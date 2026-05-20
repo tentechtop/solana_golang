@@ -1,0 +1,393 @@
+Solana Golang Database 使用说明
+
+1. 简介
+
+database 包提供一套面向区块链节点的本地 KV 数据库接口，默认实现基于 Pebble。
+
+Pebble 本身没有 RocksDB column family 的概念。本实现使用“表常量 + 原始业务 key”的组合方式隔离不同逻辑表：
+
+- 调用方只需要传入 Table 和业务 key。
+- 实现层会在写入 Pebble 前自动加上表前缀。
+- 查询结果返回时会自动去掉表前缀，只暴露业务 key。
+
+这套接口适合保存区块、区块头、区块体、交易索引、UTXO、地址索引、节点信息、checkpoint 等链上/节点本地数据。
+
+2. 表定义
+
+表使用 Table 常量加 TableMetadata 元数据的方式定义。
+
+Table 常量是业务代码使用的逻辑表标识。
+
+TableMetadata 包含：
+
+- Table：逻辑表
+- Code：稳定的数字编码，也是 Pebble 内部 key 前缀
+- ColumnFamilyName：物理表名/列族名风格的名称，主要用于日志、列表和后续兼容 RocksDB 风格实现
+- CacheSizeMB：预留缓存容量配置
+- CacheTTLSeconds：预留缓存过期时间配置
+
+当前表：
+
+- TableAccount：账户数据
+- TableChain：链状态数据
+- TableBlock：区块数据
+- TablePeer：节点数据
+- TableHeightToHash：高度到区块哈希索引
+- TableUTXO：UTXO 数据
+- TableTxToBlock：交易到区块索引
+- TableAddrToUTXO：地址到 UTXO 索引
+- TableAddrToTx：地址到交易索引
+- TableOrphan：孤块数据
+- TableBlockHeader：区块头数据
+- TableBlockBody：区块体数据
+- TableHashToHeight：区块哈希到高度索引
+- TableHashToChainWork：区块哈希到累计工作量索引
+- TableCheckpoint：checkpoint 数据
+- TableTest1 / TableTest2：测试表
+
+辅助方法：
+
+table.Code() uint16
+返回表的稳定数字编码。
+
+table.Metadata() (TableMetadata, bool)
+返回表元数据。
+
+table.ColumnFamilyName() string
+返回表的物理存储名。
+
+table.String() string
+返回表的物理存储名。
+
+TableByCode(code uint16) (Table, bool)
+根据数字编码反查表。
+
+AllTableMetadata() []TableMetadata
+返回所有表元数据。
+
+3. 初始化和关闭
+
+示例：
+
+db := database.NewDatabaseImpl()
+err := db.CreateDatabase(database.DatabaseConfig{
+    Path: "./data/pebble",
+})
+if err != nil {
+    panic(err)
+}
+defer db.CloseDatabase()
+
+NewDatabaseImpl 是默认构造函数，当前返回 Pebble 实现。
+NewPebbleDatabase 仍然保留，可以直接创建 PebbleDatabase。
+
+4. 基础增删改查
+
+写入：
+
+err := db.Insert(database.TablePeer, []byte("local_peer"), peerBytes)
+
+读取：
+
+value, err := db.Get(database.TablePeer, []byte("local_peer"))
+if err != nil {
+    return err
+}
+if value == nil {
+    // key 不存在
+}
+
+更新：
+
+err := db.Update(database.TablePeer, []byte("local_peer"), newPeerBytes)
+
+删除：
+
+err := db.Delete(database.TablePeer, []byte("local_peer"))
+
+判断是否存在：
+
+ok, err := db.Exists(database.TablePeer, []byte("local_peer"))
+
+5. int / int64 key 读取
+
+GetInt 和 GetInt64 会使用 big-endian 编码 key，兼容区块高度这类有序数字 key。
+
+value, err := db.GetInt64(database.TableHeightToHash, 100)
+
+如果需要写入数字 key，建议业务代码也使用 big-endian 编码：
+
+key := make([]byte, 8)
+binary.BigEndian.PutUint64(key, height)
+err := db.Insert(database.TableHeightToHash, key, blockHash)
+
+这样高度 key 在 Pebble 中的字典序就等于数字顺序，便于范围查询和反向查询。
+
+6. 批量执行和原子事务
+
+DataTransaction 可以一次提交多个写操作，Pebble 会用 batch 原子提交。
+
+operations := []database.DBOperation{
+    database.NewInsertOperation(database.TableAccount, []byte("alice"), []byte("10")),
+    database.NewUpdateOperation(database.TableAccount, []byte("alice"), []byte("15")),
+    database.NewDeleteOperation(database.TableAccount, []byte("bob")),
+}
+
+err := db.DataTransaction(operations)
+
+批量便捷方法：
+
+- BatchInsert(table, keys, values)
+- BatchUpdate(table, keys, values)
+- BatchDelete(table, keys)
+- BatchGet(table, keys)
+
+7. 手动事务
+
+适合分多步构造事务的场景：
+
+txID, err := db.BeginTransaction()
+if err != nil {
+    return err
+}
+
+err = db.AddToTransaction(txID, database.NewInsertOperation(
+    database.TableBlock,
+    blockHash,
+    blockBytes,
+))
+if err != nil {
+    _ = db.RollbackTransaction(txID)
+    return err
+}
+
+err = db.CommitTransaction(txID)
+
+如果中途失败：
+
+_ = db.RollbackTransaction(txID)
+
+8. 前缀查询
+
+前缀查询适合地址索引、交易索引、UTXO 索引。
+
+正向查询：
+
+pairs, err := db.PrefixQuery(database.TableAddrToUTXO, []byte("addr:alice:"))
+
+限制返回数量：
+
+pairs, err := db.PrefixQueryWithLimit(database.TableAddrToUTXO, []byte("addr:alice:"), 100)
+
+反向查询：
+
+pairs, err := db.PrefixQueryReverse(database.TableAddrToTx, []byte("addr:alice:"))
+
+反向并限制数量：
+
+pairs, err := db.PrefixQueryReverseWithLimit(database.TableAddrToTx, []byte("addr:alice:"), 50)
+
+判断某个前缀下是否存在数据：
+
+ok, err := db.ExistsByPrefix(database.TableAddrToUTXO, []byte("addr:alice:"))
+
+统计某个前缀下的数据：
+
+count, err := db.CountByPrefix(database.TableAddrToUTXO, []byte("addr:alice:"))
+
+删除某个前缀下所有数据：
+
+err := db.DeleteByPrefix(database.TableAddrToUTXO, []byte("addr:alice:"))
+
+9. 范围查询
+
+范围查询是左闭右开：[startKey, endKey)。
+
+正向范围查询：
+
+pairs, err := db.RangeQuery(database.TableHeightToHash, startHeightKey, endHeightKey)
+
+限制返回数量：
+
+pairs, err := db.RangeQueryWithLimit(database.TableHeightToHash, startHeightKey, endHeightKey, 100)
+
+反向范围查询：
+
+pairs, err := db.RangeQueryReverse(database.TableHeightToHash, startHeightKey, endHeightKey)
+
+反向并限制数量：
+
+pairs, err := db.RangeQueryReverseWithLimit(database.TableHeightToHash, startHeightKey, endHeightKey, 100)
+
+批量删除范围：
+
+err := db.BatchDeleteRange(database.TableHeightToHash, startHeightKey, endHeightKey)
+
+10. 首尾查询
+
+获取表内第一个 key/value：
+
+first, err := db.First(database.TableHeightToHash)
+
+获取表内最后一个 key/value：
+
+last, err := db.Last(database.TableHeightToHash)
+
+获取某个前缀下第一个 key/value：
+
+first, err := db.FirstByPrefix(database.TableAddrToTx, []byte("addr:alice:"))
+
+获取某个前缀下最后一个 key/value：
+
+last, err := db.LastByPrefix(database.TableAddrToTx, []byte("addr:alice:"))
+
+这些方法很适合：
+
+- 获取当前最高区块高度
+- 获取地址最近一笔交易
+- 获取某个前缀索引的边界
+
+11. 分页查询
+
+按 value 分页：
+
+page, err := db.Page(database.TableBlock, 100, lastKey)
+
+按前缀 value 分页：
+
+page, err := db.PageByPrefix(database.TableAddrToTx, []byte("addr:alice:"), 100, lastKey)
+
+按 key 分页：
+
+page, err := db.PageKey(database.TableHeightToHash, 100, lastKey)
+
+按前缀 key 分页：
+
+page, err := db.PageKeyByPrefix(database.TableAddrToTx, []byte("addr:alice:"), 100, lastKey)
+
+按前缀 key 反向分页：
+
+page, err := db.PageKeyByPrefixReverse(database.TableAddrToTx, []byte("addr:alice:"), 100, lastKey)
+
+PageResult 字段：
+
+- Data：本页数据。Page/PageByPrefix 返回 value；PageKey/PageKeyByPrefix 返回 key。
+- LastKey：本页最后一个 key，用于下一页。
+- IsLastPage：是否已经到最后一页。
+
+12. 遍历
+
+遍历整张表：
+
+err := db.Iterate(database.TableUTXO, func(key []byte, value []byte) bool {
+    // 返回 false 可提前停止
+    return true
+})
+
+按前缀遍历：
+
+err := db.IterateByPrefix(database.TableAddrToUTXO, []byte("addr:alice:"), func(key []byte, value []byte) bool {
+    return true
+})
+
+遍历适合数据修复、索引重建、统计任务。避免一次性把大表全部加载进内存。
+
+13. 缓存
+
+设置某张表的缓存策略：
+
+err := db.SetCachePolicy(database.TablePeer, 60_000, 1000)
+
+参数：
+
+- ttlMillis：缓存存活时间，毫秒。0 表示不过期。
+- maxSize：最大缓存条数。小于等于 0 表示关闭该表缓存。
+
+清理缓存：
+
+err := db.ClearCache(database.TablePeer)
+
+清理所有表缓存：
+
+err := db.ClearCache(database.TableAll)
+
+刷新缓存：
+
+err := db.RefreshCache(database.TablePeer, []byte("local_peer"))
+
+14. 数据维护
+
+强制刷盘：
+
+err := db.Flush()
+
+手动压缩范围：
+
+err := db.Compact(startKey, endKey)
+
+创建 checkpoint：
+
+err := db.Checkpoint("./backup/checkpoint-001")
+
+健康检查：
+
+err := db.CheckHealth()
+
+15. WAL
+
+默认启用 WAL。
+
+如果需要关闭 WAL，必须在 CreateDatabase 之前调用：
+
+db := database.NewDatabaseImpl()
+err := db.EnableWAL(false)
+err = db.CreateDatabase(database.DatabaseConfig{Path: "./data/pebble"})
+
+数据库打开后不能再切换 WAL 设置。
+
+16. 区块链 key 设计建议
+
+高度索引：
+
+- key：8 字节 big-endian 高度
+- value：区块 hash
+- 表：TableHeightToHash
+
+哈希到高度：
+
+- key：区块 hash
+- value：8 字节 big-endian 高度
+- 表：TableHashToHeight
+
+交易到区块：
+
+- key：交易 hash
+- value：区块 hash 或区块定位信息
+- 表：TableTxToBlock
+
+地址到交易：
+
+- key：addr + 分隔符 + height/time + tx hash
+- value：交易摘要或交易定位信息
+- 表：TableAddrToTx
+
+地址到 UTXO：
+
+- key：addr + 分隔符 + tx hash + output index
+- value：UTXO 序列化数据
+- 表：TableAddrToUTXO
+
+孤块：
+
+- key：区块 hash
+- value：孤块序列化数据
+- 表：TableOrphan
+
+17. 注意事项
+
+- 所有 Get 返回的 []byte 都是拷贝，调用方可以安全修改。
+- Delete 不存在的 key 不会报错。
+- RangeQuery 的 endKey 不包含在结果内。
+- PrefixQuery 返回的是完整业务 key，不会裁剪 prefix。
+- TableAll 只用于缓存类操作，不能用于普通数据读写。
+- 批量写入建议优先使用 DataTransaction，避免多次单独写入导致状态不一致。
