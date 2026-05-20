@@ -1,0 +1,1 @@
+让https://stage-www.mitradeaffiliates.com/register 去请求 https://stage-call.mitradeaffiliates.com 就正常了
