@@ -106,6 +106,10 @@ func (p *databaseService) Exists(table Table, key []byte) (bool, error) {
 	return value != nil, nil
 }
 
+func (p *databaseService) Put(table Table, key []byte, value []byte) error {
+	return p.put(table, key, value)
+}
+
 func (p *databaseService) Insert(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
@@ -144,16 +148,44 @@ func (p *databaseService) Get(table Table, key []byte) ([]byte, error) {
 	return value, nil
 }
 
+func (p *databaseService) ExistsInt(table Table, key int) (bool, error) {
+	return p.Exists(table, encodeIntKey(key))
+}
+
+func (p *databaseService) ExistsInt64(table Table, key int64) (bool, error) {
+	return p.Exists(table, encodeInt64Key(key))
+}
+
+func (p *databaseService) PutInt(table Table, key int, value []byte) error {
+	return p.Put(table, encodeIntKey(key), value)
+}
+
+func (p *databaseService) PutInt64(table Table, key int64, value []byte) error {
+	return p.Put(table, encodeInt64Key(key), value)
+}
+
+func (p *databaseService) UpdateInt(table Table, key int, value []byte) error {
+	return p.Update(table, encodeIntKey(key), value)
+}
+
+func (p *databaseService) UpdateInt64(table Table, key int64, value []byte) error {
+	return p.Update(table, encodeInt64Key(key), value)
+}
+
+func (p *databaseService) DeleteInt(table Table, key int) error {
+	return p.Delete(table, encodeIntKey(key))
+}
+
+func (p *databaseService) DeleteInt64(table Table, key int64) error {
+	return p.Delete(table, encodeInt64Key(key))
+}
+
 func (p *databaseService) GetInt(table Table, key int) ([]byte, error) {
-	var encoded [4]byte
-	binary.BigEndian.PutUint32(encoded[:], uint32(key))
-	return p.Get(table, encoded[:])
+	return p.Get(table, encodeIntKey(key))
 }
 
 func (p *databaseService) GetInt64(table Table, key int64) ([]byte, error) {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], uint64(key))
-	return p.Get(table, encoded[:])
+	return p.Get(table, encodeInt64Key(key))
 }
 
 func (p *databaseService) Count(table Table) (int, error) {
@@ -408,6 +440,38 @@ func (p *databaseService) LastByPrefix(table Table, prefix []byte) (*KeyValue, e
 	return p.firstInBounds(lower, upper, true)
 }
 
+func (p *databaseService) Keys(table Table) ([][]byte, error) {
+	pairs, err := p.RangeQuery(table, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return collectKeys(pairs), nil
+}
+
+func (p *databaseService) KeysByPrefix(table Table, prefix []byte) ([][]byte, error) {
+	pairs, err := p.PrefixQuery(table, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return collectKeys(pairs), nil
+}
+
+func (p *databaseService) Values(table Table) ([][]byte, error) {
+	pairs, err := p.RangeQuery(table, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return collectValues(pairs), nil
+}
+
+func (p *databaseService) ValuesByPrefix(table Table, prefix []byte) ([][]byte, error) {
+	pairs, err := p.PrefixQuery(table, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return collectValues(pairs), nil
+}
+
 func (p *databaseService) ClearCache(table Table) error {
 	if table != TableAll {
 		if err := validateDataTable(table); err != nil {
@@ -614,6 +678,10 @@ func (p *databaseService) DeleteByPrefix(table Table, prefix []byte) error {
 	}
 	p.clearCacheOnly(table)
 	return nil
+}
+
+func (p *databaseService) ClearTable(table Table) error {
+	return p.BatchDeleteRange(table, nil, nil)
 }
 
 func (p *databaseService) EnableWAL(enable bool) error {
@@ -954,6 +1022,34 @@ func validateDataTable(table Table) error {
 		return fmt.Errorf("database: unknown table code %d", table)
 	}
 	return nil
+}
+
+func encodeIntKey(key int) []byte {
+	var encoded [4]byte
+	binary.BigEndian.PutUint32(encoded[:], uint32(key))
+	return encoded[:]
+}
+
+func encodeInt64Key(key int64) []byte {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(key))
+	return encoded[:]
+}
+
+func collectKeys(pairs []KeyValue) [][]byte {
+	keys := make([][]byte, 0, len(pairs))
+	for _, pair := range pairs {
+		keys = append(keys, cloneBytes(pair.Key))
+	}
+	return keys
+}
+
+func collectValues(pairs []KeyValue) [][]byte {
+	values := make([][]byte, 0, len(pairs))
+	for _, pair := range pairs {
+		values = append(values, cloneBytes(pair.Value))
+	}
+	return values
 }
 
 func positionPageIterator(iter KVIterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {

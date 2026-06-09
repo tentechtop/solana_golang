@@ -45,7 +45,7 @@ import "solana_golang/utils"
 | `ecc_with_aes_gcm.go` | X25519 共享密钥、HKDF-SHA256、AES-256-GCM 加解密 |
 | `pda.go` | Solana PDA、bump seed、create_with_seed、Ed25519 curve 检查 |
 | `shortvec.go` | Solana short_vec compact-u16 长度编解码 |
-| `multi_address.go` | `/ip4/.../tcp|udp|quic/.../p2p/...` 地址解析和构建 |
+| `multi_address.go` | `/ip4/.../tcp|quic/.../p2p/...` 地址解析和构建 |
 
 ## 常用示例
 
@@ -370,7 +370,6 @@ fmt.Println(parsed.RawAddress)
 
 ```text
 /ip4/127.0.0.1/tcp/5002/p2p/<Base58Encoded32BytePeerID>
-/ip6/::1/udp/5002/p2p/<Base58Encoded32BytePeerID>
 /ip4/127.0.0.1/quic/5002/p2p/<Base58Encoded32BytePeerID>
 ```
 

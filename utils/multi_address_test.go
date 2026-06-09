@@ -60,11 +60,11 @@ func TestParseMultiAddressNormalizesProtocol(t *testing.T) {
 func TestBuildMultiAddress(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x03}, multiAddressPeerIDSize))
 
-	address, err := BuildMultiAddress(MultiAddressIP4, "10.0.0.1", ProtocolUDP, 8080, peerID)
+	address, err := BuildMultiAddress(MultiAddressIP4, "10.0.0.1", ProtocolQUIC, 8080, peerID)
 	if err != nil {
 		t.Fatalf("BuildMultiAddress() error = %v", err)
 	}
-	want := "/ip4/10.0.0.1/udp/8080/p2p/" + peerID
+	want := "/ip4/10.0.0.1/quic/8080/p2p/" + peerID
 	if address.RawAddress != want {
 		t.Fatalf("RawAddress = %q, want %q", address.RawAddress, want)
 	}

@@ -20,12 +20,9 @@ const (
 // MultiAddressProtocol 定义 P2P 传输协议 + 限制支持范围。
 type MultiAddressProtocol string
 
-// 本项目仅支持TCP 或者 QUIC
 const (
 	// ProtocolTCP 表示 TCP 传输段 + 兼容 multi-address 协议。
 	ProtocolTCP MultiAddressProtocol = "tcp"
-	// ProtocolUDP 表示 UDP 传输段 + 兼容 multi-address 协议。
-	ProtocolUDP MultiAddressProtocol = "udp"
 	// ProtocolQUIC 表示 QUIC 传输段 + 兼容 multi-address 协议。
 	ProtocolQUIC MultiAddressProtocol = "quic"
 )
@@ -137,8 +134,6 @@ func ParseMultiAddressProtocol(value string) (MultiAddressProtocol, error) {
 	switch strings.ToLower(value) {
 	case string(ProtocolTCP):
 		return ProtocolTCP, nil
-	case string(ProtocolUDP):
-		return ProtocolUDP, nil
 	case string(ProtocolQUIC):
 		return ProtocolQUIC, nil
 	default:

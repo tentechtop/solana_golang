@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"solana_golang/utils"
 )
 
 const (
@@ -24,6 +27,7 @@ type ServerConfig struct {
 	Address      string
 	MaxBodyBytes int64
 	MaxBatchSize int
+	Logger       *slog.Logger
 }
 
 // Server 提供 HTTP JSON-RPC 服务 + 使用标准库减少外部依赖。
@@ -32,6 +36,7 @@ type Server struct {
 	maxBodyBytes int64
 	maxBatchSize int
 	httpServer   *http.Server
+	logger       *slog.Logger
 }
 
 func NewServer(config ServerConfig, router *Router) *Server {
@@ -49,6 +54,7 @@ func NewServer(config ServerConfig, router *Router) *Server {
 		router:       router,
 		maxBodyBytes: config.MaxBodyBytes,
 		maxBatchSize: config.MaxBatchSize,
+		logger:       utils.EnsureLogger(config.Logger),
 	}
 	server.httpServer = &http.Server{
 		Addr:         config.Address,
@@ -64,9 +70,12 @@ func (s *Server) ListenAndServe() error {
 	if s.httpServer == nil {
 		return errors.New("rpc: http server is nil")
 	}
+	s.logger.Info("rpc server starting", slog.String("address", s.httpServer.Addr))
 	if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		s.logger.Error("rpc server failed", slog.String("address", s.httpServer.Addr), slog.Any("error", err))
 		return fmt.Errorf("rpc: listen and serve: %w", err)
 	}
+	s.logger.Info("rpc server stopped", slog.String("address", s.httpServer.Addr))
 	return nil
 }
 
@@ -74,37 +83,57 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
 	}
+	s.logger.Info("rpc server shutdown started", slog.String("address", s.httpServer.Addr))
 	if err := s.httpServer.Shutdown(ctx); err != nil {
+		s.logger.Error("rpc server shutdown failed", slog.String("address", s.httpServer.Addr), slog.Any("error", err))
 		return fmt.Errorf("rpc: shutdown server: %w", err)
 	}
+	s.logger.Info("rpc server shutdown completed", slog.String("address", s.httpServer.Addr))
 	return nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	responseWriter := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	defer s.logHTTPRequest(r, responseWriter.statusCode, startedAt)
+
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(errorResponse(nil, ErrInvalidRequest))
+		responseWriter.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(responseWriter).Encode(errorResponse(nil, ErrInvalidRequest))
 		return
 	}
 
-	body, err := readRequestBody(w, r, s.maxBodyBytes)
+	body, err := readRequestBody(responseWriter, r, s.maxBodyBytes)
 	if err != nil {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		_ = json.NewEncoder(w).Encode(errorResponse(nil, ErrRequestBodyTooLarge))
+		responseWriter.WriteHeader(http.StatusRequestEntityTooLarge)
+		_ = json.NewEncoder(responseWriter).Encode(errorResponse(nil, ErrRequestBodyTooLarge))
 		return
 	}
 
 	response, batch := s.handleBody(r.Context(), body)
 	if response == nil {
-		w.WriteHeader(http.StatusNoContent)
+		responseWriter.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if batch {
-		_ = json.NewEncoder(w).Encode(response.([]Response))
+		_ = json.NewEncoder(responseWriter).Encode(response.([]Response))
 		return
 	}
-	_ = json.NewEncoder(w).Encode(response.(Response))
+	_ = json.NewEncoder(responseWriter).Encode(response.(Response))
+}
+
+func (s *Server) logHTTPRequest(r *http.Request, statusCode int, startedAt time.Time) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Info("rpc http request completed",
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.String("remote_addr", r.RemoteAddr),
+		slog.Int("status", statusCode),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	)
 }
 
 func (s *Server) handleBody(ctx context.Context, body []byte) (any, bool) {
@@ -166,4 +195,19 @@ func decodeStrict(data []byte, value any) error {
 		return errors.New("rpc: trailing json values")
 	}
 	return nil
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (w *statusResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
 }

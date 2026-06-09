@@ -3,6 +3,11 @@ rpc:
   max_body_bytes: 1048576
   max_batch_size: 32
 
+log:
+  level: "info"
+  format: "json"
+  add_source: false
+
 database:
   engine: "pebble"
   path: "./data/pebble"
