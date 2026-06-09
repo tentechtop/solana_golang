@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseMultiAddressIPv4(t *testing.T) {
-	peerID := Base58Encode(bytes.Repeat([]byte{0x01}, PublicKeySize))
+	peerID := Base58Encode(bytes.Repeat([]byte{0x01}, multiAddressPeerIDSize))
 	raw := "/ip4/101.35.87.31/tcp/5002/p2p/" + peerID
 
 	address, err := ParseMultiAddress(raw)
@@ -38,7 +38,7 @@ func TestParseMultiAddressIPv4(t *testing.T) {
 }
 
 func TestParseMultiAddressNormalizesProtocol(t *testing.T) {
-	peerID := Base58Encode(bytes.Repeat([]byte{0x02}, PublicKeySize))
+	peerID := Base58Encode(bytes.Repeat([]byte{0x02}, multiAddressPeerIDSize))
 	raw := "/ip6/2001:db8::1/QUIC/443/p2p/" + peerID
 
 	address, err := NewMultiAddress(raw)
@@ -58,7 +58,7 @@ func TestParseMultiAddressNormalizesProtocol(t *testing.T) {
 }
 
 func TestBuildMultiAddress(t *testing.T) {
-	peerID := Base58Encode(bytes.Repeat([]byte{0x03}, PublicKeySize))
+	peerID := Base58Encode(bytes.Repeat([]byte{0x03}, multiAddressPeerIDSize))
 
 	address, err := BuildMultiAddress(MultiAddressIP4, "10.0.0.1", ProtocolUDP, 8080, peerID)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestBuildMultiAddress(t *testing.T) {
 }
 
 func TestMultiAddressInvalidInputs(t *testing.T) {
-	peerID := Base58Encode(bytes.Repeat([]byte{0x04}, PublicKeySize))
+	peerID := Base58Encode(bytes.Repeat([]byte{0x04}, multiAddressPeerIDSize))
 	shortPeerID := Base58Encode([]byte{1, 2, 3})
 
 	tests := []struct {
@@ -101,7 +101,7 @@ func TestMultiAddressInvalidInputs(t *testing.T) {
 }
 
 func TestBuildMultiAddressRejectsInvalidParts(t *testing.T) {
-	peerID := Base58Encode(bytes.Repeat([]byte{0x05}, PublicKeySize))
+	peerID := Base58Encode(bytes.Repeat([]byte{0x05}, multiAddressPeerIDSize))
 
 	if _, err := BuildMultiAddress(MultiAddressIP6, "127.0.0.1", ProtocolTCP, 80, peerID); err == nil {
 		t.Fatal("BuildMultiAddress(ip mismatch) error = nil, want error")

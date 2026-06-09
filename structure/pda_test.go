@@ -1,8 +1,10 @@
-package utils
+package structure
 
 import (
 	"bytes"
 	"testing"
+
+	"solana_golang/utils"
 )
 
 func TestPDAHelpers(t *testing.T) {
@@ -31,15 +33,15 @@ func TestPDAHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWithSeed() error = %v", err)
 	}
-	want := SHA256(ConcatBytes(programID[:], []byte("seed"), programID[:]))
+	want := utils.SHA256(utils.ConcatBytes(programID[:], []byte("seed"), programID[:]))
 	if !bytes.Equal(withSeed[:], want) {
 		t.Fatalf("CreateWithSeed() = %x, want %x", withSeed[:], want)
 	}
 }
 
 func TestEd25519CurveCheck(t *testing.T) {
-	seed := bytes.Repeat([]byte{0x01}, Ed25519KeySize)
-	publicKey, err := DeriveEd25519PublicKeyFromPrivateKey(seed)
+	seed := bytes.Repeat([]byte{0x01}, utils.Ed25519KeySize)
+	publicKey, err := utils.DeriveEd25519PublicKeyFromPrivateKey(seed)
 	if err != nil {
 		t.Fatalf("DeriveEd25519PublicKeyFromPrivateKey() error = %v", err)
 	}
@@ -54,7 +56,7 @@ func TestEd25519CurveCheck(t *testing.T) {
 	if !IsOnEd25519Curve(identity) {
 		t.Fatal("identity point reported off curve")
 	}
-	negativeIdentityEncoding := CloneBytes(identity)
+	negativeIdentityEncoding := utils.CloneBytes(identity)
 	negativeIdentityEncoding[31] = 0x80
 	if IsOnEd25519Curve(negativeIdentityEncoding) {
 		t.Fatal("non-canonical negative identity encoding reported on curve")
@@ -70,8 +72,8 @@ func TestPDAInvalidInput(t *testing.T) {
 		t.Fatal("CreateProgramAddress(long seed) error = nil, want error")
 	}
 	tooManySeeds := make([][]byte, maxSeeds+1)
-	for i := range tooManySeeds {
-		tooManySeeds[i] = []byte{byte(i)}
+	for seedIndex := range tooManySeeds {
+		tooManySeeds[seedIndex] = []byte{byte(seedIndex)}
 	}
 	if _, err := CreateProgramAddress(tooManySeeds, programID); err == nil {
 		t.Fatal("CreateProgramAddress(too many seeds) error = nil, want error")

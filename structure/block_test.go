@@ -3,8 +3,6 @@ package structure
 import (
 	"errors"
 	"testing"
-
-	"solana_golang/utils"
 )
 
 func TestBlockValidateMarshalAndRoot(t *testing.T) {
@@ -26,7 +24,7 @@ func TestBlockValidateMarshalAndRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeTransactionsRoot() error = %v", err)
 	}
-	if root == (utils.Hash{}) {
+	if root == (Hash{}) {
 		t.Fatal("ComputeTransactionsRoot() returned zero hash")
 	}
 }
@@ -43,7 +41,7 @@ func TestBlockRejectsInvalidParentSlot(t *testing.T) {
 
 func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 	block := newTestBlock(t)
-	block.Header.Blockhash = utils.Hash{}
+	block.Header.Blockhash = Hash{}
 
 	err := block.Validate()
 	if !errors.Is(err, ErrEmptyBlockhash) {
@@ -51,20 +49,49 @@ func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 	}
 }
 
+func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
+	block := newTestBlock(t)
+	block.Header.TransactionsRoot = newTestHash(99)
+
+	err := block.Validate()
+	if !errors.Is(err, ErrInvalidBlockHeader) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidBlockHeader", err)
+	}
+}
+
 func newTestBlock(t *testing.T) Block {
 	t.Helper()
 
-	return Block{
+	block := Block{
 		Header: BlockHeader{
-			Slot:             2,
-			ParentSlot:       1,
-			ParentHash:       newTestHash(4),
-			Blockhash:        newTestHash(5),
-			TransactionsRoot: newTestHash(6),
-			StateRoot:        newTestHash(7),
-			TimestampUnix:    1710000000,
-			Leader:           newTestPublicKey(8),
+			Version:           1,
+			Slot:              2,
+			ParentSlot:        1,
+			BlockHeight:       2,
+			ParentHash:        newTestHash(4),
+			PreviousBlockhash: newTestHash(5),
+			Blockhash:         newTestHash(5),
+			AccountsHash:      newTestHash(6),
+			StateRoot:         newTestHash(7),
+			RewardsHash:       newTestHash(8),
+			EntriesHash:       newTestHash(9),
+			TimestampUnix:     1710000000,
+			Leader:            newTestPublicKey(10),
+			TransactionCount:  1,
 		},
 		Transactions: []Transaction{newTestTransaction(t)},
+		Meta: BlockMeta{
+			Status:            BlockStatusConfirmed,
+			TotalFees:         5000,
+			ComputeUnitsUsed:  100,
+			ReceivedTimeUnix:  1710000000,
+			FinalizedTimeUnix: 1710000001,
+		},
 	}
+	root, err := block.ComputeTransactionsRoot()
+	if err != nil {
+		t.Fatalf("ComputeTransactionsRoot() error = %v", err)
+	}
+	block.Header.TransactionsRoot = root
+	return block
 }

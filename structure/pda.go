@@ -1,9 +1,11 @@
-package utils
+package structure
 
 import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+
+	"solana_golang/utils"
 )
 
 const (
@@ -23,29 +25,28 @@ var (
 	}()
 )
 
-// CreateProgramAddress 派生 Solana 程序地址 + 使用 seeds 和 programID 计算 PDA。
+// CreateProgramAddress 派生程序地址 + 使用 seeds 和 programID 计算 PDA。
 func CreateProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, error) {
 	if len(seeds) > maxSeeds {
-		return PublicKey{}, fmt.Errorf("utils: too many PDA seeds: %d > %d", len(seeds), maxSeeds)
+		return PublicKey{}, fmt.Errorf("structure: too many PDA seeds: %d > %d", len(seeds), maxSeeds)
 	}
 
 	hasher := sha256.New()
-	for i, seed := range seeds {
+	for seedIndex, seed := range seeds {
 		if len(seed) > maxSeedLength {
-			return PublicKey{}, fmt.Errorf("utils: PDA seed %d exceeds %d bytes", i, maxSeedLength)
+			return PublicKey{}, fmt.Errorf("structure: PDA seed %d exceeds %d bytes", seedIndex, maxSeedLength)
 		}
 		hasher.Write(seed)
 	}
 	hasher.Write(programID[:])
 	hasher.Write([]byte(pdaMarker))
-	sum := hasher.Sum(nil)
 
-	address, err := NewPublicKey(sum)
+	address, err := NewPublicKey(hasher.Sum(nil))
 	if err != nil {
 		return PublicKey{}, err
 	}
 	if IsOnEd25519Curve(address[:]) {
-		return PublicKey{}, fmt.Errorf("utils: derived address must fall off the Ed25519 curve")
+		return PublicKey{}, fmt.Errorf("structure: derived address must fall off the Ed25519 curve")
 	}
 	return address, nil
 }
@@ -53,27 +54,26 @@ func CreateProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, error
 // FindProgramAddress 查找可用 PDA + 从 255 到 0 递减尝试 bump seed。
 func FindProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, byte, error) {
 	if len(seeds) >= maxSeeds {
-		return PublicKey{}, 0, fmt.Errorf("utils: PDA seeds leave no room for bump seed")
+		return PublicKey{}, 0, fmt.Errorf("structure: PDA seeds leave no room for bump seed")
 	}
 	for bump := 255; bump >= 0; bump-- {
-		bumpSeed := []byte{byte(bump)}
 		candidateSeeds := make([][]byte, 0, len(seeds)+1)
 		candidateSeeds = append(candidateSeeds, seeds...)
-		candidateSeeds = append(candidateSeeds, bumpSeed)
+		candidateSeeds = append(candidateSeeds, []byte{byte(bump)})
 		address, err := CreateProgramAddress(candidateSeeds, programID)
 		if err == nil {
 			return address, byte(bump), nil
 		}
 	}
-	return PublicKey{}, 0, fmt.Errorf("utils: unable to find a viable program address bump seed")
+	return PublicKey{}, 0, fmt.Errorf("structure: unable to find a viable program address bump seed")
 }
 
 // CreateWithSeed 派生种子地址 + 匹配 Solana create_with_seed 规则。
 func CreateWithSeed(base PublicKey, seed string, owner PublicKey) (PublicKey, error) {
 	if len(seed) > maxSeedStringLength {
-		return PublicKey{}, fmt.Errorf("utils: seed string exceeds %d bytes", maxSeedStringLength)
+		return PublicKey{}, fmt.Errorf("structure: seed string exceeds %d bytes", maxSeedStringLength)
 	}
-	sum := sha256.Sum256(ConcatBytes(base[:], []byte(seed), owner[:]))
+	sum := sha256.Sum256(utils.ConcatBytes(base[:], []byte(seed), owner[:]))
 	return NewPublicKey(sum[:])
 }
 
@@ -83,7 +83,7 @@ func IsOnEd25519Curve(value []byte) bool {
 		return false
 	}
 
-	encodedY := CloneBytes(value)
+	encodedY := utils.CloneBytes(value)
 	encodedY[31] &= 0x7f
 	y := littleEndianBytesToBigInt(encodedY)
 	if y.Cmp(ed25519Prime) >= 0 {
@@ -92,10 +92,8 @@ func IsOnEd25519Curve(value []byte) bool {
 
 	y2 := new(big.Int).Mul(y, y)
 	y2.Mod(y2, ed25519Prime)
-
 	numerator := new(big.Int).Sub(y2, big.NewInt(1))
 	numerator.Mod(numerator, ed25519Prime)
-
 	denominator := new(big.Int).Mul(ed25519D, y2)
 	denominator.Add(denominator, big.NewInt(1))
 	denominator.Mod(denominator, ed25519Prime)
@@ -116,7 +114,7 @@ func IsOnEd25519Curve(value []byte) bool {
 }
 
 func littleEndianBytesToBigInt(value []byte) *big.Int {
-	reversed := ReverseBytes(value)
+	reversed := utils.ReverseBytes(value)
 	return new(big.Int).SetBytes(reversed)
 }
 

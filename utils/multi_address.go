@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	multiAddressSeparator = "/"
+	multiAddressSeparator  = "/"
+	multiAddressPeerIDSize = 32
 
 	// MultiAddressIP4 定义 IPv4 地址段 + 兼容 multi-address 协议。
 	MultiAddressIP4 = "ip4"
@@ -188,8 +189,8 @@ func validateMultiAddressPeerID(peerID string) error {
 	if err != nil {
 		return fmt.Errorf("utils: invalid multi-address peer id: %w", err)
 	}
-	if len(decoded) != PublicKeySize {
-		return fmt.Errorf("utils: multi-address peer id requires %d decoded bytes, got %d", PublicKeySize, len(decoded))
+	if len(decoded) != multiAddressPeerIDSize {
+		return fmt.Errorf("utils: multi-address peer id requires %d decoded bytes, got %d", multiAddressPeerIDSize, len(decoded))
 	}
 	return nil
 }

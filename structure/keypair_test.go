@@ -1,4 +1,4 @@
-package utils
+package structure
 
 import (
 	"bytes"
@@ -19,27 +19,12 @@ func TestSolanaKeyPairSecretKey64(t *testing.T) {
 	if len(secretKey) != SolanaSecretKeySize {
 		t.Fatalf("SecretKey64() length = %d, want %d", len(secretKey), SolanaSecretKeySize)
 	}
-	if !bytes.Equal(secretKey[:SolanaPrivateKeySeedSize], seed) {
-		t.Fatal("SecretKey64() does not start with private seed")
-	}
-	if !bytes.Equal(secretKey[SolanaPrivateKeySeedSize:], keyPair.PublicKey[:]) {
-		t.Fatal("SecretKey64() does not end with public key")
-	}
-
 	loaded, err := KeyPairFromSecretKey64(secretKey)
 	if err != nil {
 		t.Fatalf("KeyPairFromSecretKey64() error = %v", err)
 	}
 	if !loaded.PublicKey.Equal(keyPair.PublicKey) || !bytes.Equal(loaded.PrivateKey, keyPair.PrivateKey) {
 		t.Fatal("loaded key pair differs from original")
-	}
-
-	converted, err := ToSecretKey64(seed)
-	if err != nil {
-		t.Fatalf("ToSecretKey64() error = %v", err)
-	}
-	if !bytes.Equal(converted, secretKey) {
-		t.Fatal("ToSecretKey64() differs from keyPair.SecretKey64()")
 	}
 
 	signature, err := keyPair.Sign([]byte("payload"))

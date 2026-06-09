@@ -10,22 +10,48 @@ const (
 	MaxTransactionsPerBlock = 128 * 1024
 )
 
-// BlockHeader 描述区块头核心元数据 + 为共识验证和索引查询提供稳定字段。
+type BlockStatus int16
+
+const (
+	BlockStatusProposed BlockStatus = iota
+	BlockStatusConfirmed
+	BlockStatusFinalized
+	BlockStatusSkipped
+)
+
+// BlockHeader 描述区块头 + 为共识验证、账本索引和状态追踪提供稳定字段。
 type BlockHeader struct {
-	Slot             uint64
-	ParentSlot       uint64
-	ParentHash       utils.Hash
-	Blockhash        utils.Hash
-	TransactionsRoot utils.Hash
-	StateRoot        utils.Hash
-	TimestampUnix    int64
-	Leader           utils.PublicKey
+	Version           uint16
+	Slot              uint64
+	ParentSlot        uint64
+	BlockHeight       uint64
+	ParentHash        Hash
+	PreviousBlockhash Hash
+	Blockhash         Hash
+	TransactionsRoot  Hash
+	AccountsHash      Hash
+	StateRoot         Hash
+	RewardsHash       Hash
+	EntriesHash       Hash
+	TimestampUnix     int64
+	Leader            PublicKey
+	TransactionCount  uint32
 }
 
-// Block 描述完整区块 + 将区块头和交易列表分离便于轻量验证。
+// BlockMeta 描述区块运行时元数据 + 避免把索引和观测字段混入共识哈希。
+type BlockMeta struct {
+	Status            BlockStatus
+	TotalFees         uint64
+	ComputeUnitsUsed  uint64
+	ReceivedTimeUnix  int64
+	FinalizedTimeUnix int64
+}
+
+// Block 描述完整区块 + 分离共识头、交易体和运行时元数据。
 type Block struct {
 	Header       BlockHeader
 	Transactions []Transaction
+	Meta         BlockMeta
 }
 
 // Validate 校验区块结构 + 在共识处理前拦截非法区块输入。
@@ -36,16 +62,19 @@ func (block Block) Validate() error {
 	if len(block.Transactions) > MaxTransactionsPerBlock {
 		return fmt.Errorf("%w: got %d, max %d", ErrTooManyTransactions, len(block.Transactions), MaxTransactionsPerBlock)
 	}
+	if err := block.validateTransactionCount(); err != nil {
+		return err
+	}
 	for transactionIndex, transaction := range block.Transactions {
 		if err := transaction.Validate(); err != nil {
 			return fmt.Errorf("structure: transaction %d: %w", transactionIndex, err)
 		}
 	}
-	return nil
+	return block.validateTransactionsRoot()
 }
 
 // Hash 计算区块哈希 + 使用区块头确定性序列化作为哈希输入。
-func (block Block) Hash() (utils.Hash, error) {
+func (block Block) Hash() (Hash, error) {
 	return block.Header.Hash()
 }
 
@@ -72,9 +101,9 @@ func (block Block) MarshalBinary() ([]byte, error) {
 	return encoded, nil
 }
 
-// Validate 校验区块头 + 保证高度、哈希和出块者字段合法。
+// Validate 校验区块头 + 保证高度、哈希、时间和出块者字段合法。
 func (header BlockHeader) Validate() error {
-	if header.Blockhash == (utils.Hash{}) {
+	if header.Blockhash == (Hash{}) {
 		return ErrEmptyBlockhash
 	}
 	if header.Leader.IsZero() {
@@ -83,16 +112,22 @@ func (header BlockHeader) Validate() error {
 	if header.Slot > 0 && header.ParentSlot >= header.Slot {
 		return fmt.Errorf("%w: parent slot must be less than slot", ErrInvalidBlockHeader)
 	}
+	if header.TimestampUnix <= 0 {
+		return fmt.Errorf("%w: timestamp must be positive", ErrInvalidBlockHeader)
+	}
+	if header.TransactionCount > MaxTransactionsPerBlock {
+		return fmt.Errorf("%w: transaction count exceeds max block limit", ErrInvalidBlockHeader)
+	}
 	return nil
 }
 
 // Hash 计算区块头哈希 + 使用 SHA-256 保持依赖简单且性能稳定。
-func (header BlockHeader) Hash() (utils.Hash, error) {
+func (header BlockHeader) Hash() (Hash, error) {
 	encoded, err := header.MarshalBinary()
 	if err != nil {
-		return utils.Hash{}, fmt.Errorf("structure: marshal block header before hash: %w", err)
+		return Hash{}, fmt.Errorf("structure: marshal block header before hash: %w", err)
 	}
-	return utils.NewHash(utils.SHA256(encoded))
+	return NewHash(utils.SHA256(encoded))
 }
 
 // MarshalBinary 序列化区块头 + 使用小端整数兼容 Solana 数据习惯。
@@ -101,48 +136,81 @@ func (header BlockHeader) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 
-	encoded := make([]byte, 0, 8+8+utils.PublicKeySize*5+8)
+	encoded := make([]byte, 0, 2+8+8+8+PublicKeySize*8+8+PublicKeySize+4)
+	encoded = append(encoded, utils.Uint16ToBytesLE(header.Version)...)
 	encoded = append(encoded, utils.Uint64ToBytesLE(header.Slot)...)
 	encoded = append(encoded, utils.Uint64ToBytesLE(header.ParentSlot)...)
+	encoded = append(encoded, utils.Uint64ToBytesLE(header.BlockHeight)...)
 	encoded = append(encoded, header.ParentHash[:]...)
+	encoded = append(encoded, header.PreviousBlockhash[:]...)
 	encoded = append(encoded, header.Blockhash[:]...)
 	encoded = append(encoded, header.TransactionsRoot[:]...)
+	encoded = append(encoded, header.AccountsHash[:]...)
 	encoded = append(encoded, header.StateRoot[:]...)
+	encoded = append(encoded, header.RewardsHash[:]...)
+	encoded = append(encoded, header.EntriesHash[:]...)
 	encoded = append(encoded, utils.Int64ToBytesLE(header.TimestampUnix)...)
 	encoded = append(encoded, header.Leader[:]...)
+	encoded = append(encoded, utils.Uint32ToBytesLE(header.TransactionCount)...)
 	return encoded, nil
 }
 
 // ComputeTransactionsRoot 计算交易根 + 使用二叉 Merkle 树压缩交易哈希。
-func (block Block) ComputeTransactionsRoot() (utils.Hash, error) {
-	transactionHashes := make([]utils.Hash, len(block.Transactions))
+func (block Block) ComputeTransactionsRoot() (Hash, error) {
+	transactionHashes := make([]Hash, len(block.Transactions))
 	for transactionIndex, transaction := range block.Transactions {
 		transactionHash, err := transaction.Hash()
 		if err != nil {
-			return utils.Hash{}, fmt.Errorf("structure: hash transaction %d: %w", transactionIndex, err)
+			return Hash{}, fmt.Errorf("structure: hash transaction %d: %w", transactionIndex, err)
 		}
 		transactionHashes[transactionIndex] = transactionHash
 	}
 	return merkleRoot(transactionHashes)
 }
 
-func merkleRoot(hashes []utils.Hash) (utils.Hash, error) {
+// VerifyTransactionsRoot 校验交易根 + 防止区块头与交易列表不一致。
+func (block Block) VerifyTransactionsRoot() error {
+	return block.validateTransactionsRoot()
+}
+
+func (block Block) validateTransactionCount() error {
+	if block.Header.TransactionCount == 0 && len(block.Transactions) == 0 {
+		return nil
+	}
+	if int(block.Header.TransactionCount) != len(block.Transactions) {
+		return fmt.Errorf("%w: header transaction count %d does not match body %d", ErrInvalidBlockHeader, block.Header.TransactionCount, len(block.Transactions))
+	}
+	return nil
+}
+
+func (block Block) validateTransactionsRoot() error {
+	computedRoot, err := block.ComputeTransactionsRoot()
+	if err != nil {
+		return fmt.Errorf("structure: compute transactions root: %w", err)
+	}
+	if block.Header.TransactionsRoot != computedRoot {
+		return fmt.Errorf("%w: transactions root mismatch", ErrInvalidBlockHeader)
+	}
+	return nil
+}
+
+func merkleRoot(hashes []Hash) (Hash, error) {
 	if len(hashes) == 0 {
-		return utils.NewHash(make([]byte, utils.PublicKeySize))
+		return NewHash(make([]byte, PublicKeySize))
 	}
 	currentLevel := cloneHashes(hashes)
 	for len(currentLevel) > 1 {
 		nextLevel, err := merkleParentLevel(currentLevel)
 		if err != nil {
-			return utils.Hash{}, fmt.Errorf("structure: build merkle parent level: %w", err)
+			return Hash{}, fmt.Errorf("structure: build merkle parent level: %w", err)
 		}
 		currentLevel = nextLevel
 	}
 	return currentLevel[0], nil
 }
 
-func merkleParentLevel(currentLevel []utils.Hash) ([]utils.Hash, error) {
-	nextLevel := make([]utils.Hash, 0, (len(currentLevel)+1)/2)
+func merkleParentLevel(currentLevel []Hash) ([]Hash, error) {
+	nextLevel := make([]Hash, 0, (len(currentLevel)+1)/2)
 	for index := 0; index < len(currentLevel); index += 2 {
 		left := currentLevel[index]
 		right := left
@@ -158,16 +226,16 @@ func merkleParentLevel(currentLevel []utils.Hash) ([]utils.Hash, error) {
 	return nextLevel, nil
 }
 
-func hashPair(left utils.Hash, right utils.Hash) (utils.Hash, error) {
-	hash, err := utils.NewHash(utils.SHA256(utils.ConcatBytes(left[:], right[:])))
+func hashPair(left Hash, right Hash) (Hash, error) {
+	hash, err := NewHash(utils.SHA256(utils.ConcatBytes(left[:], right[:])))
 	if err != nil {
-		return utils.Hash{}, err
+		return Hash{}, err
 	}
 	return hash, nil
 }
 
-func cloneHashes(value []utils.Hash) []utils.Hash {
-	cloned := make([]utils.Hash, len(value))
+func cloneHashes(value []Hash) []Hash {
+	cloned := make([]Hash, len(value))
 	copy(cloned, value)
 	return cloned
 }
