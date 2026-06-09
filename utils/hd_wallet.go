@@ -19,7 +19,7 @@ const (
 	ed25519SeedMasterSalt = "ed25519 seed"
 )
 
-// KeyInfo 保存钱包密钥信息 + 兼容 Java KeyInfo 数据结构。
+// KeyInfo 保存钱包密钥信息 + 汇总私钥、公钥、地址和路径。
 type KeyInfo struct {
 	PrivateKey []byte
 	PublicKey  []byte

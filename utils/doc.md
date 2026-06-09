@@ -38,7 +38,7 @@ import "solana_golang/utils"
 | `bytes.go` | Hex、大小端整数转换、SHA-256/SHA-512、HMAC-SHA512、字节复制/拼接/反转 |
 | `crypto.go` | 安全随机数、常量时间比较、Base64/Base64 raw |
 | `public_key.go` | Solana `PublicKey`、`Hash`、`Signature` 固定长度类型 |
-| `ed25519.go` | Ed25519 keypair、签名、验签和 Java 风格别名 |
+| `ed25519.go` | Ed25519 keypair、签名、验签和调用别名 |
 | `solana_keypair.go` | Solana seed keypair、64 字节 secret key 格式、签名验签 |
 | `bip39.go` | BIP-39 英文助记词、entropy、seed |
 | `hd_wallet.go` | SLIP-0010 Ed25519 HD 钱包和 Solana 派生路径 |

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// IntToBytes 编码 Java 风格 int + 使用大端序保持跨语言一致。
+// IntToBytes 编码 int + 使用大端序保持网络序一致。
 func IntToBytes(value int) []byte {
 	return Int32ToBytes(int32(value))
 }

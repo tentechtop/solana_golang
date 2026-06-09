@@ -99,7 +99,7 @@ func (transaction Transaction) Validate() error {
 	return transaction.validateSignatureCount(message.Header.NumRequiredSignatures)
 }
 
-// TxID 计算交易 ID + 与原 Java 结构保持首签名 SHA-256 语义一致。
+// TxID 计算交易 ID + 使用首个签名的 SHA-256 作为稳定标识。
 func (transaction Transaction) TxID() (Hash, error) {
 	if len(transaction.Signatures) == 0 {
 		return Hash{}, ErrEmptyTransactionSignatures

@@ -15,11 +15,11 @@ const (
 	Curve25519KeySize = 32
 	// AES256KeySize 定义 AES-256 密钥长度 + 用于统一输入校验。
 	AES256KeySize = 32
-	// AESGCMNonceSize 定义 GCM nonce 长度 + 兼容 Java 参考实现。
+	// AESGCMNonceSize 定义 GCM nonce 长度 + 使用标准 96 位随机数。
 	AESGCMNonceSize = 12
-	// AESGCMTagSize 定义 GCM 认证标签长度 + 兼容 Java 参考实现。
+	// AESGCMTagSize 定义 GCM 认证标签长度 + 使用标准 128 位认证强度。
 	AESGCMTagSize = 16
-	// AESGCMHKDFSaltSize 定义 HKDF salt 长度 + 兼容 Java 参考实现。
+	// AESGCMHKDFSaltSize 定义 HKDF salt 长度 + 保持派生输入强度。
 	AESGCMHKDFSaltSize = 32
 )
 
@@ -77,7 +77,7 @@ func GenerateSharedSecret(privateKey []byte, publicKey []byte) ([]byte, error) {
 	return CloneBytes(sharedSecret), nil
 }
 
-// DeriveAESKey 派生 AES-256 密钥 + 使用进程级随机 salt 兼容 Java 工具行为；跨进程应使用 DeriveAESKeyWithSalt。
+// DeriveAESKey 派生 AES-256 密钥 + 使用进程级随机 salt 隔离默认派生结果。
 func DeriveAESKey(sharedSecret []byte) ([]byte, error) {
 	return DeriveAESKeyWithSalt(sharedSecret, defaultAESGCMHKDFSalt)
 }
@@ -133,22 +133,22 @@ func AESGCMDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// DeriveAesKey 提供 DeriveAESKey 别名 + 兼容 Java 方法命名。
+// DeriveAesKey 提供 DeriveAESKey 别名 + 支持短驼峰调用习惯。
 func DeriveAesKey(sharedSecret []byte) ([]byte, error) {
 	return DeriveAESKey(sharedSecret)
 }
 
-// DeriveAesKeyWithSalt 提供 DeriveAESKeyWithSalt 别名 + 兼容 Java 方法命名。
+// DeriveAesKeyWithSalt 提供 DeriveAESKeyWithSalt 别名 + 支持短驼峰调用习惯。
 func DeriveAesKeyWithSalt(sharedSecret []byte, salt []byte) ([]byte, error) {
 	return DeriveAESKeyWithSalt(sharedSecret, salt)
 }
 
-// AesGcmEncrypt 提供 AESGCMEncrypt 别名 + 兼容 Java 方法命名。
+// AesGcmEncrypt 提供 AESGCMEncrypt 别名 + 支持短驼峰调用习惯。
 func AesGcmEncrypt(key []byte, plaintext []byte) ([]byte, error) {
 	return AESGCMEncrypt(key, plaintext)
 }
 
-// AesGcmDecrypt 提供 AESGCMDecrypt 别名 + 兼容 Java 方法命名。
+// AesGcmDecrypt 提供 AESGCMDecrypt 别名 + 支持短驼峰调用习惯。
 func AesGcmDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	return AESGCMDecrypt(key, encryptedData)
 }

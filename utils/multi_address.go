@@ -20,6 +20,7 @@ const (
 // MultiAddressProtocol 定义 P2P 传输协议 + 限制支持范围。
 type MultiAddressProtocol string
 
+// 本项目仅支持TCP 或者 QUIC
 const (
 	// ProtocolTCP 表示 TCP 传输段 + 兼容 multi-address 协议。
 	ProtocolTCP MultiAddressProtocol = "tcp"

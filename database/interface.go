@@ -167,9 +167,6 @@ func NewDeleteOperation(table Table, key []byte) DBOperation {
 	return DBOperation{Table: table, Key: key, Type: OperationDelete}
 }
 
-// DbOperation 保留 Java 风格别名 + 兼容迁移期调用方。
-type DbOperation = DBOperation
-
 // Database 定义链上本地 KV 契约 + 屏蔽具体存储引擎差异。
 type Database interface {
 	CreateDatabase(config DatabaseConfig) error
@@ -234,6 +231,3 @@ type Database interface {
 	DeleteByPrefix(table Table, prefix []byte) error
 	EnableWAL(enable bool) error
 }
-
-// DataBase 保留 Java 风格接口名 + 兼容迁移期调用方。
-type DataBase = Database

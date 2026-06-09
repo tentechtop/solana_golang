@@ -70,12 +70,12 @@ func Ed25519Verify(publicKey []byte, data []byte, signature []byte) bool {
 	return ed25519.Verify(ed25519.PublicKey(publicKey), data, signature)
 }
 
-// ApplyEd25519Signature 提供签名别名 + 兼容 Java applySignature 行为。
+// ApplyEd25519Signature 提供签名别名 + 复用 Ed25519Sign 统一校验。
 func ApplyEd25519Signature(privateKey []byte, data []byte) ([]byte, error) {
 	return Ed25519Sign(privateKey, data)
 }
 
-// VerifyEd25519Signature 提供验签别名 + 兼容 Java verifySignature 行为。
+// VerifyEd25519Signature 提供验签别名 + 复用 Ed25519Verify 统一校验。
 func VerifyEd25519Signature(publicKey []byte, data []byte, signature []byte) bool {
 	return Ed25519Verify(publicKey, data, signature)
 }
