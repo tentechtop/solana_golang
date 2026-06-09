@@ -1,0 +1,13 @@
+rpc:
+  address: ":8899"
+  max_body_bytes: 1048576
+  max_batch_size: 32
+
+database:
+  engine: "pebble"
+  path: "./data/pebble"
+  wal: true
+
+p2p:
+  listen_address: "/ip4/0.0.0.0/tcp/5002"
+  max_peers: 64
