@@ -36,7 +36,7 @@ func init() {
 	}
 }
 
-// NewBIP39Entropy creates cryptographically secure entropy for a BIP-39 mnemonic.
+// NewBIP39Entropy 生成 BIP-39 熵 + 使用密码学随机数保证安全性。
 func NewBIP39Entropy(bitSize int) ([]byte, error) {
 	if err := validateBIP39EntropyBitSize(bitSize); err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func NewBIP39Entropy(bitSize int) ([]byte, error) {
 	return entropy, nil
 }
 
-// NewBIP39Mnemonic converts entropy into an English BIP-39 mnemonic.
+// NewBIP39Mnemonic 生成英文助记词 + 按 BIP-39 规则编码熵和校验和。
 func NewBIP39Mnemonic(entropy []byte) (string, error) {
 	entropyBitSize := len(entropy) * 8
 	if err := validateBIP39EntropyBitSize(entropyBitSize); err != nil {
@@ -76,7 +76,7 @@ func NewBIP39Mnemonic(entropy []byte) (string, error) {
 	return strings.Join(words, " "), nil
 }
 
-// EntropyFromBIP39Mnemonic validates a mnemonic and returns its original entropy.
+// EntropyFromBIP39Mnemonic 还原助记词熵 + 校验 BIP-39 单词和校验和。
 func EntropyFromBIP39Mnemonic(mnemonic string) ([]byte, error) {
 	words := strings.Fields(mnemonic)
 	if len(words)%3 != 0 || len(words) < 12 || len(words) > 24 {
@@ -117,13 +117,13 @@ func EntropyFromBIP39Mnemonic(mnemonic string) ([]byte, error) {
 	return entropy, nil
 }
 
-// IsBIP39MnemonicValid reports whether mnemonic is a valid English BIP-39 mnemonic.
+// IsBIP39MnemonicValid 判断助记词是否合法 + 复用完整 BIP-39 校验逻辑。
 func IsBIP39MnemonicValid(mnemonic string) bool {
 	_, err := EntropyFromBIP39Mnemonic(mnemonic)
 	return err == nil
 }
 
-// NewBIP39Seed derives the 64-byte BIP-39 seed with PBKDF2-HMAC-SHA512.
+// NewBIP39Seed 派生 BIP-39 种子 + 使用 PBKDF2-HMAC-SHA512 标准算法。
 func NewBIP39Seed(mnemonic string, passphrase string) ([]byte, error) {
 	normalized := strings.Join(strings.Fields(mnemonic), " ")
 	if _, err := EntropyFromBIP39Mnemonic(normalized); err != nil {

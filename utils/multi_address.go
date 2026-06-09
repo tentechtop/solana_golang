@@ -10,25 +10,25 @@ import (
 const (
 	multiAddressSeparator = "/"
 
-	// MultiAddressIP4 is the ip4 multi-address protocol segment.
+	// MultiAddressIP4 定义 IPv4 地址段 + 兼容 multi-address 协议。
 	MultiAddressIP4 = "ip4"
-	// MultiAddressIP6 is the ip6 multi-address protocol segment.
+	// MultiAddressIP6 定义 IPv6 地址段 + 兼容 multi-address 协议。
 	MultiAddressIP6 = "ip6"
 )
 
-// MultiAddressProtocol is a supported P2P transport protocol.
+// MultiAddressProtocol 定义 P2P 传输协议 + 限制支持范围。
 type MultiAddressProtocol string
 
 const (
-	// ProtocolTCP represents a TCP transport segment.
+	// ProtocolTCP 表示 TCP 传输段 + 兼容 multi-address 协议。
 	ProtocolTCP MultiAddressProtocol = "tcp"
-	// ProtocolUDP represents a UDP transport segment.
+	// ProtocolUDP 表示 UDP 传输段 + 兼容 multi-address 协议。
 	ProtocolUDP MultiAddressProtocol = "udp"
-	// ProtocolQUIC represents a QUIC transport segment.
+	// ProtocolQUIC 表示 QUIC 传输段 + 兼容 multi-address 协议。
 	ProtocolQUIC MultiAddressProtocol = "quic"
 )
 
-// MultiAddress stores a parsed P2P multi-address.
+// MultiAddress 保存解析后的 P2P 地址 + 便于校验和规范化输出。
 type MultiAddress struct {
 	IPType     string
 	IPAddress  string
@@ -38,13 +38,13 @@ type MultiAddress struct {
 	RawAddress string
 }
 
-// NewMultiAddress parses rawAddress into a MultiAddress.
+// NewMultiAddress 创建 P2P 地址对象 + 复用标准解析逻辑。
 func NewMultiAddress(rawAddress string) (MultiAddress, error) {
 	return ParseMultiAddress(rawAddress)
 }
 
-// ParseMultiAddress parses a standard address such as
-// /ip4/101.35.87.31/tcp/5002/p2p/Base58Encoded32BytePeerID.
+// ParseMultiAddress 解析标准 multi-address + 校验 IP、协议、端口和节点 ID。
+// 示例格式：/ip4/101.35.87.31/tcp/5002/p2p/Base58Encoded32BytePeerID。
 func ParseMultiAddress(rawAddress string) (MultiAddress, error) {
 	rawAddress = strings.TrimSpace(rawAddress)
 	if rawAddress == "" {
@@ -98,7 +98,7 @@ func ParseMultiAddress(rawAddress string) (MultiAddress, error) {
 	return address, nil
 }
 
-// BuildMultiAddress validates the parts and builds a canonical MultiAddress.
+// BuildMultiAddress 构造规范地址 + 对分段输入执行完整校验。
 func BuildMultiAddress(ipType string, ipAddress string, protocol MultiAddressProtocol, port int, peerID string) (MultiAddress, error) {
 	normalizedIPType, err := normalizeMultiAddressIPType(ipType)
 	if err != nil {
@@ -130,7 +130,7 @@ func BuildMultiAddress(ipType string, ipAddress string, protocol MultiAddressPro
 	return address, nil
 }
 
-// ParseMultiAddressProtocol validates and normalizes a transport protocol.
+// ParseMultiAddressProtocol 解析传输协议 + 统一大小写并限制支持集合。
 func ParseMultiAddressProtocol(value string) (MultiAddressProtocol, error) {
 	switch strings.ToLower(value) {
 	case string(ProtocolTCP):
@@ -144,12 +144,12 @@ func ParseMultiAddressProtocol(value string) (MultiAddressProtocol, error) {
 	}
 }
 
-// ToRawAddress returns the canonical string representation.
+// ToRawAddress 返回规范字符串 + 保持 multi-address 输出格式一致。
 func (m MultiAddress) ToRawAddress() string {
 	return fmt.Sprintf("/%s/%s/%s/%d/p2p/%s", m.IPType, m.IPAddress, m.Protocol, m.Port, m.PeerID)
 }
 
-// String returns the canonical string representation.
+// String 返回规范字符串 + 便于日志和格式化输出。
 func (m MultiAddress) String() string {
 	return m.ToRawAddress()
 }

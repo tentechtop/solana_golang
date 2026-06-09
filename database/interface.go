@@ -1,8 +1,6 @@
 package database
 
-// DatabaseConfig contains the database-related part of the system config.
-// It intentionally stays small so upper layers can adapt their own config
-// structs without forcing the database package to import application config.
+// DatabaseConfig 定义数据库配置 + 避免数据层依赖上层应用配置。
 type DatabaseConfig struct {
 	Path      string
 	Engine    EngineType
@@ -22,11 +20,11 @@ const (
 	EngineLevelDB EngineType = "leveldb"
 )
 
-// Table identifies one logical KV table/column family.
+// Table 标识逻辑 KV 表 + 隔离不同业务数据命名空间。
 type Table uint16
 
 const (
-	// TableAll is a sentinel used by cache operations that target every table.
+	// TableAll 标识全部表 + 仅用于缓存等全局操作。
 	TableAll Table = 0
 
 	TableAccount         Table = 1
@@ -49,8 +47,7 @@ const (
 	TableTest2 Table = 110
 )
 
-// TableMetadata mirrors the Java TableEnum metadata that is useful outside
-// the concrete database implementation.
+// TableMetadata 描述表元数据 + 供日志、兼容和物理存储映射使用。
 type TableMetadata struct {
 	Table            Table
 	Code             uint16
@@ -79,12 +76,12 @@ var tableMetadata = []TableMetadata{
 	{Table: TableTest2, Code: uint16(TableTest2), ColumnFamilyName: "height_to_hash"},
 }
 
-// Code returns the stable numeric table code.
+// Code 返回稳定表编码 + 用作底层 key 前缀。
 func (t Table) Code() uint16 {
 	return uint16(t)
 }
 
-// Metadata returns the metadata bound to this table.
+// Metadata 返回表元数据 + 供调用方获取物理表信息。
 func (t Table) Metadata() (TableMetadata, bool) {
 	for _, metadata := range tableMetadata {
 		if metadata.Table == t {
@@ -94,7 +91,7 @@ func (t Table) Metadata() (TableMetadata, bool) {
 	return TableMetadata{}, false
 }
 
-// ColumnFamilyName returns the physical storage name for the table.
+// ColumnFamilyName 返回物理存储名 + 兼容列族风格命名。
 func (t Table) ColumnFamilyName() string {
 	metadata, ok := t.Metadata()
 	if !ok {
@@ -103,12 +100,12 @@ func (t Table) ColumnFamilyName() string {
 	return metadata.ColumnFamilyName
 }
 
-// String returns the physical table/column-family name.
+// String 返回物理表名 + 便于日志和调试输出。
 func (t Table) String() string {
 	return t.ColumnFamilyName()
 }
 
-// TableByCode returns the table for a stable numeric code.
+// TableByCode 根据稳定编码查表 + 支持持久化 key 反查。
 func TableByCode(code uint16) (Table, bool) {
 	for _, metadata := range tableMetadata {
 		if metadata.Code == code {
@@ -118,30 +115,30 @@ func TableByCode(code uint16) (Table, bool) {
 	return 0, false
 }
 
-// AllTableMetadata returns all known table metadata in declaration order.
+// AllTableMetadata 返回所有表元数据 + 保持声明顺序稳定。
 func AllTableMetadata() []TableMetadata {
 	tables := make([]TableMetadata, len(tableMetadata))
 	copy(tables, tableMetadata)
 	return tables
 }
 
-// PageResult is the result of cursor-style pagination over raw values.
+// PageResult 表示游标分页结果 + 支持大表分批扫描。
 type PageResult struct {
 	Data       [][]byte
 	LastKey    []byte
 	IsLastPage bool
 }
 
-// KeyValue is a raw key/value pair returned by range scans.
+// KeyValue 表示原始键值对 + 用于范围和前缀查询结果。
 type KeyValue struct {
 	Key   []byte
 	Value []byte
 }
 
-// KeyValueHandler handles one iterator item. Returning false stops iteration.
+// KeyValueHandler 处理迭代项 + 返回 false 可提前停止扫描。
 type KeyValueHandler func(key []byte, value []byte) bool
 
-// OperationType identifies one write operation inside a transaction.
+// OperationType 标识写操作类型 + 用于批量事务执行。
 type OperationType uint8
 
 const (
@@ -150,7 +147,7 @@ const (
 	OperationDelete
 )
 
-// DBOperation describes one operation inside a batch or transaction.
+// DBOperation 描述单个写操作 + 支持批量和事务提交。
 type DBOperation struct {
 	Table Table
 	Key   []byte
@@ -170,10 +167,10 @@ func NewDeleteOperation(table Table, key []byte) DBOperation {
 	return DBOperation{Table: table, Key: key, Type: OperationDelete}
 }
 
-// DbOperation keeps the Java-style name available for callers that prefer it.
+// DbOperation 保留 Java 风格别名 + 兼容迁移期调用方。
 type DbOperation = DBOperation
 
-// Database defines the KV database contract used by the chain.
+// Database 定义链上本地 KV 契约 + 屏蔽具体存储引擎差异。
 type Database interface {
 	CreateDatabase(config DatabaseConfig) error
 	CloseDatabase() error
@@ -238,6 +235,5 @@ type Database interface {
 	EnableWAL(enable bool) error
 }
 
-// DataBase keeps the Java interface spelling available while Database remains
-// the Go-preferred name.
+// DataBase 保留 Java 风格接口名 + 兼容迁移期调用方。
 type DataBase = Database

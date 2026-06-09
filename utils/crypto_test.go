@@ -26,34 +26,50 @@ func TestCryptoHelpers(t *testing.T) {
 	if SecureEqual([]byte{1, 2, 3}, []byte{1, 2}) {
 		t.Fatal("SecureEqual(different length) = true, want false")
 	}
+}
 
-	encoded := Base64Encode([]byte("hello"))
-	if encoded != "aGVsbG8=" {
-		t.Fatalf("Base64Encode() = %q, want aGVsbG8=", encoded)
+func TestHashHelpers(t *testing.T) {
+	input := []byte("hello")
+	wantSHA256 := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+	wantSHA512 := "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
+
+	if got := SHA256Hex(input); got != wantSHA256 {
+		t.Fatalf("SHA256Hex() = %q, want %q", got, wantSHA256)
 	}
-	decoded, err := Base64Decode(encoded)
-	if err != nil {
-		t.Fatalf("Base64Decode() error = %v", err)
+	if got := BytesToHex(Sha256(input)); got != wantSHA256 {
+		t.Fatalf("Sha256() = %q, want %q", got, wantSHA256)
 	}
-	if !bytes.Equal(decoded, []byte("hello")) {
-		t.Fatalf("Base64Decode() = %q, want hello", decoded)
+	if got := Sha256Hex(input); got != wantSHA256 {
+		t.Fatalf("Sha256Hex() = %q, want %q", got, wantSHA256)
 	}
 
-	rawEncoded := Base64RawEncode([]byte("hello"))
-	if rawEncoded != "aGVsbG8" {
-		t.Fatalf("Base64RawEncode() = %q, want aGVsbG8", rawEncoded)
+	doubleHash := DoubleSHA256(input)
+	if !bytes.Equal(doubleHash, SHA256(SHA256(input))) {
+		t.Fatal("DoubleSHA256() != SHA256(SHA256(input))")
 	}
-	rawDecoded, err := Base64RawDecode(rawEncoded)
-	if err != nil {
-		t.Fatalf("Base64RawDecode() error = %v", err)
+	if !bytes.Equal(DoubleSha256(input), doubleHash) {
+		t.Fatal("DoubleSha256() != DoubleSHA256()")
 	}
-	if !bytes.Equal(rawDecoded, []byte("hello")) {
-		t.Fatalf("Base64RawDecode() = %q, want hello", rawDecoded)
+	if DoubleSHA256Hex(input) != BytesToHex(doubleHash) {
+		t.Fatal("DoubleSHA256Hex() != hex DoubleSHA256()")
 	}
-	if _, err := Base64Decode("not base64"); err == nil {
-		t.Fatal("Base64Decode(invalid) error = nil, want error")
+	if DoubleSha256Hex(input) != DoubleSHA256Hex(input) {
+		t.Fatal("DoubleSha256Hex() != DoubleSHA256Hex()")
 	}
-	if _, err := Base64RawDecode("not base64"); err == nil {
-		t.Fatal("Base64RawDecode(invalid) error = nil, want error")
+	if !bytes.Equal(Checksum4(input), doubleHash[:4]) {
+		t.Fatal("Checksum4() != first 4 bytes of DoubleSHA256()")
+	}
+	if got := SHA512Hex(input); got != wantSHA512 {
+		t.Fatalf("SHA512Hex() = %q, want %q", got, wantSHA512)
+	}
+	if !bytes.Equal(Sha512(input), SHA512(input)) {
+		t.Fatal("Sha512() != SHA512()")
+	}
+
+	key := bytes.Repeat([]byte{0x0b}, 20)
+	hmac := HMACSHA512(key, []byte("Hi There"))
+	wantHMAC := "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+	if got := BytesToHex(hmac); got != wantHMAC {
+		t.Fatalf("HMACSHA512() = %q, want %q", got, wantHMAC)
 	}
 }

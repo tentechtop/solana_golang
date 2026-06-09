@@ -19,7 +19,7 @@ const (
 	ed25519SeedMasterSalt = "ed25519 seed"
 )
 
-// KeyInfo mirrors the Java KeyInfo DTO used by the Solana wallet helpers.
+// KeyInfo 保存钱包密钥信息 + 兼容 Java KeyInfo 数据结构。
 type KeyInfo struct {
 	PrivateKey []byte
 	PublicKey  []byte
@@ -27,14 +27,14 @@ type KeyInfo struct {
 	Path       string
 }
 
-// HDNode is a SLIP-0010 Ed25519 extended private key.
+// HDNode 表示 SLIP-0010 扩展私钥节点 + 保存私钥、链码和路径。
 type HDNode struct {
 	PrivateKey []byte
 	ChainCode  []byte
 	Path       string
 }
 
-// GenerateMnemonic generates a 12-word BIP-39 English mnemonic.
+// GenerateMnemonic 生成 12 个英文助记词 + 使用 BIP-39 标准熵。
 func GenerateMnemonic() ([]string, error) {
 	mnemonic, err := GenerateMnemonicString()
 	if err != nil {
@@ -43,7 +43,7 @@ func GenerateMnemonic() ([]string, error) {
 	return strings.Fields(mnemonic), nil
 }
 
-// GenerateMnemonicString generates a 12-word BIP-39 English mnemonic string.
+// GenerateMnemonicString 生成助记词字符串 + 便于展示和持久化。
 func GenerateMnemonicString() (string, error) {
 	entropy, err := NewBIP39Entropy(mnemonicEntropyBits)
 	if err != nil {
@@ -56,12 +56,12 @@ func GenerateMnemonicString() (string, error) {
 	return mnemonic, nil
 }
 
-// GenerateSeed creates a 64-byte BIP-39 seed from mnemonic words and a passphrase.
+// GenerateSeed 生成 BIP-39 种子 + 从助记词数组和密码短语派生。
 func GenerateSeed(mnemonic []string, passphrase string) ([]byte, error) {
 	return GenerateSeedFromMnemonicString(strings.Join(mnemonic, " "), passphrase)
 }
 
-// GenerateSeedFromMnemonicString creates a 64-byte BIP-39 seed from a mnemonic string.
+// GenerateSeedFromMnemonicString 生成 BIP-39 种子 + 从助记词字符串派生。
 func GenerateSeedFromMnemonicString(mnemonic string, passphrase string) ([]byte, error) {
 	normalized := strings.Join(strings.Fields(mnemonic), " ")
 	if !IsBIP39MnemonicValid(normalized) {
@@ -74,7 +74,7 @@ func GenerateSeedFromMnemonicString(mnemonic string, passphrase string) ([]byte,
 	return CloneBytes(seed), nil
 }
 
-// GenerateRootHDNode derives the SLIP-0010 Ed25519 root node from a seed.
+// GenerateRootHDNode 派生根 HD 节点 + 使用 SLIP-0010 Ed25519 规则。
 func GenerateRootHDNode(seed []byte) (HDNode, error) {
 	if err := validateSLIP10Seed(seed); err != nil {
 		return HDNode{}, err
@@ -87,7 +87,7 @@ func GenerateRootHDNode(seed []byte) (HDNode, error) {
 	}, nil
 }
 
-// GenerateRootPrivateKey derives the SLIP-0010 Ed25519 root private key from a seed.
+// GenerateRootPrivateKey 派生根私钥 + 复用 SLIP-0010 根节点逻辑。
 func GenerateRootPrivateKey(seed []byte) ([]byte, error) {
 	node, err := GenerateRootHDNode(seed)
 	if err != nil {
@@ -96,7 +96,7 @@ func GenerateRootPrivateKey(seed []byte) ([]byte, error) {
 	return node.PrivateKey, nil
 }
 
-// DeriveChildHDNode derives one hardened child node using SLIP-0010 Ed25519 CKDpriv.
+// DeriveChildHDNode 派生硬化子节点 + 使用 SLIP-0010 Ed25519 CKDpriv。
 func DeriveChildHDNode(parent HDNode, index uint32) (HDNode, error) {
 	if index&hardenedDeriveOffset == 0 {
 		return HDNode{}, fmt.Errorf("utils: ed25519 SLIP-0010 requires hardened child index")
@@ -117,7 +117,7 @@ func DeriveChildHDNode(parent HDNode, index uint32) (HDNode, error) {
 	return child, nil
 }
 
-// DeriveChildPrivateKey derives one hardened child private key and chain code.
+// DeriveChildPrivateKey 派生子私钥和链码 + 兼容旧接口入参形式。
 func DeriveChildPrivateKey(parentPrivateKey []byte, parentChainCode []byte, index uint32) ([]byte, []byte, error) {
 	child, err := DeriveChildHDNode(HDNode{PrivateKey: parentPrivateKey, ChainCode: parentChainCode, Path: "m"}, index)
 	if err != nil {
@@ -126,7 +126,7 @@ func DeriveChildPrivateKey(parentPrivateKey []byte, parentChainCode []byte, inde
 	return child.PrivateKey, child.ChainCode, nil
 }
 
-// GetSolanaAddress returns the Solana address, which is Base58(publicKey).
+// GetSolanaAddress 生成 Solana 地址 + 地址格式为 Base58 公钥。
 func GetSolanaAddress(publicKey []byte) (string, error) {
 	if err := requireLength(publicKey, Ed25519KeySize, "solana public key"); err != nil {
 		return "", err
@@ -134,7 +134,7 @@ func GetSolanaAddress(publicKey []byte) (string, error) {
 	return Base58Encode(publicKey), nil
 }
 
-// GetSolanaKeyPair derives a standard Solana key pair from mnemonic words.
+// GetSolanaKeyPair 派生 Solana 密钥对 + 使用助记词和标准路径参数。
 func GetSolanaKeyPair(mnemonic []string, accountIndex int, addressIndex int) (KeyInfo, error) {
 	seed, err := GenerateSeed(mnemonic, "")
 	if err != nil {
@@ -143,7 +143,7 @@ func GetSolanaKeyPair(mnemonic []string, accountIndex int, addressIndex int) (Ke
 	return GetSolanaKeyPairFromSeed(seed, accountIndex, addressIndex)
 }
 
-// GetSolanaKeyPairFromMnemonicString derives a Solana key pair from a mnemonic string.
+// GetSolanaKeyPairFromMnemonicString 派生 Solana 密钥对 + 使用助记词字符串。
 func GetSolanaKeyPairFromMnemonicString(mnemonic string, accountIndex int, addressIndex int) (KeyInfo, error) {
 	seed, err := GenerateSeedFromMnemonicString(mnemonic, "")
 	if err != nil {
@@ -152,7 +152,7 @@ func GetSolanaKeyPairFromMnemonicString(mnemonic string, accountIndex int, addre
 	return GetSolanaKeyPairFromSeed(seed, accountIndex, addressIndex)
 }
 
-// GetSolanaKeyPairFromSeed derives m/44'/501'/accountIndex'/addressIndex' from a BIP-39 seed.
+// GetSolanaKeyPairFromSeed 派生标准路径密钥对 + 路径为 m/44'/501'/accountIndex'/addressIndex'。
 func GetSolanaKeyPairFromSeed(seed []byte, accountIndex int, addressIndex int) (KeyInfo, error) {
 	if accountIndex < 0 {
 		return KeyInfo{}, fmt.Errorf("utils: account index cannot be negative")
@@ -164,7 +164,7 @@ func GetSolanaKeyPairFromSeed(seed []byte, accountIndex int, addressIndex int) (
 	return GetSolanaKeyPairFromSeedAndPath(seed, path)
 }
 
-// GetSolanaKeyPairFromSeedAndPath derives a Solana key pair from seed and a SLIP-0010 path.
+// GetSolanaKeyPairFromSeedAndPath 派生 Solana 密钥对 + 使用 seed 和 SLIP-0010 路径。
 func GetSolanaKeyPairFromSeedAndPath(seed []byte, path string) (KeyInfo, error) {
 	node, err := DeriveHDNodeFromSeedAndPath(seed, path)
 	if err != nil {
@@ -186,7 +186,7 @@ func GetSolanaKeyPairFromSeedAndPath(seed []byte, path string) (KeyInfo, error) 
 	}, nil
 }
 
-// DerivePrivateKeyFromSeedAndPath derives a 32-byte private key from seed and a path like m/44'/501'/0'/0'.
+// DerivePrivateKeyFromSeedAndPath 派生 32 字节私钥 + 支持 m/44'/501'/0'/0' 路径。
 func DerivePrivateKeyFromSeedAndPath(seed []byte, path string) ([]byte, string, error) {
 	node, err := DeriveHDNodeFromSeedAndPath(seed, path)
 	if err != nil {
@@ -195,7 +195,7 @@ func DerivePrivateKeyFromSeedAndPath(seed []byte, path string) ([]byte, string, 
 	return node.PrivateKey, node.Path, nil
 }
 
-// DeriveHDNodeFromSeedAndPath derives an HD node from seed and a path like m/44'/501'/0'/0'.
+// DeriveHDNodeFromSeedAndPath 派生 HD 节点 + 按路径逐级执行硬化派生。
 func DeriveHDNodeFromSeedAndPath(seed []byte, path string) (HDNode, error) {
 	indexes, normalizedPath, err := ParseDerivationPath(path)
 	if err != nil {
@@ -216,7 +216,7 @@ func DeriveHDNodeFromSeedAndPath(seed []byte, path string) (HDNode, error) {
 	return node, nil
 }
 
-// ParseDerivationPath parses m/... paths and supports hardened indexes marked with a trailing apostrophe.
+// ParseDerivationPath 解析派生路径 + 支持撇号、h、H 标识硬化索引。
 func ParseDerivationPath(path string) ([]uint32, string, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -260,7 +260,7 @@ func ParseDerivationPath(path string) ([]uint32, string, error) {
 	return indexes, "m/" + strings.Join(normalized, "/"), nil
 }
 
-// SolanaDerivationPath returns m/44'/501'/accountIndex'/addressIndex'.
+// SolanaDerivationPath 构造 Solana 标准路径 + 格式为 m/44'/501'/accountIndex'/addressIndex'。
 func SolanaDerivationPath(accountIndex int, addressIndex int) string {
 	return fmt.Sprintf("m/%d'/%d'/%d'/%d'", bip44Purpose, solanaCoinType, accountIndex, addressIndex)
 }

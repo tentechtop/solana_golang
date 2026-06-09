@@ -11,27 +11,27 @@ import (
 )
 
 const (
-	// Curve25519KeySize is the byte length of raw X25519 public and private keys.
+	// Curve25519KeySize 定义 X25519 原始密钥长度 + 用于统一输入校验。
 	Curve25519KeySize = 32
-	// AES256KeySize is the AES-256 key length in bytes.
+	// AES256KeySize 定义 AES-256 密钥长度 + 用于统一输入校验。
 	AES256KeySize = 32
-	// AESGCMNonceSize is the Java reference's 12-byte GCM IV length.
+	// AESGCMNonceSize 定义 GCM nonce 长度 + 兼容 Java 参考实现。
 	AESGCMNonceSize = 12
-	// AESGCMTagSize is the Java reference's 128-bit GCM tag length in bytes.
+	// AESGCMTagSize 定义 GCM 认证标签长度 + 兼容 Java 参考实现。
 	AESGCMTagSize = 16
-	// AESGCMHKDFSaltSize is the salt length used by the Java reference.
+	// AESGCMHKDFSaltSize 定义 HKDF salt 长度 + 兼容 Java 参考实现。
 	AESGCMHKDFSaltSize = 32
 )
 
 var defaultAESGCMHKDFSalt = mustRandomAESGCMHKDFSalt()
 
-// Curve25519KeyPair stores a raw X25519 private/public key pair.
+// Curve25519KeyPair 保存 X25519 密钥对 + 使用原始字节便于跨语言传输。
 type Curve25519KeyPair struct {
 	PrivateKey []byte
 	PublicKey  []byte
 }
 
-// GenerateCurve25519KeyPair creates a raw X25519 key pair.
+// GenerateCurve25519KeyPair 生成 X25519 密钥对 + 使用标准库安全随机源。
 func GenerateCurve25519KeyPair() (Curve25519KeyPair, error) {
 	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -43,7 +43,7 @@ func GenerateCurve25519KeyPair() (Curve25519KeyPair, error) {
 	}, nil
 }
 
-// GenerateCurve25519KeyPairBytes creates a raw X25519 key pair and returns private key first.
+// GenerateCurve25519KeyPairBytes 生成 X25519 原始密钥 + 按私钥优先顺序兼容旧接口。
 func GenerateCurve25519KeyPairBytes() (privateKey []byte, publicKey []byte, err error) {
 	keyPair, err := GenerateCurve25519KeyPair()
 	if err != nil {
@@ -52,7 +52,7 @@ func GenerateCurve25519KeyPairBytes() (privateKey []byte, publicKey []byte, err 
 	return keyPair.PrivateKey, keyPair.PublicKey, nil
 }
 
-// GenerateSharedSecret performs X25519 key agreement with a local private key and remote public key.
+// GenerateSharedSecret 生成共享密钥 + 执行 X25519 私钥和远端公钥协商。
 func GenerateSharedSecret(privateKey []byte, publicKey []byte) ([]byte, error) {
 	if err := requireLength(privateKey, Curve25519KeySize, "curve25519 private key"); err != nil {
 		return nil, err
@@ -77,16 +77,12 @@ func GenerateSharedSecret(privateKey []byte, publicKey []byte) ([]byte, error) {
 	return CloneBytes(sharedSecret), nil
 }
 
-// DeriveAESKey derives a 32-byte AES-256 key with HKDF-SHA256.
-//
-// This mirrors the Java utility's package-level random salt behavior: the salt is
-// generated once per process. Use DeriveAESKeyWithSalt when the other side runs
-// in another process or language and must derive the same key.
+// DeriveAESKey 派生 AES-256 密钥 + 使用进程级随机 salt 兼容 Java 工具行为；跨进程应使用 DeriveAESKeyWithSalt。
 func DeriveAESKey(sharedSecret []byte) ([]byte, error) {
 	return DeriveAESKeyWithSalt(sharedSecret, defaultAESGCMHKDFSalt)
 }
 
-// DeriveAESKeyWithSalt derives a 32-byte AES-256 key with HKDF-SHA256 and an explicit salt.
+// DeriveAESKeyWithSalt 派生 AES-256 密钥 + 使用显式 salt 保证跨端一致。
 func DeriveAESKeyWithSalt(sharedSecret []byte, salt []byte) ([]byte, error) {
 	if err := requireLength(sharedSecret, Curve25519KeySize, "curve25519 shared secret"); err != nil {
 		return nil, err
@@ -101,7 +97,7 @@ func DeriveAESKeyWithSalt(sharedSecret []byte, salt []byte) ([]byte, error) {
 	return key, nil
 }
 
-// AESGCMEncrypt encrypts plaintext with AES-GCM and returns nonce + ciphertext + tag.
+// AESGCMEncrypt 加密明文 + 返回 nonce、密文和认证标签的拼接结果。
 func AESGCMEncrypt(key []byte, plaintext []byte) ([]byte, error) {
 	gcm, err := newAESGCM(key)
 	if err != nil {
@@ -117,7 +113,7 @@ func AESGCMEncrypt(key []byte, plaintext []byte) ([]byte, error) {
 	return ConcatBytes(nonce, ciphertext), nil
 }
 
-// AESGCMDecrypt decrypts data in nonce + ciphertext + tag format.
+// AESGCMDecrypt 解密密文 + 按 nonce、密文和认证标签格式解析。
 func AESGCMDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	if len(encryptedData) < AESGCMNonceSize+AESGCMTagSize {
 		return nil, fmt.Errorf("utils: aes-gcm encrypted data requires at least %d bytes, got %d", AESGCMNonceSize+AESGCMTagSize, len(encryptedData))
@@ -137,22 +133,22 @@ func AESGCMDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// DeriveAesKey is an alias matching the Java reference's method name casing.
+// DeriveAesKey 提供 DeriveAESKey 别名 + 兼容 Java 方法命名。
 func DeriveAesKey(sharedSecret []byte) ([]byte, error) {
 	return DeriveAESKey(sharedSecret)
 }
 
-// DeriveAesKeyWithSalt is an alias matching the Java reference's method name casing.
+// DeriveAesKeyWithSalt 提供 DeriveAESKeyWithSalt 别名 + 兼容 Java 方法命名。
 func DeriveAesKeyWithSalt(sharedSecret []byte, salt []byte) ([]byte, error) {
 	return DeriveAESKeyWithSalt(sharedSecret, salt)
 }
 
-// AesGcmEncrypt is an alias matching the Java reference's method name casing.
+// AesGcmEncrypt 提供 AESGCMEncrypt 别名 + 兼容 Java 方法命名。
 func AesGcmEncrypt(key []byte, plaintext []byte) ([]byte, error) {
 	return AESGCMEncrypt(key, plaintext)
 }
 
-// AesGcmDecrypt is an alias matching the Java reference's method name casing.
+// AesGcmDecrypt 提供 AESGCMDecrypt 别名 + 兼容 Java 方法命名。
 func AesGcmDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	return AESGCMDecrypt(key, encryptedData)
 }

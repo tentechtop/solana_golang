@@ -23,7 +23,7 @@ var (
 	}()
 )
 
-// CreateProgramAddress derives a Solana program address from seeds and programID.
+// CreateProgramAddress 派生 Solana 程序地址 + 使用 seeds 和 programID 计算 PDA。
 func CreateProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, error) {
 	if len(seeds) > maxSeeds {
 		return PublicKey{}, fmt.Errorf("utils: too many PDA seeds: %d > %d", len(seeds), maxSeeds)
@@ -50,7 +50,7 @@ func CreateProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, error
 	return address, nil
 }
 
-// FindProgramAddress finds the first valid PDA and bump seed, trying bumps from 255 down to 0.
+// FindProgramAddress 查找可用 PDA + 从 255 到 0 递减尝试 bump seed。
 func FindProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, byte, error) {
 	if len(seeds) >= maxSeeds {
 		return PublicKey{}, 0, fmt.Errorf("utils: PDA seeds leave no room for bump seed")
@@ -68,7 +68,7 @@ func FindProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, byte, e
 	return PublicKey{}, 0, fmt.Errorf("utils: unable to find a viable program address bump seed")
 }
 
-// CreateWithSeed derives SHA256(base || seed || owner), matching Solana's create_with_seed.
+// CreateWithSeed 派生种子地址 + 匹配 Solana create_with_seed 规则。
 func CreateWithSeed(base PublicKey, seed string, owner PublicKey) (PublicKey, error) {
 	if len(seed) > maxSeedStringLength {
 		return PublicKey{}, fmt.Errorf("utils: seed string exceeds %d bytes", maxSeedStringLength)
@@ -77,7 +77,7 @@ func CreateWithSeed(base PublicKey, seed string, owner PublicKey) (PublicKey, er
 	return NewPublicKey(sum[:])
 }
 
-// IsOnEd25519Curve reports whether value is a valid compressed Ed25519 curve point.
+// IsOnEd25519Curve 判断是否在 Ed25519 曲线上 + 用于排除有效 PDA 冲突。
 func IsOnEd25519Curve(value []byte) bool {
 	if len(value) != PublicKeySize {
 		return false

@@ -3,25 +3,25 @@ package utils
 import "fmt"
 
 const (
-	// PublicKeySize is the size in bytes of a Solana public key.
+	// PublicKeySize 定义 Solana 公钥长度 + 用于统一输入校验。
 	PublicKeySize = 32
-	// SignatureSize is the size in bytes of a Solana transaction signature.
+	// SignatureSize 定义 Solana 交易签名长度 + 用于统一输入校验。
 	SignatureSize = 64
 )
 
-// PublicKey is a fixed-size Solana public key.
+// PublicKey 表示固定长度 Solana 公钥 + 避免动态切片长度错误。
 type PublicKey [PublicKeySize]byte
 
-// Hash is a fixed-size 32-byte Solana hash value.
+// Hash 表示固定长度 Solana 哈希 + 与公钥长度保持一致。
 type Hash [PublicKeySize]byte
 
-// Blockhash is a fixed-size Solana recent blockhash.
+// Blockhash 表示最近区块哈希 + 复用 Hash 类型保持兼容。
 type Blockhash = Hash
 
-// Signature is a fixed-size Ed25519/Solana signature.
+// Signature 表示固定长度签名 + 兼容 Ed25519 和 Solana 交易签名。
 type Signature [SignatureSize]byte
 
-// NewPublicKey converts a 32-byte slice into a PublicKey.
+// NewPublicKey 创建公钥对象 + 校验输入必须为 32 字节。
 func NewPublicKey(value []byte) (PublicKey, error) {
 	var key PublicKey
 	if err := requireLength(value, PublicKeySize, "public key"); err != nil {
@@ -31,12 +31,12 @@ func NewPublicKey(value []byte) (PublicKey, error) {
 	return key, nil
 }
 
-// PublicKeyFromBytes converts a 32-byte slice into a PublicKey.
+// PublicKeyFromBytes 从字节创建公钥 + 复用统一长度校验。
 func PublicKeyFromBytes(value []byte) (PublicKey, error) {
 	return NewPublicKey(value)
 }
 
-// PublicKeyFromBase58 decodes a Base58-encoded Solana public key.
+// PublicKeyFromBase58 解码 Base58 公钥 + 兼容 Solana 地址格式。
 func PublicKeyFromBase58(value string) (PublicKey, error) {
 	decoded, err := Base58Decode(value)
 	if err != nil {
@@ -45,7 +45,7 @@ func PublicKeyFromBase58(value string) (PublicKey, error) {
 	return NewPublicKey(decoded)
 }
 
-// PublicKeyFromHex decodes a hex-encoded Solana public key.
+// PublicKeyFromHex 解码十六进制公钥 + 便于调试和配置导入。
 func PublicKeyFromHex(value string) (PublicKey, error) {
 	decoded, err := HexToBytes(value)
 	if err != nil {
@@ -54,32 +54,32 @@ func PublicKeyFromHex(value string) (PublicKey, error) {
 	return NewPublicKey(decoded)
 }
 
-// Bytes returns a copy of the public key bytes.
+// Bytes 返回公钥字节拷贝 + 防止外部修改内部数组。
 func (p PublicKey) Bytes() []byte {
 	return CloneBytes(p[:])
 }
 
-// String returns the Base58 representation of the public key.
+// String 返回 Base58 公钥 + 作为默认可读表示。
 func (p PublicKey) String() string {
 	return Base58Encode(p[:])
 }
 
-// Hex returns the lower-case hex representation of the public key.
+// Hex 返回小写十六进制公钥 + 便于日志和调试。
 func (p PublicKey) Hex() string {
 	return BytesToHex(p[:])
 }
 
-// Equal reports whether two public keys are equal.
+// Equal 比较公钥是否相等 + 使用安全字节比较。
 func (p PublicKey) Equal(other PublicKey) bool {
 	return SecureEqual(p[:], other[:])
 }
 
-// IsZero reports whether the public key is all zero bytes.
+// IsZero 判断是否为空公钥 + 用于默认值检查。
 func (p PublicKey) IsZero() bool {
 	return p == PublicKey{}
 }
 
-// NewHash converts a 32-byte slice into a Hash.
+// NewHash 创建哈希对象 + 校验输入必须为 32 字节。
 func NewHash(value []byte) (Hash, error) {
 	var hash Hash
 	if err := requireLength(value, PublicKeySize, "hash"); err != nil {
@@ -89,7 +89,7 @@ func NewHash(value []byte) (Hash, error) {
 	return hash, nil
 }
 
-// HashFromBase58 decodes a Base58-encoded Solana hash.
+// HashFromBase58 解码 Base58 哈希 + 兼容 Solana 哈希表示。
 func HashFromBase58(value string) (Hash, error) {
 	decoded, err := Base58Decode(value)
 	if err != nil {
@@ -98,22 +98,22 @@ func HashFromBase58(value string) (Hash, error) {
 	return NewHash(decoded)
 }
 
-// Bytes returns a copy of the hash bytes.
+// Bytes 返回哈希字节拷贝 + 防止外部修改内部数组。
 func (h Hash) Bytes() []byte {
 	return CloneBytes(h[:])
 }
 
-// String returns the Base58 representation of the hash.
+// String 返回 Base58 哈希 + 作为默认可读表示。
 func (h Hash) String() string {
 	return Base58Encode(h[:])
 }
 
-// Hex returns the lower-case hex representation of the hash.
+// Hex 返回小写十六进制哈希 + 便于日志和调试。
 func (h Hash) Hex() string {
 	return BytesToHex(h[:])
 }
 
-// NewSignature converts a 64-byte slice into a Signature.
+// NewSignature 创建签名对象 + 校验输入必须为 64 字节。
 func NewSignature(value []byte) (Signature, error) {
 	var signature Signature
 	if err := requireLength(value, SignatureSize, "signature"); err != nil {
@@ -123,12 +123,12 @@ func NewSignature(value []byte) (Signature, error) {
 	return signature, nil
 }
 
-// SignatureFromBytes converts a 64-byte slice into a Signature.
+// SignatureFromBytes 从字节创建签名 + 复用统一长度校验。
 func SignatureFromBytes(value []byte) (Signature, error) {
 	return NewSignature(value)
 }
 
-// SignatureFromBase58 decodes a Base58-encoded Solana signature.
+// SignatureFromBase58 解码 Base58 签名 + 兼容 Solana 签名表示。
 func SignatureFromBase58(value string) (Signature, error) {
 	decoded, err := Base58Decode(value)
 	if err != nil {
@@ -137,7 +137,7 @@ func SignatureFromBase58(value string) (Signature, error) {
 	return NewSignature(decoded)
 }
 
-// SignatureFromHex decodes a hex-encoded Solana signature.
+// SignatureFromHex 解码十六进制签名 + 便于调试和配置导入。
 func SignatureFromHex(value string) (Signature, error) {
 	decoded, err := HexToBytes(value)
 	if err != nil {
@@ -146,27 +146,27 @@ func SignatureFromHex(value string) (Signature, error) {
 	return NewSignature(decoded)
 }
 
-// Bytes returns a copy of the signature bytes.
+// Bytes 返回签名字节拷贝 + 防止外部修改内部数组。
 func (s Signature) Bytes() []byte {
 	return CloneBytes(s[:])
 }
 
-// String returns the Base58 representation of the signature.
+// String 返回 Base58 签名 + 作为默认可读表示。
 func (s Signature) String() string {
 	return Base58Encode(s[:])
 }
 
-// Hex returns the lower-case hex representation of the signature.
+// Hex 返回小写十六进制签名 + 便于日志和调试。
 func (s Signature) Hex() string {
 	return BytesToHex(s[:])
 }
 
-// Equal reports whether two signatures are equal.
+// Equal 比较签名是否相等 + 使用安全字节比较。
 func (s Signature) Equal(other Signature) bool {
 	return SecureEqual(s[:], other[:])
 }
 
-// MustPublicKeyFromBase58 decodes value and panics on error. Intended for package-level constants and tests.
+// MustPublicKeyFromBase58 解码 Base58 公钥 + 仅用于包级常量和测试快速失败。
 func MustPublicKeyFromBase58(value string) PublicKey {
 	key, err := PublicKeyFromBase58(value)
 	if err != nil {
