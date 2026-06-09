@@ -5,10 +5,22 @@ package database
 // structs without forcing the database package to import application config.
 type DatabaseConfig struct {
 	Path      string
+	Engine    EngineType
 	Username  string
 	Password  string
 	MaxSizeMB int
+	WAL       bool
 }
+
+// EngineType 标识数据库引擎 + 便于运行期选择不同存储实现。
+type EngineType string
+
+const (
+	// EnginePebble 默认引擎 + 兼容当前生产实现。
+	EnginePebble EngineType = "pebble"
+	// EngineLevelDB LevelDB 引擎 + 支持轻量级本地 KV 存储。
+	EngineLevelDB EngineType = "leveldb"
+)
 
 // Table identifies one logical KV table/column family.
 type Table uint16

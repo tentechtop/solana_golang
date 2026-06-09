@@ -5,21 +5,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/cockroachdb/pebble"
 )
 
 const tableKeyPrefixSize = 2
-
-var (
-	ErrDatabaseNotOpen = errors.New("database: pebble database is not open")
-	pebbleNoSync       = &pebble.WriteOptions{Sync: false}
-)
 
 type cacheEntry struct {
 	value     []byte
@@ -33,89 +24,101 @@ type tableCache struct {
 	items   map[string]cacheEntry
 }
 
-type pebbleTransaction struct {
-	batch *pebble.Batch
+type databaseTransaction struct {
+	batch databaseBatch
 	ops   []DBOperation
 }
 
-// PebbleDatabase is a Pebble-backed implementation of Database.
-type PebbleDatabase struct {
+type databaseCore struct {
 	mu           sync.RWMutex
-	db           *pebble.DB
+	engine       databaseEngine
 	path         string
 	walEnabled   bool
 	initialized  bool
-	transactions map[string]*pebbleTransaction
+	transactions map[string]*databaseTransaction
 	txSeq        uint64
 
 	cacheMu sync.RWMutex
 	caches  map[Table]*tableCache
 }
 
-var _ Database = (*PebbleDatabase)(nil)
+// PebbleDatabase 是 Pebble 包装类型 + 保持旧构造函数兼容。
+type PebbleDatabase struct {
+	*databaseCore
+}
 
-// DatabaseImpl is the default Pebble-backed implementation of Database.
-type DatabaseImpl = PebbleDatabase
+// LevelDBDatabase 是 LevelDB 包装类型 + 便于调用方显式选择引擎。
+type LevelDBDatabase struct {
+	*databaseCore
+}
+
+var _ Database = (*PebbleDatabase)(nil)
+var _ Database = (*LevelDBDatabase)(nil)
+var _ Database = (*databaseCore)(nil)
+
+// DatabaseImpl 默认数据库实现 + 兼容旧代码入口。
+type DatabaseImpl = databaseCore
+
+func newDatabaseCore(engine databaseEngine) *databaseCore {
+	database := &databaseCore{engine: engine}
+	database.mu.Lock()
+	database.ensureDefaultsLocked()
+	database.mu.Unlock()
+	return database
+}
 
 func NewPebbleDatabase() *PebbleDatabase {
-	p := &PebbleDatabase{}
-	p.mu.Lock()
-	p.ensureDefaultsLocked()
-	p.mu.Unlock()
-	return p
+	return &PebbleDatabase{databaseCore: newDatabaseCore(newPebbleEngine())}
+}
+
+func NewLevelDBDatabase() *LevelDBDatabase {
+	return &LevelDBDatabase{databaseCore: newDatabaseCore(newLevelDBEngine())}
 }
 
 func NewDatabaseImpl() *DatabaseImpl {
-	return NewPebbleDatabase()
+	return newDatabaseCore(newPebbleEngine())
 }
 
-func (p *PebbleDatabase) ensureDefaultsLocked() {
+func (p *databaseCore) ensureDefaultsLocked() {
 	if !p.initialized {
 		p.walEnabled = true
 		p.initialized = true
 	}
 	if p.transactions == nil {
-		p.transactions = make(map[string]*pebbleTransaction)
+		p.transactions = make(map[string]*databaseTransaction)
 	}
 }
 
-func (p *PebbleDatabase) ensureCacheStateLocked() {
+func (p *databaseCore) ensureCacheStateLocked() {
 	if p.caches == nil {
 		p.caches = make(map[Table]*tableCache)
 	}
 }
 
-func (p *PebbleDatabase) CreateDatabase(config DatabaseConfig) error {
+func (p *databaseCore) CreateDatabase(config DatabaseConfig) error {
 	if config.Path == "" {
 		return errors.New("database: config path is empty")
-	}
-	if err := os.MkdirAll(config.Path, 0755); err != nil {
-		return fmt.Errorf("database: create pebble directory: %w", err)
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureDefaultsLocked()
-	if p.db != nil {
+	if p.path != "" {
 		return nil
 	}
-
-	db, err := pebble.Open(config.Path, &pebble.Options{
-		DisableWAL: !p.walEnabled,
-	})
-	if err != nil {
-		return fmt.Errorf("database: open pebble: %w", err)
+	config.WAL = p.walEnabled
+	if err := p.engine.Open(config); err != nil {
+		return fmt.Errorf("database: open engine: %w", err)
 	}
-	p.db = db
 	p.path = config.Path
 	return nil
 }
 
-func (p *PebbleDatabase) CloseDatabase() error {
+func (p *databaseCore) CloseDatabase() error {
 	return p.Close()
 }
 
-func (p *PebbleDatabase) Exists(table Table, key []byte) (bool, error) {
+func (p *databaseCore) Exists(table Table, key []byte) (bool, error) {
 	value, err := p.Get(table, key)
 	if err != nil {
 		return false, err
@@ -123,30 +126,30 @@ func (p *PebbleDatabase) Exists(table Table, key []byte) (bool, error) {
 	return value != nil, nil
 }
 
-func (p *PebbleDatabase) Insert(table Table, key []byte, value []byte) error {
+func (p *databaseCore) Insert(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
 
-func (p *PebbleDatabase) Delete(table Table, key []byte) error {
+func (p *databaseCore) Delete(table Table, key []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	if err := db.Delete(encodeKey(table, key), pebbleNoSync); err != nil && !errors.Is(err, pebble.ErrNotFound) {
+	if err := engine.Delete(encodeKey(table, key)); err != nil && !errors.Is(err, ErrKeyNotFound) {
 		return fmt.Errorf("database: delete key: %w", err)
 	}
 	p.cacheDelete(table, key)
 	return nil
 }
 
-func (p *PebbleDatabase) Update(table Table, key []byte, value []byte) error {
+func (p *databaseCore) Update(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
 
-func (p *PebbleDatabase) Get(table Table, key []byte) ([]byte, error) {
+func (p *databaseCore) Get(table Table, key []byte) ([]byte, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -161,19 +164,19 @@ func (p *PebbleDatabase) Get(table Table, key []byte) ([]byte, error) {
 	return value, nil
 }
 
-func (p *PebbleDatabase) GetInt(table Table, key int) ([]byte, error) {
+func (p *databaseCore) GetInt(table Table, key int) ([]byte, error) {
 	var encoded [4]byte
 	binary.BigEndian.PutUint32(encoded[:], uint32(key))
 	return p.Get(table, encoded[:])
 }
 
-func (p *PebbleDatabase) GetInt64(table Table, key int64) ([]byte, error) {
+func (p *databaseCore) GetInt64(table Table, key int64) ([]byte, error) {
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], uint64(key))
 	return p.Get(table, encoded[:])
 }
 
-func (p *PebbleDatabase) Count(table Table) (int, error) {
+func (p *databaseCore) Count(table Table) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
 	}
@@ -181,7 +184,7 @@ func (p *PebbleDatabase) Count(table Table) (int, error) {
 	return p.countInBounds(lower, upper)
 }
 
-func (p *PebbleDatabase) CountByPrefix(table Table, prefix []byte) (int, error) {
+func (p *databaseCore) CountByPrefix(table Table, prefix []byte) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
 	}
@@ -189,7 +192,7 @@ func (p *PebbleDatabase) CountByPrefix(table Table, prefix []byte) (int, error) 
 	return p.countInBounds(lower, upper)
 }
 
-func (p *PebbleDatabase) IsEmpty(table Table) (bool, error) {
+func (p *databaseCore) IsEmpty(table Table) (bool, error) {
 	first, err := p.First(table)
 	if err != nil {
 		return false, err
@@ -197,11 +200,11 @@ func (p *PebbleDatabase) IsEmpty(table Table) (bool, error) {
 	return first == nil, nil
 }
 
-func (p *PebbleDatabase) BatchInsert(table Table, keys [][]byte, values [][]byte) error {
+func (p *databaseCore) BatchInsert(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationInsert)
 }
 
-func (p *PebbleDatabase) BatchDelete(table Table, keys [][]byte) error {
+func (p *databaseCore) BatchDelete(table Table, keys [][]byte) error {
 	ops := make([]DBOperation, len(keys))
 	for i, key := range keys {
 		ops[i] = DBOperation{Table: table, Key: key, Type: OperationDelete}
@@ -209,11 +212,11 @@ func (p *PebbleDatabase) BatchDelete(table Table, keys [][]byte) error {
 	return p.DataTransaction(ops)
 }
 
-func (p *PebbleDatabase) BatchUpdate(table Table, keys [][]byte, values [][]byte) error {
+func (p *databaseCore) BatchUpdate(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationUpdate)
 }
 
-func (p *PebbleDatabase) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
+func (p *databaseCore) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
 	values := make([][]byte, len(keys))
 	for i, key := range keys {
 		value, err := p.Get(table, key)
@@ -225,13 +228,13 @@ func (p *PebbleDatabase) BatchGet(table Table, keys [][]byte) ([][]byte, error) 
 	return values, nil
 }
 
-func (p *PebbleDatabase) Close() error {
+func (p *databaseCore) Close() error {
 	p.mu.Lock()
 	p.ensureDefaultsLocked()
-	db := p.db
+	engine := p.engine
 	transactions := p.transactions
-	p.db = nil
-	p.transactions = make(map[string]*pebbleTransaction)
+	p.path = ""
+	p.transactions = make(map[string]*databaseTransaction)
 	p.mu.Unlock()
 
 	var firstErr error
@@ -240,8 +243,8 @@ func (p *PebbleDatabase) Close() error {
 			firstErr = err
 		}
 	}
-	if db != nil {
-		if err := db.Close(); err != nil && firstErr == nil {
+	if engine != nil {
+		if err := engine.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -249,19 +252,19 @@ func (p *PebbleDatabase) Close() error {
 	return firstErr
 }
 
-func (p *PebbleDatabase) Flush() error {
-	db, err := p.getDB()
+func (p *databaseCore) Flush() error {
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	if err := db.Flush(); err != nil {
-		return fmt.Errorf("database: flush pebble: %w", err)
+	if err := engine.Flush(); err != nil {
+		return fmt.Errorf("database: flush engine: %w", err)
 	}
 	return nil
 }
 
-func (p *PebbleDatabase) Compact(start []byte, limit []byte) error {
-	db, err := p.getDB()
+func (p *databaseCore) Compact(start []byte, limit []byte) error {
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
@@ -271,59 +274,53 @@ func (p *PebbleDatabase) Compact(start []byte, limit []byte) error {
 	if limit == nil {
 		limit = []byte{0xff, 0xff, 0xff, 0xff}
 	}
-	return db.Compact(start, limit, true)
+	return engine.Compact(start, limit)
 }
 
-func (p *PebbleDatabase) Checkpoint(destDir string) error {
+func (p *databaseCore) Checkpoint(destDir string) error {
 	if destDir == "" {
 		return errors.New("database: checkpoint destination is empty")
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	parent := filepath.Dir(destDir)
-	if parent != "." && parent != "" {
-		if err := os.MkdirAll(parent, 0755); err != nil {
-			return fmt.Errorf("database: create checkpoint parent: %w", err)
-		}
-	}
-	if err := db.Checkpoint(destDir); err != nil {
+	if err := engine.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("database: create checkpoint: %w", err)
 	}
 	return nil
 }
 
-func (p *PebbleDatabase) Page(table Table, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseCore) Page(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, false, false)
 }
 
-func (p *PebbleDatabase) PageByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseCore) PageByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, false, false)
 }
 
-func (p *PebbleDatabase) PageKey(table Table, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseCore) PageKey(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, true, false)
 }
 
-func (p *PebbleDatabase) PageKeyByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseCore) PageKeyByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, false)
 }
 
-func (p *PebbleDatabase) PageKeyByPrefixReverse(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseCore) PageKeyByPrefixReverse(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, true)
 }
 
-func (p *PebbleDatabase) ExistsByPrefix(table Table, prefix []byte) (bool, error) {
+func (p *databaseCore) ExistsByPrefix(table Table, prefix []byte) (bool, error) {
 	if err := validateDataTable(table); err != nil {
 		return false, err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return false, err
 	}
 	lower, upper := prefixBounds(table, prefix)
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return false, fmt.Errorf("database: create prefix iterator: %w", err)
 	}
@@ -335,15 +332,18 @@ func (p *PebbleDatabase) ExistsByPrefix(table Table, prefix []byte) (bool, error
 	return ok, nil
 }
 
-func (p *PebbleDatabase) DataTransaction(operations []DBOperation) error {
+func (p *databaseCore) DataTransaction(operations []DBOperation) error {
 	if len(operations) == 0 {
 		return nil
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	batch := db.NewBatch()
+	batch, err := engine.NewBatch()
+	if err != nil {
+		return fmt.Errorf("database: create transaction batch: %w", err)
+	}
 	defer batch.Close()
 
 	ops := make([]DBOperation, len(operations))
@@ -354,46 +354,46 @@ func (p *PebbleDatabase) DataTransaction(operations []DBOperation) error {
 		}
 		ops[i] = cloned
 	}
-	if err := batch.Commit(pebbleNoSync); err != nil {
+	if err := batch.Commit(); err != nil {
 		return fmt.Errorf("database: commit transaction: %w", err)
 	}
 	p.applyCacheOperations(ops)
 	return nil
 }
 
-func (p *PebbleDatabase) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
+func (p *databaseCore) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, false)
 }
 
-func (p *PebbleDatabase) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
+func (p *databaseCore) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, false)
 }
 
-func (p *PebbleDatabase) PrefixQueryReverse(table Table, prefix []byte) ([]KeyValue, error) {
+func (p *databaseCore) PrefixQueryReverse(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, true)
 }
 
-func (p *PebbleDatabase) PrefixQueryReverseWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
+func (p *databaseCore) PrefixQueryReverseWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, true)
 }
 
-func (p *PebbleDatabase) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
+func (p *databaseCore) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, false)
 }
 
-func (p *PebbleDatabase) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
+func (p *databaseCore) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, false)
 }
 
-func (p *PebbleDatabase) RangeQueryReverse(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
+func (p *databaseCore) RangeQueryReverse(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, true)
 }
 
-func (p *PebbleDatabase) RangeQueryReverseWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
+func (p *databaseCore) RangeQueryReverseWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, true)
 }
 
-func (p *PebbleDatabase) First(table Table) (*KeyValue, error) {
+func (p *databaseCore) First(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -401,7 +401,7 @@ func (p *PebbleDatabase) First(table Table) (*KeyValue, error) {
 	return p.firstInBounds(lower, upper, false)
 }
 
-func (p *PebbleDatabase) Last(table Table) (*KeyValue, error) {
+func (p *databaseCore) Last(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -409,7 +409,7 @@ func (p *PebbleDatabase) Last(table Table) (*KeyValue, error) {
 	return p.firstInBounds(lower, upper, true)
 }
 
-func (p *PebbleDatabase) FirstByPrefix(table Table, prefix []byte) (*KeyValue, error) {
+func (p *databaseCore) FirstByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (p *PebbleDatabase) FirstByPrefix(table Table, prefix []byte) (*KeyValue, e
 	return p.firstInBounds(lower, upper, false)
 }
 
-func (p *PebbleDatabase) LastByPrefix(table Table, prefix []byte) (*KeyValue, error) {
+func (p *databaseCore) LastByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -425,7 +425,7 @@ func (p *PebbleDatabase) LastByPrefix(table Table, prefix []byte) (*KeyValue, er
 	return p.firstInBounds(lower, upper, true)
 }
 
-func (p *PebbleDatabase) ClearCache(table Table) error {
+func (p *databaseCore) ClearCache(table Table) error {
 	if table != TableAll {
 		if err := validateDataTable(table); err != nil {
 			return err
@@ -435,7 +435,7 @@ func (p *PebbleDatabase) ClearCache(table Table) error {
 	return nil
 }
 
-func (p *PebbleDatabase) SetCachePolicy(table Table, ttlMillis int64, maxSize int) error {
+func (p *databaseCore) SetCachePolicy(table Table, ttlMillis int64, maxSize int) error {
 	if ttlMillis < 0 {
 		return errors.New("database: cache ttl cannot be negative")
 	}
@@ -469,7 +469,7 @@ func (p *PebbleDatabase) SetCachePolicy(table Table, ttlMillis int64, maxSize in
 	return nil
 }
 
-func (p *PebbleDatabase) RefreshCache(table Table, key []byte) error {
+func (p *databaseCore) RefreshCache(table Table, key []byte) error {
 	if table == TableAll {
 		for _, metadata := range AllTableMetadata() {
 			if err := p.RefreshCache(metadata.Table, key); err != nil {
@@ -508,13 +508,17 @@ func (p *PebbleDatabase) RefreshCache(table Table, key []byte) error {
 	return nil
 }
 
-func (p *PebbleDatabase) BeginTransaction() (string, error) {
-	db, err := p.getDB()
+func (p *databaseCore) BeginTransaction() (string, error) {
+	engine, err := p.getDB()
 	if err != nil {
 		return "", err
 	}
+	batch, err := engine.NewBatch()
+	if err != nil {
+		return "", fmt.Errorf("database: create manual transaction batch: %w", err)
+	}
 	id := fmt.Sprintf("%d-%d", time.Now().UnixNano(), atomic.AddUint64(&p.txSeq, 1))
-	tx := &pebbleTransaction{batch: db.NewBatch()}
+	tx := &databaseTransaction{batch: batch}
 
 	p.mu.Lock()
 	p.ensureDefaultsLocked()
@@ -523,20 +527,20 @@ func (p *PebbleDatabase) BeginTransaction() (string, error) {
 	return id, nil
 }
 
-func (p *PebbleDatabase) CommitTransaction(transactionID string) error {
+func (p *databaseCore) CommitTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
 		return err
 	}
 	defer tx.batch.Close()
-	if err := tx.batch.Commit(pebbleNoSync); err != nil {
+	if err := tx.batch.Commit(); err != nil {
 		return fmt.Errorf("database: commit transaction %s: %w", transactionID, err)
 	}
 	p.applyCacheOperations(tx.ops)
 	return nil
 }
 
-func (p *PebbleDatabase) RollbackTransaction(transactionID string) error {
+func (p *databaseCore) RollbackTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
 		return err
@@ -544,7 +548,7 @@ func (p *PebbleDatabase) RollbackTransaction(transactionID string) error {
 	return tx.batch.Close()
 }
 
-func (p *PebbleDatabase) AddToTransaction(transactionID string, operation DBOperation) error {
+func (p *databaseCore) AddToTransaction(transactionID string, operation DBOperation) error {
 	if transactionID == "" {
 		return errors.New("database: transaction id is empty")
 	}
@@ -566,7 +570,7 @@ func (p *PebbleDatabase) AddToTransaction(transactionID string, operation DBOper
 	return nil
 }
 
-func (p *PebbleDatabase) ListAllTables() ([]string, error) {
+func (p *databaseCore) ListAllTables() ([]string, error) {
 	metadata := AllTableMetadata()
 	tables := make([]string, 0, len(metadata))
 	for _, item := range metadata {
@@ -575,34 +579,27 @@ func (p *PebbleDatabase) ListAllTables() ([]string, error) {
 	return tables, nil
 }
 
-func (p *PebbleDatabase) CheckHealth() error {
-	db, err := p.getDB()
+func (p *databaseCore) CheckHealth() error {
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	key := []byte{0, 0, 'h', 'e', 'a', 'l', 't', 'h'}
-	if err := db.Set(key, []byte("ok"), pebbleNoSync); err != nil {
-		return fmt.Errorf("database: health set: %w", err)
-	}
-	if err := db.Delete(key, pebbleNoSync); err != nil {
-		return fmt.Errorf("database: health delete: %w", err)
-	}
-	return nil
+	return engine.CheckHealth()
 }
 
-func (p *PebbleDatabase) Iterate(table Table, handler KeyValueHandler) error {
+func (p *databaseCore) Iterate(table Table, handler KeyValueHandler) error {
 	return p.iterate(table, nil, handler)
 }
 
-func (p *PebbleDatabase) IterateByPrefix(table Table, prefix []byte, handler KeyValueHandler) error {
+func (p *databaseCore) IterateByPrefix(table Table, prefix []byte, handler KeyValueHandler) error {
 	return p.iterate(table, prefix, handler)
 }
 
-func (p *PebbleDatabase) BatchDeleteRange(table Table, startKey []byte, endKey []byte) error {
+func (p *databaseCore) BatchDeleteRange(table Table, startKey []byte, endKey []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
@@ -610,18 +607,18 @@ func (p *PebbleDatabase) BatchDeleteRange(table Table, startKey []byte, endKey [
 	if end == nil {
 		return p.deleteRangeByIteration(table, start, end)
 	}
-	if err := db.DeleteRange(start, end, pebbleNoSync); err != nil {
+	if err := engine.DeleteRange(start, end); err != nil {
 		return fmt.Errorf("database: delete range: %w", err)
 	}
 	p.clearCacheOnly(table)
 	return nil
 }
 
-func (p *PebbleDatabase) DeleteByPrefix(table Table, prefix []byte) error {
+func (p *databaseCore) DeleteByPrefix(table Table, prefix []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
@@ -629,56 +626,55 @@ func (p *PebbleDatabase) DeleteByPrefix(table Table, prefix []byte) error {
 	if end == nil {
 		return p.deleteRangeByIteration(table, start, end)
 	}
-	if err := db.DeleteRange(start, end, pebbleNoSync); err != nil {
+	if err := engine.DeleteRange(start, end); err != nil {
 		return fmt.Errorf("database: delete by prefix: %w", err)
 	}
 	p.clearCacheOnly(table)
 	return nil
 }
 
-func (p *PebbleDatabase) EnableWAL(enable bool) error {
+func (p *databaseCore) EnableWAL(enable bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureDefaultsLocked()
-	if p.db != nil && p.walEnabled != enable {
-		return errors.New("database: pebble WAL setting can only be changed before CreateDatabase")
+	if p.path != "" && p.walEnabled != enable {
+		return errors.New("database: WAL setting can only be changed before CreateDatabase")
 	}
 	p.walEnabled = enable
-	return nil
+	return p.engine.EnableWAL(enable)
 }
 
-func (p *PebbleDatabase) put(table Table, key []byte, value []byte) error {
+func (p *databaseCore) put(table Table, key []byte, value []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	if err := db.Set(encodeKey(table, key), value, pebbleNoSync); err != nil {
+	if err := engine.Set(encodeKey(table, key), value); err != nil {
 		return fmt.Errorf("database: put key: %w", err)
 	}
 	p.cacheSet(table, key, value)
 	return nil
 }
 
-func (p *PebbleDatabase) getRaw(table Table, key []byte) ([]byte, error) {
-	db, err := p.getDB()
+func (p *databaseCore) getRaw(table Table, key []byte) ([]byte, error) {
+	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
 	}
-	value, closer, err := db.Get(encodeKey(table, key))
-	if errors.Is(err, pebble.ErrNotFound) {
+	value, err := engine.Get(encodeKey(table, key))
+	if errors.Is(err, ErrKeyNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database: get key: %w", err)
 	}
-	defer closer.Close()
 	return cloneBytes(value), nil
 }
 
-func (p *PebbleDatabase) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
+func (p *databaseCore) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
 	if len(keys) != len(values) {
 		return fmt.Errorf("database: keys and values length mismatch: %d != %d", len(keys), len(values))
 	}
@@ -689,20 +685,20 @@ func (p *PebbleDatabase) batchPut(table Table, keys [][]byte, values [][]byte, o
 	return p.DataTransaction(ops)
 }
 
-func (p *PebbleDatabase) page(table Table, prefix []byte, pageSize int, lastKey []byte, keysOnly bool, reverse bool) (PageResult, error) {
+func (p *databaseCore) page(table Table, prefix []byte, pageSize int, lastKey []byte, keysOnly bool, reverse bool) (PageResult, error) {
 	if pageSize <= 0 {
 		return PageResult{IsLastPage: true}, nil
 	}
 	if err := validateDataTable(table); err != nil {
 		return PageResult{}, err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return PageResult{}, err
 	}
 
 	lower, upper := prefixBounds(table, prefix)
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return PageResult{}, fmt.Errorf("database: create page iterator: %w", err)
 	}
@@ -731,19 +727,19 @@ func (p *PebbleDatabase) page(table Table, prefix []byte, pageSize int, lastKey 
 	return result, nil
 }
 
-func (p *PebbleDatabase) prefixQuery(table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
+func (p *databaseCore) prefixQuery(table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
 	}
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
 	}
 	lower, upper := prefixBounds(table, prefix)
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return nil, fmt.Errorf("database: create prefix query iterator: %w", err)
 	}
@@ -765,19 +761,19 @@ func (p *PebbleDatabase) prefixQuery(table Table, prefix []byte, limit int, reve
 	return pairs, nil
 }
 
-func (p *PebbleDatabase) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
+func (p *databaseCore) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
 	}
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
 	}
 	lower, upper := rangeBounds(table, startKey, endKey)
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return nil, fmt.Errorf("database: create range iterator: %w", err)
 	}
@@ -799,12 +795,12 @@ func (p *PebbleDatabase) rangeQuery(table Table, startKey []byte, endKey []byte,
 	return pairs, nil
 }
 
-func (p *PebbleDatabase) countInBounds(lower []byte, upper []byte) (int, error) {
-	db, err := p.getDB()
+func (p *databaseCore) countInBounds(lower []byte, upper []byte) (int, error) {
+	engine, err := p.getDB()
 	if err != nil {
 		return 0, err
 	}
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return 0, fmt.Errorf("database: create count iterator: %w", err)
 	}
@@ -820,12 +816,12 @@ func (p *PebbleDatabase) countInBounds(lower []byte, upper []byte) (int, error) 
 	return count, nil
 }
 
-func (p *PebbleDatabase) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
-	db, err := p.getDB()
+func (p *databaseCore) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
+	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
 	}
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return nil, fmt.Errorf("database: create boundary iterator: %w", err)
 	}
@@ -847,19 +843,19 @@ func (p *PebbleDatabase) firstInBounds(lower []byte, upper []byte, reverse bool)
 	return pair, nil
 }
 
-func (p *PebbleDatabase) iterate(table Table, prefix []byte, handler KeyValueHandler) error {
+func (p *databaseCore) iterate(table Table, prefix []byte, handler KeyValueHandler) error {
 	if handler == nil {
 		return errors.New("database: iterator handler is nil")
 	}
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
-	db, err := p.getDB()
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
 	lower, upper := prefixBounds(table, prefix)
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	iter, err := engine.NewIterator(lower, upper)
 	if err != nil {
 		return fmt.Errorf("database: create iterator: %w", err)
 	}
@@ -876,45 +872,49 @@ func (p *PebbleDatabase) iterate(table Table, prefix []byte, handler KeyValueHan
 	return nil
 }
 
-func (p *PebbleDatabase) deleteRangeByIteration(table Table, start []byte, end []byte) error {
-	db, err := p.getDB()
+func (p *databaseCore) deleteRangeByIteration(table Table, start []byte, end []byte) error {
+	engine, err := p.getDB()
 	if err != nil {
 		return err
 	}
-	iter, err := db.NewIter(&pebble.IterOptions{LowerBound: start, UpperBound: end})
+	iter, err := engine.NewIterator(start, end)
 	if err != nil {
 		return fmt.Errorf("database: create delete range iterator: %w", err)
 	}
 	defer iter.Close()
 
-	batch := db.NewBatch()
+	batch, err := engine.NewBatch()
+	if err != nil {
+		return fmt.Errorf("database: create delete range batch: %w", err)
+	}
 	defer batch.Close()
 	for ok := iter.First(); ok; ok = iter.Next() {
-		if err := batch.Delete(cloneBytes(iter.Key()), nil); err != nil {
+		if err := batch.Delete(cloneBytes(iter.Key())); err != nil {
 			return fmt.Errorf("database: delete range batch: %w", err)
 		}
 	}
 	if err := iter.Error(); err != nil {
 		return fmt.Errorf("database: delete range iterator: %w", err)
 	}
-	if err := batch.Commit(pebbleNoSync); err != nil {
+	if err := batch.Commit(); err != nil {
 		return fmt.Errorf("database: commit delete range: %w", err)
 	}
 	p.clearCacheOnly(table)
 	return nil
 }
 
-func (p *PebbleDatabase) getDB() (*pebble.DB, error) {
+func (p *databaseCore) getDB() (databaseEngine, error) {
 	p.mu.RLock()
-	db := p.db
+	engine := p.engine
+	opened := p.path != ""
 	p.mu.RUnlock()
-	if db == nil {
+	if engine == nil || !opened {
 		return nil, ErrDatabaseNotOpen
 	}
-	return db, nil
+	return engine, nil
 }
 
-func (p *PebbleDatabase) takeTransaction(transactionID string) (*pebbleTransaction, error) {
+func (p *databaseCore) takeTransaction(transactionID string) (*databaseTransaction, error) {
 	if transactionID == "" {
 		return nil, errors.New("database: transaction id is empty")
 	}
@@ -928,14 +928,14 @@ func (p *PebbleDatabase) takeTransaction(transactionID string) (*pebbleTransacti
 	return tx, nil
 }
 
-func (p *PebbleDatabase) cacheEnabled(table Table) bool {
+func (p *databaseCore) cacheEnabled(table Table) bool {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
 	cache := p.caches[table]
 	return cache != nil && cache.maxSize > 0
 }
 
-func (p *PebbleDatabase) cacheGet(table Table, key []byte) ([]byte, bool) {
+func (p *databaseCore) cacheGet(table Table, key []byte) ([]byte, bool) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	cache := p.caches[table]
@@ -956,7 +956,7 @@ func (p *PebbleDatabase) cacheGet(table Table, key []byte) ([]byte, bool) {
 	return cloneBytes(entry.value), true
 }
 
-func (p *PebbleDatabase) cacheSet(table Table, key []byte, value []byte) {
+func (p *databaseCore) cacheSet(table Table, key []byte, value []byte) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	p.ensureCacheStateLocked()
@@ -973,7 +973,7 @@ func (p *PebbleDatabase) cacheSet(table Table, key []byte, value []byte) {
 	enforceCacheLimit(cache)
 }
 
-func (p *PebbleDatabase) cacheDelete(table Table, key []byte) {
+func (p *databaseCore) cacheDelete(table Table, key []byte) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	cache := p.caches[table]
@@ -983,7 +983,7 @@ func (p *PebbleDatabase) cacheDelete(table Table, key []byte) {
 	delete(cache.items, string(key))
 }
 
-func (p *PebbleDatabase) clearCacheOnly(table Table) {
+func (p *databaseCore) clearCacheOnly(table Table) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	if p.caches == nil {
@@ -1001,7 +1001,7 @@ func (p *PebbleDatabase) clearCacheOnly(table Table) {
 	}
 }
 
-func (p *PebbleDatabase) applyCacheOperations(operations []DBOperation) {
+func (p *databaseCore) applyCacheOperations(operations []DBOperation) {
 	for _, op := range operations {
 		switch op.Type {
 		case OperationInsert, OperationUpdate:
@@ -1026,18 +1026,18 @@ func enforceCacheLimit(cache *tableCache) {
 	}
 }
 
-func applyOperationToBatch(batch *pebble.Batch, op DBOperation) error {
+func applyOperationToBatch(batch databaseBatch, op DBOperation) error {
 	if err := validateOperation(op); err != nil {
 		return err
 	}
 	key := encodeKey(op.Table, op.Key)
 	switch op.Type {
 	case OperationInsert, OperationUpdate:
-		if err := batch.Set(key, op.Value, nil); err != nil {
+		if err := batch.Set(key, op.Value); err != nil {
 			return fmt.Errorf("database: add set operation: %w", err)
 		}
 	case OperationDelete:
-		if err := batch.Delete(key, nil); err != nil {
+		if err := batch.Delete(key); err != nil {
 			return fmt.Errorf("database: add delete operation: %w", err)
 		}
 	default:
@@ -1068,7 +1068,7 @@ func validateDataTable(table Table) error {
 	return nil
 }
 
-func positionPageIterator(iter *pebble.Iterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {
+func positionPageIterator(iter databaseIterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {
 	if reverse {
 		if lastKey != nil {
 			return iter.SeekLT(encodeKey(table, lastKey))
@@ -1089,14 +1089,14 @@ func positionPageIterator(iter *pebble.Iterator, table Table, upper []byte, last
 	return ok
 }
 
-func positionPrefixQueryIterator(iter *pebble.Iterator, reverse bool) bool {
+func positionPrefixQueryIterator(iter databaseIterator, reverse bool) bool {
 	if reverse {
 		return iter.Last()
 	}
 	return iter.First()
 }
 
-func advancePrefixQueryIterator(iter *pebble.Iterator, reverse bool) bool {
+func advancePrefixQueryIterator(iter databaseIterator, reverse bool) bool {
 	if reverse {
 		return iter.Prev()
 	}

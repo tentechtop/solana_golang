@@ -1,0 +1,4 @@
+Borsh = Binary + Deterministic + Compact + Hash-friendly
+           ↓            ↓           ↓           ↓
+       二进制格式   同一数据永远   体积小   专为哈希场景设计
+                   产出相同字节

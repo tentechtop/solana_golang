@@ -2,7 +2,10 @@ module solana_golang
 
 go 1.24.6
 
-require github.com/cockroachdb/pebble v1.1.5
+require (
+	github.com/cockroachdb/pebble v1.1.5
+	github.com/syndtr/goleveldb v1.0.0
+)
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
