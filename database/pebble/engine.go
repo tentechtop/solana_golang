@@ -1,4 +1,4 @@
-package database
+package pebble
 
 import (
 	"errors"
@@ -11,29 +11,31 @@ import (
 
 var pebbleNoSync = &pebble.WriteOptions{Sync: false}
 
-type pebbleEngine struct {
+var ErrNotOpen = errors.New("database: pebble database is not open")
+
+type Engine struct {
 	db        *pebble.DB
 	walEnable bool
 }
 
-func newPebbleEngine() *pebbleEngine {
-	return &pebbleEngine{walEnable: true}
+func NewEngine() *Engine {
+	return &Engine{walEnable: true}
 }
 
-func (e *pebbleEngine) Open(config DatabaseConfig) error {
-	if err := os.MkdirAll(config.Path, 0755); err != nil {
+func (e *Engine) Open(path string, walEnabled bool) error {
+	if err := os.MkdirAll(path, 0755); err != nil {
 		return fmt.Errorf("database: create pebble directory: %w", err)
 	}
-	db, err := pebble.Open(config.Path, &pebble.Options{DisableWAL: !config.WAL})
+	db, err := pebble.Open(path, &pebble.Options{DisableWAL: !walEnabled})
 	if err != nil {
 		return fmt.Errorf("database: open pebble: %w", err)
 	}
 	e.db = db
-	e.walEnable = config.WAL
+	e.walEnable = walEnabled
 	return nil
 }
 
-func (e *pebbleEngine) Close() error {
+func (e *Engine) Close() error {
 	if e.db == nil {
 		return nil
 	}
@@ -42,13 +44,13 @@ func (e *pebbleEngine) Close() error {
 	return db.Close()
 }
 
-func (e *pebbleEngine) Get(key []byte) ([]byte, error) {
+func (e *Engine) Get(key []byte) ([]byte, error) {
 	if e.db == nil {
-		return nil, ErrDatabaseNotOpen
+		return nil, ErrNotOpen
 	}
 	value, closer, err := e.db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
-		return nil, ErrKeyNotFound
+		return nil, pebble.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -57,62 +59,62 @@ func (e *pebbleEngine) Get(key []byte) ([]byte, error) {
 	return cloneBytes(value), nil
 }
 
-func (e *pebbleEngine) Set(key []byte, value []byte) error {
+func (e *Engine) Set(key []byte, value []byte) error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	return e.db.Set(key, value, pebbleNoSync)
 }
 
-func (e *pebbleEngine) Delete(key []byte) error {
+func (e *Engine) Delete(key []byte) error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	return e.db.Delete(key, pebbleNoSync)
 }
 
-func (e *pebbleEngine) NewBatch() (databaseBatch, error) {
+func (e *Engine) NewBatch() (*Batch, error) {
 	if e.db == nil {
-		return nil, ErrDatabaseNotOpen
+		return nil, ErrNotOpen
 	}
-	return &pebbleBatch{batch: e.db.NewBatch()}, nil
+	return &Batch{batch: e.db.NewBatch()}, nil
 }
 
-func (e *pebbleEngine) NewIterator(lower []byte, upper []byte) (databaseIterator, error) {
+func (e *Engine) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	if e.db == nil {
-		return nil, ErrDatabaseNotOpen
+		return nil, ErrNotOpen
 	}
 	iter, err := e.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
 		return nil, err
 	}
-	return &pebbleIterator{iter: iter}, nil
+	return &Iterator{iter: iter}, nil
 }
 
-func (e *pebbleEngine) DeleteRange(start []byte, end []byte) error {
+func (e *Engine) DeleteRange(start []byte, end []byte) error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	return e.db.DeleteRange(start, end, pebbleNoSync)
 }
 
-func (e *pebbleEngine) Flush() error {
+func (e *Engine) Flush() error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	return e.db.Flush()
 }
 
-func (e *pebbleEngine) Compact(start []byte, limit []byte) error {
+func (e *Engine) Compact(start []byte, limit []byte) error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	return e.db.Compact(start, limit, true)
 }
 
-func (e *pebbleEngine) Checkpoint(destDir string) error {
+func (e *Engine) Checkpoint(destDir string) error {
 	if e.db == nil {
-		return ErrDatabaseNotOpen
+		return ErrNotOpen
 	}
 	parent := filepath.Dir(destDir)
 	if parent != "." && parent != "" {
@@ -123,7 +125,7 @@ func (e *pebbleEngine) Checkpoint(destDir string) error {
 	return e.db.Checkpoint(destDir)
 }
 
-func (e *pebbleEngine) CheckHealth() error {
+func (e *Engine) CheckHealth() error {
 	key := []byte{0, 0, 'h', 'e', 'a', 'l', 't', 'h'}
 	if err := e.Set(key, []byte("ok")); err != nil {
 		return fmt.Errorf("database: health set: %w", err)
@@ -134,7 +136,7 @@ func (e *pebbleEngine) CheckHealth() error {
 	return nil
 }
 
-func (e *pebbleEngine) EnableWAL(enable bool) error {
+func (e *Engine) EnableWAL(enable bool) error {
 	if e.db != nil && e.walEnable != enable {
 		return errors.New("database: WAL setting can only be changed before open")
 	}
@@ -142,66 +144,87 @@ func (e *pebbleEngine) EnableWAL(enable bool) error {
 	return nil
 }
 
-type pebbleBatch struct {
+func (e *Engine) IsNotFound(err error) bool {
+	return errors.Is(err, pebble.ErrNotFound)
+}
+
+func (e *Engine) SupportsCheckpoint() bool {
+	return true
+}
+
+func (e *Engine) SupportsDisableWAL() bool {
+	return true
+}
+
+type Batch struct {
 	batch *pebble.Batch
 }
 
-func (b *pebbleBatch) Set(key []byte, value []byte) error {
+func (b *Batch) Set(key []byte, value []byte) error {
 	return b.batch.Set(key, value, nil)
 }
 
-func (b *pebbleBatch) Delete(key []byte) error {
+func (b *Batch) Delete(key []byte) error {
 	return b.batch.Delete(key, nil)
 }
 
-func (b *pebbleBatch) Commit() error {
+func (b *Batch) Commit() error {
 	return b.batch.Commit(pebbleNoSync)
 }
 
-func (b *pebbleBatch) Close() error {
+func (b *Batch) Close() error {
 	return b.batch.Close()
 }
 
-type pebbleIterator struct {
+type Iterator struct {
 	iter *pebble.Iterator
 }
 
-func (i *pebbleIterator) First() bool {
+func (i *Iterator) First() bool {
 	return i.iter.First()
 }
 
-func (i *pebbleIterator) Last() bool {
+func (i *Iterator) Last() bool {
 	return i.iter.Last()
 }
 
-func (i *pebbleIterator) SeekGE(key []byte) bool {
+func (i *Iterator) SeekGE(key []byte) bool {
 	return i.iter.SeekGE(key)
 }
 
-func (i *pebbleIterator) SeekLT(key []byte) bool {
+func (i *Iterator) SeekLT(key []byte) bool {
 	return i.iter.SeekLT(key)
 }
 
-func (i *pebbleIterator) Next() bool {
+func (i *Iterator) Next() bool {
 	return i.iter.Next()
 }
 
-func (i *pebbleIterator) Prev() bool {
+func (i *Iterator) Prev() bool {
 	return i.iter.Prev()
 }
 
-func (i *pebbleIterator) Key() []byte {
+func (i *Iterator) Key() []byte {
 	return i.iter.Key()
 }
 
-func (i *pebbleIterator) Value() []byte {
+func (i *Iterator) Value() []byte {
 	return i.iter.Value()
 }
 
-func (i *pebbleIterator) Error() error {
+func (i *Iterator) Error() error {
 	return i.iter.Error()
 }
 
-func (i *pebbleIterator) Close() error {
+func (i *Iterator) Close() error {
 	return i.iter.Close()
+}
+
+func cloneBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]byte, len(value))
+	copy(cloned, value)
+	return cloned
 }

@@ -10,28 +10,14 @@ import (
 	"time"
 )
 
-const tableKeyPrefixSize = 2
-
-type cacheEntry struct {
-	value     []byte
-	expiresAt time.Time
-	accessed  time.Time
-}
-
-type tableCache struct {
-	ttl     time.Duration
-	maxSize int
-	items   map[string]cacheEntry
-}
-
 type databaseTransaction struct {
-	batch databaseBatch
+	batch KVBatch
 	ops   []DBOperation
 }
 
-type databaseCore struct {
+type databaseService struct {
 	mu           sync.RWMutex
-	engine       databaseEngine
+	engine       KVEngine
 	path         string
 	walEnabled   bool
 	initialized  bool
@@ -44,23 +30,23 @@ type databaseCore struct {
 
 // PebbleDatabase 是 Pebble 包装类型 + 保持旧构造函数兼容。
 type PebbleDatabase struct {
-	*databaseCore
+	*databaseService
 }
 
 // LevelDBDatabase 是 LevelDB 包装类型 + 便于调用方显式选择引擎。
 type LevelDBDatabase struct {
-	*databaseCore
+	*databaseService
 }
 
 var _ Database = (*PebbleDatabase)(nil)
 var _ Database = (*LevelDBDatabase)(nil)
-var _ Database = (*databaseCore)(nil)
+var _ Database = (*databaseService)(nil)
 
 // DatabaseImpl 默认数据库实现 + 兼容旧代码入口。
-type DatabaseImpl = databaseCore
+type DatabaseImpl = databaseService
 
-func newDatabaseCore(engine databaseEngine) *databaseCore {
-	database := &databaseCore{engine: engine}
+func newDatabaseService(engine KVEngine) *databaseService {
+	database := &databaseService{engine: engine}
 	database.mu.Lock()
 	database.ensureDefaultsLocked()
 	database.mu.Unlock()
@@ -68,18 +54,18 @@ func newDatabaseCore(engine databaseEngine) *databaseCore {
 }
 
 func NewPebbleDatabase() *PebbleDatabase {
-	return &PebbleDatabase{databaseCore: newDatabaseCore(newPebbleEngine())}
+	return &PebbleDatabase{databaseService: newDatabaseService(newPebbleKVEngine())}
 }
 
 func NewLevelDBDatabase() *LevelDBDatabase {
-	return &LevelDBDatabase{databaseCore: newDatabaseCore(newLevelDBEngine())}
+	return &LevelDBDatabase{databaseService: newDatabaseService(newLevelDBKVEngine())}
 }
 
 func NewDatabaseImpl() *DatabaseImpl {
-	return newDatabaseCore(newPebbleEngine())
+	return newDatabaseService(newPebbleKVEngine())
 }
 
-func (p *databaseCore) ensureDefaultsLocked() {
+func (p *databaseService) ensureDefaultsLocked() {
 	if !p.initialized {
 		p.walEnabled = true
 		p.initialized = true
@@ -89,13 +75,7 @@ func (p *databaseCore) ensureDefaultsLocked() {
 	}
 }
 
-func (p *databaseCore) ensureCacheStateLocked() {
-	if p.caches == nil {
-		p.caches = make(map[Table]*tableCache)
-	}
-}
-
-func (p *databaseCore) CreateDatabase(config DatabaseConfig) error {
+func (p *databaseService) CreateDatabase(config DatabaseConfig) error {
 	if config.Path == "" {
 		return errors.New("database: config path is empty")
 	}
@@ -107,18 +87,18 @@ func (p *databaseCore) CreateDatabase(config DatabaseConfig) error {
 		return nil
 	}
 	config.WAL = p.walEnabled
-	if err := p.engine.Open(config); err != nil {
+	if err := p.engine.Open(config.Path, config.WAL); err != nil {
 		return fmt.Errorf("database: open engine: %w", err)
 	}
 	p.path = config.Path
 	return nil
 }
 
-func (p *databaseCore) CloseDatabase() error {
+func (p *databaseService) CloseDatabase() error {
 	return p.Close()
 }
 
-func (p *databaseCore) Exists(table Table, key []byte) (bool, error) {
+func (p *databaseService) Exists(table Table, key []byte) (bool, error) {
 	value, err := p.Get(table, key)
 	if err != nil {
 		return false, err
@@ -126,11 +106,11 @@ func (p *databaseCore) Exists(table Table, key []byte) (bool, error) {
 	return value != nil, nil
 }
 
-func (p *databaseCore) Insert(table Table, key []byte, value []byte) error {
+func (p *databaseService) Insert(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
 
-func (p *databaseCore) Delete(table Table, key []byte) error {
+func (p *databaseService) Delete(table Table, key []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
@@ -138,18 +118,18 @@ func (p *databaseCore) Delete(table Table, key []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := engine.Delete(encodeKey(table, key)); err != nil && !errors.Is(err, ErrKeyNotFound) {
+	if err := engine.Delete(encodeKey(table, key)); err != nil && !engine.IsNotFound(err) {
 		return fmt.Errorf("database: delete key: %w", err)
 	}
 	p.cacheDelete(table, key)
 	return nil
 }
 
-func (p *databaseCore) Update(table Table, key []byte, value []byte) error {
+func (p *databaseService) Update(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
 
-func (p *databaseCore) Get(table Table, key []byte) ([]byte, error) {
+func (p *databaseService) Get(table Table, key []byte) ([]byte, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -164,19 +144,19 @@ func (p *databaseCore) Get(table Table, key []byte) ([]byte, error) {
 	return value, nil
 }
 
-func (p *databaseCore) GetInt(table Table, key int) ([]byte, error) {
+func (p *databaseService) GetInt(table Table, key int) ([]byte, error) {
 	var encoded [4]byte
 	binary.BigEndian.PutUint32(encoded[:], uint32(key))
 	return p.Get(table, encoded[:])
 }
 
-func (p *databaseCore) GetInt64(table Table, key int64) ([]byte, error) {
+func (p *databaseService) GetInt64(table Table, key int64) ([]byte, error) {
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], uint64(key))
 	return p.Get(table, encoded[:])
 }
 
-func (p *databaseCore) Count(table Table) (int, error) {
+func (p *databaseService) Count(table Table) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
 	}
@@ -184,7 +164,7 @@ func (p *databaseCore) Count(table Table) (int, error) {
 	return p.countInBounds(lower, upper)
 }
 
-func (p *databaseCore) CountByPrefix(table Table, prefix []byte) (int, error) {
+func (p *databaseService) CountByPrefix(table Table, prefix []byte) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
 	}
@@ -192,7 +172,7 @@ func (p *databaseCore) CountByPrefix(table Table, prefix []byte) (int, error) {
 	return p.countInBounds(lower, upper)
 }
 
-func (p *databaseCore) IsEmpty(table Table) (bool, error) {
+func (p *databaseService) IsEmpty(table Table) (bool, error) {
 	first, err := p.First(table)
 	if err != nil {
 		return false, err
@@ -200,11 +180,11 @@ func (p *databaseCore) IsEmpty(table Table) (bool, error) {
 	return first == nil, nil
 }
 
-func (p *databaseCore) BatchInsert(table Table, keys [][]byte, values [][]byte) error {
+func (p *databaseService) BatchInsert(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationInsert)
 }
 
-func (p *databaseCore) BatchDelete(table Table, keys [][]byte) error {
+func (p *databaseService) BatchDelete(table Table, keys [][]byte) error {
 	ops := make([]DBOperation, len(keys))
 	for i, key := range keys {
 		ops[i] = DBOperation{Table: table, Key: key, Type: OperationDelete}
@@ -212,11 +192,11 @@ func (p *databaseCore) BatchDelete(table Table, keys [][]byte) error {
 	return p.DataTransaction(ops)
 }
 
-func (p *databaseCore) BatchUpdate(table Table, keys [][]byte, values [][]byte) error {
+func (p *databaseService) BatchUpdate(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationUpdate)
 }
 
-func (p *databaseCore) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
+func (p *databaseService) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
 	values := make([][]byte, len(keys))
 	for i, key := range keys {
 		value, err := p.Get(table, key)
@@ -228,7 +208,7 @@ func (p *databaseCore) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
 	return values, nil
 }
 
-func (p *databaseCore) Close() error {
+func (p *databaseService) Close() error {
 	p.mu.Lock()
 	p.ensureDefaultsLocked()
 	engine := p.engine
@@ -252,7 +232,7 @@ func (p *databaseCore) Close() error {
 	return firstErr
 }
 
-func (p *databaseCore) Flush() error {
+func (p *databaseService) Flush() error {
 	engine, err := p.getDB()
 	if err != nil {
 		return err
@@ -263,7 +243,7 @@ func (p *databaseCore) Flush() error {
 	return nil
 }
 
-func (p *databaseCore) Compact(start []byte, limit []byte) error {
+func (p *databaseService) Compact(start []byte, limit []byte) error {
 	engine, err := p.getDB()
 	if err != nil {
 		return err
@@ -277,7 +257,7 @@ func (p *databaseCore) Compact(start []byte, limit []byte) error {
 	return engine.Compact(start, limit)
 }
 
-func (p *databaseCore) Checkpoint(destDir string) error {
+func (p *databaseService) Checkpoint(destDir string) error {
 	if destDir == "" {
 		return errors.New("database: checkpoint destination is empty")
 	}
@@ -285,33 +265,36 @@ func (p *databaseCore) Checkpoint(destDir string) error {
 	if err != nil {
 		return err
 	}
+	if !engine.SupportsCheckpoint() {
+		return ErrFeatureNotSupported
+	}
 	if err := engine.Checkpoint(destDir); err != nil {
 		return fmt.Errorf("database: create checkpoint: %w", err)
 	}
 	return nil
 }
 
-func (p *databaseCore) Page(table Table, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseService) Page(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, false, false)
 }
 
-func (p *databaseCore) PageByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseService) PageByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, false, false)
 }
 
-func (p *databaseCore) PageKey(table Table, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseService) PageKey(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, true, false)
 }
 
-func (p *databaseCore) PageKeyByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseService) PageKeyByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, false)
 }
 
-func (p *databaseCore) PageKeyByPrefixReverse(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
+func (p *databaseService) PageKeyByPrefixReverse(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, true)
 }
 
-func (p *databaseCore) ExistsByPrefix(table Table, prefix []byte) (bool, error) {
+func (p *databaseService) ExistsByPrefix(table Table, prefix []byte) (bool, error) {
 	if err := validateDataTable(table); err != nil {
 		return false, err
 	}
@@ -332,7 +315,7 @@ func (p *databaseCore) ExistsByPrefix(table Table, prefix []byte) (bool, error) 
 	return ok, nil
 }
 
-func (p *databaseCore) DataTransaction(operations []DBOperation) error {
+func (p *databaseService) DataTransaction(operations []DBOperation) error {
 	if len(operations) == 0 {
 		return nil
 	}
@@ -361,39 +344,39 @@ func (p *databaseCore) DataTransaction(operations []DBOperation) error {
 	return nil
 }
 
-func (p *databaseCore) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
+func (p *databaseService) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, false)
 }
 
-func (p *databaseCore) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
+func (p *databaseService) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, false)
 }
 
-func (p *databaseCore) PrefixQueryReverse(table Table, prefix []byte) ([]KeyValue, error) {
+func (p *databaseService) PrefixQueryReverse(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, true)
 }
 
-func (p *databaseCore) PrefixQueryReverseWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
+func (p *databaseService) PrefixQueryReverseWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, true)
 }
 
-func (p *databaseCore) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
+func (p *databaseService) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, false)
 }
 
-func (p *databaseCore) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
+func (p *databaseService) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, false)
 }
 
-func (p *databaseCore) RangeQueryReverse(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
+func (p *databaseService) RangeQueryReverse(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, true)
 }
 
-func (p *databaseCore) RangeQueryReverseWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
+func (p *databaseService) RangeQueryReverseWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, true)
 }
 
-func (p *databaseCore) First(table Table) (*KeyValue, error) {
+func (p *databaseService) First(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -401,7 +384,7 @@ func (p *databaseCore) First(table Table) (*KeyValue, error) {
 	return p.firstInBounds(lower, upper, false)
 }
 
-func (p *databaseCore) Last(table Table) (*KeyValue, error) {
+func (p *databaseService) Last(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -409,7 +392,7 @@ func (p *databaseCore) Last(table Table) (*KeyValue, error) {
 	return p.firstInBounds(lower, upper, true)
 }
 
-func (p *databaseCore) FirstByPrefix(table Table, prefix []byte) (*KeyValue, error) {
+func (p *databaseService) FirstByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -417,7 +400,7 @@ func (p *databaseCore) FirstByPrefix(table Table, prefix []byte) (*KeyValue, err
 	return p.firstInBounds(lower, upper, false)
 }
 
-func (p *databaseCore) LastByPrefix(table Table, prefix []byte) (*KeyValue, error) {
+func (p *databaseService) LastByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
 	}
@@ -425,7 +408,7 @@ func (p *databaseCore) LastByPrefix(table Table, prefix []byte) (*KeyValue, erro
 	return p.firstInBounds(lower, upper, true)
 }
 
-func (p *databaseCore) ClearCache(table Table) error {
+func (p *databaseService) ClearCache(table Table) error {
 	if table != TableAll {
 		if err := validateDataTable(table); err != nil {
 			return err
@@ -435,7 +418,7 @@ func (p *databaseCore) ClearCache(table Table) error {
 	return nil
 }
 
-func (p *databaseCore) SetCachePolicy(table Table, ttlMillis int64, maxSize int) error {
+func (p *databaseService) SetCachePolicy(table Table, ttlMillis int64, maxSize int) error {
 	if ttlMillis < 0 {
 		return errors.New("database: cache ttl cannot be negative")
 	}
@@ -469,7 +452,7 @@ func (p *databaseCore) SetCachePolicy(table Table, ttlMillis int64, maxSize int)
 	return nil
 }
 
-func (p *databaseCore) RefreshCache(table Table, key []byte) error {
+func (p *databaseService) RefreshCache(table Table, key []byte) error {
 	if table == TableAll {
 		for _, metadata := range AllTableMetadata() {
 			if err := p.RefreshCache(metadata.Table, key); err != nil {
@@ -508,7 +491,7 @@ func (p *databaseCore) RefreshCache(table Table, key []byte) error {
 	return nil
 }
 
-func (p *databaseCore) BeginTransaction() (string, error) {
+func (p *databaseService) BeginTransaction() (string, error) {
 	engine, err := p.getDB()
 	if err != nil {
 		return "", err
@@ -527,7 +510,7 @@ func (p *databaseCore) BeginTransaction() (string, error) {
 	return id, nil
 }
 
-func (p *databaseCore) CommitTransaction(transactionID string) error {
+func (p *databaseService) CommitTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
 		return err
@@ -540,7 +523,7 @@ func (p *databaseCore) CommitTransaction(transactionID string) error {
 	return nil
 }
 
-func (p *databaseCore) RollbackTransaction(transactionID string) error {
+func (p *databaseService) RollbackTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
 		return err
@@ -548,7 +531,7 @@ func (p *databaseCore) RollbackTransaction(transactionID string) error {
 	return tx.batch.Close()
 }
 
-func (p *databaseCore) AddToTransaction(transactionID string, operation DBOperation) error {
+func (p *databaseService) AddToTransaction(transactionID string, operation DBOperation) error {
 	if transactionID == "" {
 		return errors.New("database: transaction id is empty")
 	}
@@ -570,7 +553,7 @@ func (p *databaseCore) AddToTransaction(transactionID string, operation DBOperat
 	return nil
 }
 
-func (p *databaseCore) ListAllTables() ([]string, error) {
+func (p *databaseService) ListAllTables() ([]string, error) {
 	metadata := AllTableMetadata()
 	tables := make([]string, 0, len(metadata))
 	for _, item := range metadata {
@@ -579,7 +562,7 @@ func (p *databaseCore) ListAllTables() ([]string, error) {
 	return tables, nil
 }
 
-func (p *databaseCore) CheckHealth() error {
+func (p *databaseService) CheckHealth() error {
 	engine, err := p.getDB()
 	if err != nil {
 		return err
@@ -587,15 +570,15 @@ func (p *databaseCore) CheckHealth() error {
 	return engine.CheckHealth()
 }
 
-func (p *databaseCore) Iterate(table Table, handler KeyValueHandler) error {
+func (p *databaseService) Iterate(table Table, handler KeyValueHandler) error {
 	return p.iterate(table, nil, handler)
 }
 
-func (p *databaseCore) IterateByPrefix(table Table, prefix []byte, handler KeyValueHandler) error {
+func (p *databaseService) IterateByPrefix(table Table, prefix []byte, handler KeyValueHandler) error {
 	return p.iterate(table, prefix, handler)
 }
 
-func (p *databaseCore) BatchDeleteRange(table Table, startKey []byte, endKey []byte) error {
+func (p *databaseService) BatchDeleteRange(table Table, startKey []byte, endKey []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
@@ -614,7 +597,7 @@ func (p *databaseCore) BatchDeleteRange(table Table, startKey []byte, endKey []b
 	return nil
 }
 
-func (p *databaseCore) DeleteByPrefix(table Table, prefix []byte) error {
+func (p *databaseService) DeleteByPrefix(table Table, prefix []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
@@ -633,18 +616,21 @@ func (p *databaseCore) DeleteByPrefix(table Table, prefix []byte) error {
 	return nil
 }
 
-func (p *databaseCore) EnableWAL(enable bool) error {
+func (p *databaseService) EnableWAL(enable bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureDefaultsLocked()
 	if p.path != "" && p.walEnabled != enable {
 		return errors.New("database: WAL setting can only be changed before CreateDatabase")
 	}
+	if !enable && !p.engine.SupportsDisableWAL() {
+		return ErrFeatureNotSupported
+	}
 	p.walEnabled = enable
 	return p.engine.EnableWAL(enable)
 }
 
-func (p *databaseCore) put(table Table, key []byte, value []byte) error {
+func (p *databaseService) put(table Table, key []byte, value []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
 	}
@@ -659,13 +645,13 @@ func (p *databaseCore) put(table Table, key []byte, value []byte) error {
 	return nil
 }
 
-func (p *databaseCore) getRaw(table Table, key []byte) ([]byte, error) {
+func (p *databaseService) getRaw(table Table, key []byte) ([]byte, error) {
 	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
 	}
 	value, err := engine.Get(encodeKey(table, key))
-	if errors.Is(err, ErrKeyNotFound) {
+	if engine.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -674,7 +660,7 @@ func (p *databaseCore) getRaw(table Table, key []byte) ([]byte, error) {
 	return cloneBytes(value), nil
 }
 
-func (p *databaseCore) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
+func (p *databaseService) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
 	if len(keys) != len(values) {
 		return fmt.Errorf("database: keys and values length mismatch: %d != %d", len(keys), len(values))
 	}
@@ -685,7 +671,7 @@ func (p *databaseCore) batchPut(table Table, keys [][]byte, values [][]byte, opT
 	return p.DataTransaction(ops)
 }
 
-func (p *databaseCore) page(table Table, prefix []byte, pageSize int, lastKey []byte, keysOnly bool, reverse bool) (PageResult, error) {
+func (p *databaseService) page(table Table, prefix []byte, pageSize int, lastKey []byte, keysOnly bool, reverse bool) (PageResult, error) {
 	if pageSize <= 0 {
 		return PageResult{IsLastPage: true}, nil
 	}
@@ -727,7 +713,7 @@ func (p *databaseCore) page(table Table, prefix []byte, pageSize int, lastKey []
 	return result, nil
 }
 
-func (p *databaseCore) prefixQuery(table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
+func (p *databaseService) prefixQuery(table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
 	}
@@ -761,7 +747,7 @@ func (p *databaseCore) prefixQuery(table Table, prefix []byte, limit int, revers
 	return pairs, nil
 }
 
-func (p *databaseCore) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
+func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
 	}
@@ -795,7 +781,7 @@ func (p *databaseCore) rangeQuery(table Table, startKey []byte, endKey []byte, l
 	return pairs, nil
 }
 
-func (p *databaseCore) countInBounds(lower []byte, upper []byte) (int, error) {
+func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error) {
 	engine, err := p.getDB()
 	if err != nil {
 		return 0, err
@@ -816,7 +802,7 @@ func (p *databaseCore) countInBounds(lower []byte, upper []byte) (int, error) {
 	return count, nil
 }
 
-func (p *databaseCore) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
+func (p *databaseService) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
 	engine, err := p.getDB()
 	if err != nil {
 		return nil, err
@@ -843,7 +829,7 @@ func (p *databaseCore) firstInBounds(lower []byte, upper []byte, reverse bool) (
 	return pair, nil
 }
 
-func (p *databaseCore) iterate(table Table, prefix []byte, handler KeyValueHandler) error {
+func (p *databaseService) iterate(table Table, prefix []byte, handler KeyValueHandler) error {
 	if handler == nil {
 		return errors.New("database: iterator handler is nil")
 	}
@@ -872,7 +858,7 @@ func (p *databaseCore) iterate(table Table, prefix []byte, handler KeyValueHandl
 	return nil
 }
 
-func (p *databaseCore) deleteRangeByIteration(table Table, start []byte, end []byte) error {
+func (p *databaseService) deleteRangeByIteration(table Table, start []byte, end []byte) error {
 	engine, err := p.getDB()
 	if err != nil {
 		return err
@@ -903,7 +889,7 @@ func (p *databaseCore) deleteRangeByIteration(table Table, start []byte, end []b
 	return nil
 }
 
-func (p *databaseCore) getDB() (databaseEngine, error) {
+func (p *databaseService) getDB() (KVEngine, error) {
 	p.mu.RLock()
 	engine := p.engine
 	opened := p.path != ""
@@ -914,7 +900,7 @@ func (p *databaseCore) getDB() (databaseEngine, error) {
 	return engine, nil
 }
 
-func (p *databaseCore) takeTransaction(transactionID string) (*databaseTransaction, error) {
+func (p *databaseService) takeTransaction(transactionID string) (*databaseTransaction, error) {
 	if transactionID == "" {
 		return nil, errors.New("database: transaction id is empty")
 	}
@@ -928,105 +914,7 @@ func (p *databaseCore) takeTransaction(transactionID string) (*databaseTransacti
 	return tx, nil
 }
 
-func (p *databaseCore) cacheEnabled(table Table) bool {
-	p.cacheMu.RLock()
-	defer p.cacheMu.RUnlock()
-	cache := p.caches[table]
-	return cache != nil && cache.maxSize > 0
-}
-
-func (p *databaseCore) cacheGet(table Table, key []byte) ([]byte, bool) {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	cache := p.caches[table]
-	if cache == nil || cache.maxSize <= 0 {
-		return nil, false
-	}
-	entry, ok := cache.items[string(key)]
-	if !ok {
-		return nil, false
-	}
-	now := time.Now()
-	if !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
-		delete(cache.items, string(key))
-		return nil, false
-	}
-	entry.accessed = now
-	cache.items[string(key)] = entry
-	return cloneBytes(entry.value), true
-}
-
-func (p *databaseCore) cacheSet(table Table, key []byte, value []byte) {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	p.ensureCacheStateLocked()
-	cache := p.caches[table]
-	if cache == nil || cache.maxSize <= 0 {
-		return
-	}
-	now := time.Now()
-	entry := cacheEntry{value: cloneBytes(value), accessed: now}
-	if cache.ttl > 0 {
-		entry.expiresAt = now.Add(cache.ttl)
-	}
-	cache.items[string(key)] = entry
-	enforceCacheLimit(cache)
-}
-
-func (p *databaseCore) cacheDelete(table Table, key []byte) {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	cache := p.caches[table]
-	if cache == nil {
-		return
-	}
-	delete(cache.items, string(key))
-}
-
-func (p *databaseCore) clearCacheOnly(table Table) {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	if p.caches == nil {
-		return
-	}
-	if table == TableAll {
-		for _, cache := range p.caches {
-			cache.items = make(map[string]cacheEntry)
-		}
-		return
-	}
-	cache := p.caches[table]
-	if cache != nil {
-		cache.items = make(map[string]cacheEntry)
-	}
-}
-
-func (p *databaseCore) applyCacheOperations(operations []DBOperation) {
-	for _, op := range operations {
-		switch op.Type {
-		case OperationInsert, OperationUpdate:
-			p.cacheSet(op.Table, op.Key, op.Value)
-		case OperationDelete:
-			p.cacheDelete(op.Table, op.Key)
-		}
-	}
-}
-
-func enforceCacheLimit(cache *tableCache) {
-	for cache.maxSize > 0 && len(cache.items) > cache.maxSize {
-		var oldestKey string
-		var oldestTime time.Time
-		for key, entry := range cache.items {
-			if oldestKey == "" || entry.accessed.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = entry.accessed
-			}
-		}
-		delete(cache.items, oldestKey)
-	}
-}
-
-func applyOperationToBatch(batch databaseBatch, op DBOperation) error {
+func applyOperationToBatch(batch KVBatch, op DBOperation) error {
 	if err := validateOperation(op); err != nil {
 		return err
 	}
@@ -1068,7 +956,7 @@ func validateDataTable(table Table) error {
 	return nil
 }
 
-func positionPageIterator(iter databaseIterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {
+func positionPageIterator(iter KVIterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {
 	if reverse {
 		if lastKey != nil {
 			return iter.SeekLT(encodeKey(table, lastKey))
@@ -1089,98 +977,16 @@ func positionPageIterator(iter databaseIterator, table Table, upper []byte, last
 	return ok
 }
 
-func positionPrefixQueryIterator(iter databaseIterator, reverse bool) bool {
+func positionPrefixQueryIterator(iter KVIterator, reverse bool) bool {
 	if reverse {
 		return iter.Last()
 	}
 	return iter.First()
 }
 
-func advancePrefixQueryIterator(iter databaseIterator, reverse bool) bool {
+func advancePrefixQueryIterator(iter KVIterator, reverse bool) bool {
 	if reverse {
 		return iter.Prev()
 	}
 	return iter.Next()
-}
-
-func tableBounds(table Table) ([]byte, []byte) {
-	return tablePrefix(table), tableUpperBound(table)
-}
-
-func rangeBounds(table Table, startKey []byte, endKey []byte) ([]byte, []byte) {
-	lower, upper := tableBounds(table)
-	if startKey != nil {
-		lower = encodeKey(table, startKey)
-	}
-	if endKey != nil {
-		upper = encodeKey(table, endKey)
-	}
-	return lower, upper
-}
-
-func prefixBounds(table Table, prefix []byte) ([]byte, []byte) {
-	lower := encodeKey(table, prefix)
-	upper := keySuccessor(lower)
-	tableUpper := tableUpperBound(table)
-	if upper == nil || (tableUpper != nil && bytes.Compare(upper, tableUpper) > 0) {
-		upper = tableUpper
-	}
-	return lower, upper
-}
-
-func tablePrefix(table Table) []byte {
-	prefix := make([]byte, tableKeyPrefixSize)
-	binary.BigEndian.PutUint16(prefix, table.Code())
-	return prefix
-}
-
-func tableUpperBound(table Table) []byte {
-	code := table.Code()
-	if code == ^uint16(0) {
-		return nil
-	}
-	upper := make([]byte, tableKeyPrefixSize)
-	binary.BigEndian.PutUint16(upper, code+1)
-	return upper
-}
-
-func encodeKey(table Table, key []byte) []byte {
-	prefix := tablePrefix(table)
-	encoded := make([]byte, len(prefix)+len(key))
-	copy(encoded, prefix)
-	copy(encoded[len(prefix):], key)
-	return encoded
-}
-
-func stripTablePrefix(key []byte) []byte {
-	if len(key) <= tableKeyPrefixSize {
-		return []byte{}
-	}
-	return cloneBytes(key[tableKeyPrefixSize:])
-}
-
-func keySuccessor(key []byte) []byte {
-	successor := cloneBytes(key)
-	for i := len(successor) - 1; i >= 0; i-- {
-		if successor[i] != 0xff {
-			successor[i]++
-			return successor[:i+1]
-		}
-	}
-	return nil
-}
-
-func cloneOperation(op DBOperation) DBOperation {
-	op.Key = cloneBytes(op.Key)
-	op.Value = cloneBytes(op.Value)
-	return op
-}
-
-func cloneBytes(value []byte) []byte {
-	if value == nil {
-		return nil
-	}
-	cloned := make([]byte, len(value))
-	copy(cloned, value)
-	return cloned
 }
