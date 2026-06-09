@@ -30,17 +30,19 @@ func init() {
 	if len(bip39EnglishWords) != bip39WordCount {
 		panic(fmt.Sprintf("utils: invalid BIP39 English wordlist size %d", len(bip39EnglishWords)))
 	}
+
 	bip39EnglishMap = make(map[string]int, len(bip39EnglishWords))
-	for i, word := range bip39EnglishWords {
-		bip39EnglishMap[word] = i
+	for wordIndex, word := range bip39EnglishWords {
+		bip39EnglishMap[word] = wordIndex
 	}
 }
 
-// NewBIP39Entropy 生成 BIP-39 熵 + 使用密码学随机数保证安全性。
+// NewBIP39Entropy 生成 BIP-39 熵 + 使用密码学随机数保证助记词安全性。
 func NewBIP39Entropy(bitSize int) ([]byte, error) {
 	if err := validateBIP39EntropyBitSize(bitSize); err != nil {
 		return nil, err
 	}
+
 	entropy := make([]byte, bitSize/8)
 	if _, err := rand.Read(entropy); err != nil {
 		return nil, fmt.Errorf("utils: generate bip39 entropy: %w", err)
@@ -66,17 +68,18 @@ func NewBIP39Mnemonic(entropy []byte) (string, error) {
 			bitIndex := wordIndex*bip39WordBitSize + bitOffset
 			index <<= 1
 			if bitIndex < entropyBitSize {
-				index |= getBit(entropy, bitIndex)
-			} else {
-				index |= getBit(checksum[:], bitIndex-entropyBitSize)
+				index |= getBIP39Bit(entropy, bitIndex)
+				continue
 			}
+			index |= getBIP39Bit(checksum[:], bitIndex-entropyBitSize)
 		}
 		words[wordIndex] = bip39EnglishWords[index]
 	}
+
 	return strings.Join(words, " "), nil
 }
 
-// EntropyFromBIP39Mnemonic 还原助记词熵 + 校验 BIP-39 单词和校验和。
+// EntropyFromBIP39Mnemonic 还原助记词熵 + 校验 BIP-39 单词数量、词表和校验和。
 func EntropyFromBIP39Mnemonic(mnemonic string) ([]byte, error) {
 	words := strings.Fields(mnemonic)
 	if len(words)%3 != 0 || len(words) < 12 || len(words) > 24 {
@@ -93,31 +96,32 @@ func EntropyFromBIP39Mnemonic(mnemonic string) ([]byte, error) {
 	entropy := make([]byte, entropyBitSize/8)
 	checksumBits := make([]byte, checksumBitSize)
 	for wordPosition, word := range words {
-		index, ok := bip39EnglishMap[word]
+		wordIndex, ok := bip39EnglishMap[word]
 		if !ok {
 			return nil, fmt.Errorf("utils: bip39 word %q not found", word)
 		}
+
 		for bitOffset := 0; bitOffset < bip39WordBitSize; bitOffset++ {
-			bit := (index >> (bip39WordBitSize - 1 - bitOffset)) & 1
+			bit := (wordIndex >> (bip39WordBitSize - 1 - bitOffset)) & 1
 			bitIndex := wordPosition*bip39WordBitSize + bitOffset
 			if bitIndex < entropyBitSize {
-				setBit(entropy, bitIndex, bit)
-			} else {
-				checksumBits[bitIndex-entropyBitSize] = byte(bit)
+				setBIP39Bit(entropy, bitIndex, bit)
+				continue
 			}
+			checksumBits[bitIndex-entropyBitSize] = byte(bit)
 		}
 	}
 
 	expectedChecksum := sha256.Sum256(entropy)
-	for i, got := range checksumBits {
-		if got != byte(getBit(expectedChecksum[:], i)) {
+	for bitIndex, got := range checksumBits {
+		if got != byte(getBIP39Bit(expectedChecksum[:], bitIndex)) {
 			return nil, fmt.Errorf("utils: bip39 checksum incorrect")
 		}
 	}
 	return entropy, nil
 }
 
-// IsBIP39MnemonicValid 判断助记词是否合法 + 复用完整 BIP-39 校验逻辑。
+// IsBIP39MnemonicValid 判断助记词是否合法 + 复用完整 BIP-39 反解校验逻辑。
 func IsBIP39MnemonicValid(mnemonic string) bool {
 	_, err := EntropyFromBIP39Mnemonic(mnemonic)
 	return err == nil
@@ -125,15 +129,20 @@ func IsBIP39MnemonicValid(mnemonic string) bool {
 
 // NewBIP39Seed 派生 BIP-39 种子 + 使用 PBKDF2-HMAC-SHA512 标准算法。
 func NewBIP39Seed(mnemonic string, passphrase string) ([]byte, error) {
-	normalized := strings.Join(strings.Fields(mnemonic), " ")
-	if _, err := EntropyFromBIP39Mnemonic(normalized); err != nil {
+	normalizedMnemonic := normalizeBIP39Mnemonic(mnemonic)
+	if _, err := EntropyFromBIP39Mnemonic(normalizedMnemonic); err != nil {
 		return nil, err
 	}
-	seed, err := pbkdf2.Key(sha512.New, normalized, []byte("mnemonic"+passphrase), 2048, bip39SeedLength)
+
+	seed, err := pbkdf2.Key(sha512.New, normalizedMnemonic, []byte("mnemonic"+passphrase), 2048, bip39SeedLength)
 	if err != nil {
 		return nil, fmt.Errorf("utils: derive bip39 seed: %w", err)
 	}
 	return seed, nil
+}
+
+func normalizeBIP39Mnemonic(mnemonic string) string {
+	return strings.Join(strings.Fields(mnemonic), " ")
 }
 
 func validateBIP39EntropyBitSize(bitSize int) error {
@@ -143,11 +152,11 @@ func validateBIP39EntropyBitSize(bitSize int) error {
 	return nil
 }
 
-func getBit(data []byte, bitIndex int) int {
+func getBIP39Bit(data []byte, bitIndex int) int {
 	return int((data[bitIndex/8] >> (7 - uint(bitIndex%8))) & 1)
 }
 
-func setBit(data []byte, bitIndex int, value int) {
+func setBIP39Bit(data []byte, bitIndex int, value int) {
 	if value == 0 {
 		return
 	}
