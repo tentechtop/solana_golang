@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestIntegerHelpers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestIntegerHelpers(t *testing.T) {
 	intBytes := IntToBytes(258)
 	if !bytes.Equal(intBytes, []byte{0x00, 0x00, 0x01, 0x02}) {
@@ -63,6 +64,7 @@ func TestIntegerHelpers(t *testing.T) {
 	}
 }
 
+// TestLittleEndianIntegerHelpers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLittleEndianIntegerHelpers(t *testing.T) {
 	if got := Uint16ToBytesLE(0x1234); !bytes.Equal(got, []byte{0x34, 0x12}) {
 		t.Fatalf("Uint16ToBytesLE() = %x, want 3412", got)
@@ -124,6 +126,7 @@ func TestLittleEndianIntegerHelpers(t *testing.T) {
 	}
 }
 
+// TestByteSliceHelpers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestByteSliceHelpers(t *testing.T) {
 	original := []byte{1, 2, 3}
 	cloned := CloneBytes(original)

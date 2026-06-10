@@ -173,6 +173,7 @@ func (block Block) VerifyTransactionsRoot() error {
 	return block.validateTransactionsRoot()
 }
 
+// validateTransactionCount 执行对应逻辑 + 保持函数职责清晰可维护。
 func (block Block) validateTransactionCount() error {
 	if block.Header.TransactionCount == 0 && len(block.Transactions) == 0 {
 		return nil
@@ -183,6 +184,7 @@ func (block Block) validateTransactionCount() error {
 	return nil
 }
 
+// validateTransactionsRoot 执行对应逻辑 + 保持函数职责清晰可维护。
 func (block Block) validateTransactionsRoot() error {
 	computedRoot, err := block.ComputeTransactionsRoot()
 	if err != nil {
@@ -194,6 +196,7 @@ func (block Block) validateTransactionsRoot() error {
 	return nil
 }
 
+// merkleRoot 执行对应逻辑 + 保持函数职责清晰可维护。
 func merkleRoot(hashes []Hash) (Hash, error) {
 	if len(hashes) == 0 {
 		return NewHash(make([]byte, PublicKeySize))
@@ -209,6 +212,7 @@ func merkleRoot(hashes []Hash) (Hash, error) {
 	return currentLevel[0], nil
 }
 
+// merkleParentLevel 执行对应逻辑 + 保持函数职责清晰可维护。
 func merkleParentLevel(currentLevel []Hash) ([]Hash, error) {
 	nextLevel := make([]Hash, 0, (len(currentLevel)+1)/2)
 	for index := 0; index < len(currentLevel); index += 2 {
@@ -226,6 +230,7 @@ func merkleParentLevel(currentLevel []Hash) ([]Hash, error) {
 	return nextLevel, nil
 }
 
+// hashPair 执行对应逻辑 + 保持函数职责清晰可维护。
 func hashPair(left Hash, right Hash) (Hash, error) {
 	hash, err := NewHash(utils.SHA256(utils.ConcatBytes(left[:], right[:])))
 	if err != nil {
@@ -234,6 +239,7 @@ func hashPair(left Hash, right Hash) (Hash, error) {
 	return hash, nil
 }
 
+// cloneHashes 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneHashes(value []Hash) []Hash {
 	cloned := make([]Hash, len(value))
 	copy(cloned, value)

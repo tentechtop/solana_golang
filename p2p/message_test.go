@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestMessageFrameRoundTrip 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMessageFrameRoundTrip(t *testing.T) {
 	message, err := NewMessage(MessageTypePing, []byte("hello"))
 	if err != nil {
@@ -35,6 +36,7 @@ func TestMessageFrameRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRequestResponseMessageRules 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestRequestResponseMessageRules(t *testing.T) {
 	peerID := testPeerID(10)
 	request, err := NewRequestMessage(peerID, MessageTypePing, []byte("ping"))
@@ -60,6 +62,7 @@ func TestRequestResponseMessageRules(t *testing.T) {
 	}
 }
 
+// TestMessageBinaryCarriesPeerRoute 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMessageBinaryCarriesPeerRoute(t *testing.T) {
 	fromPeerID := testPeerID(11)
 	toPeerID := testPeerID(12)
@@ -86,6 +89,7 @@ func TestMessageBinaryCarriesPeerRoute(t *testing.T) {
 	}
 }
 
+// TestMessageRejectsInvalidFields 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMessageRejectsInvalidFields(t *testing.T) {
 	if err := (Message{}).Validate(DefaultMaxMessageSize); !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("Validate(empty) error = %v, want ErrInvalidMessage", err)
@@ -100,6 +104,7 @@ func TestMessageRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+// TestMessageCloneIsolatesPayload 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMessageCloneIsolatesPayload(t *testing.T) {
 	message, err := NewMessage(MessageTypePing, []byte{1, 2, 3})
 	if err != nil {

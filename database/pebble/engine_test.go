@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// TestEngineCRUDBatchIteratorAndMaintenance 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {
@@ -91,6 +92,7 @@ func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	}
 }
 
+// TestEngineClosedOperationsReturnError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEngineClosedOperationsReturnError(t *testing.T) {
 	engine := NewEngine()
 
@@ -111,6 +113,7 @@ func TestEngineClosedOperationsReturnError(t *testing.T) {
 	}
 }
 
+// TestSnapshotKeepsStableReadView 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestSnapshotKeepsStableReadView(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {

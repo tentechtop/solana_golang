@@ -7,6 +7,7 @@ import (
 	"solana_golang/utils"
 )
 
+// TestTransactionValidateMarshalAndHash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionValidateMarshalAndHash(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -31,6 +32,7 @@ func TestTransactionValidateMarshalAndHash(t *testing.T) {
 	}
 }
 
+// TestTransactionBuildSignDataExcludesSignatures 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -54,6 +56,7 @@ func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
 	transaction.Signatures[0] = originalSignature
 }
 
+// TestTransactionBuildsSolanaMessageFromAccountMeta 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -73,6 +76,7 @@ func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
 	}
 }
 
+// TestVersionedSolanaMessageAllowsAddressTableIndexes 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Message = SolanaMessage{
@@ -105,6 +109,7 @@ func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
 	}
 }
 
+// TestTransactionSenderAndSignerAccounts 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionSenderAndSignerAccounts(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -123,6 +128,7 @@ func TestTransactionSenderAndSignerAccounts(t *testing.T) {
 	}
 }
 
+// TestTransactionRejectsSignatureMismatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsSignatureMismatch(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Signatures = append(transaction.Signatures, newTestSignature(2))
@@ -133,6 +139,7 @@ func TestTransactionRejectsSignatureMismatch(t *testing.T) {
 	}
 }
 
+// TestTransactionRejectsDuplicateAccounts 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsDuplicateAccounts(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Accounts[1].PublicKey = transaction.Accounts[0].PublicKey
@@ -143,6 +150,7 @@ func TestTransactionRejectsDuplicateAccounts(t *testing.T) {
 	}
 }
 
+// TestTransactionRejectsInvalidInstructionIndex 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsInvalidInstructionIndex(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Instructions[0].ProgramIDIndex = 99
@@ -153,6 +161,7 @@ func TestTransactionRejectsInvalidInstructionIndex(t *testing.T) {
 	}
 }
 
+// TestTransactionRejectsEmptyRecentBlockhash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsEmptyRecentBlockhash(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.RecentBlockhash = Blockhash{}
@@ -163,6 +172,7 @@ func TestTransactionRejectsEmptyRecentBlockhash(t *testing.T) {
 	}
 }
 
+// TestTransactionExpiration 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionExpiration(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.SubmitTime = 1000
@@ -175,6 +185,7 @@ func TestTransactionExpiration(t *testing.T) {
 	}
 }
 
+// TestTransactionCloneIsolation 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionCloneIsolation(t *testing.T) {
 	transaction := newTestTransaction(t)
 	cloned := transaction.Clone()
@@ -185,6 +196,7 @@ func TestTransactionCloneIsolation(t *testing.T) {
 	}
 }
 
+// TestTransactionSignAndVerifySignatures 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionSignAndVerifySignatures(t *testing.T) {
 	publicKeyBytes, privateKey, err := utils.GenerateEd25519KeyPairBytes()
 	if err != nil {
@@ -223,6 +235,7 @@ func TestTransactionSignAndVerifySignatures(t *testing.T) {
 	}
 }
 
+// TestAccountMetaMergeSortAndIndexMap 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestAccountMetaMergeSortAndIndexMap(t *testing.T) {
 	firstKey := newTestPublicKey(1)
 	secondKey := newTestPublicKey(2)
@@ -256,6 +269,7 @@ func TestAccountMetaMergeSortAndIndexMap(t *testing.T) {
 	}
 }
 
+// TestCompileInstructionAndMarshal 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestCompileInstructionAndMarshal(t *testing.T) {
 	programKey := newTestPublicKey(1)
 	accountKey := newTestPublicKey(2)
@@ -281,6 +295,7 @@ func TestCompileInstructionAndMarshal(t *testing.T) {
 	}
 }
 
+// newTestTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestTransaction(t *testing.T) Transaction {
 	t.Helper()
 
@@ -319,6 +334,7 @@ func newTestTransaction(t *testing.T) Transaction {
 	}
 }
 
+// newTestPublicKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestPublicKey(seed byte) PublicKey {
 	var key PublicKey
 	for index := range key {
@@ -327,6 +343,7 @@ func newTestPublicKey(seed byte) PublicKey {
 	return key
 }
 
+// newTestHash 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestHash(seed byte) Hash {
 	var hash Hash
 	for index := range hash {
@@ -335,6 +352,7 @@ func newTestHash(seed byte) Hash {
 	return hash
 }
 
+// newTestSignature 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestSignature(seed byte) Signature {
 	var signature Signature
 	for index := range signature {

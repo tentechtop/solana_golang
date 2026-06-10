@@ -7,6 +7,7 @@ import (
 	"solana_golang/utils"
 )
 
+// FuzzSolanaKeyPairSeedSignVerify 执行模糊测试 + 发现随机输入下的边界缺陷。
 func FuzzSolanaKeyPairSeedSignVerify(f *testing.F) {
 	f.Add(bytes.Repeat([]byte{1}, SolanaPrivateKeySeedSize))
 	f.Add(bytes.Repeat([]byte{255}, SolanaPrivateKeySeedSize))

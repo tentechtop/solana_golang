@@ -214,12 +214,14 @@ func ReverseBytes(value []byte) []byte {
 	return reversed
 }
 
+// reverseBytesInPlace 执行对应逻辑 + 保持函数职责清晰可维护。
 func reverseBytesInPlace(value []byte) {
 	for left, right := 0, len(value)-1; left < right; left, right = left+1, right-1 {
 		value[left], value[right] = value[right], value[left]
 	}
 }
 
+// requireLength 执行对应逻辑 + 保持函数职责清晰可维护。
 func requireLength(value []byte, want int, name string) error {
 	if len(value) != want {
 		return fmt.Errorf("utils: %s requires %d bytes, got %d", name, want, len(value))

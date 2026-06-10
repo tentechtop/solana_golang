@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestSolanaKeyPairSecretKey64 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestSolanaKeyPairSecretKey64(t *testing.T) {
 	seed := bytes.Repeat([]byte{0x09}, SolanaPrivateKeySeedSize)
 	keyPair, err := KeyPairFromSeed(seed)
@@ -39,6 +40,7 @@ func TestSolanaKeyPairSecretKey64(t *testing.T) {
 	}
 }
 
+// TestSolanaKeyPairInvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestSolanaKeyPairInvalidInput(t *testing.T) {
 	if _, err := KeyPairFromSeed([]byte{1, 2, 3}); err == nil {
 		t.Fatal("KeyPairFromSeed(short) error = nil, want error")

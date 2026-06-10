@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestBlockValidateMarshalAndRoot 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockValidateMarshalAndRoot(t *testing.T) {
 	block := newTestBlock(t)
 
@@ -29,6 +30,7 @@ func TestBlockValidateMarshalAndRoot(t *testing.T) {
 	}
 }
 
+// TestBlockRejectsInvalidParentSlot 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsInvalidParentSlot(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.ParentSlot = block.Header.Slot
@@ -39,6 +41,7 @@ func TestBlockRejectsInvalidParentSlot(t *testing.T) {
 	}
 }
 
+// TestBlockRejectsEmptyBlockhash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.Blockhash = Hash{}
@@ -49,6 +52,7 @@ func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 	}
 }
 
+// TestBlockRejectsTransactionsRootMismatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.TransactionsRoot = newTestHash(99)
@@ -59,6 +63,7 @@ func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
 	}
 }
 
+// newTestBlock 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestBlock(t *testing.T) Block {
 	t.Helper()
 

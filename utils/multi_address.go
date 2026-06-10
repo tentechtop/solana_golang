@@ -151,6 +151,7 @@ func (m MultiAddress) String() string {
 	return m.ToRawAddress()
 }
 
+// normalizeMultiAddressIPType 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeMultiAddressIPType(value string) (string, error) {
 	switch strings.ToLower(value) {
 	case MultiAddressIP4:
@@ -162,6 +163,7 @@ func normalizeMultiAddressIPType(value string) (string, error) {
 	}
 }
 
+// isValidMultiAddressIP 执行对应逻辑 + 保持函数职责清晰可维护。
 func isValidMultiAddressIP(ipAddress string, ipType string) bool {
 	ip := net.ParseIP(ipAddress)
 	if ip == nil {
@@ -173,6 +175,7 @@ func isValidMultiAddressIP(ipAddress string, ipType string) bool {
 	return ip.To4() == nil && ip.To16() != nil
 }
 
+// validateMultiAddressPort 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateMultiAddressPort(port int) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("utils: multi-address port out of range 1-65535: %d", port)
@@ -180,6 +183,7 @@ func validateMultiAddressPort(port int) error {
 	return nil
 }
 
+// validateMultiAddressPeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateMultiAddressPeerID(peerID string) error {
 	decoded, err := Base58Decode(peerID)
 	if err != nil {

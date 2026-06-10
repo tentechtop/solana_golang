@@ -27,6 +27,7 @@ type Error struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+// successResponse 执行对应逻辑 + 保持函数职责清晰可维护。
 func successResponse(id json.RawMessage, result any) Response {
 	return Response{
 		JSONRPC: jsonRPCVersion,
@@ -35,6 +36,7 @@ func successResponse(id json.RawMessage, result any) Response {
 	}
 }
 
+// errorResponse 执行对应逻辑 + 保持函数职责清晰可维护。
 func errorResponse(id json.RawMessage, rpcError *Error) Response {
 	return Response{
 		JSONRPC: jsonRPCVersion,
@@ -43,6 +45,7 @@ func errorResponse(id json.RawMessage, rpcError *Error) Response {
 	}
 }
 
+// normalizeID 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeID(id json.RawMessage) json.RawMessage {
 	if len(id) == 0 {
 		return json.RawMessage("null")

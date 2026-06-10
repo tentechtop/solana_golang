@@ -10,10 +10,12 @@ import (
 	"solana_golang/utils"
 )
 
+// testPeerID 验证目标行为 + 保证核心场景和边界条件稳定。
 func testPeerID(seed byte) string {
 	return utils.Base58Encode(bytes.Repeat([]byte{seed}, peerIDByteSize))
 }
 
+// testAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func testAddress(t *testing.T, protocol utils.MultiAddressProtocol, port int, peerID string) utils.MultiAddress {
 	t.Helper()
 	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "127.0.0.1", protocol, port, peerID)
@@ -23,6 +25,7 @@ func testAddress(t *testing.T, protocol utils.MultiAddressProtocol, port int, pe
 	return address
 }
 
+// freeTCPPort 执行对应逻辑 + 保持函数职责清晰可维护。
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -33,6 +36,7 @@ func freeTCPPort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+// waitForTCP 执行对应逻辑 + 保持函数职责清晰可维护。
 func waitForTCP(t *testing.T, port int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

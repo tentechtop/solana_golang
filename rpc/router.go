@@ -17,16 +17,19 @@ type Router struct {
 	handlers map[string]HandlerFunc
 }
 
+// NewRouter 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewRouter() *Router {
 	return &Router{handlers: make(map[string]HandlerFunc)}
 }
 
+// NewDefaultRouter 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewDefaultRouter(backend LedgerBackend) *Router {
 	router := NewRouter()
 	RegisterDefaultHandlers(router, backend)
 	return router
 }
 
+// Register 执行对应逻辑 + 保持函数职责清晰可维护。
 func (r *Router) Register(method string, handler HandlerFunc) error {
 	method = strings.TrimSpace(method)
 	if method == "" {
@@ -42,6 +45,7 @@ func (r *Router) Register(method string, handler HandlerFunc) error {
 	return nil
 }
 
+// Handle 执行对应逻辑 + 保持函数职责清晰可维护。
 func (r *Router) Handle(ctx context.Context, request Request) Response {
 	if request.JSONRPC != jsonRPCVersion || strings.TrimSpace(request.Method) == "" {
 		return errorResponse(request.ID, ErrInvalidRequest)
@@ -59,6 +63,7 @@ func (r *Router) Handle(ctx context.Context, request Request) Response {
 	return successResponse(request.ID, result)
 }
 
+// lookup 执行对应逻辑 + 保持函数职责清晰可维护。
 func (r *Router) lookup(method string) HandlerFunc {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

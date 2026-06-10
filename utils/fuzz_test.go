@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// FuzzBase58RoundTrip 执行模糊测试 + 发现随机输入下的边界缺陷。
 func FuzzBase58RoundTrip(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 1, 2})
@@ -21,6 +22,7 @@ func FuzzBase58RoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzHexRoundTrip 执行模糊测试 + 发现随机输入下的边界缺陷。
 func FuzzHexRoundTrip(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0, 15, 16, 255})
@@ -35,6 +37,7 @@ func FuzzHexRoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzShortVecRoundTrip 执行模糊测试 + 发现随机输入下的边界缺陷。
 func FuzzShortVecRoundTrip(f *testing.F) {
 	f.Add(0)
 	f.Add(127)
@@ -58,6 +61,7 @@ func FuzzShortVecRoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzBIP39EntropyRoundTrip 执行模糊测试 + 发现随机输入下的边界缺陷。
 func FuzzBIP39EntropyRoundTrip(f *testing.F) {
 	f.Add(bytes.Repeat([]byte{0}, 16))
 	f.Add(bytes.Repeat([]byte{1}, 20))

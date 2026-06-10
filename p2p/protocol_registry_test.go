@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// TestProtocolRegistryHandlesResponseProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryHandlesResponseProtocol(t *testing.T) {
 	registry := NewProtocolRegistry()
 	localPeerID := testPeerID(8)
@@ -46,6 +47,7 @@ func TestProtocolRegistryHandlesResponseProtocol(t *testing.T) {
 	}
 }
 
+// TestProtocolRegistryRejectsMismatchedRegistration 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryRejectsMismatchedRegistration(t *testing.T) {
 	registry := NewProtocolRegistry()
 	spec := ProtocolSpec{
@@ -63,6 +65,7 @@ func TestProtocolRegistryRejectsMismatchedRegistration(t *testing.T) {
 	}
 }
 
+// TestProtocolRegistryRejectsDuplicateProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryRejectsDuplicateProtocol(t *testing.T) {
 	registry := NewProtocolRegistry()
 	spec := ProtocolSpec{

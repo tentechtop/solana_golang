@@ -8,6 +8,7 @@ import (
 
 const bip39VectorMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
+// TestGenerateMnemonicAndSeed 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestGenerateMnemonicAndSeed(t *testing.T) {
 	mnemonic, err := GenerateMnemonic()
 	if err != nil {
@@ -26,6 +27,7 @@ func TestGenerateMnemonicAndSeed(t *testing.T) {
 	}
 }
 
+// TestGenerateSeedBIP39Vector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestGenerateSeedBIP39Vector(t *testing.T) {
 	entropy, err := HexToBytes("00000000000000000000000000000000")
 	if err != nil {
@@ -57,6 +59,7 @@ func TestGenerateSeedBIP39Vector(t *testing.T) {
 	}
 }
 
+// TestBIP39EntropyRoundTripAllSupportedSizes 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBIP39EntropyRoundTripAllSupportedSizes(t *testing.T) {
 	for entropyBytes := 16; entropyBytes <= 32; entropyBytes += 4 {
 		entropy := make([]byte, entropyBytes)
@@ -80,6 +83,7 @@ func TestBIP39EntropyRoundTripAllSupportedSizes(t *testing.T) {
 	}
 }
 
+// TestBIP39InvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBIP39InvalidInput(t *testing.T) {
 	if _, err := NewBIP39Entropy(96); err == nil {
 		t.Fatal("NewBIP39Entropy(96) error = nil, want error")
@@ -101,6 +105,7 @@ func TestBIP39InvalidInput(t *testing.T) {
 	}
 }
 
+// TestSLIP10Ed25519Vector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestSLIP10Ed25519Vector(t *testing.T) {
 	seed, err := HexToBytes("000102030405060708090a0b0c0d0e0f")
 	if err != nil {
@@ -130,6 +135,7 @@ func TestSLIP10Ed25519Vector(t *testing.T) {
 	}
 }
 
+// TestSolanaKeyPairDerivation 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestSolanaKeyPairDerivation(t *testing.T) {
 	seed, err := GenerateSeedFromMnemonicString(bip39VectorMnemonic, "")
 	if err != nil {
@@ -176,6 +182,7 @@ func TestSolanaKeyPairDerivation(t *testing.T) {
 	}
 }
 
+// TestGetSolanaKeyPairFromMnemonic 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestGetSolanaKeyPairFromMnemonic(t *testing.T) {
 	words := strings.Fields(bip39VectorMnemonic)
 	keyInfo, err := GetSolanaKeyPair(words, 0, 0)
@@ -206,6 +213,7 @@ func TestGetSolanaKeyPairFromMnemonic(t *testing.T) {
 	}
 }
 
+// TestParseDerivationPath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestParseDerivationPath(t *testing.T) {
 	indexes, normalized, err := ParseDerivationPath(" M/44H/501h/0'/0/1' ")
 	if err != nil {
@@ -228,6 +236,7 @@ func TestParseDerivationPath(t *testing.T) {
 	}
 }
 
+// TestHDWalletInvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHDWalletInvalidInput(t *testing.T) {
 	if _, err := GenerateSeedFromMnemonicString("not a valid mnemonic", ""); err == nil {
 		t.Fatal("GenerateSeedFromMnemonicString(invalid) error = nil, want error")

@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestBase58EncodeDecode 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBase58EncodeDecode(t *testing.T) {
 	value := []byte("hello world")
 	encoded := Base58Encode(value)
@@ -21,6 +22,7 @@ func TestBase58EncodeDecode(t *testing.T) {
 	}
 }
 
+// TestBase58LeadingZeros 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBase58LeadingZeros(t *testing.T) {
 	value := []byte{0x00, 0x00, 0x01, 0x02}
 	encoded := Base58Encode(value)
@@ -37,6 +39,7 @@ func TestBase58LeadingZeros(t *testing.T) {
 	}
 }
 
+// TestBase58EmptyAndAllZeros 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBase58EmptyAndAllZeros(t *testing.T) {
 	if got := Base58Encode(nil); got != "" {
 		t.Fatalf("Base58Encode(nil) = %q, want empty", got)
@@ -63,12 +66,14 @@ func TestBase58EmptyAndAllZeros(t *testing.T) {
 	}
 }
 
+// TestBase58InvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBase58InvalidInput(t *testing.T) {
 	if _, err := Base58Decode("0OIl"); err == nil {
 		t.Fatal("Base58Decode(invalid) error = nil, want error")
 	}
 }
 
+// TestBase64Encoding 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBase64Encoding(t *testing.T) {
 	encoded := Base64Encode([]byte("hello"))
 	if encoded != "aGVsbG8=" {
@@ -101,6 +106,7 @@ func TestBase64Encoding(t *testing.T) {
 	}
 }
 
+// TestHexEncoding 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHexEncoding(t *testing.T) {
 	value := []byte{0x00, 0x0f, 0x10, 0xff}
 
@@ -126,6 +132,7 @@ func TestHexEncoding(t *testing.T) {
 	}
 }
 
+// TestShortVecEncoding 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestShortVecEncoding(t *testing.T) {
 	cases := []struct {
 		length int
@@ -163,6 +170,7 @@ func TestShortVecEncoding(t *testing.T) {
 	}
 }
 
+// TestShortVecInvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestShortVecInvalidInput(t *testing.T) {
 	if _, err := EncodeShortVecLength(-1); err == nil {
 		t.Fatal("EncodeShortVecLength(-1) error = nil, want error")

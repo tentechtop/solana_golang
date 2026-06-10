@@ -115,6 +115,7 @@ func (transport *TCPTransport) Close() error {
 	return errors.Join(closeErrors...)
 }
 
+// acceptLoop 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transport *TCPTransport) acceptLoop(ctx context.Context, listener net.Listener, handler ConnectionHandler) error {
 	for {
 		netConnection, err := listener.Accept()
@@ -126,6 +127,7 @@ func (transport *TCPTransport) acceptLoop(ctx context.Context, listener net.List
 	}
 }
 
+// acceptError 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transport *TCPTransport) acceptError(ctx context.Context, err error) error {
 	if ctx != nil && ctx.Err() != nil {
 		return nil
@@ -136,6 +138,7 @@ func (transport *TCPTransport) acceptError(ctx context.Context, err error) error
 	return fmt.Errorf("p2p: accept tcp connection: %w", err)
 }
 
+// addListener 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transport *TCPTransport) addListener(key string, listener net.Listener) error {
 	transport.mutex.Lock()
 	defer transport.mutex.Unlock()
@@ -146,12 +149,14 @@ func (transport *TCPTransport) addListener(key string, listener net.Listener) er
 	return nil
 }
 
+// removeListener 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transport *TCPTransport) removeListener(key string) {
 	transport.mutex.Lock()
 	delete(transport.listeners, key)
 	transport.mutex.Unlock()
 }
 
+// isClosed 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transport *TCPTransport) isClosed() bool {
 	transport.mutex.Lock()
 	defer transport.mutex.Unlock()
@@ -170,6 +175,7 @@ type TCPConnection struct {
 	closeErr       error
 }
 
+// newTCPConnection 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTCPConnection(netConnection net.Conn, remotePeerID string, maxMessageSize int) *TCPConnection {
 	connectionID, err := newMessageID()
 	if err != nil {
@@ -245,6 +251,7 @@ func (connection *TCPConnection) Close() error {
 	return connection.closeErr
 }
 
+// validateListenInput 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateListenInput(address utils.MultiAddress, protocol utils.MultiAddressProtocol, handler ConnectionHandler) error {
 	if err := validateDialInput(address, protocol); err != nil {
 		return err
@@ -255,6 +262,7 @@ func validateListenInput(address utils.MultiAddress, protocol utils.MultiAddress
 	return nil
 }
 
+// validateDialInput 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateDialInput(address utils.MultiAddress, protocol utils.MultiAddressProtocol) error {
 	if address.Protocol != protocol {
 		return fmt.Errorf("%w: want %s got %s", ErrUnsupportedProtocol, protocol, address.Protocol)
@@ -262,10 +270,12 @@ func validateDialInput(address utils.MultiAddress, protocol utils.MultiAddressPr
 	return nil
 }
 
+// joinAddress 执行对应逻辑 + 保持函数职责清晰可维护。
 func joinAddress(address utils.MultiAddress) string {
 	return net.JoinHostPort(address.IPAddress, strconv.Itoa(address.Port))
 }
 
+// closeListenerOnContext 执行对应逻辑 + 保持函数职责清晰可维护。
 func closeListenerOnContext(ctx context.Context, listener net.Listener) {
 	if ctx == nil {
 		return
@@ -274,6 +284,7 @@ func closeListenerOnContext(ctx context.Context, listener net.Listener) {
 	_ = listener.Close()
 }
 
+// armConnectionDeadline 执行对应逻辑 + 保持函数职责清晰可维护。
 func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) error) func() {
 	if ctx == nil {
 		ctx = context.Background()
@@ -297,6 +308,7 @@ func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) erro
 	}
 }
 
+// normalizeConnectionError 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeConnectionError(operation string, err error) error {
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 		return fmt.Errorf("%w: %s", ErrConnectionClosed, operation)

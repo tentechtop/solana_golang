@@ -10,6 +10,7 @@ import (
 	"solana_golang/utils"
 )
 
+// TestLoadLocalConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadLocalConfig(t *testing.T) {
 	config, err := Load(filepath.Join("local", "config.yaml"))
 	if err != nil {
@@ -26,6 +27,7 @@ func TestLoadLocalConfig(t *testing.T) {
 	}
 }
 
+// TestLoadAbsoluteConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadAbsoluteConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	source, err := os.ReadFile(filepath.Join("local", "config.yaml"))
@@ -41,6 +43,7 @@ func TestLoadAbsoluteConfig(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnknownField 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := []byte("rpc:\n  address: ':8899'\n  unknown: true\n")
@@ -53,6 +56,7 @@ func TestLoadRejectsUnknownField(t *testing.T) {
 	}
 }
 
+// TestLoadUsesDefaultPathForEmptyInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadUsesDefaultPathForEmptyInput(t *testing.T) {
 	config, err := Load(" ")
 	if err != nil {
@@ -63,6 +67,7 @@ func TestLoadUsesDefaultPathForEmptyInput(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidYaml 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsInvalidYaml(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("rpc:\n  address: ["), 0o644); err != nil {
@@ -74,6 +79,7 @@ func TestLoadRejectsInvalidYaml(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsMissingFile 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsMissingFile(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {
@@ -81,6 +87,7 @@ func TestLoadRejectsMissingFile(t *testing.T) {
 	}
 }
 
+// TestLogFileOutputRequiresPath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogFileOutputRequiresPath(t *testing.T) {
 	config := Default()
 	config.Log.Output = utils.LogOutputFile
@@ -91,6 +98,7 @@ func TestLogFileOutputRequiresPath(t *testing.T) {
 	}
 }
 
+// TestLogFileOutputWithPathIsValid 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogFileOutputWithPathIsValid(t *testing.T) {
 	config := Default()
 	config.Log.Output = utils.LogOutputFile
@@ -101,6 +109,7 @@ func TestLogFileOutputWithPathIsValid(t *testing.T) {
 	}
 }
 
+// TestLogEmptyOutputUsesConsoleDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogEmptyOutputUsesConsoleDefault(t *testing.T) {
 	config := Default()
 	config.Log.Output = ""
@@ -110,6 +119,7 @@ func TestLogEmptyOutputUsesConsoleDefault(t *testing.T) {
 	}
 }
 
+// TestP2PRejectsInvalidProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestP2PRejectsInvalidProtocol(t *testing.T) {
 	config := Default()
 	config.P2P.DefaultProtocol = "udp"
@@ -119,6 +129,7 @@ func TestP2PRejectsInvalidProtocol(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidRPC 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidRPC(t *testing.T) {
 	config := Default()
 	config.RPC.Address = ""
@@ -128,6 +139,7 @@ func TestValidateRejectsInvalidRPC(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidRPCLimits 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidRPCLimits(t *testing.T) {
 	config := Default()
 	config.RPC.MaxBodyBytes = 0
@@ -142,6 +154,7 @@ func TestValidateRejectsInvalidRPCLimits(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidLogFormat 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidLogFormat(t *testing.T) {
 	config := Default()
 	config.Log.Format = "plain"
@@ -151,6 +164,7 @@ func TestValidateRejectsInvalidLogFormat(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidLogOutput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidLogOutput(t *testing.T) {
 	config := Default()
 	config.Log.Output = "network"
@@ -160,6 +174,7 @@ func TestValidateRejectsInvalidLogOutput(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidDatabase 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidDatabase(t *testing.T) {
 	config := Default()
 	config.Database.Engine = "badger"
@@ -169,6 +184,7 @@ func TestValidateRejectsInvalidDatabase(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsEmptyDatabasePath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsEmptyDatabasePath(t *testing.T) {
 	config := Default()
 	config.Database.Path = ""
@@ -178,6 +194,7 @@ func TestValidateRejectsEmptyDatabasePath(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidP2PPort 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PPort(t *testing.T) {
 	config := Default()
 	config.P2P.ListenPort = 70000
@@ -187,6 +204,7 @@ func TestValidateRejectsInvalidP2PPort(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidP2PMaxPeers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PMaxPeers(t *testing.T) {
 	config := Default()
 	config.P2P.MaxPeers = 0
@@ -196,6 +214,7 @@ func TestValidateRejectsInvalidP2PMaxPeers(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsInvalidP2PAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PAddress(t *testing.T) {
 	config := Default()
 	config.P2P.ListenIP = "bad-ip"
@@ -205,6 +224,7 @@ func TestValidateRejectsInvalidP2PAddress(t *testing.T) {
 	}
 }
 
+// TestProtocolFallsBackForInvalidValue 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolFallsBackForInvalidValue(t *testing.T) {
 	config := Default()
 	config.P2P.DefaultProtocol = "udp"
@@ -214,6 +234,7 @@ func TestProtocolFallsBackForInvalidValue(t *testing.T) {
 	}
 }
 
+// TestDatabaseOptionsNormalizesEngine 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseOptionsNormalizesEngine(t *testing.T) {
 	config := DatabaseConfig{
 		Engine: strings.ToUpper(string(database.EngineLevelDB)),

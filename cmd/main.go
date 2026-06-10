@@ -33,6 +33,7 @@ type runtimeResources struct {
 	serverErrors chan error
 }
 
+// main 执行对应逻辑 + 保持函数职责清晰可维护。
 func main() {
 	if err := run(); err != nil {
 		slog.Error("application exited with error", slog.Any("error", err))
@@ -40,6 +41,7 @@ func main() {
 	}
 }
 
+// run 执行对应逻辑 + 保持函数职责清晰可维护。
 func run() error {
 	configPath := configPathFromFlag()
 	config, err := appconfig.Load(configPath)
@@ -67,6 +69,7 @@ func run() error {
 	return err
 }
 
+// configPathFromFlag 执行对应逻辑 + 保持函数职责清晰可维护。
 func configPathFromFlag() string {
 	configPath := flag.String("config", "", "config file path")
 	flag.Parse()
@@ -79,6 +82,7 @@ func configPathFromFlag() string {
 	return appconfig.DefaultPath
 }
 
+// startRuntime 执行对应逻辑 + 保持函数职责清晰可维护。
 func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 	logger, logCloser, err := newConfiguredLogger(config.Log)
 	if err != nil {
@@ -102,6 +106,7 @@ func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 	return resources, nil
 }
 
+// newConfiguredLogger 执行对应逻辑 + 保持函数职责清晰可维护。
 func newConfiguredLogger(config appconfig.LogConfig) (*slog.Logger, io.Closer, error) {
 	var output io.Writer = os.Stdout
 	var closer io.Closer
@@ -129,6 +134,7 @@ func newConfiguredLogger(config appconfig.LogConfig) (*slog.Logger, io.Closer, e
 	return logger, closer, nil
 }
 
+// openDatabase 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig) error {
 	databaseInstance, err := database.NewDatabase(config.DatabaseOptions())
 	if err != nil {
@@ -147,6 +153,7 @@ func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig)
 	return nil
 }
 
+// startP2P 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
 	host, err := p2p.NewHost(p2p.HostConfig{
 		PeerID:             config.PeerID,
@@ -176,6 +183,7 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
 	return nil
 }
 
+// handleP2PConnection 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) handleP2PConnection(ctx context.Context, connection p2p.Connection) {
 	defer connection.Close()
 	for {
@@ -197,6 +205,7 @@ func (resources *runtimeResources) handleP2PConnection(ctx context.Context, conn
 	}
 }
 
+// startRPC 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) startRPC(config appconfig.RPCConfig) {
 	resources.rpcServer = rpc.NewServer(rpc.ServerConfig{
 		Address:      config.Address,
@@ -211,6 +220,7 @@ func (resources *runtimeResources) startRPC(config appconfig.RPCConfig) {
 	}()
 }
 
+// waitForStop 执行对应逻辑 + 保持函数职责清晰可维护。
 func waitForStop(resources *runtimeResources) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -225,6 +235,7 @@ func waitForStop(resources *runtimeResources) error {
 	}
 }
 
+// close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -251,6 +262,7 @@ func (resources *runtimeResources) close() error {
 	return errorsJoin(closeErrors)
 }
 
+// closeLog 执行对应逻辑 + 保持函数职责清晰可维护。
 func (resources *runtimeResources) closeLog() {
 	if resources.logCloser != nil {
 		_ = resources.logCloser.Close()
@@ -258,6 +270,7 @@ func (resources *runtimeResources) closeLog() {
 	}
 }
 
+// errorsJoin 执行对应逻辑 + 保持函数职责清晰可维护。
 func errorsJoin(errs []error) error {
 	return errors.Join(errs...)
 }

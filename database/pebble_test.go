@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// TestPebbleDatabaseCRUDPageAndRange 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPebbleDatabaseCRUDPageAndRange(t *testing.T) {
 	db := NewPebbleDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -97,6 +98,7 @@ func TestPebbleDatabaseCRUDPageAndRange(t *testing.T) {
 	}
 }
 
+// TestPebbleDatabaseTransactionsAndDeleteRange 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPebbleDatabaseTransactionsAndDeleteRange(t *testing.T) {
 	db := NewPebbleDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -154,6 +156,7 @@ func TestPebbleDatabaseTransactionsAndDeleteRange(t *testing.T) {
 	}
 }
 
+// TestPebbleDatabaseDataTransactionOperations 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPebbleDatabaseDataTransactionOperations(t *testing.T) {
 	db := NewPebbleDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -188,6 +191,7 @@ func TestPebbleDatabaseDataTransactionOperations(t *testing.T) {
 	}
 }
 
+// TestPebbleDatabasePrefixQueryAndReverse 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPebbleDatabasePrefixQueryAndReverse(t *testing.T) {
 	db := NewPebbleDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -234,6 +238,7 @@ func TestPebbleDatabasePrefixQueryAndReverse(t *testing.T) {
 	assertKeys(t, limited, [][]byte{[]byte("addr:010"), []byte("addr:002")})
 }
 
+// TestPebbleDatabaseBlockchainCommonHelpers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPebbleDatabaseBlockchainCommonHelpers(t *testing.T) {
 	db := NewPebbleDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -334,6 +339,7 @@ func TestPebbleDatabaseBlockchainCommonHelpers(t *testing.T) {
 	}
 }
 
+// assertKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertKeys(t *testing.T, pairs []KeyValue, want [][]byte) {
 	t.Helper()
 	if len(pairs) != len(want) {
@@ -346,12 +352,14 @@ func assertKeys(t *testing.T, pairs []KeyValue, want [][]byte) {
 	}
 }
 
+// heightKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func heightKey(height uint64) []byte {
 	key := make([]byte, 8)
 	binary.BigEndian.PutUint64(key, height)
 	return key
 }
 
+// assertValues 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertValues(t *testing.T, pairs []KeyValue, want [][]byte) {
 	t.Helper()
 	if len(pairs) != len(want) {

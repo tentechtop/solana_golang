@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+// TestDatabaseContractAcrossEngines 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseContractAcrossEngines(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -30,6 +31,7 @@ func TestDatabaseContractAcrossEngines(t *testing.T) {
 	}
 }
 
+// runDatabaseContract 执行对应逻辑 + 保持函数职责清晰可维护。
 func runDatabaseContract(t *testing.T, db Database) {
 	t.Helper()
 
@@ -80,6 +82,7 @@ func runDatabaseContract(t *testing.T, db Database) {
 	}
 }
 
+// runDatabaseExtendedContract 执行对应逻辑 + 保持函数职责清晰可维护。
 func runDatabaseExtendedContract(t *testing.T, db Database) {
 	t.Helper()
 
@@ -92,6 +95,7 @@ func runDatabaseExtendedContract(t *testing.T, db Database) {
 	testConcurrentAccess(t, db)
 }
 
+// testNumericKeyMethods 验证目标行为 + 保证核心场景和边界条件稳定。
 func testNumericKeyMethods(t *testing.T, db Database) {
 	t.Helper()
 
@@ -128,6 +132,7 @@ func testNumericKeyMethods(t *testing.T, db Database) {
 	}
 }
 
+// testKeyValueCollectionMethods 验证目标行为 + 保证核心场景和边界条件稳定。
 func testKeyValueCollectionMethods(t *testing.T, db Database) {
 	t.Helper()
 
@@ -170,6 +175,7 @@ func testKeyValueCollectionMethods(t *testing.T, db Database) {
 	}
 }
 
+// testCacheAndCloneSafety 验证目标行为 + 保证核心场景和边界条件稳定。
 func testCacheAndCloneSafety(t *testing.T, db Database) {
 	t.Helper()
 
@@ -200,6 +206,7 @@ func testCacheAndCloneSafety(t *testing.T, db Database) {
 	}
 }
 
+// testManualTransactionRollback 验证目标行为 + 保证核心场景和边界条件稳定。
 func testManualTransactionRollback(t *testing.T, db Database) {
 	t.Helper()
 
@@ -222,6 +229,7 @@ func testManualTransactionRollback(t *testing.T, db Database) {
 	}
 }
 
+// testReadTransactionSnapshotConsistency 验证目标行为 + 保证核心场景和边界条件稳定。
 func testReadTransactionSnapshotConsistency(t *testing.T, db Database) {
 	t.Helper()
 
@@ -312,6 +320,7 @@ func testReadTransactionSnapshotConsistency(t *testing.T, db Database) {
 	}
 }
 
+// testValidationAndBoundaryCases 验证目标行为 + 保证核心场景和边界条件稳定。
 func testValidationAndBoundaryCases(t *testing.T, db Database) {
 	t.Helper()
 
@@ -352,6 +361,7 @@ func testValidationAndBoundaryCases(t *testing.T, db Database) {
 	}
 }
 
+// testConcurrentAccess 验证目标行为 + 保证核心场景和边界条件稳定。
 func testConcurrentAccess(t *testing.T, db Database) {
 	t.Helper()
 
@@ -394,6 +404,7 @@ func testConcurrentAccess(t *testing.T, db Database) {
 	}
 }
 
+// assertByteSlices 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertByteSlices(t *testing.T, got [][]byte, want [][]byte) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -406,6 +417,7 @@ func assertByteSlices(t *testing.T, got [][]byte, want [][]byte) {
 	}
 }
 
+// TestDatabaseOperationsRequireOpenDatabase 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseOperationsRequireOpenDatabase(t *testing.T) {
 	db := NewDatabaseImpl()
 	if _, err := db.Get(TablePeer, []byte("closed")); !errors.Is(err, ErrDatabaseNotOpen) {

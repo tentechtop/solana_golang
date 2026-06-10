@@ -25,6 +25,7 @@ var (
 	bip39EnglishMap   map[string]int
 )
 
+// init 初始化包级状态 + 保证依赖数据在使用前完成准备。
 func init() {
 	bip39EnglishWords = strings.Fields(bip39EnglishWordList)
 	if len(bip39EnglishWords) != bip39WordCount {
@@ -141,10 +142,12 @@ func NewBIP39Seed(mnemonic string, passphrase string) ([]byte, error) {
 	return seed, nil
 }
 
+// normalizeBIP39Mnemonic 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeBIP39Mnemonic(mnemonic string) string {
 	return strings.Join(strings.Fields(mnemonic), " ")
 }
 
+// validateBIP39EntropyBitSize 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateBIP39EntropyBitSize(bitSize int) error {
 	if bitSize < bip39MinEntropyBits || bitSize > bip39MaxEntropyBits || bitSize%32 != 0 {
 		return fmt.Errorf("utils: bip39 entropy length must be [%d, %d] bits and a multiple of 32, got %d", bip39MinEntropyBits, bip39MaxEntropyBits, bitSize)
@@ -152,10 +155,12 @@ func validateBIP39EntropyBitSize(bitSize int) error {
 	return nil
 }
 
+// getBIP39Bit 执行对应逻辑 + 保持函数职责清晰可维护。
 func getBIP39Bit(data []byte, bitIndex int) int {
 	return int((data[bitIndex/8] >> (7 - uint(bitIndex%8))) & 1)
 }
 
+// setBIP39Bit 执行对应逻辑 + 保持函数职责清晰可维护。
 func setBIP39Bit(data []byte, bitIndex int, value int) {
 	if value == 0 {
 		return

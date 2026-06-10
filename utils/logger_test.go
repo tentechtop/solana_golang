@@ -9,6 +9,7 @@ import (
 	"testing"
 )
 
+// TestNewLoggerUsesJSONByDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewLoggerUsesJSONByDefault(t *testing.T) {
 	var output bytes.Buffer
 	logger, err := NewLogger(LoggerConfig{Output: &output})
@@ -27,6 +28,7 @@ func TestNewLoggerUsesJSONByDefault(t *testing.T) {
 	}
 }
 
+// TestNewLoggerRejectsInvalidLevel 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewLoggerRejectsInvalidLevel(t *testing.T) {
 	_, err := NewLogger(LoggerConfig{Level: "verbose"})
 	if err == nil {
@@ -34,6 +36,7 @@ func TestNewLoggerRejectsInvalidLevel(t *testing.T) {
 	}
 }
 
+// TestNewLoggerSupportsTextFormat 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewLoggerSupportsTextFormat(t *testing.T) {
 	var output bytes.Buffer
 	logger, err := NewLogger(LoggerConfig{
@@ -55,6 +58,7 @@ func TestNewLoggerSupportsTextFormat(t *testing.T) {
 	}
 }
 
+// TestNewLoggerRejectsInvalidFormat 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewLoggerRejectsInvalidFormat(t *testing.T) {
 	_, err := NewLogger(LoggerConfig{Format: "xml"})
 	if err == nil {
@@ -62,6 +66,7 @@ func TestNewLoggerRejectsInvalidFormat(t *testing.T) {
 	}
 }
 
+// TestOpenLogFileCreatesParentDirectory 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestOpenLogFileCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "app.log")
 	file, err := OpenLogFile(path)
@@ -82,18 +87,21 @@ func TestOpenLogFileCreatesParentDirectory(t *testing.T) {
 	}
 }
 
+// TestOpenLogFileRejectsEmptyPath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestOpenLogFileRejectsEmptyPath(t *testing.T) {
 	if _, err := OpenLogFile(" "); err == nil {
 		t.Fatal("OpenLogFile() error = nil, want empty path error")
 	}
 }
 
+// TestOpenLogFileReturnsOpenError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestOpenLogFileReturnsOpenError(t *testing.T) {
 	if _, err := OpenLogFile(string([]byte{0})); err == nil {
 		t.Fatal("OpenLogFile() error = nil, want invalid path error")
 	}
 }
 
+// TestInitDefaultLoggerSetsSlogDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestInitDefaultLoggerSetsSlogDefault(t *testing.T) {
 	var output bytes.Buffer
 	logger, err := InitDefaultLogger(LoggerConfig{Output: &output})
@@ -111,12 +119,14 @@ func TestInitDefaultLoggerSetsSlogDefault(t *testing.T) {
 	}
 }
 
+// TestInitDefaultLoggerRejectsInvalidConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestInitDefaultLoggerRejectsInvalidConfig(t *testing.T) {
 	if _, err := InitDefaultLogger(LoggerConfig{Level: "trace"}); err == nil {
 		t.Fatal("InitDefaultLogger() error = nil, want invalid level error")
 	}
 }
 
+// TestMustInitDefaultLoggerPanicsOnInvalidConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMustInitDefaultLoggerPanicsOnInvalidConfig(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -127,6 +137,7 @@ func TestMustInitDefaultLoggerPanicsOnInvalidConfig(t *testing.T) {
 	MustInitDefaultLogger(LoggerConfig{Format: "bad"})
 }
 
+// TestMustInitDefaultLoggerReturnsLogger 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMustInitDefaultLoggerReturnsLogger(t *testing.T) {
 	var output bytes.Buffer
 	logger := MustInitDefaultLogger(LoggerConfig{Output: &output})
@@ -139,6 +150,7 @@ func TestMustInitDefaultLoggerReturnsLogger(t *testing.T) {
 	}
 }
 
+// TestParseLogLevelAcceptsSupportedLevels 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestParseLogLevelAcceptsSupportedLevels(t *testing.T) {
 	cases := []string{"", "debug", "info", "warn", "warning", "error"}
 	for _, value := range cases {
@@ -148,6 +160,7 @@ func TestParseLogLevelAcceptsSupportedLevels(t *testing.T) {
 	}
 }
 
+// TestLoggerFromEnvUsesEnvironment 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoggerFromEnvUsesEnvironment(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("LOG_FORMAT", "text")
@@ -162,12 +175,14 @@ func TestLoggerFromEnvUsesEnvironment(t *testing.T) {
 	}
 }
 
+// TestEnsureLoggerReturnsFallback 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEnsureLoggerReturnsFallback(t *testing.T) {
 	if EnsureLogger(nil) == nil {
 		t.Fatal("EnsureLogger(nil) returned nil")
 	}
 }
 
+// TestEnsureLoggerReturnsProvidedLogger 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEnsureLoggerReturnsProvidedLogger(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
 	if EnsureLogger(logger) != logger {
@@ -175,6 +190,7 @@ func TestEnsureLoggerReturnsProvidedLogger(t *testing.T) {
 	}
 }
 
+// TestNormalizeLogFormat 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNormalizeLogFormat(t *testing.T) {
 	if got := normalizeLogFormat(" "); got != LogFormatJSON {
 		t.Fatalf("normalizeLogFormat(empty) = %q, want json", got)

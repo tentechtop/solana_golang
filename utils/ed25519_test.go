@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestGenerateEd25519KeyPair 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestGenerateEd25519KeyPair(t *testing.T) {
 	keyPair, err := GenerateEd25519KeyPair()
 	if err != nil {
@@ -28,6 +29,7 @@ func TestGenerateEd25519KeyPair(t *testing.T) {
 	}
 }
 
+// TestEd25519DeriveSignAndVerify 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEd25519DeriveSignAndVerify(t *testing.T) {
 	seed := bytes.Repeat([]byte{0x01}, Ed25519KeySize)
 	data := []byte("solana transaction message")
@@ -59,6 +61,7 @@ func TestEd25519DeriveSignAndVerify(t *testing.T) {
 	}
 }
 
+// TestEd25519RFC8032Vector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEd25519RFC8032Vector(t *testing.T) {
 	seed, err := HexToBytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
 	if err != nil {
@@ -93,6 +96,7 @@ func TestEd25519RFC8032Vector(t *testing.T) {
 	}
 }
 
+// TestEd25519Aliases 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEd25519Aliases(t *testing.T) {
 	keyPair, err := GenerateEd25519KeyPair()
 	if err != nil {
@@ -117,6 +121,7 @@ func TestEd25519Aliases(t *testing.T) {
 	}
 }
 
+// TestEd25519InvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEd25519InvalidInput(t *testing.T) {
 	if _, err := DeriveEd25519PublicKeyFromPrivateKey([]byte{1, 2, 3}); err == nil {
 		t.Fatal("DeriveEd25519PublicKeyFromPrivateKey(short key) error = nil, want error")

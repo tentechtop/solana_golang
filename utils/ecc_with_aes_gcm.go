@@ -153,6 +153,7 @@ func AesGcmDecrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	return AESGCMDecrypt(key, encryptedData)
 }
 
+// newAESGCM 执行对应逻辑 + 保持函数职责清晰可维护。
 func newAESGCM(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -165,6 +166,7 @@ func newAESGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
+// hkdfSHA256 执行对应逻辑 + 保持函数职责清晰可维护。
 func hkdfSHA256(inputKeyingMaterial []byte, salt []byte, info []byte, length int) ([]byte, error) {
 	if length < 0 {
 		return nil, fmt.Errorf("utils: hkdf length cannot be negative")
@@ -193,6 +195,7 @@ func hkdfSHA256(inputKeyingMaterial []byte, salt []byte, info []byte, length int
 	return CloneBytes(output[:length]), nil
 }
 
+// mustRandomAESGCMHKDFSalt 执行对应逻辑 + 保持函数职责清晰可维护。
 func mustRandomAESGCMHKDFSalt() []byte {
 	salt, err := RandomBytes(AESGCMHKDFSaltSize)
 	if err != nil {

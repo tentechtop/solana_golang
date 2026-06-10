@@ -7,6 +7,7 @@ import (
 	"solana_golang/utils"
 )
 
+// TestPDAHelpers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPDAHelpers(t *testing.T) {
 	programID, err := PublicKeyFromBase58("11111111111111111111111111111111")
 	if err != nil {
@@ -39,6 +40,7 @@ func TestPDAHelpers(t *testing.T) {
 	}
 }
 
+// TestEd25519CurveCheck 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEd25519CurveCheck(t *testing.T) {
 	seed := bytes.Repeat([]byte{0x01}, utils.Ed25519KeySize)
 	publicKey, err := utils.DeriveEd25519PublicKeyFromPrivateKey(seed)
@@ -63,6 +65,7 @@ func TestEd25519CurveCheck(t *testing.T) {
 	}
 }
 
+// TestPDAInvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPDAInvalidInput(t *testing.T) {
 	programID, err := PublicKeyFromBase58("11111111111111111111111111111111")
 	if err != nil {

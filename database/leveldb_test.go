@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestLevelDBDatabaseCRUDPageAndRange 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLevelDBDatabaseCRUDPageAndRange(t *testing.T) {
 	db := NewLevelDBDatabase()
 	if err := db.CreateDatabase(DatabaseConfig{Path: t.TempDir()}); err != nil {
@@ -57,6 +58,7 @@ func TestLevelDBDatabaseCRUDPageAndRange(t *testing.T) {
 	}
 }
 
+// TestLevelDBDatabaseTransactionsAndUnsupportedCheckpoint 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLevelDBDatabaseTransactionsAndUnsupportedCheckpoint(t *testing.T) {
 	db, err := NewDatabase(DatabaseConfig{Path: t.TempDir(), Engine: EngineLevelDB})
 	if err != nil {
@@ -94,6 +96,7 @@ func TestLevelDBDatabaseTransactionsAndUnsupportedCheckpoint(t *testing.T) {
 	}
 }
 
+// TestNewDatabaseUsesPebbleByDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewDatabaseUsesPebbleByDefault(t *testing.T) {
 	db, err := NewDatabase(DatabaseConfig{Path: t.TempDir()})
 	if err != nil {

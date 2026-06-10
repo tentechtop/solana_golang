@@ -18,10 +18,12 @@ type Engine struct {
 	writeOptions *opt.WriteOptions
 }
 
+// NewEngine 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewEngine() *Engine {
 	return &Engine{writeOptions: &opt.WriteOptions{Sync: false}}
 }
 
+// Open 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Open(path string, walEnabled bool) error {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return fmt.Errorf("database: create leveldb directory: %w", err)
@@ -34,6 +36,7 @@ func (e *Engine) Open(path string, walEnabled bool) error {
 	return nil
 }
 
+// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Close() error {
 	if e.db == nil {
 		return nil
@@ -43,6 +46,7 @@ func (e *Engine) Close() error {
 	return db.Close()
 }
 
+// Get 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Get(key []byte) ([]byte, error) {
 	if e.db == nil {
 		return nil, ErrNotOpen
@@ -57,6 +61,7 @@ func (e *Engine) Get(key []byte) ([]byte, error) {
 	return cloneBytes(value), nil
 }
 
+// Set 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Set(key []byte, value []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -64,6 +69,7 @@ func (e *Engine) Set(key []byte, value []byte) error {
 	return e.db.Put(key, value, e.writeOptions)
 }
 
+// Delete 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Delete(key []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -71,6 +77,7 @@ func (e *Engine) Delete(key []byte) error {
 	return e.db.Delete(key, e.writeOptions)
 }
 
+// NewBatch 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) NewBatch() (*Batch, error) {
 	if e.db == nil {
 		return nil, ErrNotOpen
@@ -82,6 +89,7 @@ func (e *Engine) NewBatch() (*Batch, error) {
 	}, nil
 }
 
+// NewIterator 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	if e.db == nil {
 		return nil, ErrNotOpen
@@ -89,6 +97,7 @@ func (e *Engine) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	return &Iterator{iter: e.db.NewIterator(&util.Range{Start: lower, Limit: upper}, nil)}, nil
 }
 
+// NewSnapshot 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) NewSnapshot() (*Snapshot, error) {
 	if e.db == nil {
 		return nil, ErrNotOpen
@@ -100,6 +109,7 @@ func (e *Engine) NewSnapshot() (*Snapshot, error) {
 	return &Snapshot{snapshot: snapshot}, nil
 }
 
+// DeleteRange 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) DeleteRange(start []byte, end []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -117,6 +127,7 @@ func (e *Engine) DeleteRange(start []byte, end []byte) error {
 	return e.db.Write(batch, e.writeOptions)
 }
 
+// Flush 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Flush() error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -124,6 +135,7 @@ func (e *Engine) Flush() error {
 	return nil
 }
 
+// Compact 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Compact(start []byte, limit []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -131,10 +143,12 @@ func (e *Engine) Compact(start []byte, limit []byte) error {
 	return e.db.CompactRange(util.Range{Start: start, Limit: limit})
 }
 
+// Checkpoint 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) Checkpoint(string) error {
 	return errors.New("database: leveldb checkpoint is not supported")
 }
 
+// CheckHealth 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) CheckHealth() error {
 	key := []byte{0, 0, 'h', 'e', 'a', 'l', 't', 'h'}
 	if err := e.Set(key, []byte("ok")); err != nil {
@@ -146,18 +160,22 @@ func (e *Engine) CheckHealth() error {
 	return nil
 }
 
+// EnableWAL 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) EnableWAL(bool) error {
 	return nil
 }
 
+// IsNotFound 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) IsNotFound(err error) bool {
 	return errors.Is(err, leveldb.ErrNotFound)
 }
 
+// SupportsCheckpoint 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) SupportsCheckpoint() bool {
 	return false
 }
 
+// SupportsDisableWAL 执行对应逻辑 + 保持函数职责清晰可维护。
 func (e *Engine) SupportsDisableWAL() bool {
 	return false
 }
@@ -168,20 +186,24 @@ type Batch struct {
 	writeOptions *opt.WriteOptions
 }
 
+// Set 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b *Batch) Set(key []byte, value []byte) error {
 	b.batch.Put(key, value)
 	return nil
 }
 
+// Delete 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b *Batch) Delete(key []byte) error {
 	b.batch.Delete(key)
 	return nil
 }
 
+// Commit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b *Batch) Commit() error {
 	return b.db.Write(b.batch, b.writeOptions)
 }
 
+// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b *Batch) Close() error {
 	b.batch.Reset()
 	return nil
@@ -203,18 +225,22 @@ type iterator interface {
 	Release()
 }
 
+// First 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) First() bool {
 	return i.iter.First()
 }
 
+// Last 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Last() bool {
 	return i.iter.Last()
 }
 
+// SeekGE 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) SeekGE(key []byte) bool {
 	return i.iter.Seek(key)
 }
 
+// SeekLT 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) SeekLT(key []byte) bool {
 	if !i.iter.Seek(key) {
 		return i.iter.Last()
@@ -225,26 +251,32 @@ func (i *Iterator) SeekLT(key []byte) bool {
 	return i.iter.Prev()
 }
 
+// Next 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Next() bool {
 	return i.iter.Next()
 }
 
+// Prev 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Prev() bool {
 	return i.iter.Prev()
 }
 
+// Key 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Key() []byte {
 	return i.iter.Key()
 }
 
+// Value 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Value() []byte {
 	return i.iter.Value()
 }
 
+// Error 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Error() error {
 	return i.iter.Error()
 }
 
+// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (i *Iterator) Close() error {
 	i.iter.Release()
 	return nil
@@ -254,6 +286,7 @@ type Snapshot struct {
 	snapshot *leveldb.Snapshot
 }
 
+// Get 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Snapshot) Get(key []byte) ([]byte, error) {
 	value, err := s.snapshot.Get(key, nil)
 	if errors.Is(err, leveldb.ErrNotFound) {
@@ -265,19 +298,23 @@ func (s *Snapshot) Get(key []byte) ([]byte, error) {
 	return cloneBytes(value), nil
 }
 
+// NewIterator 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Snapshot) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	return &Iterator{iter: s.snapshot.NewIterator(&util.Range{Start: lower, Limit: upper}, nil)}, nil
 }
 
+// IsNotFound 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Snapshot) IsNotFound(err error) bool {
 	return errors.Is(err, leveldb.ErrNotFound)
 }
 
+// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Snapshot) Close() error {
 	s.snapshot.Release()
 	return nil
 }
 
+// cloneBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil

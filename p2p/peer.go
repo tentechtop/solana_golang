@@ -244,6 +244,7 @@ func (peer Peer) BestAddress(protocolOrder []utils.MultiAddressProtocol) (utils.
 	return peer.Addresses[0], true
 }
 
+// firstAddressByProtocol 执行对应逻辑 + 保持函数职责清晰可维护。
 func (peer Peer) firstAddressByProtocol(protocol utils.MultiAddressProtocol) (utils.MultiAddress, bool) {
 	for _, address := range peer.Addresses {
 		if address.Protocol == protocol {
@@ -253,6 +254,7 @@ func (peer Peer) firstAddressByProtocol(protocol utils.MultiAddressProtocol) (ut
 	return utils.MultiAddress{}, false
 }
 
+// mergeNodeFields 执行对应逻辑 + 保持函数职责清晰可维护。
 func (peer *Peer) mergeNodeFields(next Peer) {
 	peer.Status = choosePeerStatus(peer.Status, next.Status)
 	peer.Role = choosePeerRole(peer.Role, next.Role)
@@ -287,6 +289,7 @@ func (peer *Peer) mergeNodeFields(next Peer) {
 	peer.Metadata = mergeStringMap(peer.Metadata, next.Metadata)
 }
 
+// choosePeerStatus 执行对应逻辑 + 保持函数职责清晰可维护。
 func choosePeerStatus(current PeerStatus, next PeerStatus) PeerStatus {
 	if next == "" || next == PeerStatusUnknown {
 		return current
@@ -294,6 +297,7 @@ func choosePeerStatus(current PeerStatus, next PeerStatus) PeerStatus {
 	return next
 }
 
+// choosePeerRole 执行对应逻辑 + 保持函数职责清晰可维护。
 func choosePeerRole(current PeerRole, next PeerRole) PeerRole {
 	if next == "" || next == PeerRoleUnknown {
 		return current
@@ -301,6 +305,7 @@ func choosePeerRole(current PeerRole, next PeerRole) PeerRole {
 	return next
 }
 
+// validatePeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func validatePeerID(peerID string) error {
 	decoded, err := utils.Base58Decode(peerID)
 	if err != nil {
@@ -312,6 +317,7 @@ func validatePeerID(peerID string) error {
 	return nil
 }
 
+// cloneAddresses 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneAddresses(addresses []utils.MultiAddress) []utils.MultiAddress {
 	if addresses == nil {
 		return nil
@@ -321,6 +327,7 @@ func cloneAddresses(addresses []utils.MultiAddress) []utils.MultiAddress {
 	return cloned
 }
 
+// cloneStringMap 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneStringMap(values map[string]string) map[string]string {
 	if values == nil {
 		return nil
@@ -332,6 +339,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
+// mergeStringMap 执行对应逻辑 + 保持函数职责清晰可维护。
 func mergeStringMap(current map[string]string, next map[string]string) map[string]string {
 	if len(next) == 0 {
 		return cloneStringMap(current)
@@ -346,6 +354,7 @@ func mergeStringMap(current map[string]string, next map[string]string) map[strin
 	return merged
 }
 
+// normalizedProtocolOrder 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizedProtocolOrder(protocolOrder []utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
 	if len(protocolOrder) == 0 {
 		return []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP}

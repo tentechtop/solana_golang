@@ -6,6 +6,7 @@ import (
 	"solana_golang/utils"
 )
 
+// TestPeerBestAddressUsesProtocolOrder 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPeerBestAddressUsesProtocolOrder(t *testing.T) {
 	peerID := testPeerID(1)
 	tcpAddress := testAddress(t, utils.ProtocolTCP, 3001, peerID)
@@ -25,6 +26,7 @@ func TestPeerBestAddressUsesProtocolOrder(t *testing.T) {
 	}
 }
 
+// TestPeerRejectsAddressMismatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPeerRejectsAddressMismatch(t *testing.T) {
 	peerID := testPeerID(2)
 	otherPeerID := testPeerID(3)
@@ -35,6 +37,7 @@ func TestPeerRejectsAddressMismatch(t *testing.T) {
 	}
 }
 
+// TestPeerMergeAndSnapshot 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPeerMergeAndSnapshot(t *testing.T) {
 	peerID := testPeerID(13)
 	tcpAddress := testAddress(t, utils.ProtocolTCP, 3001, peerID)
@@ -74,6 +77,7 @@ func TestPeerMergeAndSnapshot(t *testing.T) {
 	}
 }
 
+// TestPeerStateTransitions 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPeerStateTransitions(t *testing.T) {
 	peerID := testPeerID(14)
 	address := testAddress(t, utils.ProtocolTCP, 3001, peerID)
@@ -101,6 +105,7 @@ func TestPeerStateTransitions(t *testing.T) {
 
 type assertError string
 
+// Error 执行对应逻辑 + 保持函数职责清晰可维护。
 func (err assertError) Error() string {
 	return string(err)
 }

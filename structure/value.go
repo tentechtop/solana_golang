@@ -195,6 +195,7 @@ func MustPublicKeyFromBase58(value string) PublicKey {
 	return key
 }
 
+// requireValueLength 执行对应逻辑 + 保持函数职责清晰可维护。
 func requireValueLength(value []byte, want int, name string) error {
 	if len(value) != want {
 		return fmt.Errorf("structure: %s requires %d bytes, got %d", name, want, len(value))

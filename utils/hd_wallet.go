@@ -265,12 +265,14 @@ func SolanaDerivationPath(accountIndex int, addressIndex int) string {
 	return fmt.Sprintf("m/%d'/%d'/%d'/%d'", bip44Purpose, solanaCoinType, accountIndex, addressIndex)
 }
 
+// hmacSHA512 执行对应逻辑 + 保持函数职责清晰可维护。
 func hmacSHA512(key []byte, data []byte) []byte {
 	mac := hmac.New(sha512.New, key)
 	mac.Write(data)
 	return mac.Sum(nil)
 }
 
+// validateSLIP10Seed 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateSLIP10Seed(seed []byte) error {
 	if len(seed) < slip10MinSeedLength || len(seed) > slip10MaxSeedLength {
 		return fmt.Errorf("utils: slip-0010 seed requires %d-%d bytes, got %d", slip10MinSeedLength, slip10MaxSeedLength, len(seed))
@@ -278,6 +280,7 @@ func validateSLIP10Seed(seed []byte) error {
 	return nil
 }
 
+// appendPathIndex 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendPathIndex(parentPath string, index uint32) string {
 	if parentPath == "" {
 		parentPath = "m"
