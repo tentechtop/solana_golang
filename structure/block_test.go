@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// TestBlockValidateMarshalAndRoot 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockValidateMarshalAndRoot(t *testing.T) {
 	block := newTestBlock(t)
 
@@ -29,8 +28,6 @@ func TestBlockValidateMarshalAndRoot(t *testing.T) {
 		t.Fatal("ComputeTransactionsRoot() returned zero hash")
 	}
 }
-
-// TestBlockRejectsInvalidParentSlot 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsInvalidParentSlot(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.ParentSlot = block.Header.Slot
@@ -40,8 +37,6 @@ func TestBlockRejectsInvalidParentSlot(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidBlockHeader", err)
 	}
 }
-
-// TestBlockRejectsEmptyBlockhash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.Blockhash = Hash{}
@@ -51,8 +46,6 @@ func TestBlockRejectsEmptyBlockhash(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrEmptyBlockhash", err)
 	}
 }
-
-// TestBlockRejectsTransactionsRootMismatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
 	block := newTestBlock(t)
 	block.Header.TransactionsRoot = newTestHash(99)

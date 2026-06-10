@@ -27,8 +27,6 @@ func (recorder *closeRecorder) Close() error {
 	recorder.closed = true
 	return nil
 }
-
-// TestConfigPathFromFlagUsesFlag 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestConfigPathFromFlagUsesFlag(t *testing.T) {
 	restoreFlags := replaceCommandLine([]string{"cmd", "-config", "config/prod/config.yaml"})
 	defer restoreFlags()
@@ -37,8 +35,6 @@ func TestConfigPathFromFlagUsesFlag(t *testing.T) {
 		t.Fatalf("configPathFromFlag() = %q, want flag path", got)
 	}
 }
-
-// TestConfigPathFromFlagUsesEnvironment 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestConfigPathFromFlagUsesEnvironment(t *testing.T) {
 	restoreFlags := replaceCommandLine([]string{"cmd"})
 	defer restoreFlags()
@@ -48,8 +44,6 @@ func TestConfigPathFromFlagUsesEnvironment(t *testing.T) {
 		t.Fatalf("configPathFromFlag() = %q, want env path", got)
 	}
 }
-
-// TestConfigPathFromFlagUsesDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestConfigPathFromFlagUsesDefault(t *testing.T) {
 	restoreFlags := replaceCommandLine([]string{"cmd"})
 	defer restoreFlags()
@@ -59,8 +53,6 @@ func TestConfigPathFromFlagUsesDefault(t *testing.T) {
 		t.Fatalf("configPathFromFlag() = %q, want default path", got)
 	}
 }
-
-// TestNewConfiguredLoggerWritesFile 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewConfiguredLoggerWritesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	logger, closer, err := newConfiguredLogger(appconfig.LogConfig{
@@ -86,8 +78,6 @@ func TestNewConfiguredLoggerWritesFile(t *testing.T) {
 		t.Fatalf("log file = %q, want message", string(data))
 	}
 }
-
-// TestNewConfiguredLoggerRejectsBadConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewConfiguredLoggerRejectsBadConfig(t *testing.T) {
 	_, _, err := newConfiguredLogger(appconfig.LogConfig{
 		Format: "bad",
@@ -97,8 +87,6 @@ func TestNewConfiguredLoggerRejectsBadConfig(t *testing.T) {
 		t.Fatal("newConfiguredLogger() error = nil, want format error")
 	}
 }
-
-// TestRunReturnsConfigError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestRunReturnsConfigError(t *testing.T) {
 	restoreFlags := replaceCommandLine([]string{"cmd", "-config", filepath.Join(t.TempDir(), "missing.yaml")})
 	defer restoreFlags()
@@ -107,8 +95,6 @@ func TestRunReturnsConfigError(t *testing.T) {
 		t.Fatal("run() error = nil, want config error")
 	}
 }
-
-// TestRunReturnsServerError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestRunReturnsServerError(t *testing.T) {
 	configPath := writeRuntimeConfig(t, "bad address", freeTCPPort(t), filepath.Join(t.TempDir(), "db"))
 	restoreFlags := replaceCommandLine([]string{"cmd", "-config", configPath})
@@ -118,8 +104,6 @@ func TestRunReturnsServerError(t *testing.T) {
 		t.Fatal("run() error = nil, want server error")
 	}
 }
-
-// TestStartRuntimeAndClose 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartRuntimeAndClose(t *testing.T) {
 	config := appconfig.Default()
 	config.Database.Path = filepath.Join(t.TempDir(), "db")
@@ -136,8 +120,6 @@ func TestStartRuntimeAndClose(t *testing.T) {
 	}
 	resources.closeLog()
 }
-
-// TestStartP2PRejectsInvalidConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartP2PRejectsInvalidConfig(t *testing.T) {
 	resources := &runtimeResources{
 		logger:       discardLogger(),
@@ -150,8 +132,6 @@ func TestStartP2PRejectsInvalidConfig(t *testing.T) {
 		t.Fatal("startP2P() error = nil, want peer id error")
 	}
 }
-
-// TestStartP2PRejectsInvalidAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartP2PRejectsInvalidAddress(t *testing.T) {
 	resources := &runtimeResources{
 		logger:       discardLogger(),
@@ -164,8 +144,6 @@ func TestStartP2PRejectsInvalidAddress(t *testing.T) {
 		t.Fatal("startP2P() error = nil, want listen address error")
 	}
 }
-
-// TestStartRPCReportsListenError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartRPCReportsListenError(t *testing.T) {
 	resources := &runtimeResources{
 		logger:       discardLogger(),
@@ -186,8 +164,6 @@ func TestStartRPCReportsListenError(t *testing.T) {
 		t.Fatal("timed out waiting for rpc listen error")
 	}
 }
-
-// TestStartRuntimeReturnsDatabaseError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartRuntimeReturnsDatabaseError(t *testing.T) {
 	config := appconfig.Default()
 	config.Database.Path = ""
@@ -196,8 +172,6 @@ func TestStartRuntimeReturnsDatabaseError(t *testing.T) {
 		t.Fatal("startRuntime() error = nil, want database error")
 	}
 }
-
-// TestStartRuntimeReturnsP2PError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestStartRuntimeReturnsP2PError(t *testing.T) {
 	config := appconfig.Default()
 	config.Database.Path = filepath.Join(t.TempDir(), "db")
@@ -207,8 +181,6 @@ func TestStartRuntimeReturnsP2PError(t *testing.T) {
 		t.Fatal("startRuntime() error = nil, want p2p error")
 	}
 }
-
-// TestNewConfiguredLoggerReturnsFileOpenError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewConfiguredLoggerReturnsFileOpenError(t *testing.T) {
 	_, _, err := newConfiguredLogger(appconfig.LogConfig{
 		Level:    "info",
@@ -220,8 +192,6 @@ func TestNewConfiguredLoggerReturnsFileOpenError(t *testing.T) {
 		t.Fatal("newConfiguredLogger() error = nil, want file path error")
 	}
 }
-
-// TestHandleP2PConnectionStopsOnReadError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHandleP2PConnectionStopsOnReadError(t *testing.T) {
 	resources := &runtimeResources{logger: discardLogger()}
 	connection := &failingConnection{}
@@ -232,8 +202,6 @@ func TestHandleP2PConnectionStopsOnReadError(t *testing.T) {
 		t.Fatal("connection was not closed")
 	}
 }
-
-// TestHandleP2PConnectionRejectsUnknownProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHandleP2PConnectionRejectsUnknownProtocol(t *testing.T) {
 	host, err := p2p.NewHost(p2p.HostConfig{
 		PeerID: appconfig.Default().P2P.PeerID,
@@ -261,8 +229,6 @@ func TestHandleP2PConnectionRejectsUnknownProtocol(t *testing.T) {
 		t.Fatal("connection was not closed")
 	}
 }
-
-// TestWaitForStopReturnsServerError 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestWaitForStopReturnsServerError(t *testing.T) {
 	want := errors.New("server failed")
 	resources := &runtimeResources{
@@ -275,8 +241,6 @@ func TestWaitForStopReturnsServerError(t *testing.T) {
 		t.Fatalf("waitForStop() error = %v, want %v", err, want)
 	}
 }
-
-// TestWaitForStopReturnsOnSignal 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestWaitForStopReturnsOnSignal(t *testing.T) {
 	resources := &runtimeResources{
 		logger:       discardLogger(),
@@ -306,8 +270,6 @@ func TestWaitForStopReturnsOnSignal(t *testing.T) {
 		t.Fatal("timed out waiting for signal shutdown")
 	}
 }
-
-// TestCloseLogClosesOnce 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestCloseLogClosesOnce(t *testing.T) {
 	recorder := &closeRecorder{}
 	resources := &runtimeResources{logCloser: recorder}
@@ -322,8 +284,6 @@ func TestCloseLogClosesOnce(t *testing.T) {
 		t.Fatal("log closer was not cleared")
 	}
 }
-
-// TestErrorsJoin 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestErrorsJoin(t *testing.T) {
 	first := errors.New("first")
 	second := errors.New("second")

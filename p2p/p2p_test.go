@@ -10,12 +10,9 @@ import (
 	"solana_golang/utils"
 )
 
-// testPeerID 验证目标行为 + 保证核心场景和边界条件稳定。
 func testPeerID(seed byte) string {
 	return utils.Base58Encode(bytes.Repeat([]byte{seed}, peerIDByteSize))
 }
-
-// testAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func testAddress(t *testing.T, protocol utils.MultiAddressProtocol, port int, peerID string) utils.MultiAddress {
 	t.Helper()
 	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "127.0.0.1", protocol, port, peerID)

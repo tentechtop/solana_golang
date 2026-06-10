@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// TestParseMultiAddressIPv4 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestParseMultiAddressIPv4(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x01}, multiAddressPeerIDSize))
 	raw := "/ip4/101.35.87.31/tcp/5002/p2p/" + peerID
@@ -37,8 +36,6 @@ func TestParseMultiAddressIPv4(t *testing.T) {
 		t.Fatalf("String() = %q, want %q", address.String(), raw)
 	}
 }
-
-// TestParseMultiAddressNormalizesProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestParseMultiAddressNormalizesProtocol(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x02}, multiAddressPeerIDSize))
 	raw := "/ip6/2001:db8::1/QUIC/443/p2p/" + peerID
@@ -58,8 +55,6 @@ func TestParseMultiAddressNormalizesProtocol(t *testing.T) {
 		t.Fatalf("Protocol = %q, want %q", address.Protocol, ProtocolQUIC)
 	}
 }
-
-// TestBuildMultiAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBuildMultiAddress(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x03}, multiAddressPeerIDSize))
 
@@ -72,8 +67,6 @@ func TestBuildMultiAddress(t *testing.T) {
 		t.Fatalf("RawAddress = %q, want %q", address.RawAddress, want)
 	}
 }
-
-// TestMultiAddressInvalidInputs 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestMultiAddressInvalidInputs(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x04}, multiAddressPeerIDSize))
 	shortPeerID := Base58Encode([]byte{1, 2, 3})
@@ -103,8 +96,6 @@ func TestMultiAddressInvalidInputs(t *testing.T) {
 		})
 	}
 }
-
-// TestBuildMultiAddressRejectsInvalidParts 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBuildMultiAddressRejectsInvalidParts(t *testing.T) {
 	peerID := Base58Encode(bytes.Repeat([]byte{0x05}, multiAddressPeerIDSize))
 

@@ -10,7 +10,6 @@ import (
 	"solana_golang/utils"
 )
 
-// TestTCPTransportSendMessage 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTCPTransportSendMessage(t *testing.T) {
 	serverPeerID := testPeerID(4)
 	address := testAddress(t, utils.ProtocolTCP, freeTCPPort(t), serverPeerID)

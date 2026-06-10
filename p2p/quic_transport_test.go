@@ -8,7 +8,6 @@ import (
 	"solana_golang/utils"
 )
 
-// TestQUICTransportUnavailable 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestQUICTransportUnavailable(t *testing.T) {
 	peerID := testPeerID(7)
 	address := testAddress(t, utils.ProtocolQUIC, 4001, peerID)

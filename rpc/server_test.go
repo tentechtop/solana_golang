@@ -22,8 +22,6 @@ func (b testLedgerBackend) SendTransaction(context.Context, string) (string, err
 func (b testLedgerBackend) GetBlock(context.Context, uint64) (BlockResult, error) {
 	return BlockResult{Slot: 10, Blockhash: "test-blockhash"}, nil
 }
-
-// TestServerGetBalance 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerGetBalance(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}`)
@@ -40,8 +38,6 @@ func TestServerGetBalance(t *testing.T) {
 		t.Fatalf("result = %#v, want value 100", decoded.Result)
 	}
 }
-
-// TestServerMethodNotFound 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerMethodNotFound(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"unknown","params":[]}`)
@@ -54,8 +50,6 @@ func TestServerMethodNotFound(t *testing.T) {
 		t.Fatalf("error = %+v, want method not found", decoded.Error)
 	}
 }
-
-// TestServerInvalidParams 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerInvalidParams(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBlock","params":["bad"]}`)
@@ -68,8 +62,6 @@ func TestServerInvalidParams(t *testing.T) {
 		t.Fatalf("error = %+v, want invalid params", decoded.Error)
 	}
 }
-
-// TestServerBatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerBatch(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `[
@@ -88,8 +80,6 @@ func TestServerBatch(t *testing.T) {
 		t.Fatalf("batch errors = %+v %+v", decoded[0].Error, decoded[1].Error)
 	}
 }
-
-// TestServerMethodUnavailableWithoutBackend 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerMethodUnavailableWithoutBackend(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(nil))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}`)
@@ -102,8 +92,6 @@ func TestServerMethodUnavailableWithoutBackend(t *testing.T) {
 		t.Fatalf("error = %+v, want method unavailable", decoded.Error)
 	}
 }
-
-// TestServerRejectsTrailingJSON 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerRejectsTrailingJSON(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}{}`)
@@ -116,8 +104,6 @@ func TestServerRejectsTrailingJSON(t *testing.T) {
 		t.Fatalf("error = %+v, want parse error", decoded.Error)
 	}
 }
-
-// TestServerWritesStructuredRequestLog 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestServerWritesStructuredRequestLog(t *testing.T) {
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))

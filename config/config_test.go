@@ -10,7 +10,6 @@ import (
 	"solana_golang/utils"
 )
 
-// TestLoadLocalConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadLocalConfig(t *testing.T) {
 	config, err := Load(filepath.Join("local", "config.yaml"))
 	if err != nil {
@@ -26,8 +25,6 @@ func TestLoadLocalConfig(t *testing.T) {
 		t.Fatalf("P2P.Protocol() = %q, want tcp", config.P2P.Protocol())
 	}
 }
-
-// TestLoadAbsoluteConfig 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadAbsoluteConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	source, err := os.ReadFile(filepath.Join("local", "config.yaml"))
@@ -42,8 +39,6 @@ func TestLoadAbsoluteConfig(t *testing.T) {
 		t.Fatalf("Load(abs) error = %v", err)
 	}
 }
-
-// TestLoadRejectsUnknownField 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := []byte("rpc:\n  address: ':8899'\n  unknown: true\n")
@@ -55,8 +50,6 @@ func TestLoadRejectsUnknownField(t *testing.T) {
 		t.Fatal("Load() error = nil, want unknown field error")
 	}
 }
-
-// TestLoadUsesDefaultPathForEmptyInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadUsesDefaultPathForEmptyInput(t *testing.T) {
 	config, err := Load(" ")
 	if err != nil {
@@ -66,8 +59,6 @@ func TestLoadUsesDefaultPathForEmptyInput(t *testing.T) {
 		t.Fatal("RPC.Address is empty")
 	}
 }
-
-// TestLoadRejectsInvalidYaml 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsInvalidYaml(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("rpc:\n  address: ["), 0o644); err != nil {
@@ -78,16 +69,12 @@ func TestLoadRejectsInvalidYaml(t *testing.T) {
 		t.Fatal("Load() error = nil, want yaml error")
 	}
 }
-
-// TestLoadRejectsMissingFile 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLoadRejectsMissingFile(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {
 		t.Fatal("Load() error = nil, want missing file error")
 	}
 }
-
-// TestLogFileOutputRequiresPath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogFileOutputRequiresPath(t *testing.T) {
 	config := Default()
 	config.Log.Output = utils.LogOutputFile
@@ -97,8 +84,6 @@ func TestLogFileOutputRequiresPath(t *testing.T) {
 		t.Fatal("Validate() error = nil, want file path error")
 	}
 }
-
-// TestLogFileOutputWithPathIsValid 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogFileOutputWithPathIsValid(t *testing.T) {
 	config := Default()
 	config.Log.Output = utils.LogOutputFile
@@ -108,8 +93,6 @@ func TestLogFileOutputWithPathIsValid(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
-
-// TestLogEmptyOutputUsesConsoleDefault 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestLogEmptyOutputUsesConsoleDefault(t *testing.T) {
 	config := Default()
 	config.Log.Output = ""
@@ -118,8 +101,6 @@ func TestLogEmptyOutputUsesConsoleDefault(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
-
-// TestP2PRejectsInvalidProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestP2PRejectsInvalidProtocol(t *testing.T) {
 	config := Default()
 	config.P2P.DefaultProtocol = "udp"
@@ -128,8 +109,6 @@ func TestP2PRejectsInvalidProtocol(t *testing.T) {
 		t.Fatal("Validate() error = nil, want protocol error")
 	}
 }
-
-// TestValidateRejectsInvalidRPC 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidRPC(t *testing.T) {
 	config := Default()
 	config.RPC.Address = ""
@@ -138,8 +117,6 @@ func TestValidateRejectsInvalidRPC(t *testing.T) {
 		t.Fatal("Validate() error = nil, want rpc address error")
 	}
 }
-
-// TestValidateRejectsInvalidRPCLimits 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidRPCLimits(t *testing.T) {
 	config := Default()
 	config.RPC.MaxBodyBytes = 0
@@ -153,8 +130,6 @@ func TestValidateRejectsInvalidRPCLimits(t *testing.T) {
 		t.Fatal("Validate() error = nil, want max batch error")
 	}
 }
-
-// TestValidateRejectsInvalidLogFormat 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidLogFormat(t *testing.T) {
 	config := Default()
 	config.Log.Format = "plain"
@@ -163,8 +138,6 @@ func TestValidateRejectsInvalidLogFormat(t *testing.T) {
 		t.Fatal("Validate() error = nil, want log format error")
 	}
 }
-
-// TestValidateRejectsInvalidLogOutput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidLogOutput(t *testing.T) {
 	config := Default()
 	config.Log.Output = "network"
@@ -173,8 +146,6 @@ func TestValidateRejectsInvalidLogOutput(t *testing.T) {
 		t.Fatal("Validate() error = nil, want log output error")
 	}
 }
-
-// TestValidateRejectsInvalidDatabase 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidDatabase(t *testing.T) {
 	config := Default()
 	config.Database.Engine = "badger"
@@ -183,8 +154,6 @@ func TestValidateRejectsInvalidDatabase(t *testing.T) {
 		t.Fatal("Validate() error = nil, want database engine error")
 	}
 }
-
-// TestValidateRejectsEmptyDatabasePath 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsEmptyDatabasePath(t *testing.T) {
 	config := Default()
 	config.Database.Path = ""
@@ -193,8 +162,6 @@ func TestValidateRejectsEmptyDatabasePath(t *testing.T) {
 		t.Fatal("Validate() error = nil, want database path error")
 	}
 }
-
-// TestValidateRejectsInvalidP2PPort 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PPort(t *testing.T) {
 	config := Default()
 	config.P2P.ListenPort = 70000
@@ -203,8 +170,6 @@ func TestValidateRejectsInvalidP2PPort(t *testing.T) {
 		t.Fatal("Validate() error = nil, want p2p port error")
 	}
 }
-
-// TestValidateRejectsInvalidP2PMaxPeers 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PMaxPeers(t *testing.T) {
 	config := Default()
 	config.P2P.MaxPeers = 0
@@ -213,8 +178,6 @@ func TestValidateRejectsInvalidP2PMaxPeers(t *testing.T) {
 		t.Fatal("Validate() error = nil, want max peers error")
 	}
 }
-
-// TestValidateRejectsInvalidP2PAddress 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestValidateRejectsInvalidP2PAddress(t *testing.T) {
 	config := Default()
 	config.P2P.ListenIP = "bad-ip"
@@ -223,8 +186,6 @@ func TestValidateRejectsInvalidP2PAddress(t *testing.T) {
 		t.Fatal("Validate() error = nil, want listen ip error")
 	}
 }
-
-// TestProtocolFallsBackForInvalidValue 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolFallsBackForInvalidValue(t *testing.T) {
 	config := Default()
 	config.P2P.DefaultProtocol = "udp"
@@ -233,8 +194,6 @@ func TestProtocolFallsBackForInvalidValue(t *testing.T) {
 		t.Fatalf("Protocol() = %q, want tcp fallback", protocol)
 	}
 }
-
-// TestDatabaseOptionsNormalizesEngine 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseOptionsNormalizesEngine(t *testing.T) {
 	config := DatabaseConfig{
 		Engine: strings.ToUpper(string(database.EngineLevelDB)),

@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// TestECCWithAESGCM 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestECCWithAESGCM(t *testing.T) {
 	aliceKeys, err := GenerateCurve25519KeyPair()
 	if err != nil {
@@ -75,8 +74,6 @@ func TestECCWithAESGCM(t *testing.T) {
 		t.Fatal("AESGCMDecrypt() tampered error = nil, want error")
 	}
 }
-
-// TestX25519RFC7748Vector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestX25519RFC7748Vector(t *testing.T) {
 	alicePrivate, err := HexToBytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
 	if err != nil {
@@ -114,8 +111,6 @@ func TestX25519RFC7748Vector(t *testing.T) {
 		t.Fatalf("bob shared secret = %x, want %x", bobShared, wantShared)
 	}
 }
-
-// TestHKDFSHA256RFC5869Vector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHKDFSHA256RFC5869Vector(t *testing.T) {
 	ikm := bytes.Repeat([]byte{0x0b}, 22)
 	salt, err := HexToBytes("000102030405060708090a0b0c")
@@ -139,8 +134,6 @@ func TestHKDFSHA256RFC5869Vector(t *testing.T) {
 		t.Fatalf("hkdfSHA256() = %x, want %x", okm, wantOKM)
 	}
 }
-
-// TestECCWithAESGCMValidation 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestECCWithAESGCMValidation(t *testing.T) {
 	if _, err := GenerateSharedSecret([]byte{1}, make([]byte, Curve25519KeySize)); err == nil {
 		t.Fatal("GenerateSharedSecret() short private key error = nil, want error")
@@ -174,8 +167,6 @@ func TestECCWithAESGCMValidation(t *testing.T) {
 		t.Fatal("GenerateSharedSecret(low-order public key) error = nil, want error")
 	}
 }
-
-// TestECCWithAESGCMAliases 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestECCWithAESGCMAliases(t *testing.T) {
 	alicePrivate, alicePublic, err := GenerateCurve25519KeyPairBytes()
 	if err != nil {

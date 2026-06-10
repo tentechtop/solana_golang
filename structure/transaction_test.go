@@ -7,7 +7,6 @@ import (
 	"solana_golang/utils"
 )
 
-// TestTransactionValidateMarshalAndHash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionValidateMarshalAndHash(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -31,8 +30,6 @@ func TestTransactionValidateMarshalAndHash(t *testing.T) {
 		t.Fatal("TxID() returned zero hash")
 	}
 }
-
-// TestTransactionBuildSignDataExcludesSignatures 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -55,8 +52,6 @@ func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
 	}
 	transaction.Signatures[0] = originalSignature
 }
-
-// TestTransactionBuildsSolanaMessageFromAccountMeta 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -75,8 +70,6 @@ func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
 		t.Fatalf("AccountKeys length = %d, want %d", len(message.AccountKeys), len(transaction.Accounts))
 	}
 }
-
-// TestVersionedSolanaMessageAllowsAddressTableIndexes 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Message = SolanaMessage{
@@ -108,8 +101,6 @@ func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
-
-// TestTransactionSenderAndSignerAccounts 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionSenderAndSignerAccounts(t *testing.T) {
 	transaction := newTestTransaction(t)
 
@@ -127,8 +118,6 @@ func TestTransactionSenderAndSignerAccounts(t *testing.T) {
 		t.Fatalf("SignerAccounts() length = %d, want 1", len(transaction.SignerAccounts()))
 	}
 }
-
-// TestTransactionRejectsSignatureMismatch 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsSignatureMismatch(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Signatures = append(transaction.Signatures, newTestSignature(2))
@@ -138,8 +127,6 @@ func TestTransactionRejectsSignatureMismatch(t *testing.T) {
 		t.Fatal("Validate() error = nil, want signature mismatch")
 	}
 }
-
-// TestTransactionRejectsDuplicateAccounts 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsDuplicateAccounts(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Accounts[1].PublicKey = transaction.Accounts[0].PublicKey
@@ -149,8 +136,6 @@ func TestTransactionRejectsDuplicateAccounts(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidAccountMeta", err)
 	}
 }
-
-// TestTransactionRejectsInvalidInstructionIndex 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsInvalidInstructionIndex(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.Instructions[0].ProgramIDIndex = 99
@@ -160,8 +145,6 @@ func TestTransactionRejectsInvalidInstructionIndex(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidInstruction", err)
 	}
 }
-
-// TestTransactionRejectsEmptyRecentBlockhash 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionRejectsEmptyRecentBlockhash(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.RecentBlockhash = Blockhash{}
@@ -171,8 +154,6 @@ func TestTransactionRejectsEmptyRecentBlockhash(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrEmptyRecentBlockhash", err)
 	}
 }
-
-// TestTransactionExpiration 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionExpiration(t *testing.T) {
 	transaction := newTestTransaction(t)
 	transaction.SubmitTime = 1000
@@ -184,8 +165,6 @@ func TestTransactionExpiration(t *testing.T) {
 		t.Fatal("IsExpired() = false, want true")
 	}
 }
-
-// TestTransactionCloneIsolation 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionCloneIsolation(t *testing.T) {
 	transaction := newTestTransaction(t)
 	cloned := transaction.Clone()
@@ -195,8 +174,6 @@ func TestTransactionCloneIsolation(t *testing.T) {
 		t.Fatal("Clone() shares instruction data")
 	}
 }
-
-// TestTransactionSignAndVerifySignatures 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestTransactionSignAndVerifySignatures(t *testing.T) {
 	publicKeyBytes, privateKey, err := utils.GenerateEd25519KeyPairBytes()
 	if err != nil {
@@ -234,8 +211,6 @@ func TestTransactionSignAndVerifySignatures(t *testing.T) {
 		t.Fatal("HasValidSignatures(mutated) = true, want false")
 	}
 }
-
-// TestAccountMetaMergeSortAndIndexMap 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestAccountMetaMergeSortAndIndexMap(t *testing.T) {
 	firstKey := newTestPublicKey(1)
 	secondKey := newTestPublicKey(2)
@@ -268,8 +243,6 @@ func TestAccountMetaMergeSortAndIndexMap(t *testing.T) {
 		t.Fatalf("AccountIndexMap(firstKey) = %d, want 0", indexMap[firstKey])
 	}
 }
-
-// TestCompileInstructionAndMarshal 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestCompileInstructionAndMarshal(t *testing.T) {
 	programKey := newTestPublicKey(1)
 	accountKey := newTestPublicKey(2)

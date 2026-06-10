@@ -7,7 +7,6 @@ import (
 	"testing"
 )
 
-// TestProtocolRegistryHandlesResponseProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryHandlesResponseProtocol(t *testing.T) {
 	registry := NewProtocolRegistry()
 	localPeerID := testPeerID(8)
@@ -46,8 +45,6 @@ func TestProtocolRegistryHandlesResponseProtocol(t *testing.T) {
 		t.Fatalf("Payload = %q, want pong", result.Message.Payload)
 	}
 }
-
-// TestProtocolRegistryRejectsMismatchedRegistration 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryRejectsMismatchedRegistration(t *testing.T) {
 	registry := NewProtocolRegistry()
 	spec := ProtocolSpec{
@@ -64,8 +61,6 @@ func TestProtocolRegistryRejectsMismatchedRegistration(t *testing.T) {
 		t.Fatalf("RegisterResultHandler() error = %v, want ErrProtocolResponseMismatch", err)
 	}
 }
-
-// TestProtocolRegistryRejectsDuplicateProtocol 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestProtocolRegistryRejectsDuplicateProtocol(t *testing.T) {
 	registry := NewProtocolRegistry()
 	spec := ProtocolSpec{

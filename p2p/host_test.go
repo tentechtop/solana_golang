@@ -9,7 +9,6 @@ import (
 	"solana_golang/utils"
 )
 
-// TestHostSendFallsBackFromQUICToTCP 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestHostSendFallsBackFromQUICToTCP(t *testing.T) {
 	clientPeerID := testPeerID(5)
 	serverPeerID := testPeerID(6)

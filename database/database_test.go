@@ -7,7 +7,6 @@ import (
 	"testing"
 )
 
-// TestDatabaseContractAcrossEngines 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseContractAcrossEngines(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -90,8 +89,6 @@ func runDatabaseExtendedContract(t *testing.T, db Database) {
 	testValidationAndBoundaryCases(t, db)
 	testConcurrentAccess(t, db)
 }
-
-// testNumericKeyMethods 验证目标行为 + 保证核心场景和边界条件稳定。
 func testNumericKeyMethods(t *testing.T, db Database) {
 	t.Helper()
 
@@ -127,8 +124,6 @@ func testNumericKeyMethods(t *testing.T, db Database) {
 		t.Fatal("ExistsInt64(after delete) = true, want false")
 	}
 }
-
-// testKeyValueCollectionMethods 验证目标行为 + 保证核心场景和边界条件稳定。
 func testKeyValueCollectionMethods(t *testing.T, db Database) {
 	t.Helper()
 
@@ -170,8 +165,6 @@ func testKeyValueCollectionMethods(t *testing.T, db Database) {
 		t.Fatalf("len(Values()) = %d, want 3", len(allValues))
 	}
 }
-
-// testCacheAndCloneSafety 验证目标行为 + 保证核心场景和边界条件稳定。
 func testCacheAndCloneSafety(t *testing.T, db Database) {
 	t.Helper()
 
@@ -201,8 +194,6 @@ func testCacheAndCloneSafety(t *testing.T, db Database) {
 		t.Fatalf("SetCachePolicy(disable) error = %v", err)
 	}
 }
-
-// testManualTransactionRollback 验证目标行为 + 保证核心场景和边界条件稳定。
 func testManualTransactionRollback(t *testing.T, db Database) {
 	t.Helper()
 
@@ -224,8 +215,6 @@ func testManualTransactionRollback(t *testing.T, db Database) {
 		t.Fatal("rolled back key exists, want absent")
 	}
 }
-
-// testReadTransactionSnapshotConsistency 验证目标行为 + 保证核心场景和边界条件稳定。
 func testReadTransactionSnapshotConsistency(t *testing.T, db Database) {
 	t.Helper()
 
@@ -315,8 +304,6 @@ func testReadTransactionSnapshotConsistency(t *testing.T, db Database) {
 		t.Fatalf("db.Get(new) = %q, want new-1", value)
 	}
 }
-
-// testValidationAndBoundaryCases 验证目标行为 + 保证核心场景和边界条件稳定。
 func testValidationAndBoundaryCases(t *testing.T, db Database) {
 	t.Helper()
 
@@ -356,8 +343,6 @@ func testValidationAndBoundaryCases(t *testing.T, db Database) {
 		t.Fatal("CommitTransaction(rolled back id) error = nil, want not found")
 	}
 }
-
-// testConcurrentAccess 验证目标行为 + 保证核心场景和边界条件稳定。
 func testConcurrentAccess(t *testing.T, db Database) {
 	t.Helper()
 
@@ -410,8 +395,6 @@ func assertByteSlices(t *testing.T, got [][]byte, want [][]byte) {
 		}
 	}
 }
-
-// TestDatabaseOperationsRequireOpenDatabase 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestDatabaseOperationsRequireOpenDatabase(t *testing.T) {
 	db := NewDatabaseImpl()
 	if _, err := db.Get(TablePeer, []byte("closed")); !errors.Is(err, ErrDatabaseNotOpen) {

@@ -12,7 +12,6 @@ const (
 	bip39OfficialSeedHex    = "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
 )
 
-// TestBIP39OfficialVector 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBIP39OfficialVector(t *testing.T) {
 	entropy, err := HexToBytes(bip39OfficialEntropyHex)
 	if err != nil {
@@ -43,8 +42,6 @@ func TestBIP39OfficialVector(t *testing.T) {
 		t.Fatalf("seed = %q, want %q", got, bip39OfficialSeedHex)
 	}
 }
-
-// TestBIP39EntropyRoundTripSupportedSizes 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestBIP39EntropyRoundTripSupportedSizes(t *testing.T) {
 	for bitSize := 128; bitSize <= 256; bitSize += 32 {
 		entropy := deterministicBIP39Entropy(bitSize)
@@ -65,8 +62,6 @@ func TestBIP39EntropyRoundTripSupportedSizes(t *testing.T) {
 		}
 	}
 }
-
-// TestNewBIP39EntropySizeValidation 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewBIP39EntropySizeValidation(t *testing.T) {
 	validSizes := []int{128, 160, 192, 224, 256}
 	for _, bitSize := range validSizes {
@@ -86,8 +81,6 @@ func TestNewBIP39EntropySizeValidation(t *testing.T) {
 		}
 	}
 }
-
-// TestNewBIP39MnemonicRejectsInvalidEntropy 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewBIP39MnemonicRejectsInvalidEntropy(t *testing.T) {
 	invalidEntropyList := [][]byte{
 		nil,
@@ -101,8 +94,6 @@ func TestNewBIP39MnemonicRejectsInvalidEntropy(t *testing.T) {
 		}
 	}
 }
-
-// TestEntropyFromBIP39MnemonicRejectsInvalidInput 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestEntropyFromBIP39MnemonicRejectsInvalidInput(t *testing.T) {
 	invalidMnemonicList := []string{
 		strings.Repeat("abandon ", 11),
@@ -119,8 +110,6 @@ func TestEntropyFromBIP39MnemonicRejectsInvalidInput(t *testing.T) {
 		}
 	}
 }
-
-// TestNewBIP39SeedNormalizesWhitespace 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestNewBIP39SeedNormalizesWhitespace(t *testing.T) {
 	mnemonicWithExtraSpaces := "  abandon   abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about  "
 	wantSeed, err := NewBIP39Seed(bip39OfficialMnemonic, "TREZOR")

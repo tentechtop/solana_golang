@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// TestPublicKeyHashAndSignatureValues 验证目标行为 + 保证核心场景和边界条件稳定。
 func TestPublicKeyHashAndSignatureValues(t *testing.T) {
 	keyBytes := bytes.Repeat([]byte{0x01}, PublicKeySize)
 	publicKey, err := NewPublicKey(keyBytes)
