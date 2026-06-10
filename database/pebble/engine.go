@@ -91,6 +91,13 @@ func (e *Engine) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	return &Iterator{iter: iter}, nil
 }
 
+func (e *Engine) NewSnapshot() (*Snapshot, error) {
+	if e.db == nil {
+		return nil, ErrNotOpen
+	}
+	return &Snapshot{snapshot: e.db.NewSnapshot()}, nil
+}
+
 func (e *Engine) DeleteRange(start []byte, end []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -218,6 +225,38 @@ func (i *Iterator) Error() error {
 
 func (i *Iterator) Close() error {
 	return i.iter.Close()
+}
+
+type Snapshot struct {
+	snapshot *pebble.Snapshot
+}
+
+func (s *Snapshot) Get(key []byte) ([]byte, error) {
+	value, closer, err := s.snapshot.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil, pebble.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer closer.Close()
+	return cloneBytes(value), nil
+}
+
+func (s *Snapshot) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
+	iter, err := s.snapshot.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, err
+	}
+	return &Iterator{iter: iter}, nil
+}
+
+func (s *Snapshot) IsNotFound(err error) bool {
+	return errors.Is(err, pebble.ErrNotFound)
+}
+
+func (s *Snapshot) Close() error {
+	return s.snapshot.Close()
 }
 
 func cloneBytes(value []byte) []byte {

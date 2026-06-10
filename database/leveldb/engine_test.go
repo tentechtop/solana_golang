@@ -100,4 +100,44 @@ func TestEngineClosedOperationsReturnError(t *testing.T) {
 	if _, err := engine.NewIterator(nil, nil); err == nil {
 		t.Fatal("NewIterator() error = nil, want not open error")
 	}
+	if _, err := engine.NewSnapshot(); err == nil {
+		t.Fatal("NewSnapshot() error = nil, want not open error")
+	}
+}
+
+func TestSnapshotKeepsStableReadView(t *testing.T) {
+	engine := NewEngine()
+	if err := engine.Open(t.TempDir(), true); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	if err := engine.Set([]byte("a"), []byte("old")); err != nil {
+		t.Fatalf("Set(old) error = %v", err)
+	}
+	snapshot, err := engine.NewSnapshot()
+	if err != nil {
+		t.Fatalf("NewSnapshot() error = %v", err)
+	}
+	defer snapshot.Close()
+
+	if err := engine.Set([]byte("a"), []byte("new")); err != nil {
+		t.Fatalf("Set(new) error = %v", err)
+	}
+	value, err := snapshot.Get([]byte("a"))
+	if err != nil {
+		t.Fatalf("Snapshot.Get() error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("old")) {
+		t.Fatalf("Snapshot.Get() = %q, want old", value)
+	}
+
+	iter, err := snapshot.NewIterator([]byte("a"), []byte("b"))
+	if err != nil {
+		t.Fatalf("Snapshot.NewIterator() error = %v", err)
+	}
+	defer iter.Close()
+	if !iter.First() || !bytes.Equal(iter.Value(), []byte("old")) {
+		t.Fatalf("Snapshot iterator value = %q, want old", iter.Value())
+	}
 }

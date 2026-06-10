@@ -87,6 +87,7 @@ func runDatabaseExtendedContract(t *testing.T, db Database) {
 	testKeyValueCollectionMethods(t, db)
 	testCacheAndCloneSafety(t, db)
 	testManualTransactionRollback(t, db)
+	testReadTransactionSnapshotConsistency(t, db)
 	testValidationAndBoundaryCases(t, db)
 	testConcurrentAccess(t, db)
 }
@@ -218,6 +219,96 @@ func testManualTransactionRollback(t *testing.T, db Database) {
 	}
 	if exists {
 		t.Fatal("rolled back key exists, want absent")
+	}
+}
+
+func testReadTransactionSnapshotConsistency(t *testing.T, db Database) {
+	t.Helper()
+
+	if err := db.ClearTable(TableAccount); err != nil {
+		t.Fatalf("ClearTable(read tx setup) error = %v", err)
+	}
+	if err := db.BatchInsert(
+		TableAccount,
+		[][]byte{[]byte("acct:1"), []byte("acct:2")},
+		[][]byte{[]byte("old-1"), []byte("old-2")},
+	); err != nil {
+		t.Fatalf("BatchInsert(read tx setup) error = %v", err)
+	}
+
+	readTx, err := db.BeginReadTransaction()
+	if err != nil {
+		t.Fatalf("BeginReadTransaction() error = %v", err)
+	}
+	defer readTx.Close()
+
+	if err := db.DataTransaction([]DBOperation{
+		NewUpdateOperation(TableAccount, []byte("acct:1"), []byte("new-1")),
+		NewInsertOperation(TableAccount, []byte("acct:3"), []byte("new-3")),
+	}); err != nil {
+		t.Fatalf("DataTransaction(read tx update) error = %v", err)
+	}
+
+	value, err := readTx.Get(TableAccount, []byte("acct:1"))
+	if err != nil {
+		t.Fatalf("readTx.Get(old) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("old-1")) {
+		t.Fatalf("readTx.Get(old) = %q, want old-1", value)
+	}
+	value[0] = 'x'
+
+	value, err = readTx.Get(TableAccount, []byte("acct:1"))
+	if err != nil {
+		t.Fatalf("readTx.Get(clone) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("old-1")) {
+		t.Fatalf("readTx.Get(clone) = %q, want old-1", value)
+	}
+
+	exists, err := readTx.Exists(TableAccount, []byte("acct:3"))
+	if err != nil {
+		t.Fatalf("readTx.Exists(new) error = %v", err)
+	}
+	if exists {
+		t.Fatal("readTx.Exists(new) = true, want false")
+	}
+
+	pairs, err := readTx.PrefixQuery(TableAccount, []byte("acct:"))
+	if err != nil {
+		t.Fatalf("readTx.PrefixQuery() error = %v", err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("len(readTx.PrefixQuery()) = %d, want 2", len(pairs))
+	}
+
+	count, err := readTx.Count(TableAccount)
+	if err != nil {
+		t.Fatalf("readTx.Count() error = %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("readTx.Count() = %d, want 2", count)
+	}
+
+	values, err := readTx.BatchGet(TableAccount, [][]byte{[]byte("acct:1"), []byte("acct:2")})
+	if err != nil {
+		t.Fatalf("readTx.BatchGet() error = %v", err)
+	}
+	assertByteSlices(t, values, [][]byte{[]byte("old-1"), []byte("old-2")})
+
+	if err := readTx.Close(); err != nil {
+		t.Fatalf("readTx.Close() error = %v", err)
+	}
+	if _, err := readTx.Get(TableAccount, []byte("acct:1")); err == nil {
+		t.Fatal("readTx.Get(after close) error = nil, want closed error")
+	}
+
+	value, err = db.Get(TableAccount, []byte("acct:1"))
+	if err != nil {
+		t.Fatalf("db.Get(new) error = %v", err)
+	}
+	if !bytes.Equal(value, []byte("new-1")) {
+		t.Fatalf("db.Get(new) = %q, want new-1", value)
 	}
 }
 

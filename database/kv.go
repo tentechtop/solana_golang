@@ -8,6 +8,7 @@ type KVEngine interface {
 	Delete(key []byte) error
 	NewBatch() (KVBatch, error)
 	NewIterator(lower []byte, upper []byte) (KVIterator, error)
+	NewSnapshot() (KVSnapshot, error)
 	DeleteRange(start []byte, end []byte) error
 	Flush() error
 	Compact(start []byte, limit []byte) error
@@ -17,6 +18,13 @@ type KVEngine interface {
 	IsNotFound(err error) bool
 	SupportsCheckpoint() bool
 	SupportsDisableWAL() bool
+}
+
+type KVSnapshot interface {
+	Get(key []byte) ([]byte, error)
+	NewIterator(lower []byte, upper []byte) (KVIterator, error)
+	IsNotFound(err error) bool
+	Close() error
 }
 
 type KVBatch interface {

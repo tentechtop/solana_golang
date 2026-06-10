@@ -5,6 +5,7 @@ go 1.24.6
 require (
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/syndtr/goleveldb v1.0.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

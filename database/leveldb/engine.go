@@ -89,6 +89,17 @@ func (e *Engine) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
 	return &Iterator{iter: e.db.NewIterator(&util.Range{Start: lower, Limit: upper}, nil)}, nil
 }
 
+func (e *Engine) NewSnapshot() (*Snapshot, error) {
+	if e.db == nil {
+		return nil, ErrNotOpen
+	}
+	snapshot, err := e.db.GetSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return &Snapshot{snapshot: snapshot}, nil
+}
+
 func (e *Engine) DeleteRange(start []byte, end []byte) error {
 	if e.db == nil {
 		return ErrNotOpen
@@ -236,6 +247,34 @@ func (i *Iterator) Error() error {
 
 func (i *Iterator) Close() error {
 	i.iter.Release()
+	return nil
+}
+
+type Snapshot struct {
+	snapshot *leveldb.Snapshot
+}
+
+func (s *Snapshot) Get(key []byte) ([]byte, error) {
+	value, err := s.snapshot.Get(key, nil)
+	if errors.Is(err, leveldb.ErrNotFound) {
+		return nil, leveldb.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return cloneBytes(value), nil
+}
+
+func (s *Snapshot) NewIterator(lower []byte, upper []byte) (*Iterator, error) {
+	return &Iterator{iter: s.snapshot.NewIterator(&util.Range{Start: lower, Limit: upper}, nil)}, nil
+}
+
+func (s *Snapshot) IsNotFound(err error) bool {
+	return errors.Is(err, leveldb.ErrNotFound)
+}
+
+func (s *Snapshot) Close() error {
+	s.snapshot.Release()
 	return nil
 }
 

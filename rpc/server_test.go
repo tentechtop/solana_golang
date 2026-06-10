@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +110,25 @@ func TestServerRejectsTrailingJSON(t *testing.T) {
 	}
 	if decoded.Error == nil || decoded.Error.Code != CodeParseError {
 		t.Fatalf("error = %+v, want parse error", decoded.Error)
+	}
+}
+
+func TestServerWritesStructuredRequestLog(t *testing.T) {
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	server := NewServer(ServerConfig{Logger: logger}, NewDefaultRouter(testLedgerBackend{}))
+
+	_ = postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}`)
+
+	logLine := logOutput.String()
+	if !strings.Contains(logLine, `"msg":"rpc http request completed"`) {
+		t.Fatalf("log line = %q, want rpc request message", logLine)
+	}
+	if !strings.Contains(logLine, `"status":200`) {
+		t.Fatalf("log line = %q, want status field", logLine)
+	}
+	if !strings.Contains(logLine, `"method":"POST"`) {
+		t.Fatalf("log line = %q, want method field", logLine)
 	}
 }
 

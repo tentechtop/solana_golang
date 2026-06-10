@@ -15,6 +15,18 @@ type databaseTransaction struct {
 	ops   []DBOperation
 }
 
+type kvReadSource interface {
+	Get(key []byte) ([]byte, error)
+	NewIterator(lower []byte, upper []byte) (KVIterator, error)
+	IsNotFound(err error) bool
+}
+
+type readTransaction struct {
+	mu       sync.RWMutex
+	snapshot KVSnapshot
+	closed   bool
+}
+
 type databaseService struct {
 	mu           sync.RWMutex
 	engine       KVEngine
@@ -41,6 +53,7 @@ type LevelDBDatabase struct {
 var _ Database = (*PebbleDatabase)(nil)
 var _ Database = (*LevelDBDatabase)(nil)
 var _ Database = (*databaseService)(nil)
+var _ ReadTransaction = (*readTransaction)(nil)
 
 // DatabaseImpl 默认数据库实现 + 兼容旧代码入口。
 type DatabaseImpl = databaseService
@@ -86,7 +99,7 @@ func (p *databaseService) CreateDatabase(config DatabaseConfig) error {
 	if p.path != "" {
 		return nil
 	}
-	config.WAL = p.walEnabled
+	p.walEnabled = config.WAL
 	if err := p.engine.Open(config.Path, config.WAL); err != nil {
 		return fmt.Errorf("database: open engine: %w", err)
 	}
@@ -345,6 +358,18 @@ func (p *databaseService) ExistsByPrefix(table Table, prefix []byte) (bool, erro
 		return false, fmt.Errorf("database: prefix iterator: %w", err)
 	}
 	return ok, nil
+}
+
+func (p *databaseService) BeginReadTransaction() (ReadTransaction, error) {
+	engine, err := p.getDB()
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := engine.NewSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("database: create read transaction snapshot: %w", err)
+	}
+	return &readTransaction{snapshot: snapshot}, nil
 }
 
 func (p *databaseService) DataTransaction(operations []DBOperation) error {
@@ -718,14 +743,7 @@ func (p *databaseService) getRaw(table Table, key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	value, err := engine.Get(encodeKey(table, key))
-	if engine.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("database: get key: %w", err)
-	}
-	return cloneBytes(value), nil
+	return readRaw(engine, table, key)
 }
 
 func (p *databaseService) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
@@ -792,27 +810,7 @@ func (p *databaseService) prefixQuery(table Table, prefix []byte, limit int, rev
 	if err != nil {
 		return nil, err
 	}
-	lower, upper := prefixBounds(table, prefix)
-	iter, err := engine.NewIterator(lower, upper)
-	if err != nil {
-		return nil, fmt.Errorf("database: create prefix query iterator: %w", err)
-	}
-	defer iter.Close()
-
-	pairs := make([]KeyValue, 0)
-	for ok := positionPrefixQueryIterator(iter, reverse); ok; ok = advancePrefixQueryIterator(iter, reverse) {
-		pairs = append(pairs, KeyValue{
-			Key:   stripTablePrefix(iter.Key()),
-			Value: cloneBytes(iter.Value()),
-		})
-		if limit > 0 && len(pairs) >= limit {
-			break
-		}
-	}
-	if err := iter.Error(); err != nil {
-		return nil, fmt.Errorf("database: prefix query iterator: %w", err)
-	}
-	return pairs, nil
+	return readPrefixQuery(engine, table, prefix, limit, reverse)
 }
 
 func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
@@ -826,10 +824,196 @@ func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte
 	if err != nil {
 		return nil, err
 	}
-	lower, upper := rangeBounds(table, startKey, endKey)
-	iter, err := engine.NewIterator(lower, upper)
+	return readRangeQuery(engine, table, startKey, endKey, limit, reverse)
+}
+
+func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error) {
+	engine, err := p.getDB()
 	if err != nil {
-		return nil, fmt.Errorf("database: create range iterator: %w", err)
+		return 0, err
+	}
+	return readCountInBounds(engine, lower, upper)
+}
+
+func (p *databaseService) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
+	engine, err := p.getDB()
+	if err != nil {
+		return nil, err
+	}
+	return readFirstInBounds(engine, lower, upper, reverse)
+}
+
+func (tx *readTransaction) Get(table Table, key []byte) ([]byte, error) {
+	if err := validateDataTable(table); err != nil {
+		return nil, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.unlock()
+	return readRaw(snapshot.source, table, key)
+}
+
+func (tx *readTransaction) Exists(table Table, key []byte) (bool, error) {
+	value, err := tx.Get(table, key)
+	if err != nil {
+		return false, err
+	}
+	return value != nil, nil
+}
+
+func (tx *readTransaction) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
+	values := make([][]byte, len(keys))
+	for index, key := range keys {
+		value, err := tx.Get(table, key)
+		if err != nil {
+			return nil, err
+		}
+		values[index] = value
+	}
+	return values, nil
+}
+
+func (tx *readTransaction) Count(table Table) (int, error) {
+	if err := validateDataTable(table); err != nil {
+		return 0, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return 0, err
+	}
+	defer snapshot.unlock()
+	lower, upper := tableBounds(table)
+	return readCountInBounds(snapshot.source, lower, upper)
+}
+
+func (tx *readTransaction) CountByPrefix(table Table, prefix []byte) (int, error) {
+	if err := validateDataTable(table); err != nil {
+		return 0, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return 0, err
+	}
+	defer snapshot.unlock()
+	lower, upper := prefixBounds(table, prefix)
+	return readCountInBounds(snapshot.source, lower, upper)
+}
+
+func (tx *readTransaction) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
+	return tx.PrefixQueryWithLimit(table, prefix, -1)
+}
+
+func (tx *readTransaction) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
+	if limit == 0 {
+		return []KeyValue{}, nil
+	}
+	if err := validateDataTable(table); err != nil {
+		return nil, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.unlock()
+	return readPrefixQuery(snapshot.source, table, prefix, limit, false)
+}
+
+func (tx *readTransaction) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
+	return tx.RangeQueryWithLimit(table, startKey, endKey, -1)
+}
+
+func (tx *readTransaction) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
+	if limit == 0 {
+		return []KeyValue{}, nil
+	}
+	if err := validateDataTable(table); err != nil {
+		return nil, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.unlock()
+	return readRangeQuery(snapshot.source, table, startKey, endKey, limit, false)
+}
+
+func (tx *readTransaction) First(table Table) (*KeyValue, error) {
+	if err := validateDataTable(table); err != nil {
+		return nil, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.unlock()
+	lower, upper := tableBounds(table)
+	return readFirstInBounds(snapshot.source, lower, upper, false)
+}
+
+func (tx *readTransaction) Last(table Table) (*KeyValue, error) {
+	if err := validateDataTable(table); err != nil {
+		return nil, err
+	}
+	snapshot, err := tx.readSource()
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.unlock()
+	lower, upper := tableBounds(table)
+	return readFirstInBounds(snapshot.source, lower, upper, true)
+}
+
+func (tx *readTransaction) Close() error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.closed {
+		return nil
+	}
+	tx.closed = true
+	return tx.snapshot.Close()
+}
+
+type lockedReadSource struct {
+	source KVSnapshot
+	unlock func()
+}
+
+func (tx *readTransaction) readSource() (lockedReadSource, error) {
+	tx.mu.RLock()
+	if tx.closed {
+		tx.mu.RUnlock()
+		return lockedReadSource{}, errors.New("database: read transaction closed")
+	}
+	return lockedReadSource{source: tx.snapshot, unlock: tx.mu.RUnlock}, nil
+}
+
+func readRaw(reader kvReadSource, table Table, key []byte) ([]byte, error) {
+	value, err := reader.Get(encodeKey(table, key))
+	if reader.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database: get key: %w", err)
+	}
+	return cloneBytes(value), nil
+}
+
+func readPrefixQuery(reader kvReadSource, table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
+	lower, upper := prefixBounds(table, prefix)
+	return readQueryInBounds(reader, lower, upper, limit, reverse, "prefix query")
+}
+
+func readRangeQuery(reader kvReadSource, table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
+	lower, upper := rangeBounds(table, startKey, endKey)
+	return readQueryInBounds(reader, lower, upper, limit, reverse, "range")
+}
+
+func readQueryInBounds(reader kvReadSource, lower []byte, upper []byte, limit int, reverse bool, operation string) ([]KeyValue, error) {
+	iter, err := reader.NewIterator(lower, upper)
+	if err != nil {
+		return nil, fmt.Errorf("database: create %s iterator: %w", operation, err)
 	}
 	defer iter.Close()
 
@@ -844,17 +1028,13 @@ func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte
 		}
 	}
 	if err := iter.Error(); err != nil {
-		return nil, fmt.Errorf("database: range iterator: %w", err)
+		return nil, fmt.Errorf("database: %s iterator: %w", operation, err)
 	}
 	return pairs, nil
 }
 
-func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error) {
-	engine, err := p.getDB()
-	if err != nil {
-		return 0, err
-	}
-	iter, err := engine.NewIterator(lower, upper)
+func readCountInBounds(reader kvReadSource, lower []byte, upper []byte) (int, error) {
+	iter, err := reader.NewIterator(lower, upper)
 	if err != nil {
 		return 0, fmt.Errorf("database: create count iterator: %w", err)
 	}
@@ -870,12 +1050,8 @@ func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error)
 	return count, nil
 }
 
-func (p *databaseService) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
-	engine, err := p.getDB()
-	if err != nil {
-		return nil, err
-	}
-	iter, err := engine.NewIterator(lower, upper)
+func readFirstInBounds(reader kvReadSource, lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
+	iter, err := reader.NewIterator(lower, upper)
 	if err != nil {
 		return nil, fmt.Errorf("database: create boundary iterator: %w", err)
 	}

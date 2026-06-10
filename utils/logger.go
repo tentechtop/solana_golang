@@ -5,12 +5,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 const (
-	LogFormatJSON = "json"
-	LogFormatText = "text"
+	LogFormatJSON      = "json"
+	LogFormatText      = "text"
+	LogOutputConsole   = "console"
+	LogOutputFile      = "file"
+	defaultLogFilePerm = 0o644
 )
 
 // LoggerConfig 定义日志配置 + 统一系统日志初始化入口。
@@ -38,7 +42,12 @@ func NewLogger(config LoggerConfig) (*slog.Logger, error) {
 		Level:     level,
 	}
 
-	switch normalizeLogFormat(config.Format) {
+	logFormat, err := ParseLogFormat(config.Format)
+	if err != nil {
+		return nil, err
+	}
+
+	switch logFormat {
 	case LogFormatJSON:
 		return slog.New(slog.NewJSONHandler(output, options)), nil
 	case LogFormatText:
@@ -46,6 +55,40 @@ func NewLogger(config LoggerConfig) (*slog.Logger, error) {
 	default:
 		return nil, fmt.Errorf("utils: unsupported log format %q", config.Format)
 	}
+}
+
+// ParseLogFormat 解析日志格式 + 统一拒绝非法格式避免启动后日志不可读。
+func ParseLogFormat(format string) (string, error) {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return LogFormatJSON, nil
+	}
+	switch format {
+	case LogFormatJSON, LogFormatText:
+		return format, nil
+	default:
+		return "", fmt.Errorf("utils: unsupported log format %q", format)
+	}
+}
+
+// OpenLogFile 打开日志文件 + 启动阶段创建目录保证文件输出闭环。
+func OpenLogFile(path string) (*os.File, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("utils: log file path is empty")
+	}
+	cleanPath := filepath.Clean(path)
+	directory := filepath.Dir(cleanPath)
+	if directory != "." {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			return nil, fmt.Errorf("utils: create log directory %s: %w", directory, err)
+		}
+	}
+	file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultLogFilePerm)
+	if err != nil {
+		return nil, fmt.Errorf("utils: open log file %s: %w", cleanPath, err)
+	}
+	return file, nil
 }
 
 // InitDefaultLogger 初始化全局日志器 + 兼容直接使用 slog 默认日志的包。
@@ -93,11 +136,11 @@ func LoggerFromEnv() (*slog.Logger, error) {
 }
 
 func normalizeLogFormat(format string) string {
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		return LogFormatJSON
+	normalized, err := ParseLogFormat(format)
+	if err != nil {
+		return format
 	}
-	return format
+	return normalized
 }
 
 // EnsureLogger 兜底日志实例 + 避免关键路径因空指针丢失日志。

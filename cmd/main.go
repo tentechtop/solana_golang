@@ -1,16 +1,263 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
+	appconfig "solana_golang/config"
+	"solana_golang/database"
+	"solana_golang/p2p"
+	"solana_golang/rpc"
 	"solana_golang/utils"
 )
 
+const shutdownTimeout = 10 * time.Second
+
+// runtimeResources 保存启动资源 + 用统一关闭路径避免泄漏。
+type runtimeResources struct {
+	logger       *slog.Logger
+	logCloser    io.Closer
+	database     database.Database
+	p2pHost      *p2p.Host
+	rpcServer    *rpc.Server
+	p2pCancel    context.CancelFunc
+	serverErrors chan error
+}
+
 func main() {
-	logger, err := utils.LoggerFromEnv()
-	if err != nil {
-		panic(err)
+	if err := run(); err != nil {
+		slog.Error("application exited with error", slog.Any("error", err))
+		os.Exit(1)
 	}
-	slog.SetDefault(logger)
-	logger.Info("application started", slog.String("module", "solana_golang"))
+}
+
+func run() error {
+	configPath := configPathFromFlag()
+	config, err := appconfig.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	resources, err := startRuntime(config)
+	if err != nil {
+		return err
+	}
+	defer resources.closeLog()
+
+	resources.logger.Info("application started",
+		slog.String("config_path", configPath),
+		slog.String("database_engine", config.Database.Engine),
+		slog.String("p2p_protocol", config.P2P.DefaultProtocol),
+		slog.String("rpc_address", config.RPC.Address),
+	)
+
+	err = waitForStop(resources)
+	if closeErr := resources.close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func configPathFromFlag() string {
+	configPath := flag.String("config", "", "config file path")
+	flag.Parse()
+	if strings.TrimSpace(*configPath) != "" {
+		return *configPath
+	}
+	if path := strings.TrimSpace(os.Getenv("APP_CONFIG")); path != "" {
+		return path
+	}
+	return appconfig.DefaultPath
+}
+
+func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
+	logger, logCloser, err := newConfiguredLogger(config.Log)
+	if err != nil {
+		return nil, err
+	}
+	resources := &runtimeResources{
+		logger:       logger,
+		logCloser:    logCloser,
+		serverErrors: make(chan error, 2),
+	}
+
+	if err := resources.openDatabase(config.Database); err != nil {
+		resources.closeLog()
+		return nil, err
+	}
+	if err := resources.startP2P(config.P2P); err != nil {
+		_ = resources.close()
+		return nil, err
+	}
+	resources.startRPC(config.RPC)
+	return resources, nil
+}
+
+func newConfiguredLogger(config appconfig.LogConfig) (*slog.Logger, io.Closer, error) {
+	var output io.Writer = os.Stdout
+	var closer io.Closer
+	if strings.EqualFold(strings.TrimSpace(config.Output), utils.LogOutputFile) {
+		file, err := utils.OpenLogFile(config.FilePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		output = file
+		closer = file
+	}
+
+	logger, err := utils.InitDefaultLogger(utils.LoggerConfig{
+		Level:     config.Level,
+		Format:    config.Format,
+		AddSource: config.AddSource,
+		Output:    output,
+	})
+	if err != nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		return nil, nil, err
+	}
+	return logger, closer, nil
+}
+
+func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig) error {
+	databaseInstance, err := database.NewDatabase(config.DatabaseOptions())
+	if err != nil {
+		return fmt.Errorf("cmd: open database: %w", err)
+	}
+	if err := databaseInstance.CheckHealth(); err != nil {
+		_ = databaseInstance.Close()
+		return fmt.Errorf("cmd: check database health: %w", err)
+	}
+	resources.database = databaseInstance
+	resources.logger.Info("database opened",
+		slog.String("engine", config.Engine),
+		slog.String("path", config.Path),
+		slog.Bool("wal", config.WAL),
+	)
+	return nil
+}
+
+func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
+	host, err := p2p.NewHost(p2p.HostConfig{
+		PeerID:             config.PeerID,
+		PreferredProtocols: []utils.MultiAddressProtocol{config.Protocol()},
+		Logger:             resources.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("cmd: create p2p host: %w", err)
+	}
+
+	address, err := utils.BuildMultiAddress(config.IPType, config.ListenIP, config.Protocol(), config.ListenPort, config.PeerID)
+	if err != nil {
+		_ = host.Close()
+		return fmt.Errorf("cmd: build p2p listen address: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resources.p2pHost = host
+	resources.p2pCancel = cancel
+	go func() {
+		err := host.Listen(ctx, address, resources.handleP2PConnection)
+		if err != nil {
+			resources.serverErrors <- fmt.Errorf("cmd: p2p listen: %w", err)
+		}
+	}()
+	resources.logger.Info("p2p listener starting", slog.String("address", address.String()))
+	return nil
+}
+
+func (resources *runtimeResources) handleP2PConnection(ctx context.Context, connection p2p.Connection) {
+	defer connection.Close()
+	for {
+		message, err := connection.ReadMessage(ctx)
+		if err != nil {
+			resources.logger.Warn("p2p connection closed",
+				slog.String("connection_id", connection.ID()),
+				slog.Any("error", err),
+			)
+			return
+		}
+		if _, err := resources.p2pHost.HandleMessage(ctx, message); err != nil {
+			resources.logger.Warn("p2p message rejected",
+				slog.String("connection_id", connection.ID()),
+				slog.String("message_id", message.ID),
+				slog.Any("error", err),
+			)
+		}
+	}
+}
+
+func (resources *runtimeResources) startRPC(config appconfig.RPCConfig) {
+	resources.rpcServer = rpc.NewServer(rpc.ServerConfig{
+		Address:      config.Address,
+		MaxBodyBytes: config.MaxBodyBytes,
+		MaxBatchSize: config.MaxBatchSize,
+		Logger:       resources.logger,
+	}, rpc.NewDefaultRouter(nil))
+	go func() {
+		if err := resources.rpcServer.ListenAndServe(); err != nil {
+			resources.serverErrors <- err
+		}
+	}()
+}
+
+func waitForStop(resources *runtimeResources) error {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	select {
+	case signalValue := <-signals:
+		resources.logger.Info("shutdown signal received", slog.String("signal", signalValue.String()))
+		return nil
+	case err := <-resources.serverErrors:
+		return err
+	}
+}
+
+func (resources *runtimeResources) close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	var closeErrors []error
+	if resources.p2pCancel != nil {
+		resources.p2pCancel()
+	}
+	if resources.rpcServer != nil {
+		if err := resources.rpcServer.Shutdown(ctx); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	if resources.p2pHost != nil {
+		if err := resources.p2pHost.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	if resources.database != nil {
+		if err := resources.database.Close(); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errorsJoin(closeErrors)
+}
+
+func (resources *runtimeResources) closeLog() {
+	if resources.logCloser != nil {
+		_ = resources.logCloser.Close()
+		resources.logCloser = nil
+	}
+}
+
+func errorsJoin(errs []error) error {
+	return errors.Join(errs...)
 }

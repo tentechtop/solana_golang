@@ -155,6 +155,34 @@ type KeyValue struct {
 // KeyValueHandler 处理迭代项 + 返回 false 可提前停止扫描。
 type KeyValueHandler func(key []byte, value []byte) bool
 
+// ReadTransaction 定义一致性读事务 + 所有读操作绑定同一底层快照。
+type ReadTransaction interface {
+	// Get 读取字节键值 + 在事务快照内保持可重复读。
+	Get(table Table, key []byte) ([]byte, error)
+	// Exists 判断字节键是否存在 + 在事务快照内保持可重复读。
+	Exists(table Table, key []byte) (bool, error)
+	// BatchGet 批量读取键值 + 使用同一快照避免跨 key 读到不同版本。
+	BatchGet(table Table, keys [][]byte) ([][]byte, error)
+	// Count 统计表记录数 + 使用同一快照避免并发写入影响结果。
+	Count(table Table) (int, error)
+	// CountByPrefix 统计前缀记录数 + 使用同一快照保持索引视图一致。
+	CountByPrefix(table Table, prefix []byte) (int, error)
+	// PrefixQuery 查询前缀键值 + 使用同一快照读取索引分组。
+	PrefixQuery(table Table, prefix []byte) ([]KeyValue, error)
+	// PrefixQueryWithLimit 限量查询前缀键值 + 使用同一快照控制扫描成本。
+	PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error)
+	// RangeQuery 查询范围键值 + 使用同一快照读取有序 key 区间。
+	RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error)
+	// RangeQueryWithLimit 限量查询范围键值 + 使用同一快照控制扫描成本。
+	RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error)
+	// First 读取表首个键值 + 使用同一快照获取最小 key 数据。
+	First(table Table) (*KeyValue, error)
+	// Last 读取表最后键值 + 使用同一快照获取最大 key 数据。
+	Last(table Table) (*KeyValue, error)
+	// Close 关闭读事务 + 释放底层快照避免阻塞压缩。
+	Close() error
+}
+
 // OperationType 标识写操作类型 + 用于批量事务执行。
 type OperationType uint8
 
@@ -267,6 +295,8 @@ type Database interface {
 	// ExistsByPrefix 判断前缀是否存在 + 用于快速确认索引分组是否有数据。
 	ExistsByPrefix(table Table, prefix []byte) (bool, error)
 
+	// BeginReadTransaction 开启读事务 + 提供跨多次读取的一致快照。
+	BeginReadTransaction() (ReadTransaction, error)
 	// DataTransaction 执行批量事务 + 用于保证多项写操作原子提交。
 	DataTransaction(operations []DBOperation) error
 	// PrefixQuery 查询前缀键值 + 用于读取同一索引分组全部数据。

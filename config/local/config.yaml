@@ -7,6 +7,8 @@ log:
   level: "info"
   format: "json"
   add_source: false
+  output: "console"
+  file_path: "./logs/local/solana_golang.log"
 
 database:
   engine: "pebble"
@@ -14,5 +16,9 @@ database:
   wal: true
 
 p2p:
-  listen_address: "/ip4/0.0.0.0/tcp/5002"
+  peer_id: "11111111111111111111111111111111"
+  ip_type: "ip4"
+  listen_ip: "0.0.0.0"
+  listen_port: 5002
+  default_protocol: "tcp"
   max_peers: 64
