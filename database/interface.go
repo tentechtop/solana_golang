@@ -220,6 +220,14 @@ type Database interface {
 	CreateDatabase(config DatabaseConfig) error
 	// CloseDatabase 关闭数据库实例 + 用于释放底层文件和句柄资源。
 	CloseDatabase() error
+	// RegisterMigration 注册数据库迁移 + 用于实例级追加可执行 schema 变更。
+	RegisterMigration(migration Migration) error
+	// Migrate 执行待应用迁移 + 用于启动和运维阶段推进 schema 版本。
+	Migrate() error
+	// SchemaVersion 读取当前 schema 版本 + 用于启动校验和运维观测。
+	SchemaVersion() (uint64, error)
+	// MigrationHistory 读取迁移历史 + 用于审计迁移执行状态。
+	MigrationHistory() ([]MigrationRecord, error)
 
 	// Exists 判断字节键是否存在 + 用于避免无效读写。
 	Exists(table Table, key []byte) (bool, error)

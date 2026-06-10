@@ -35,6 +35,8 @@ type databaseService struct {
 	initialized  bool
 	transactions map[string]*databaseTransaction
 	txSeq        uint64
+	migrationMu  sync.Mutex
+	migrations   []Migration
 
 	cacheMu sync.RWMutex
 	caches  map[Table]*tableCache
@@ -99,16 +101,29 @@ func (p *databaseService) CreateDatabase(config DatabaseConfig) error {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.ensureDefaultsLocked()
 	if p.path != "" {
+		p.mu.Unlock()
 		return nil
 	}
 	p.walEnabled = config.WAL
 	if err := p.engine.Open(config.Path, config.WAL); err != nil {
+		p.mu.Unlock()
 		return fmt.Errorf("database: open engine: %w", err)
 	}
 	p.path = config.Path
+	p.mu.Unlock()
+
+	if err := p.Migrate(); err != nil {
+		closeErr := p.engine.Close()
+		p.mu.Lock()
+		p.path = ""
+		p.mu.Unlock()
+		if closeErr != nil {
+			return fmt.Errorf("database: migrate: %w; close engine: %v", err, closeErr)
+		}
+		return fmt.Errorf("database: migrate: %w", err)
+	}
 	return nil
 }
 
