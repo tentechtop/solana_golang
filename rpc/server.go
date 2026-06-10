@@ -39,7 +39,6 @@ type Server struct {
 	logger       *slog.Logger
 }
 
-// NewServer 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewServer(config ServerConfig, router *Router) *Server {
 	if router == nil {
 		router = NewDefaultRouter(nil)
@@ -66,8 +65,6 @@ func NewServer(config ServerConfig, router *Router) *Server {
 	}
 	return server
 }
-
-// ListenAndServe 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) ListenAndServe() error {
 	if s.httpServer == nil {
 		return errors.New("rpc: http server is nil")
@@ -80,8 +77,6 @@ func (s *Server) ListenAndServe() error {
 	s.logger.Info("rpc server stopped", slog.String("address", s.httpServer.Addr))
 	return nil
 }
-
-// Shutdown 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
@@ -94,8 +89,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("rpc server shutdown completed", slog.String("address", s.httpServer.Addr))
 	return nil
 }
-
-// ServeHTTP 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	responseWriter := &statusResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -126,8 +119,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewEncoder(responseWriter).Encode(response.(Response))
 }
-
-// logHTTPRequest 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) logHTTPRequest(r *http.Request, statusCode int, startedAt time.Time) {
 	if s.logger == nil {
 		return
@@ -140,8 +131,6 @@ func (s *Server) logHTTPRequest(r *http.Request, statusCode int, startedAt time.
 		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
 	)
 }
-
-// handleBody 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) handleBody(ctx context.Context, body []byte) (any, bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -152,8 +141,6 @@ func (s *Server) handleBody(ctx context.Context, body []byte) (any, bool) {
 	}
 	return s.handleSingle(ctx, trimmed), false
 }
-
-// handleSingle 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) handleSingle(ctx context.Context, body []byte) Response {
 	var request Request
 	if err := decodeStrict(body, &request); err != nil {
@@ -161,8 +148,6 @@ func (s *Server) handleSingle(ctx context.Context, body []byte) Response {
 	}
 	return s.router.Handle(ctx, request)
 }
-
-// handleBatch 执行对应逻辑 + 保持函数职责清晰可维护。
 func (s *Server) handleBatch(ctx context.Context, body []byte) []Response {
 	var requests []Request
 	if err := decodeStrict(body, &requests); err != nil {
@@ -181,8 +166,6 @@ func (s *Server) handleBatch(ctx context.Context, body []byte) []Response {
 	}
 	return responses
 }
-
-// readRequestBody 执行对应逻辑 + 保持函数职责清晰可维护。
 func readRequestBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64) ([]byte, error) {
 	reader := http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	defer reader.Close()
@@ -192,8 +175,6 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64)
 	}
 	return body, nil
 }
-
-// decodeStrict 执行对应逻辑 + 保持函数职责清晰可维护。
 func decodeStrict(data []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -213,7 +194,6 @@ type statusResponseWriter struct {
 	wroteHeader bool
 }
 
-// WriteHeader 执行对应逻辑 + 保持函数职责清晰可维护。
 func (w *statusResponseWriter) WriteHeader(statusCode int) {
 	if w.wroteHeader {
 		return

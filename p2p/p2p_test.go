@@ -24,8 +24,6 @@ func testAddress(t *testing.T, protocol utils.MultiAddressProtocol, port int, pe
 	}
 	return address
 }
-
-// freeTCPPort 执行对应逻辑 + 保持函数职责清晰可维护。
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -35,8 +33,6 @@ func freeTCPPort(t *testing.T) int {
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
 }
-
-// waitForTCP 执行对应逻辑 + 保持函数职责清晰可维护。
 func waitForTCP(t *testing.T, port int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

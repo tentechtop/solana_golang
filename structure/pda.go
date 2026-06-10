@@ -112,14 +112,10 @@ func IsOnEd25519Curve(value []byte) bool {
 	}
 	return isQuadraticResidue(x2, ed25519Prime)
 }
-
-// littleEndianBytesToBigInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func littleEndianBytesToBigInt(value []byte) *big.Int {
 	reversed := utils.ReverseBytes(value)
 	return new(big.Int).SetBytes(reversed)
 }
-
-// isQuadraticResidue 执行对应逻辑 + 保持函数职责清晰可维护。
 func isQuadraticResidue(value *big.Int, prime *big.Int) bool {
 	if value.Sign() == 0 {
 		return true

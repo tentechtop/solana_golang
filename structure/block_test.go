@@ -62,8 +62,6 @@ func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidBlockHeader", err)
 	}
 }
-
-// newTestBlock 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestBlock(t *testing.T) Block {
 	t.Helper()
 

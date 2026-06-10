@@ -30,8 +30,6 @@ func TestDatabaseContractAcrossEngines(t *testing.T) {
 		})
 	}
 }
-
-// runDatabaseContract 执行对应逻辑 + 保持函数职责清晰可维护。
 func runDatabaseContract(t *testing.T, db Database) {
 	t.Helper()
 
@@ -81,8 +79,6 @@ func runDatabaseContract(t *testing.T, db Database) {
 		t.Fatal("Exists(deleted) = true, want false")
 	}
 }
-
-// runDatabaseExtendedContract 执行对应逻辑 + 保持函数职责清晰可维护。
 func runDatabaseExtendedContract(t *testing.T, db Database) {
 	t.Helper()
 
@@ -403,8 +399,6 @@ func testConcurrentAccess(t *testing.T, db Database) {
 		t.Fatalf("Count(concurrent) = %d, want at least %d", count, workers*writesPerWorker)
 	}
 }
-
-// assertByteSlices 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertByteSlices(t *testing.T, got [][]byte, want [][]byte) {
 	t.Helper()
 	if len(got) != len(want) {

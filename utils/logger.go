@@ -134,8 +134,6 @@ func LoggerFromEnv() (*slog.Logger, error) {
 		AddSource: strings.EqualFold(os.Getenv("LOG_ADD_SOURCE"), "true"),
 	})
 }
-
-// normalizeLogFormat 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeLogFormat(format string) string {
 	normalized, err := ParseLogFormat(format)
 	if err != nil {

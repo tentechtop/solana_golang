@@ -23,7 +23,6 @@ type closeRecorder struct {
 	closed bool
 }
 
-// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (recorder *closeRecorder) Close() error {
 	recorder.closed = true
 	return nil
@@ -337,8 +336,6 @@ func TestErrorsJoin(t *testing.T) {
 		t.Fatal("errorsJoin(nil) != nil")
 	}
 }
-
-// replaceCommandLine 执行对应逻辑 + 保持函数职责清晰可维护。
 func replaceCommandLine(args []string) func() {
 	originalArgs := os.Args
 	originalCommandLine := flag.CommandLine
@@ -350,8 +347,6 @@ func replaceCommandLine(args []string) func() {
 		flag.CommandLine = originalCommandLine
 	}
 }
-
-// freeTCPPort 执行对应逻辑 + 保持函数职责清晰可维护。
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -361,8 +356,6 @@ func freeTCPPort(t *testing.T) int {
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
 }
-
-// writeRuntimeConfig 执行对应逻辑 + 保持函数职责清晰可维护。
 func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -394,8 +387,6 @@ func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePa
 	}
 	return path
 }
-
-// discardLogger 执行对应逻辑 + 保持函数职责清晰可维护。
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
@@ -404,42 +395,27 @@ type failingConnection struct {
 	closed bool
 }
 
-// ID 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) ID() string {
 	return "connection-1"
 }
-
-// Protocol 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) Protocol() utils.MultiAddressProtocol {
 	return utils.ProtocolTCP
 }
-
-// RemotePeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) RemotePeerID() string {
 	return ""
 }
-
-// LocalAddress 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) LocalAddress() string {
 	return "127.0.0.1:1"
 }
-
-// RemoteAddress 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) RemoteAddress() string {
 	return "127.0.0.1:2"
 }
-
-// ReadMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) ReadMessage(ctx context.Context) (p2p.Message, error) {
 	return p2p.Message{}, errors.New("read failed")
 }
-
-// WriteMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) WriteMessage(ctx context.Context, message p2p.Message) error {
 	return nil
 }
-
-// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *failingConnection) Close() error {
 	connection.closed = true
 	return nil
@@ -451,32 +427,21 @@ type messageThenFailConnection struct {
 	closed  bool
 }
 
-// ID 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) ID() string {
 	return "connection-2"
 }
-
-// Protocol 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) Protocol() utils.MultiAddressProtocol {
 	return utils.ProtocolTCP
 }
-
-// RemotePeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) RemotePeerID() string {
 	return ""
 }
-
-// LocalAddress 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) LocalAddress() string {
 	return "127.0.0.1:3"
 }
-
-// RemoteAddress 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) RemoteAddress() string {
 	return "127.0.0.1:4"
 }
-
-// ReadMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) ReadMessage(ctx context.Context) (p2p.Message, error) {
 	if connection.read {
 		return p2p.Message{}, errors.New("done")
@@ -484,13 +449,9 @@ func (connection *messageThenFailConnection) ReadMessage(ctx context.Context) (p
 	connection.read = true
 	return connection.message, nil
 }
-
-// WriteMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) WriteMessage(ctx context.Context, message p2p.Message) error {
 	return nil
 }
-
-// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (connection *messageThenFailConnection) Close() error {
 	connection.closed = true
 	return nil

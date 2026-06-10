@@ -294,8 +294,6 @@ func TestCompileInstructionAndMarshal(t *testing.T) {
 		t.Fatal("MarshalBinary() returned empty bytes")
 	}
 }
-
-// newTestTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestTransaction(t *testing.T) Transaction {
 	t.Helper()
 
@@ -333,8 +331,6 @@ func newTestTransaction(t *testing.T) Transaction {
 		Status:     TransactionStatusPending,
 	}
 }
-
-// newTestPublicKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestPublicKey(seed byte) PublicKey {
 	var key PublicKey
 	for index := range key {
@@ -342,8 +338,6 @@ func newTestPublicKey(seed byte) PublicKey {
 	}
 	return key
 }
-
-// newTestHash 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestHash(seed byte) Hash {
 	var hash Hash
 	for index := range hash {
@@ -351,8 +345,6 @@ func newTestHash(seed byte) Hash {
 	}
 	return hash
 }
-
-// newTestSignature 执行对应逻辑 + 保持函数职责清晰可维护。
 func newTestSignature(seed byte) Signature {
 	var signature Signature
 	for index := range signature {

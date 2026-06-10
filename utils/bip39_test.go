@@ -136,8 +136,6 @@ func TestNewBIP39SeedNormalizesWhitespace(t *testing.T) {
 		t.Fatalf("seed with extra spaces = %x, want %x", gotSeed, wantSeed)
 	}
 }
-
-// deterministicBIP39Entropy 执行对应逻辑 + 保持函数职责清晰可维护。
 func deterministicBIP39Entropy(bitSize int) []byte {
 	entropy := make([]byte, bitSize/8)
 	for index := range entropy {

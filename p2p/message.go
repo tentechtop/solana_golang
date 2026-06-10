@@ -241,8 +241,6 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 	}
 	return message, nil
 }
-
-// writeMessageFrame 执行对应逻辑 + 保持函数职责清晰可维护。
 func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) error {
 	encoded, err := message.MarshalBinary(maxMessageSize)
 	if err != nil {
@@ -262,8 +260,6 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 	}
 	return nil
 }
-
-// readMessageFrame 执行对应逻辑 + 保持函数职责清晰可维护。
 func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	header := make([]byte, messageFrameHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
@@ -281,8 +277,6 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	}
 	return UnmarshalBinary(encoded, maxMessageSize)
 }
-
-// newBaseMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
 	messageID, err := newMessageID()
 	if err != nil {
@@ -300,16 +294,12 @@ func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
 	}
 	return message, nil
 }
-
-// effectiveVersion 执行对应逻辑 + 保持函数职责清晰可维护。
 func (message Message) effectiveVersion() uint16 {
 	if message.Version == 0 {
 		return MessageProtocolVersion
 	}
 	return message.Version
 }
-
-// validateRequestID 执行对应逻辑 + 保持函数职责清晰可维护。
 func (message Message) validateRequestID() error {
 	if message.RequestID == "" {
 		if message.Flag == MessageFlagResponse {
@@ -328,8 +318,6 @@ func (message Message) validateRequestID() error {
 	}
 	return nil
 }
-
-// newMessageID 执行对应逻辑 + 保持函数职责清晰可维护。
 func newMessageID() (string, error) {
 	buffer := make([]byte, messageIDByteSize)
 	unixMillis := uint64(time.Now().UnixMilli())
@@ -346,8 +334,6 @@ func newMessageID() (string, error) {
 	buffer[8] = (buffer[8] & 0x3f) | 0x80
 	return hex.EncodeToString(buffer), nil
 }
-
-// messageIDBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func messageIDBytes(value string) ([]byte, error) {
 	if !isValidMessageID(value) {
 		return nil, fmt.Errorf("%w: invalid message id", ErrInvalidMessage)
@@ -358,24 +344,18 @@ func messageIDBytes(value string) ([]byte, error) {
 	}
 	return decoded, nil
 }
-
-// messageRequestIDBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func messageRequestIDBytes(value string) ([]byte, error) {
 	if value == "" {
 		return make([]byte, messageIDByteSize), nil
 	}
 	return messageIDBytes(value)
 }
-
-// messageRequestIDString 执行对应逻辑 + 保持函数职责清晰可维护。
 func messageRequestIDString(value []byte) string {
 	if isZeroBytes(value) {
 		return ""
 	}
 	return hex.EncodeToString(value)
 }
-
-// isValidMessageID 执行对应逻辑 + 保持函数职责清晰可维护。
 func isValidMessageID(value string) bool {
 	if len(value) != messageIDByteSize*2 {
 		return false
@@ -383,14 +363,10 @@ func isValidMessageID(value string) bool {
 	_, err := hex.DecodeString(value)
 	return err == nil
 }
-
-// isZeroMessageID 执行对应逻辑 + 保持函数职责清晰可维护。
 func isZeroMessageID(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && isZeroBytes(decoded)
 }
-
-// messagePeerIDBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func messagePeerIDBytes(peerID string) ([]byte, error) {
 	if peerID == "" {
 		return make([]byte, messagePeerIDByteSize), nil
@@ -404,16 +380,12 @@ func messagePeerIDBytes(peerID string) ([]byte, error) {
 	}
 	return decoded, nil
 }
-
-// messagePeerIDString 执行对应逻辑 + 保持函数职责清晰可维护。
 func messagePeerIDString(value []byte) string {
 	if isZeroBytes(value) {
 		return ""
 	}
 	return utils.Base58Encode(value)
 }
-
-// validateMessagePeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateMessagePeerID(peerID string, optional bool) error {
 	if peerID == "" && optional {
 		return nil
@@ -423,8 +395,6 @@ func validateMessagePeerID(peerID string, optional bool) error {
 	}
 	return nil
 }
-
-// maxPayloadSize 执行对应逻辑 + 保持函数职责清晰可维护。
 func maxPayloadSize(maxMessageSize int) int {
 	normalized := normalizeMaxMessageSize(maxMessageSize)
 	if normalized <= messageWireHeaderSize {
@@ -432,16 +402,12 @@ func maxPayloadSize(maxMessageSize int) int {
 	}
 	return normalized - messageWireHeaderSize
 }
-
-// normalizeMaxMessageSize 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeMaxMessageSize(maxMessageSize int) int {
 	if maxMessageSize <= 0 {
 		return DefaultMaxMessageSize
 	}
 	return maxMessageSize
 }
-
-// cloneBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil
@@ -450,8 +416,6 @@ func cloneBytes(value []byte) []byte {
 	copy(cloned, value)
 	return cloned
 }
-
-// isZeroBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func isZeroBytes(value []byte) bool {
 	for _, item := range value {
 		if item != 0 {

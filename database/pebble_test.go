@@ -338,8 +338,6 @@ func TestPebbleDatabaseBlockchainCommonHelpers(t *testing.T) {
 		t.Fatalf("checkpoint dir stat = (%v, %v), want directory", info, err)
 	}
 }
-
-// assertKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertKeys(t *testing.T, pairs []KeyValue, want [][]byte) {
 	t.Helper()
 	if len(pairs) != len(want) {
@@ -351,15 +349,11 @@ func assertKeys(t *testing.T, pairs []KeyValue, want [][]byte) {
 		}
 	}
 }
-
-// heightKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func heightKey(height uint64) []byte {
 	key := make([]byte, 8)
 	binary.BigEndian.PutUint64(key, height)
 	return key
 }
-
-// assertValues 执行对应逻辑 + 保持函数职责清晰可维护。
 func assertValues(t *testing.T, pairs []KeyValue, want [][]byte) {
 	t.Helper()
 	if len(pairs) != len(want) {

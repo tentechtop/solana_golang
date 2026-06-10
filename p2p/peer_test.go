@@ -105,7 +105,6 @@ func TestPeerStateTransitions(t *testing.T) {
 
 type assertError string
 
-// Error 执行对应逻辑 + 保持函数职责清晰可维护。
 func (err assertError) Error() string {
 	return string(err)
 }

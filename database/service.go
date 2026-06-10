@@ -58,7 +58,6 @@ var _ ReadTransaction = (*readTransaction)(nil)
 // DatabaseImpl 默认数据库实现 + 兼容旧代码入口。
 type DatabaseImpl = databaseService
 
-// newDatabaseService 执行对应逻辑 + 保持函数职责清晰可维护。
 func newDatabaseService(engine KVEngine) *databaseService {
 	database := &databaseService{engine: engine}
 	database.mu.Lock()
@@ -66,23 +65,15 @@ func newDatabaseService(engine KVEngine) *databaseService {
 	database.mu.Unlock()
 	return database
 }
-
-// NewPebbleDatabase 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewPebbleDatabase() *PebbleDatabase {
 	return &PebbleDatabase{databaseService: newDatabaseService(newPebbleKVEngine())}
 }
-
-// NewLevelDBDatabase 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewLevelDBDatabase() *LevelDBDatabase {
 	return &LevelDBDatabase{databaseService: newDatabaseService(newLevelDBKVEngine())}
 }
-
-// NewDatabaseImpl 执行对应逻辑 + 保持函数职责清晰可维护。
 func NewDatabaseImpl() *DatabaseImpl {
 	return newDatabaseService(newPebbleKVEngine())
 }
-
-// ensureDefaultsLocked 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ensureDefaultsLocked() {
 	if !p.initialized {
 		p.walEnabled = true
@@ -92,8 +83,6 @@ func (p *databaseService) ensureDefaultsLocked() {
 		p.transactions = make(map[string]*databaseTransaction)
 	}
 }
-
-// CreateDatabase 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) CreateDatabase(config DatabaseConfig) error {
 	if config.Path == "" {
 		return errors.New("database: config path is empty")
@@ -112,13 +101,9 @@ func (p *databaseService) CreateDatabase(config DatabaseConfig) error {
 	p.path = config.Path
 	return nil
 }
-
-// CloseDatabase 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) CloseDatabase() error {
 	return p.Close()
 }
-
-// Exists 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Exists(table Table, key []byte) (bool, error) {
 	value, err := p.Get(table, key)
 	if err != nil {
@@ -126,18 +111,12 @@ func (p *databaseService) Exists(table Table, key []byte) (bool, error) {
 	}
 	return value != nil, nil
 }
-
-// Put 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Put(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
-
-// Insert 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Insert(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
-
-// Delete 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Delete(table Table, key []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
@@ -152,13 +131,9 @@ func (p *databaseService) Delete(table Table, key []byte) error {
 	p.cacheDelete(table, key)
 	return nil
 }
-
-// Update 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Update(table Table, key []byte, value []byte) error {
 	return p.put(table, key, value)
 }
-
-// Get 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Get(table Table, key []byte) ([]byte, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -173,58 +148,36 @@ func (p *databaseService) Get(table Table, key []byte) ([]byte, error) {
 	p.cacheSet(table, key, value)
 	return value, nil
 }
-
-// ExistsInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ExistsInt(table Table, key int) (bool, error) {
 	return p.Exists(table, encodeIntKey(key))
 }
-
-// ExistsInt64 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ExistsInt64(table Table, key int64) (bool, error) {
 	return p.Exists(table, encodeInt64Key(key))
 }
-
-// PutInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PutInt(table Table, key int, value []byte) error {
 	return p.Put(table, encodeIntKey(key), value)
 }
-
-// PutInt64 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PutInt64(table Table, key int64, value []byte) error {
 	return p.Put(table, encodeInt64Key(key), value)
 }
-
-// UpdateInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) UpdateInt(table Table, key int, value []byte) error {
 	return p.Update(table, encodeIntKey(key), value)
 }
-
-// UpdateInt64 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) UpdateInt64(table Table, key int64, value []byte) error {
 	return p.Update(table, encodeInt64Key(key), value)
 }
-
-// DeleteInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) DeleteInt(table Table, key int) error {
 	return p.Delete(table, encodeIntKey(key))
 }
-
-// DeleteInt64 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) DeleteInt64(table Table, key int64) error {
 	return p.Delete(table, encodeInt64Key(key))
 }
-
-// GetInt 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) GetInt(table Table, key int) ([]byte, error) {
 	return p.Get(table, encodeIntKey(key))
 }
-
-// GetInt64 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) GetInt64(table Table, key int64) ([]byte, error) {
 	return p.Get(table, encodeInt64Key(key))
 }
-
-// Count 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Count(table Table) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
@@ -232,8 +185,6 @@ func (p *databaseService) Count(table Table) (int, error) {
 	lower, upper := tableBounds(table)
 	return p.countInBounds(lower, upper)
 }
-
-// CountByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) CountByPrefix(table Table, prefix []byte) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
@@ -241,8 +192,6 @@ func (p *databaseService) CountByPrefix(table Table, prefix []byte) (int, error)
 	lower, upper := prefixBounds(table, prefix)
 	return p.countInBounds(lower, upper)
 }
-
-// IsEmpty 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) IsEmpty(table Table) (bool, error) {
 	first, err := p.First(table)
 	if err != nil {
@@ -250,13 +199,9 @@ func (p *databaseService) IsEmpty(table Table) (bool, error) {
 	}
 	return first == nil, nil
 }
-
-// BatchInsert 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BatchInsert(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationInsert)
 }
-
-// BatchDelete 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BatchDelete(table Table, keys [][]byte) error {
 	ops := make([]DBOperation, len(keys))
 	for i, key := range keys {
@@ -264,13 +209,9 @@ func (p *databaseService) BatchDelete(table Table, keys [][]byte) error {
 	}
 	return p.DataTransaction(ops)
 }
-
-// BatchUpdate 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BatchUpdate(table Table, keys [][]byte, values [][]byte) error {
 	return p.batchPut(table, keys, values, OperationUpdate)
 }
-
-// BatchGet 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
 	values := make([][]byte, len(keys))
 	for i, key := range keys {
@@ -282,8 +223,6 @@ func (p *databaseService) BatchGet(table Table, keys [][]byte) ([][]byte, error)
 	}
 	return values, nil
 }
-
-// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Close() error {
 	p.mu.Lock()
 	p.ensureDefaultsLocked()
@@ -307,8 +246,6 @@ func (p *databaseService) Close() error {
 	p.clearCacheOnly(TableAll)
 	return firstErr
 }
-
-// Flush 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Flush() error {
 	engine, err := p.getDB()
 	if err != nil {
@@ -319,8 +256,6 @@ func (p *databaseService) Flush() error {
 	}
 	return nil
 }
-
-// Compact 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Compact(start []byte, limit []byte) error {
 	engine, err := p.getDB()
 	if err != nil {
@@ -334,8 +269,6 @@ func (p *databaseService) Compact(start []byte, limit []byte) error {
 	}
 	return engine.Compact(start, limit)
 }
-
-// Checkpoint 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Checkpoint(destDir string) error {
 	if destDir == "" {
 		return errors.New("database: checkpoint destination is empty")
@@ -352,33 +285,21 @@ func (p *databaseService) Checkpoint(destDir string) error {
 	}
 	return nil
 }
-
-// Page 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Page(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, false, false)
 }
-
-// PageByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PageByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, false, false)
 }
-
-// PageKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PageKey(table Table, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, nil, pageSize, lastKey, true, false)
 }
-
-// PageKeyByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PageKeyByPrefix(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, false)
 }
-
-// PageKeyByPrefixReverse 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PageKeyByPrefixReverse(table Table, prefix []byte, pageSize int, lastKey []byte) (PageResult, error) {
 	return p.page(table, prefix, pageSize, lastKey, true, true)
 }
-
-// ExistsByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ExistsByPrefix(table Table, prefix []byte) (bool, error) {
 	if err := validateDataTable(table); err != nil {
 		return false, err
@@ -399,8 +320,6 @@ func (p *databaseService) ExistsByPrefix(table Table, prefix []byte) (bool, erro
 	}
 	return ok, nil
 }
-
-// BeginReadTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BeginReadTransaction() (ReadTransaction, error) {
 	engine, err := p.getDB()
 	if err != nil {
@@ -412,8 +331,6 @@ func (p *databaseService) BeginReadTransaction() (ReadTransaction, error) {
 	}
 	return &readTransaction{snapshot: snapshot}, nil
 }
-
-// DataTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) DataTransaction(operations []DBOperation) error {
 	if len(operations) == 0 {
 		return nil
@@ -442,48 +359,30 @@ func (p *databaseService) DataTransaction(operations []DBOperation) error {
 	p.applyCacheOperations(ops)
 	return nil
 }
-
-// PrefixQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, false)
 }
-
-// PrefixQueryWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, false)
 }
-
-// PrefixQueryReverse 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PrefixQueryReverse(table Table, prefix []byte) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, -1, true)
 }
-
-// PrefixQueryReverseWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) PrefixQueryReverseWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	return p.prefixQuery(table, prefix, limit, true)
 }
-
-// RangeQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, false)
 }
-
-// RangeQueryWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, false)
 }
-
-// RangeQueryReverse 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RangeQueryReverse(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, -1, true)
 }
-
-// RangeQueryReverseWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RangeQueryReverseWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	return p.rangeQuery(table, startKey, endKey, limit, true)
 }
-
-// First 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) First(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -491,8 +390,6 @@ func (p *databaseService) First(table Table) (*KeyValue, error) {
 	lower, upper := tableBounds(table)
 	return p.firstInBounds(lower, upper, false)
 }
-
-// Last 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Last(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -500,8 +397,6 @@ func (p *databaseService) Last(table Table) (*KeyValue, error) {
 	lower, upper := tableBounds(table)
 	return p.firstInBounds(lower, upper, true)
 }
-
-// FirstByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) FirstByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -509,8 +404,6 @@ func (p *databaseService) FirstByPrefix(table Table, prefix []byte) (*KeyValue, 
 	lower, upper := prefixBounds(table, prefix)
 	return p.firstInBounds(lower, upper, false)
 }
-
-// LastByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) LastByPrefix(table Table, prefix []byte) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -518,8 +411,6 @@ func (p *databaseService) LastByPrefix(table Table, prefix []byte) (*KeyValue, e
 	lower, upper := prefixBounds(table, prefix)
 	return p.firstInBounds(lower, upper, true)
 }
-
-// Keys 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Keys(table Table) ([][]byte, error) {
 	pairs, err := p.RangeQuery(table, nil, nil)
 	if err != nil {
@@ -527,8 +418,6 @@ func (p *databaseService) Keys(table Table) ([][]byte, error) {
 	}
 	return collectKeys(pairs), nil
 }
-
-// KeysByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) KeysByPrefix(table Table, prefix []byte) ([][]byte, error) {
 	pairs, err := p.PrefixQuery(table, prefix)
 	if err != nil {
@@ -536,8 +425,6 @@ func (p *databaseService) KeysByPrefix(table Table, prefix []byte) ([][]byte, er
 	}
 	return collectKeys(pairs), nil
 }
-
-// Values 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Values(table Table) ([][]byte, error) {
 	pairs, err := p.RangeQuery(table, nil, nil)
 	if err != nil {
@@ -545,8 +432,6 @@ func (p *databaseService) Values(table Table) ([][]byte, error) {
 	}
 	return collectValues(pairs), nil
 }
-
-// ValuesByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ValuesByPrefix(table Table, prefix []byte) ([][]byte, error) {
 	pairs, err := p.PrefixQuery(table, prefix)
 	if err != nil {
@@ -554,8 +439,6 @@ func (p *databaseService) ValuesByPrefix(table Table, prefix []byte) ([][]byte, 
 	}
 	return collectValues(pairs), nil
 }
-
-// ClearCache 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ClearCache(table Table) error {
 	if table != TableAll {
 		if err := validateDataTable(table); err != nil {
@@ -565,8 +448,6 @@ func (p *databaseService) ClearCache(table Table) error {
 	p.clearCacheOnly(table)
 	return nil
 }
-
-// SetCachePolicy 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) SetCachePolicy(table Table, ttlMillis int64, maxSize int) error {
 	if ttlMillis < 0 {
 		return errors.New("database: cache ttl cannot be negative")
@@ -600,8 +481,6 @@ func (p *databaseService) SetCachePolicy(table Table, ttlMillis int64, maxSize i
 	enforceCacheLimit(cache)
 	return nil
 }
-
-// RefreshCache 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RefreshCache(table Table, key []byte) error {
 	if table == TableAll {
 		for _, metadata := range AllTableMetadata() {
@@ -640,8 +519,6 @@ func (p *databaseService) RefreshCache(table Table, key []byte) error {
 	}
 	return nil
 }
-
-// BeginTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BeginTransaction() (string, error) {
 	engine, err := p.getDB()
 	if err != nil {
@@ -660,8 +537,6 @@ func (p *databaseService) BeginTransaction() (string, error) {
 	p.mu.Unlock()
 	return id, nil
 }
-
-// CommitTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) CommitTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
@@ -674,8 +549,6 @@ func (p *databaseService) CommitTransaction(transactionID string) error {
 	p.applyCacheOperations(tx.ops)
 	return nil
 }
-
-// RollbackTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) RollbackTransaction(transactionID string) error {
 	tx, err := p.takeTransaction(transactionID)
 	if err != nil {
@@ -683,8 +556,6 @@ func (p *databaseService) RollbackTransaction(transactionID string) error {
 	}
 	return tx.batch.Close()
 }
-
-// AddToTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) AddToTransaction(transactionID string, operation DBOperation) error {
 	if transactionID == "" {
 		return errors.New("database: transaction id is empty")
@@ -706,8 +577,6 @@ func (p *databaseService) AddToTransaction(transactionID string, operation DBOpe
 	tx.ops = append(tx.ops, cloned)
 	return nil
 }
-
-// ListAllTables 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ListAllTables() ([]string, error) {
 	metadata := AllTableMetadata()
 	tables := make([]string, 0, len(metadata))
@@ -716,8 +585,6 @@ func (p *databaseService) ListAllTables() ([]string, error) {
 	}
 	return tables, nil
 }
-
-// CheckHealth 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) CheckHealth() error {
 	engine, err := p.getDB()
 	if err != nil {
@@ -725,18 +592,12 @@ func (p *databaseService) CheckHealth() error {
 	}
 	return engine.CheckHealth()
 }
-
-// Iterate 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) Iterate(table Table, handler KeyValueHandler) error {
 	return p.iterate(table, nil, handler)
 }
-
-// IterateByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) IterateByPrefix(table Table, prefix []byte, handler KeyValueHandler) error {
 	return p.iterate(table, prefix, handler)
 }
-
-// BatchDeleteRange 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) BatchDeleteRange(table Table, startKey []byte, endKey []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
@@ -755,8 +616,6 @@ func (p *databaseService) BatchDeleteRange(table Table, startKey []byte, endKey 
 	p.clearCacheOnly(table)
 	return nil
 }
-
-// DeleteByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) DeleteByPrefix(table Table, prefix []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
@@ -775,13 +634,9 @@ func (p *databaseService) DeleteByPrefix(table Table, prefix []byte) error {
 	p.clearCacheOnly(table)
 	return nil
 }
-
-// ClearTable 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ClearTable(table Table) error {
 	return p.BatchDeleteRange(table, nil, nil)
 }
-
-// EnableWAL 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) EnableWAL(enable bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -795,8 +650,6 @@ func (p *databaseService) EnableWAL(enable bool) error {
 	p.walEnabled = enable
 	return p.engine.EnableWAL(enable)
 }
-
-// put 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) put(table Table, key []byte, value []byte) error {
 	if err := validateDataTable(table); err != nil {
 		return err
@@ -811,8 +664,6 @@ func (p *databaseService) put(table Table, key []byte, value []byte) error {
 	p.cacheSet(table, key, value)
 	return nil
 }
-
-// getRaw 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) getRaw(table Table, key []byte) ([]byte, error) {
 	engine, err := p.getDB()
 	if err != nil {
@@ -820,8 +671,6 @@ func (p *databaseService) getRaw(table Table, key []byte) ([]byte, error) {
 	}
 	return readRaw(engine, table, key)
 }
-
-// batchPut 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) batchPut(table Table, keys [][]byte, values [][]byte, opType OperationType) error {
 	if len(keys) != len(values) {
 		return fmt.Errorf("database: keys and values length mismatch: %d != %d", len(keys), len(values))
@@ -832,8 +681,6 @@ func (p *databaseService) batchPut(table Table, keys [][]byte, values [][]byte, 
 	}
 	return p.DataTransaction(ops)
 }
-
-// page 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) page(table Table, prefix []byte, pageSize int, lastKey []byte, keysOnly bool, reverse bool) (PageResult, error) {
 	if pageSize <= 0 {
 		return PageResult{IsLastPage: true}, nil
@@ -875,8 +722,6 @@ func (p *databaseService) page(table Table, prefix []byte, pageSize int, lastKey
 	result.IsLastPage = !ok
 	return result, nil
 }
-
-// prefixQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) prefixQuery(table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
@@ -890,8 +735,6 @@ func (p *databaseService) prefixQuery(table Table, prefix []byte, limit int, rev
 	}
 	return readPrefixQuery(engine, table, prefix, limit, reverse)
 }
-
-// rangeQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
@@ -905,8 +748,6 @@ func (p *databaseService) rangeQuery(table Table, startKey []byte, endKey []byte
 	}
 	return readRangeQuery(engine, table, startKey, endKey, limit, reverse)
 }
-
-// countInBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error) {
 	engine, err := p.getDB()
 	if err != nil {
@@ -914,8 +755,6 @@ func (p *databaseService) countInBounds(lower []byte, upper []byte) (int, error)
 	}
 	return readCountInBounds(engine, lower, upper)
 }
-
-// firstInBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) firstInBounds(lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
 	engine, err := p.getDB()
 	if err != nil {
@@ -923,8 +762,6 @@ func (p *databaseService) firstInBounds(lower []byte, upper []byte, reverse bool
 	}
 	return readFirstInBounds(engine, lower, upper, reverse)
 }
-
-// Get 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) Get(table Table, key []byte) ([]byte, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -936,8 +773,6 @@ func (tx *readTransaction) Get(table Table, key []byte) ([]byte, error) {
 	defer snapshot.unlock()
 	return readRaw(snapshot.source, table, key)
 }
-
-// Exists 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) Exists(table Table, key []byte) (bool, error) {
 	value, err := tx.Get(table, key)
 	if err != nil {
@@ -945,8 +780,6 @@ func (tx *readTransaction) Exists(table Table, key []byte) (bool, error) {
 	}
 	return value != nil, nil
 }
-
-// BatchGet 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) BatchGet(table Table, keys [][]byte) ([][]byte, error) {
 	values := make([][]byte, len(keys))
 	for index, key := range keys {
@@ -958,8 +791,6 @@ func (tx *readTransaction) BatchGet(table Table, keys [][]byte) ([][]byte, error
 	}
 	return values, nil
 }
-
-// Count 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) Count(table Table) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
@@ -972,8 +803,6 @@ func (tx *readTransaction) Count(table Table) (int, error) {
 	lower, upper := tableBounds(table)
 	return readCountInBounds(snapshot.source, lower, upper)
 }
-
-// CountByPrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) CountByPrefix(table Table, prefix []byte) (int, error) {
 	if err := validateDataTable(table); err != nil {
 		return 0, err
@@ -986,13 +815,9 @@ func (tx *readTransaction) CountByPrefix(table Table, prefix []byte) (int, error
 	lower, upper := prefixBounds(table, prefix)
 	return readCountInBounds(snapshot.source, lower, upper)
 }
-
-// PrefixQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) PrefixQuery(table Table, prefix []byte) ([]KeyValue, error) {
 	return tx.PrefixQueryWithLimit(table, prefix, -1)
 }
-
-// PrefixQueryWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) PrefixQueryWithLimit(table Table, prefix []byte, limit int) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
@@ -1007,13 +832,9 @@ func (tx *readTransaction) PrefixQueryWithLimit(table Table, prefix []byte, limi
 	defer snapshot.unlock()
 	return readPrefixQuery(snapshot.source, table, prefix, limit, false)
 }
-
-// RangeQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) RangeQuery(table Table, startKey []byte, endKey []byte) ([]KeyValue, error) {
 	return tx.RangeQueryWithLimit(table, startKey, endKey, -1)
 }
-
-// RangeQueryWithLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) RangeQueryWithLimit(table Table, startKey []byte, endKey []byte, limit int) ([]KeyValue, error) {
 	if limit == 0 {
 		return []KeyValue{}, nil
@@ -1028,8 +849,6 @@ func (tx *readTransaction) RangeQueryWithLimit(table Table, startKey []byte, end
 	defer snapshot.unlock()
 	return readRangeQuery(snapshot.source, table, startKey, endKey, limit, false)
 }
-
-// First 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) First(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -1042,8 +861,6 @@ func (tx *readTransaction) First(table Table) (*KeyValue, error) {
 	lower, upper := tableBounds(table)
 	return readFirstInBounds(snapshot.source, lower, upper, false)
 }
-
-// Last 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) Last(table Table) (*KeyValue, error) {
 	if err := validateDataTable(table); err != nil {
 		return nil, err
@@ -1056,8 +873,6 @@ func (tx *readTransaction) Last(table Table) (*KeyValue, error) {
 	lower, upper := tableBounds(table)
 	return readFirstInBounds(snapshot.source, lower, upper, true)
 }
-
-// Close 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) Close() error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
@@ -1073,7 +888,6 @@ type lockedReadSource struct {
 	unlock func()
 }
 
-// readSource 执行对应逻辑 + 保持函数职责清晰可维护。
 func (tx *readTransaction) readSource() (lockedReadSource, error) {
 	tx.mu.RLock()
 	if tx.closed {
@@ -1082,8 +896,6 @@ func (tx *readTransaction) readSource() (lockedReadSource, error) {
 	}
 	return lockedReadSource{source: tx.snapshot, unlock: tx.mu.RUnlock}, nil
 }
-
-// readRaw 执行对应逻辑 + 保持函数职责清晰可维护。
 func readRaw(reader kvReadSource, table Table, key []byte) ([]byte, error) {
 	value, err := reader.Get(encodeKey(table, key))
 	if reader.IsNotFound(err) {
@@ -1094,20 +906,14 @@ func readRaw(reader kvReadSource, table Table, key []byte) ([]byte, error) {
 	}
 	return cloneBytes(value), nil
 }
-
-// readPrefixQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func readPrefixQuery(reader kvReadSource, table Table, prefix []byte, limit int, reverse bool) ([]KeyValue, error) {
 	lower, upper := prefixBounds(table, prefix)
 	return readQueryInBounds(reader, lower, upper, limit, reverse, "prefix query")
 }
-
-// readRangeQuery 执行对应逻辑 + 保持函数职责清晰可维护。
 func readRangeQuery(reader kvReadSource, table Table, startKey []byte, endKey []byte, limit int, reverse bool) ([]KeyValue, error) {
 	lower, upper := rangeBounds(table, startKey, endKey)
 	return readQueryInBounds(reader, lower, upper, limit, reverse, "range")
 }
-
-// readQueryInBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func readQueryInBounds(reader kvReadSource, lower []byte, upper []byte, limit int, reverse bool, operation string) ([]KeyValue, error) {
 	iter, err := reader.NewIterator(lower, upper)
 	if err != nil {
@@ -1130,8 +936,6 @@ func readQueryInBounds(reader kvReadSource, lower []byte, upper []byte, limit in
 	}
 	return pairs, nil
 }
-
-// readCountInBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func readCountInBounds(reader kvReadSource, lower []byte, upper []byte) (int, error) {
 	iter, err := reader.NewIterator(lower, upper)
 	if err != nil {
@@ -1148,8 +952,6 @@ func readCountInBounds(reader kvReadSource, lower []byte, upper []byte) (int, er
 	}
 	return count, nil
 }
-
-// readFirstInBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func readFirstInBounds(reader kvReadSource, lower []byte, upper []byte, reverse bool) (*KeyValue, error) {
 	iter, err := reader.NewIterator(lower, upper)
 	if err != nil {
@@ -1172,8 +974,6 @@ func readFirstInBounds(reader kvReadSource, lower []byte, upper []byte, reverse 
 	}
 	return pair, nil
 }
-
-// iterate 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) iterate(table Table, prefix []byte, handler KeyValueHandler) error {
 	if handler == nil {
 		return errors.New("database: iterator handler is nil")
@@ -1202,8 +1002,6 @@ func (p *databaseService) iterate(table Table, prefix []byte, handler KeyValueHa
 	}
 	return nil
 }
-
-// deleteRangeByIteration 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) deleteRangeByIteration(table Table, start []byte, end []byte) error {
 	engine, err := p.getDB()
 	if err != nil {
@@ -1234,8 +1032,6 @@ func (p *databaseService) deleteRangeByIteration(table Table, start []byte, end 
 	p.clearCacheOnly(table)
 	return nil
 }
-
-// getDB 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) getDB() (KVEngine, error) {
 	p.mu.RLock()
 	engine := p.engine
@@ -1246,8 +1042,6 @@ func (p *databaseService) getDB() (KVEngine, error) {
 	}
 	return engine, nil
 }
-
-// takeTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) takeTransaction(transactionID string) (*databaseTransaction, error) {
 	if transactionID == "" {
 		return nil, errors.New("database: transaction id is empty")
@@ -1261,8 +1055,6 @@ func (p *databaseService) takeTransaction(transactionID string) (*databaseTransa
 	delete(p.transactions, transactionID)
 	return tx, nil
 }
-
-// applyOperationToBatch 执行对应逻辑 + 保持函数职责清晰可维护。
 func applyOperationToBatch(batch KVBatch, op DBOperation) error {
 	if err := validateOperation(op); err != nil {
 		return err
@@ -1282,8 +1074,6 @@ func applyOperationToBatch(batch KVBatch, op DBOperation) error {
 	}
 	return nil
 }
-
-// validateOperation 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateOperation(op DBOperation) error {
 	if err := validateDataTable(op.Table); err != nil {
 		return err
@@ -1295,8 +1085,6 @@ func validateOperation(op DBOperation) error {
 		return fmt.Errorf("database: unsupported operation type %d", op.Type)
 	}
 }
-
-// validateDataTable 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateDataTable(table Table) error {
 	if table == TableAll {
 		return errors.New("database: TableAll cannot be used for data operations")
@@ -1306,22 +1094,16 @@ func validateDataTable(table Table) error {
 	}
 	return nil
 }
-
-// encodeIntKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func encodeIntKey(key int) []byte {
 	var encoded [4]byte
 	binary.BigEndian.PutUint32(encoded[:], uint32(key))
 	return encoded[:]
 }
-
-// encodeInt64Key 执行对应逻辑 + 保持函数职责清晰可维护。
 func encodeInt64Key(key int64) []byte {
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], uint64(key))
 	return encoded[:]
 }
-
-// collectKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func collectKeys(pairs []KeyValue) [][]byte {
 	keys := make([][]byte, 0, len(pairs))
 	for _, pair := range pairs {
@@ -1329,8 +1111,6 @@ func collectKeys(pairs []KeyValue) [][]byte {
 	}
 	return keys
 }
-
-// collectValues 执行对应逻辑 + 保持函数职责清晰可维护。
 func collectValues(pairs []KeyValue) [][]byte {
 	values := make([][]byte, 0, len(pairs))
 	for _, pair := range pairs {
@@ -1338,8 +1118,6 @@ func collectValues(pairs []KeyValue) [][]byte {
 	}
 	return values
 }
-
-// positionPageIterator 执行对应逻辑 + 保持函数职责清晰可维护。
 func positionPageIterator(iter KVIterator, table Table, upper []byte, lastKey []byte, reverse bool) bool {
 	if reverse {
 		if lastKey != nil {
@@ -1360,16 +1138,12 @@ func positionPageIterator(iter KVIterator, table Table, upper []byte, lastKey []
 	}
 	return ok
 }
-
-// positionPrefixQueryIterator 执行对应逻辑 + 保持函数职责清晰可维护。
 func positionPrefixQueryIterator(iter KVIterator, reverse bool) bool {
 	if reverse {
 		return iter.Last()
 	}
 	return iter.First()
 }
-
-// advancePrefixQueryIterator 执行对应逻辑 + 保持函数职责清晰可维护。
 func advancePrefixQueryIterator(iter KVIterator, reverse bool) bool {
 	if reverse {
 		return iter.Prev()

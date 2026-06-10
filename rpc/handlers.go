@@ -30,14 +30,11 @@ type BlockResult struct {
 	Transactions []any  `json:"transactions,omitempty"`
 }
 
-// RegisterDefaultHandlers 执行对应逻辑 + 保持函数职责清晰可维护。
 func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 }
-
-// getBalanceHandler 执行对应逻辑 + 保持函数职责清晰可维护。
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {
@@ -54,8 +51,6 @@ func getBalanceHandler(backend LedgerBackend) HandlerFunc {
 		return result, nil
 	}
 }
-
-// sendTransactionHandler 执行对应逻辑 + 保持函数职责清晰可维护。
 func sendTransactionHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {
@@ -72,8 +67,6 @@ func sendTransactionHandler(backend LedgerBackend) HandlerFunc {
 		return signature, nil
 	}
 }
-
-// getBlockHandler 执行对应逻辑 + 保持函数职责清晰可维护。
 func getBlockHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {
@@ -103,7 +96,6 @@ type getBlockParams struct {
 	Slot uint64 `json:"slot"`
 }
 
-// parseGetBalanceParams 执行对应逻辑 + 保持函数职责清晰可维护。
 func parseGetBalanceParams(params json.RawMessage) (getBalanceParams, *Error) {
 	values, rpcError := parseParamsArray(params)
 	if rpcError != nil {
@@ -118,8 +110,6 @@ func parseGetBalanceParams(params json.RawMessage) (getBalanceParams, *Error) {
 	}
 	return getBalanceParams{Address: address}, nil
 }
-
-// parseSendTransactionParams 执行对应逻辑 + 保持函数职责清晰可维护。
 func parseSendTransactionParams(params json.RawMessage) (sendTransactionParams, *Error) {
 	values, rpcError := parseParamsArray(params)
 	if rpcError != nil {
@@ -134,8 +124,6 @@ func parseSendTransactionParams(params json.RawMessage) (sendTransactionParams, 
 	}
 	return sendTransactionParams{EncodedTransaction: encodedTransaction}, nil
 }
-
-// parseGetBlockParams 执行对应逻辑 + 保持函数职责清晰可维护。
 func parseGetBlockParams(params json.RawMessage) (getBlockParams, *Error) {
 	values, rpcError := parseParamsArray(params)
 	if rpcError != nil {
@@ -150,8 +138,6 @@ func parseGetBlockParams(params json.RawMessage) (getBlockParams, *Error) {
 	}
 	return getBlockParams{Slot: slot}, nil
 }
-
-// parseParamsArray 执行对应逻辑 + 保持函数职责清晰可维护。
 func parseParamsArray(params json.RawMessage) ([]json.RawMessage, *Error) {
 	if len(params) == 0 || string(params) == "null" {
 		return nil, invalidParamsError("params must be an array")

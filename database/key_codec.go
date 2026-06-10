@@ -7,12 +7,9 @@ import (
 
 const tableKeyPrefixSize = 2
 
-// tableBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func tableBounds(table Table) ([]byte, []byte) {
 	return tablePrefix(table), tableUpperBound(table)
 }
-
-// rangeBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func rangeBounds(table Table, startKey []byte, endKey []byte) ([]byte, []byte) {
 	lower, upper := tableBounds(table)
 	if startKey != nil {
@@ -23,8 +20,6 @@ func rangeBounds(table Table, startKey []byte, endKey []byte) ([]byte, []byte) {
 	}
 	return lower, upper
 }
-
-// prefixBounds 执行对应逻辑 + 保持函数职责清晰可维护。
 func prefixBounds(table Table, prefix []byte) ([]byte, []byte) {
 	lower := encodeKey(table, prefix)
 	upper := keySuccessor(lower)
@@ -34,15 +29,11 @@ func prefixBounds(table Table, prefix []byte) ([]byte, []byte) {
 	}
 	return lower, upper
 }
-
-// tablePrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func tablePrefix(table Table) []byte {
 	prefix := make([]byte, tableKeyPrefixSize)
 	binary.BigEndian.PutUint16(prefix, table.Code())
 	return prefix
 }
-
-// tableUpperBound 执行对应逻辑 + 保持函数职责清晰可维护。
 func tableUpperBound(table Table) []byte {
 	code := table.Code()
 	if code == ^uint16(0) {
@@ -52,8 +43,6 @@ func tableUpperBound(table Table) []byte {
 	binary.BigEndian.PutUint16(upper, code+1)
 	return upper
 }
-
-// encodeKey 执行对应逻辑 + 保持函数职责清晰可维护。
 func encodeKey(table Table, key []byte) []byte {
 	prefix := tablePrefix(table)
 	encoded := make([]byte, len(prefix)+len(key))
@@ -61,16 +50,12 @@ func encodeKey(table Table, key []byte) []byte {
 	copy(encoded[len(prefix):], key)
 	return encoded
 }
-
-// stripTablePrefix 执行对应逻辑 + 保持函数职责清晰可维护。
 func stripTablePrefix(key []byte) []byte {
 	if len(key) <= tableKeyPrefixSize {
 		return []byte{}
 	}
 	return cloneBytes(key[tableKeyPrefixSize:])
 }
-
-// keySuccessor 执行对应逻辑 + 保持函数职责清晰可维护。
 func keySuccessor(key []byte) []byte {
 	successor := cloneBytes(key)
 	for i := len(successor) - 1; i >= 0; i-- {
@@ -81,15 +66,11 @@ func keySuccessor(key []byte) []byte {
 	}
 	return nil
 }
-
-// cloneOperation 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneOperation(op DBOperation) DBOperation {
 	op.Key = cloneBytes(op.Key)
 	op.Value = cloneBytes(op.Value)
 	return op
 }
-
-// cloneBytes 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil

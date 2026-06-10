@@ -329,8 +329,6 @@ func (message SolanaMessage) Clone() SolanaMessage {
 func (message SolanaMessage) IsZero() bool {
 	return len(message.AccountKeys) == 0 && len(message.Instructions) == 0 && message.RecentBlockhash == (Blockhash{})
 }
-
-// totalAccountCount 执行对应逻辑 + 保持函数职责清晰可维护。
 func (message SolanaMessage) totalAccountCount() int {
 	accountCount := len(message.AccountKeys)
 	for _, lookup := range message.AddressTableLookups {
@@ -338,8 +336,6 @@ func (message SolanaMessage) totalAccountCount() int {
 	}
 	return accountCount
 }
-
-// validateAccounts 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transaction Transaction) validateAccounts() error {
 	if len(transaction.Accounts) == 0 {
 		return ErrEmptyAccountKeys
@@ -358,8 +354,6 @@ func (transaction Transaction) validateAccounts() error {
 	}
 	return nil
 }
-
-// validateUniqueAccounts 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateUniqueAccounts(accounts []AccountMeta) error {
 	seenAccounts := make(map[PublicKey]struct{}, len(accounts))
 	for accountIndex, account := range accounts {
@@ -373,8 +367,6 @@ func validateUniqueAccounts(accounts []AccountMeta) error {
 	}
 	return nil
 }
-
-// validateAccountOrder 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateAccountOrder(accounts []AccountMeta) error {
 	lastGroup := 0
 	for accountIndex, account := range accounts {
@@ -386,21 +378,15 @@ func validateAccountOrder(accounts []AccountMeta) error {
 	}
 	return nil
 }
-
-// validateInstructions 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transaction Transaction) validateInstructions() error {
 	return validateCompiledInstructions(transaction.Instructions, len(transaction.Accounts))
 }
-
-// validateSignatureCount 执行对应逻辑 + 保持函数职责清晰可维护。
 func (transaction Transaction) validateSignatureCount(requiredSignatures uint8) error {
 	if len(transaction.Signatures) != int(requiredSignatures) {
 		return fmt.Errorf("structure: signatures count %d does not match required %d", len(transaction.Signatures), requiredSignatures)
 	}
 	return nil
 }
-
-// validateCompiledInstructions 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateCompiledInstructions(instructions []CompiledInstruction, accountCount int) error {
 	if len(instructions) == 0 {
 		return ErrEmptyInstructions
@@ -415,8 +401,6 @@ func validateCompiledInstructions(instructions []CompiledInstruction, accountCou
 	}
 	return nil
 }
-
-// validateInstruction 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateInstruction(instruction CompiledInstruction, accountCount int) error {
 	if int(instruction.ProgramIDIndex) >= accountCount {
 		return fmt.Errorf("%w: program id index %d out of range", ErrInvalidInstruction, instruction.ProgramIDIndex)
@@ -434,8 +418,6 @@ func validateInstruction(instruction CompiledInstruction, accountCount int) erro
 	}
 	return nil
 }
-
-// validateMessageHeader 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
 	if header.NumRequiredSignatures == 0 {
 		return fmt.Errorf("%w: required signatures cannot be zero", ErrInvalidMessageHeader)
@@ -453,8 +435,6 @@ func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
 	}
 	return nil
 }
-
-// validateAddressTableLookups 执行对应逻辑 + 保持函数职责清晰可维护。
 func validateAddressTableLookups(lookups []MessageAddressTableLookup) error {
 	for lookupIndex, lookup := range lookups {
 		if lookup.AccountKey.IsZero() {
@@ -463,8 +443,6 @@ func validateAddressTableLookups(lookups []MessageAddressTableLookup) error {
 	}
 	return nil
 }
-
-// appendSignatures 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendSignatures(encoded *[]byte, signatures []Signature) error {
 	if err := appendShortVecLength(encoded, len(signatures)); err != nil {
 		return err
@@ -474,8 +452,6 @@ func appendSignatures(encoded *[]byte, signatures []Signature) error {
 	}
 	return nil
 }
-
-// appendPublicKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendPublicKeys(encoded *[]byte, publicKeys []PublicKey) error {
 	if err := appendShortVecLength(encoded, len(publicKeys)); err != nil {
 		return err
@@ -485,8 +461,6 @@ func appendPublicKeys(encoded *[]byte, publicKeys []PublicKey) error {
 	}
 	return nil
 }
-
-// appendInstructions 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendInstructions(encoded *[]byte, instructions []CompiledInstruction) error {
 	if err := appendShortVecLength(encoded, len(instructions)); err != nil {
 		return err
@@ -498,8 +472,6 @@ func appendInstructions(encoded *[]byte, instructions []CompiledInstruction) err
 	}
 	return nil
 }
-
-// appendInstruction 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendInstruction(encoded *[]byte, instruction CompiledInstruction) error {
 	*encoded = append(*encoded, instruction.ProgramIDIndex)
 	if err := appendUint8Indexes(encoded, instruction.AccountIndexes); err != nil {
@@ -511,8 +483,6 @@ func appendInstruction(encoded *[]byte, instruction CompiledInstruction) error {
 	*encoded = append(*encoded, instruction.Data...)
 	return nil
 }
-
-// appendUint8Indexes 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendUint8Indexes(encoded *[]byte, indexes []uint8) error {
 	if err := appendShortVecLength(encoded, len(indexes)); err != nil {
 		return err
@@ -520,8 +490,6 @@ func appendUint8Indexes(encoded *[]byte, indexes []uint8) error {
 	*encoded = append(*encoded, indexes...)
 	return nil
 }
-
-// appendAddressTableLookups 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendAddressTableLookups(encoded *[]byte, lookups []MessageAddressTableLookup) ([]byte, error) {
 	if err := appendShortVecLength(encoded, len(lookups)); err != nil {
 		return nil, err
@@ -537,8 +505,6 @@ func appendAddressTableLookups(encoded *[]byte, lookups []MessageAddressTableLoo
 	}
 	return *encoded, nil
 }
-
-// appendShortVecLength 执行对应逻辑 + 保持函数职责清晰可维护。
 func appendShortVecLength(encoded *[]byte, length int) error {
 	lengthBytes, err := utils.EncodeShortVecLength(length)
 	if err != nil {
@@ -547,8 +513,6 @@ func appendShortVecLength(encoded *[]byte, length int) error {
 	*encoded = append(*encoded, lengthBytes...)
 	return nil
 }
-
-// estimateMessageSize 执行对应逻辑 + 保持函数职责清晰可维护。
 func estimateMessageSize(message SolanaMessage) int {
 	size := 3 + 3 + len(message.AccountKeys)*PublicKeySize + PublicKeySize
 	for _, instruction := range message.Instructions {
@@ -559,8 +523,6 @@ func estimateMessageSize(message SolanaMessage) int {
 	}
 	return size
 }
-
-// estimateAddressTableLookupSize 执行对应逻辑 + 保持函数职责清晰可维护。
 func estimateAddressTableLookupSize(lookups []MessageAddressTableLookup) int {
 	size := 3
 	for _, lookup := range lookups {
@@ -568,8 +530,6 @@ func estimateAddressTableLookupSize(lookups []MessageAddressTableLookup) int {
 	}
 	return size
 }
-
-// buildMessageHeader 执行对应逻辑 + 保持函数职责清晰可维护。
 func buildMessageHeader(accounts []AccountMeta) MessageHeader {
 	header := MessageHeader{}
 	for _, account := range accounts {
@@ -585,8 +545,6 @@ func buildMessageHeader(accounts []AccountMeta) MessageHeader {
 	}
 	return header
 }
-
-// accountPublicKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func accountPublicKeys(accounts []AccountMeta) []PublicKey {
 	publicKeys := make([]PublicKey, len(accounts))
 	for index, account := range accounts {
@@ -594,8 +552,6 @@ func accountPublicKeys(accounts []AccountMeta) []PublicKey {
 	}
 	return publicKeys
 }
-
-// accountPermissionGroup 执行对应逻辑 + 保持函数职责清晰可维护。
 func accountPermissionGroup(account AccountMeta) int {
 	if account.IsSigner && account.IsWritable {
 		return 0
@@ -608,8 +564,6 @@ func accountPermissionGroup(account AccountMeta) int {
 	}
 	return 3
 }
-
-// cloneSignatures 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneSignatures(value []Signature) []Signature {
 	if value == nil {
 		return nil
@@ -618,8 +572,6 @@ func cloneSignatures(value []Signature) []Signature {
 	copy(cloned, value)
 	return cloned
 }
-
-// cloneAccounts 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneAccounts(value []AccountMeta) []AccountMeta {
 	if value == nil {
 		return nil
@@ -628,8 +580,6 @@ func cloneAccounts(value []AccountMeta) []AccountMeta {
 	copy(cloned, value)
 	return cloned
 }
-
-// cloneInstructions 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneInstructions(value []CompiledInstruction) []CompiledInstruction {
 	if value == nil {
 		return nil
@@ -640,8 +590,6 @@ func cloneInstructions(value []CompiledInstruction) []CompiledInstruction {
 	}
 	return cloned
 }
-
-// clonePublicKeys 执行对应逻辑 + 保持函数职责清晰可维护。
 func clonePublicKeys(value []PublicKey) []PublicKey {
 	if value == nil {
 		return nil
@@ -650,8 +598,6 @@ func clonePublicKeys(value []PublicKey) []PublicKey {
 	copy(cloned, value)
 	return cloned
 }
-
-// cloneAddressTableLookups 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneAddressTableLookups(value []MessageAddressTableLookup) []MessageAddressTableLookup {
 	if value == nil {
 		return nil
@@ -666,8 +612,6 @@ func cloneAddressTableLookups(value []MessageAddressTableLookup) []MessageAddres
 	}
 	return cloned
 }
-
-// clonePohRecord 执行对应逻辑 + 保持函数职责清晰可维护。
 func clonePohRecord(value *PohRecord) *PohRecord {
 	if value == nil {
 		return nil
@@ -675,8 +619,6 @@ func clonePohRecord(value *PohRecord) *PohRecord {
 	cloned := *value
 	return &cloned
 }
-
-// cloneUint8Slice 执行对应逻辑 + 保持函数职责清晰可维护。
 func cloneUint8Slice(value []uint8) []uint8 {
 	if value == nil {
 		return nil

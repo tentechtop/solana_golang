@@ -260,8 +260,6 @@ func (host *Host) Close() error {
 	}
 	return errors.Join(closeErrors...)
 }
-
-// transport 执行对应逻辑 + 保持函数职责清晰可维护。
 func (host *Host) transport(protocol utils.MultiAddressProtocol) (Transport, error) {
 	host.mutex.RLock()
 	defer host.mutex.RUnlock()
@@ -274,8 +272,6 @@ func (host *Host) transport(protocol utils.MultiAddressProtocol) (Transport, err
 	}
 	return transport, nil
 }
-
-// storeConnection 执行对应逻辑 + 保持函数职责清晰可维护。
 func (host *Host) storeConnection(peerID string, connection Connection) {
 	host.mutex.Lock()
 	defer host.mutex.Unlock()
@@ -289,8 +285,6 @@ func (host *Host) storeConnection(peerID string, connection Connection) {
 		host.peers[peerID] = peer
 	}
 }
-
-// recordPeerError 执行对应逻辑 + 保持函数职责清晰可维护。
 func (host *Host) recordPeerError(peerID string, err error) {
 	host.mutex.Lock()
 	defer host.mutex.Unlock()
@@ -299,8 +293,6 @@ func (host *Host) recordPeerError(peerID string, err error) {
 		host.peers[peerID] = peer
 	}
 }
-
-// prepareOutboundMessage 执行对应逻辑 + 保持函数职责清晰可维护。
 func (host *Host) prepareOutboundMessage(peerID string, message Message) (Message, error) {
 	outbound := message.Clone()
 	if outbound.ID == "" {
@@ -324,8 +316,6 @@ func (host *Host) prepareOutboundMessage(peerID string, message Message) (Messag
 	}
 	return outbound, nil
 }
-
-// withDialTimeout 执行对应逻辑 + 保持函数职责清晰可维护。
 func (host *Host) withDialTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -335,29 +325,21 @@ func (host *Host) withDialTimeout(ctx context.Context) (context.Context, context
 	}
 	return context.WithTimeout(ctx, host.dialTimeout)
 }
-
-// normalizeDialTimeout 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeDialTimeout(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
 		return defaultDialTimeout
 	}
 	return timeout
 }
-
-// normalizeLogger 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeLogger(logger *slog.Logger) *slog.Logger {
 	return utils.EnsureLogger(logger)
 }
-
-// normalizeRegistry 执行对应逻辑 + 保持函数职责清晰可维护。
 func normalizeRegistry(registry *ProtocolRegistry) *ProtocolRegistry {
 	if registry != nil {
 		return registry
 	}
 	return NewProtocolRegistry()
 }
-
-// copyConnections 执行对应逻辑 + 保持函数职责清晰可维护。
 func copyConnections(source map[string]Connection) []Connection {
 	connections := make([]Connection, 0, len(source))
 	for _, connection := range source {
@@ -365,8 +347,6 @@ func copyConnections(source map[string]Connection) []Connection {
 	}
 	return connections
 }
-
-// copyTransports 执行对应逻辑 + 保持函数职责清晰可维护。
 func copyTransports(source map[utils.MultiAddressProtocol]Transport) []Transport {
 	transports := make([]Transport, 0, len(source))
 	for _, transport := range source {

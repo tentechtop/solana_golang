@@ -110,8 +110,6 @@ func (registry *ProtocolRegistry) Handle(ctx context.Context, message Message) (
 	}
 	return ProtocolHandleResult{Message: response, HasResponse: true}, nil
 }
-
-// register 执行对应逻辑 + 保持函数职责清晰可维护。
 func (registry *ProtocolRegistry) register(spec ProtocolSpec, handler ProtocolHandler) error {
 	if err := spec.Validate(); err != nil {
 		return err
@@ -138,8 +136,6 @@ func (registry *ProtocolRegistry) register(spec ProtocolSpec, handler ProtocolHa
 	registry.nameToID[normalizedName] = spec.ID
 	return nil
 }
-
-// lookup 执行对应逻辑 + 保持函数职责清晰可维护。
 func (registry *ProtocolRegistry) lookup(protocolID ProtocolID) (registeredProtocol, error) {
 	registry.mutex.RLock()
 	defer registry.mutex.RUnlock()
@@ -152,8 +148,6 @@ func (registry *ProtocolRegistry) lookup(protocolID ProtocolID) (registeredProto
 	}
 	return registered, nil
 }
-
-// responseFor 执行对应逻辑 + 保持函数职责清晰可维护。
 func responseFor(request Message, senderPeerID string, messageType MessageType, payload []byte) (Message, error) {
 	response, err := NewResponseMessage(senderPeerID, messageType, request.ID, payload)
 	if err != nil {

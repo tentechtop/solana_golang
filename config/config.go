@@ -225,13 +225,9 @@ func (config DatabaseConfig) DatabaseOptions() database.DatabaseConfig {
 		WAL:    config.WAL,
 	}
 }
-
-// defaultPeerID 执行对应逻辑 + 保持函数职责清晰可维护。
 func defaultPeerID() string {
 	return strings.Repeat("1", 32)
 }
-
-// resolveConfigPath 执行对应逻辑 + 保持函数职责清晰可维护。
 func resolveConfigPath(path string) (string, error) {
 	cleanPath := filepath.Clean(path)
 	if filepath.IsAbs(cleanPath) || fileExists(cleanPath) {
@@ -255,8 +251,6 @@ func resolveConfigPath(path string) (string, error) {
 	}
 	return cleanPath, nil
 }
-
-// fileExists 执行对应逻辑 + 保持函数职责清晰可维护。
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()

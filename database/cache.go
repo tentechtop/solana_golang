@@ -14,22 +14,17 @@ type tableCache struct {
 	items   map[string]cacheEntry
 }
 
-// ensureCacheStateLocked 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) ensureCacheStateLocked() {
 	if p.caches == nil {
 		p.caches = make(map[Table]*tableCache)
 	}
 }
-
-// cacheEnabled 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) cacheEnabled(table Table) bool {
 	p.cacheMu.RLock()
 	defer p.cacheMu.RUnlock()
 	cache := p.caches[table]
 	return cache != nil && cache.maxSize > 0
 }
-
-// cacheGet 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) cacheGet(table Table, key []byte) ([]byte, bool) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -50,8 +45,6 @@ func (p *databaseService) cacheGet(table Table, key []byte) ([]byte, bool) {
 	cache.items[string(key)] = entry
 	return cloneBytes(entry.value), true
 }
-
-// cacheSet 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) cacheSet(table Table, key []byte, value []byte) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -68,8 +61,6 @@ func (p *databaseService) cacheSet(table Table, key []byte, value []byte) {
 	cache.items[string(key)] = entry
 	enforceCacheLimit(cache)
 }
-
-// cacheDelete 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) cacheDelete(table Table, key []byte) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -79,8 +70,6 @@ func (p *databaseService) cacheDelete(table Table, key []byte) {
 	}
 	delete(cache.items, string(key))
 }
-
-// clearCacheOnly 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) clearCacheOnly(table Table) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -98,8 +87,6 @@ func (p *databaseService) clearCacheOnly(table Table) {
 		cache.items = make(map[string]cacheEntry)
 	}
 }
-
-// applyCacheOperations 执行对应逻辑 + 保持函数职责清晰可维护。
 func (p *databaseService) applyCacheOperations(operations []DBOperation) {
 	for _, op := range operations {
 		switch op.Type {
@@ -110,8 +97,6 @@ func (p *databaseService) applyCacheOperations(operations []DBOperation) {
 		}
 	}
 }
-
-// enforceCacheLimit 执行对应逻辑 + 保持函数职责清晰可维护。
 func enforceCacheLimit(cache *tableCache) {
 	for cache.maxSize > 0 && len(cache.items) > cache.maxSize {
 		var oldestKey string

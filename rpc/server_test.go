@@ -13,17 +13,12 @@ import (
 
 type testLedgerBackend struct{}
 
-// GetBalance 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b testLedgerBackend) GetBalance(context.Context, string) (BalanceResult, error) {
 	return BalanceResult{Value: 100}, nil
 }
-
-// SendTransaction 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b testLedgerBackend) SendTransaction(context.Context, string) (string, error) {
 	return "test-signature", nil
 }
-
-// GetBlock 执行对应逻辑 + 保持函数职责清晰可维护。
 func (b testLedgerBackend) GetBlock(context.Context, uint64) (BlockResult, error) {
 	return BlockResult{Slot: 10, Blockhash: "test-blockhash"}, nil
 }
@@ -141,8 +136,6 @@ func TestServerWritesStructuredRequestLog(t *testing.T) {
 		t.Fatalf("log line = %q, want method field", logLine)
 	}
 }
-
-// postJSONRPC 执行对应逻辑 + 保持函数职责清晰可维护。
 func postJSONRPC(t *testing.T, handler http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
