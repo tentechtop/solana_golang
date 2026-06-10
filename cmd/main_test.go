@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appconfig "solana_golang/config"
+	"solana_golang/database"
 	"solana_golang/p2p"
 	"solana_golang/utils"
 )
@@ -119,6 +120,57 @@ func TestStartRuntimeAndClose(t *testing.T) {
 		t.Fatalf("close() error = %v", err)
 	}
 	resources.closeLog()
+}
+func TestEnsureNodeIdentityCreatesAndPersistsKeyPair(t *testing.T) {
+	databaseInstance := openTestDatabase(t)
+	defer databaseInstance.Close()
+	resources := &runtimeResources{
+		logger:   discardLogger(),
+		database: databaseInstance,
+	}
+
+	identity, err := resources.ensureNodeIdentity(appconfig.Default().P2P.PeerID)
+	if err != nil {
+		t.Fatalf("ensureNodeIdentity() error = %v", err)
+	}
+	if len(identity.PublicKey) != utils.Ed25519KeySize {
+		t.Fatalf("PublicKey length = %d, want %d", len(identity.PublicKey), utils.Ed25519KeySize)
+	}
+	if len(identity.PrivateKey) != utils.Ed25519KeySize {
+		t.Fatalf("PrivateKey length = %d, want %d", len(identity.PrivateKey), utils.Ed25519KeySize)
+	}
+
+	publicKey, err := databaseInstance.Get(database.TablePeer, nodeIdentityPublicKey)
+	if err != nil {
+		t.Fatalf("Get(public key) error = %v", err)
+	}
+	privateKey, err := databaseInstance.Get(database.TablePeer, nodeIdentityPrivateKey)
+	if err != nil {
+		t.Fatalf("Get(private key) error = %v", err)
+	}
+	if !utils.Ed25519Verify(publicKey, []byte("probe"), mustSign(t, privateKey, []byte("probe"))) {
+		t.Fatal("persisted node key pair failed sign verification")
+	}
+}
+func TestEnsureNodeIdentityReusesStoredKeyPair(t *testing.T) {
+	databaseInstance := openTestDatabase(t)
+	defer databaseInstance.Close()
+	resources := &runtimeResources{
+		logger:   discardLogger(),
+		database: databaseInstance,
+	}
+
+	firstIdentity, err := resources.ensureNodeIdentity("")
+	if err != nil {
+		t.Fatalf("ensureNodeIdentity(first) error = %v", err)
+	}
+	secondIdentity, err := resources.ensureNodeIdentity("bad-config-peer-id")
+	if err != nil {
+		t.Fatalf("ensureNodeIdentity(second) error = %v", err)
+	}
+	if secondIdentity.PeerID != firstIdentity.PeerID {
+		t.Fatalf("PeerID = %q, want %q", secondIdentity.PeerID, firstIdentity.PeerID)
+	}
 }
 func TestStartP2PRejectsInvalidConfig(t *testing.T) {
 	resources := &runtimeResources{
@@ -315,6 +367,26 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+func openTestDatabase(t *testing.T) database.Database {
+	t.Helper()
+	databaseInstance, err := database.NewDatabase(database.DatabaseConfig{
+		Engine: database.EnginePebble,
+		Path:   filepath.Join(t.TempDir(), "db"),
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	return databaseInstance
+}
+func mustSign(t *testing.T, privateKey []byte, data []byte) []byte {
+	t.Helper()
+	signature, err := utils.Ed25519Sign(privateKey, data)
+	if err != nil {
+		t.Fatalf("Ed25519Sign() error = %v", err)
+	}
+	return signature
 }
 func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePath string) string {
 	t.Helper()

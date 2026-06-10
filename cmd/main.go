@@ -97,6 +97,12 @@ func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 		resources.closeLog()
 		return nil, err
 	}
+	identity, err := resources.ensureNodeIdentity(config.P2P.PeerID)
+	if err != nil {
+		_ = resources.close()
+		return nil, err
+	}
+	config.P2P.PeerID = identity.PeerID
 	if err := resources.startP2P(config.P2P); err != nil {
 		_ = resources.close()
 		return nil, err
@@ -178,30 +184,19 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
 			resources.serverErrors <- fmt.Errorf("cmd: p2p listen: %w", err)
 		}
 	}()
+	go host.StartHeartbeat(ctx)
 	resources.logger.Info("p2p listener starting", slog.String("address", address.String()))
 	return nil
 }
 
 // handleP2PConnection 处理入站连接消息 + 持续读取并交给协议注册表分发。
 func (resources *runtimeResources) handleP2PConnection(ctx context.Context, connection p2p.Connection) {
-	defer connection.Close()
-	for {
-		message, err := connection.ReadMessage(ctx)
-		if err != nil {
-			resources.logger.Warn("p2p connection closed",
-				slog.String("connection_id", connection.ID()),
-				slog.Any("error", err),
-			)
-			return
-		}
-		if _, err := resources.p2pHost.HandleMessage(ctx, message); err != nil {
-			resources.logger.Warn("p2p message rejected",
-				slog.String("connection_id", connection.ID()),
-				slog.String("message_id", message.ID),
-				slog.Any("error", err),
-			)
-		}
+	if resources.p2pHost == nil {
+		_ = connection.Close()
+		resources.logger.Warn("p2p host missing", slog.String("connection_id", connection.ID()))
+		return
 	}
+	resources.p2pHost.HandleConnection(ctx, connection)
 }
 
 // startRPC 启动 JSON-RPC 服务 + 将监听错误汇聚到主协程统一处理。

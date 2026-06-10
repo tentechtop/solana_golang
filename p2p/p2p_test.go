@@ -30,6 +30,15 @@ func freeTCPPort(t *testing.T) int {
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
 }
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	packetConnection, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(:0) error = %v", err)
+	}
+	defer packetConnection.Close()
+	return packetConnection.LocalAddr().(*net.UDPAddr).Port
+}
 func waitForTCP(t *testing.T, port int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
