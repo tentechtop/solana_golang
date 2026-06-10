@@ -2,89 +2,85 @@
 
 一、核心结论
 
-本项目长期遵循以下序列化分层，不得随意混用：
+本项目不使用 protobuf。
 
-1. P2P / 节点通信：Protocol Buffers
-2. 外部 HTTP / 管理接口：JSON
-3. Solana 链上账户 / 指令数据：Borsh
+长期序列化分层如下：
+
+1. P2P / 节点通信：P2P frame + Borsh message body
+2. Solana 链上账户 / instruction data：Borsh
+3. 外部 HTTP / 管理接口：JSON DTO
 4. 业务内部事实模型：Go domain struct
-5. 数据库存储：结构化字段优先，必要时保存原始 protobuf bytes 或 Borsh bytes
-6. Hash / Sign：使用专用 canonical payload，不直接 hash 普通 protobuf bytes
+5. 数据库存储：结构化字段优先，必要时保存 Borsh raw bytes
+6. Hash / Sign：专用 canonical payload，不直接 hash 传输包 bytes
+
 
 二、设计边界
 
-protobuf 管通信，Borsh 管链上数据，JSON 管外部接口展示和输入。
+Borsh 负责所有二进制协议字节。
+JSON 负责外部接口展示和输入。
+Go domain struct 负责业务一致性。
 
 同一份核心业务事实只能以 domain model 作为权威来源：
 
-protobuf message <-> domain model <-> borsh payload
+json dto <-> domain model <-> borsh payload
+p2p borsh message <-> domain model
 
-禁止 protobuf bytes 与 Borsh bytes 直接互转。
-禁止让 protobuf 和 Borsh 同时成为同一份核心事实数据的权威编码。
+禁止 JSON DTO 直接进入 P2P 或链上编码路径。
+禁止任意 raw bytes 不带 schema_id 入库。
+
 
 三、P2P 通信规范
 
-P2P 消息统一使用 protobuf binary。
+P2P 使用两层结构：
 
-适用场景：
+1. P2P frame
+   - magic
+   - protocol_version
+   - message_type
+   - payload_length
+   - checksum
 
-1. 节点握手
-2. 心跳检测
-3. 状态同步
-4. gossip 消息
-5. 请求 / 响应
-6. 数据广播
-7. 可选 gRPC / stream
+2. P2P message body
+   - Borsh 固定字段布局
 
-protobuf 使用要求：
+当前 P2P message body 字段顺序：
 
-1. proto 字段编号一旦发布禁止复用。
-2. 删除字段必须使用 reserved 保留字段编号和字段名。
-3. 禁止将 map 字段用于会影响一致性、签名、安全状态的消息。
-4. repeated 字段必须明确顺序语义。
-5. enum 必须保留 UNKNOWN = 0。
-6. 所有外部输入反序列化后必须做业务校验。
-7. 不允许动态反射解析任意消息类型，必须使用明确的 message type 白名单。
-8. P2P 单包必须设置最大长度，防止恶意大包占用内存。
+version u16
+id string
+type u32
+from_peer_id string
+to_peer_id string
+request_id string
+flag u8
+created_at_unix_milli i64
+payload bytes
 
-P2P 消息可以使用如下 framing：
+要求：
 
-magic
-protocol_version
-message_type
-payload_length
-payload_protobuf
-checksum
+1. 单包必须有最大长度。
+2. frame 必须先校验 magic、version、length、checksum。
+3. Borsh 解码后必须 EnsureEOF。
+4. 解码后必须执行业务 Validate。
+5. message_type 必须走白名单注册。
+6. 禁止 P2P 使用 JSON。
+7. 禁止引入 protobuf。
+
 
 四、Solana 链上数据规范
 
 Solana 链上账户数据和 instruction data 统一使用 Borsh。
-
-Borsh 的定位：
-
-Borsh = Binary + Deterministic + Compact + Hash-friendly
-           ↓            ↓           ↓           ↓
-       二进制格式   同一数据永远   体积小   适合哈希场景
-                   产出相同字节
-
-适用场景：
-
-1. Solana instruction data
-2. Solana account data
-3. Anchor account decode
-4. 链上状态校验
-5. 与 Rust / Solana 程序保持字节级一致
 
 Borsh 使用要求：
 
 1. 链上结构必须有 Version 字段。
 2. 字段只能尾部追加，禁止中间插入。
 3. 禁止修改已发布字段类型。
-4. 删除字段必须保留占位，禁止直接移除导致字段错位。
+4. 删除字段必须保留占位或新增版本。
 5. 禁止在核心链上结构中使用无序 map。
 6. 数组、字符串、bytes 必须有最大长度。
 7. 反序列化成功后必须继续做业务校验。
-8. Go / Rust 必须建立 golden test，保证字节级兼容。
+8. Go / Rust 必须建立 golden bytes 测试，保证字节级兼容。
+
 
 五、外部 JSON 接口规范
 
@@ -96,11 +92,10 @@ JSON DTO 必须显式转换为 domain model：
 
 api dto <-> domain model
 
-禁止外部 JSON DTO 直接进入 P2P 或链上编码路径。
 
 六、数据库存储规范
 
-数据库以结构化字段为主，不得只依赖不透明 blob 完成核心查询。
+数据库以结构化字段为主，不得只依赖 opaque blob 完成核心查询。
 
 推荐字段：
 
@@ -116,19 +111,9 @@ status
 created_at
 updated_at
 payload_bytes
+payload_hash
 
-存储要求：
-
-1. 核心检索字段必须拆列。
-2. P2P 原始消息可保存 protobuf bytes，用于审计、重放、排障。
-3. 链上原始数据可保存 Borsh bytes，用于校验、重放、排障。
-4. 数据库中的 blob 必须保存 type、version、hash，确保未来可解析。
-5. 写入数据库前必须完成输入校验和版本校验。
-6. raw bytes 必须带版本号和 schema_id，不允许只保存裸 bytes。
-7. raw bytes 必须能通过 Schema Registry 找到对应解析器，确保历史数据不会烂在数据库里。
-8. payload_bytes 写入后不得原地改写，协议升级必须通过新 version 或迁移任务完成。
-
-raw payload 推荐 envelope：
+raw payload envelope：
 
 type
 version
@@ -138,11 +123,21 @@ payload_length
 payload_bytes
 payload_hash
 
+要求：
+
+1. 核心检索字段必须拆列。
+2. raw bytes 必须带 version、codec、schema_id、hash。
+3. 写入数据库前必须完成输入校验和版本校验。
+4. raw bytes 必须能通过 Schema Registry 找到对应解码器。
+5. payload_bytes 写入后不得原地改写。
+6. 协议升级必须通过新 version 或迁移任务完成。
+
+
 七、Schema Registry 规范
 
-项目必须维护 Schema Registry，用于管理 protobuf 和 Borsh 的历史版本解析规则。
+项目必须维护 Schema Registry，用于管理 Borsh 历史版本解码规则。
 
-Schema Registry 的职责：
+Schema Registry 职责：
 
 1. 通过 type、version、codec、schema_id 定位唯一 schema。
 2. 注册当前版本和历史版本的 decode / validate / migrate 方法。
@@ -153,74 +148,55 @@ Schema Registry 的职责：
 7. 启动时必须校验关键 schema 已注册，缺失时直接失败。
 8. Schema Registry 变更必须配套单元测试和 golden bytes。
 
-Schema Registry 解决的问题：
-
-1. raw bytes 知道自己是什么版本。
-2. 系统知道现在该用哪个版本解析。
-3. 历史数据可以稳定重放、审计、迁移。
-4. 协议升级不会破坏数据库旧数据。
 
 八、Hash / Sign 规范
 
-禁止直接使用以下方式作为一致性、安全、签名相关 hash：
-
-hash = SHA256(proto.Marshal(message))
-
-原因：普通 protobuf marshal 不保证所有语言、库、版本下的 canonical bytes 完全一致。
+禁止直接使用传输包 bytes 作为安全 hash 或签名原文。
 
 推荐规则：
 
-1. 链上相关 hash 使用 Borsh bytes。
-2. P2P 去重、日志、缓存 key 可使用 protobuf bytes hash。
-3. 涉及资产、订单、账户状态、签名、安全决策的 hash 必须使用专用 canonical payload。
-4. 所有 hash/sign 必须加入 domain separator。
-5. hash/sign payload 必须包含 message_type 和 version。
-
-推荐格式：
-
 hash = SHA256(domain_separator || message_type || version || canonical_payload)
 sign = SIGN(domain_separator || message_type || version || canonical_payload)
+
+说明：
+
+1. 链上相关 hash 可以使用明确的 Borsh bytes。
+2. P2P 去重、日志、缓存 key 可以使用消息 bytes hash。
+3. 涉及资产、账户状态、共识、安全决策的 hash 必须使用专用 canonical payload。
+4. hash/sign payload 必须包含 domain_separator、message_type、version。
+
 
 九、代码组织规范
 
 推荐目录职责：
 
 api/dto       JSON DTO
-p2p/proto     protobuf schema 和生成代码
-p2p/message   P2P 消息封装和校验
-blockchain    Solana 链上 Borsh 编解码
-domain        业务事实模型
-database      结构化存储和 raw payload 存取
-schema        Schema Registry 和版本迁移
-utils         通用工具方法
+p2p          P2P frame、连接、消息、协议分发
+codec/borsh  Borsh 编解码基础能力
+structure    业务事实模型和链上基础结构
+database     结构化存储和 raw payload 存取
+schema       Schema Registry 和版本迁移
+utils        通用工具方法
 
-转换必须显式：
-
-protobuf message <-> domain model
-json dto <-> domain model
-domain model <-> borsh payload
-
-禁止跨层直接复用 DTO。
 
 十、开发铁律
 
-1. 新增通信消息优先定义 protobuf。
-2. 新增链上结构优先定义 Borsh。
-3. 新增外部接口优先定义 JSON DTO。
+1. 新增通信消息优先定义 domain model 和 Borsh 字节布局。
+2. 新增链上结构必须定义 Borsh 编解码。
+3. 新增外部接口必须定义 JSON DTO。
 4. 新增核心业务状态必须先定义 domain model。
-5. 不得将 protobuf bytes 直接作为安全 hash 原文。
+5. 不得引入 protobuf。
 6. 不得将 JSON 作为 P2P 或链上核心协议。
-7. 不得让链上 Borsh 结构承载外部 API 的临时字段。
+7. 不得让链上 Borsh 结构承载外部 API 临时字段。
 8. 所有反序列化入口必须做长度、版本、枚举、数组边界校验。
 9. 所有底层 decode 错误向上传递时必须添加上下文。
-10. 关键路径必须有日志，便于排查数据不一致问题。
-11. 新增 raw bytes 存储必须同时注册 Schema Registry。
-12. 协议升级必须保留历史解析能力，禁止只保留最新版本解析器。
+10. 新增 raw bytes 存储必须同时注册 Schema Registry。
+11. 协议升级必须保留历史解码能力。
+
 
 十一、最终原则
 
-通信演进能力交给 protobuf。
-链上确定性和 Solana 兼容交给 Borsh。
+通信简单性和确定性字节交给 Borsh。
 外部可读性和接入体验交给 JSON。
 业务一致性由 domain model 保证。
 安全 hash 和签名由 canonical payload 保证。

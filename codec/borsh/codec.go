@@ -65,6 +65,11 @@ func (writer *Writer) WriteUint64(value uint64) {
 	writer.buffer.Write(encoded[:])
 }
 
+// WriteInt64 写入 i64 + 使用小端保持 Borsh 兼容。
+func (writer *Writer) WriteInt64(value int64) {
+	writer.WriteUint64(uint64(value))
+}
+
 // WriteBool 写入 bool + Borsh 使用 0/1 表示布尔值。
 func (writer *Writer) WriteBool(value bool) {
 	if value {
@@ -82,6 +87,11 @@ func (writer *Writer) WriteBytes(value []byte) error {
 	writer.WriteUint32(uint32(len(value)))
 	writer.buffer.Write(value)
 	return nil
+}
+
+// WriteFixedBytes 写入固定字节数组 + Borsh 固定数组不写长度前缀。
+func (writer *Writer) WriteFixedBytes(value []byte) {
+	writer.buffer.Write(value)
 }
 
 // WriteString 写入 UTF-8 字符串 + Borsh string 必须是有效 UTF-8。
@@ -142,6 +152,15 @@ func (reader *Reader) ReadUint64() (uint64, error) {
 	return binary.LittleEndian.Uint64(encoded[:]), nil
 }
 
+// ReadInt64 读取 i64 + 使用小端保持 Borsh 兼容。
+func (reader *Reader) ReadInt64() (int64, error) {
+	value, err := reader.ReadUint64()
+	if err != nil {
+		return 0, err
+	}
+	return int64(value), nil
+}
+
 // ReadBool 读取 bool + 拒绝非 0/1 的畸形布尔值。
 func (reader *Reader) ReadBool() (bool, error) {
 	value, err := reader.ReadUint8()
@@ -173,6 +192,22 @@ func (reader *Reader) ReadBytes() ([]byte, error) {
 	value := make([]byte, int(length))
 	if _, err := io.ReadFull(reader.reader, value); err != nil {
 		return nil, fmt.Errorf("%w: read bytes: %w", ErrInvalidData, err)
+	}
+	return value, nil
+}
+
+// ReadFixedBytes 读取固定字节数组 + Borsh 固定数组不带长度前缀。
+func (reader *Reader) ReadFixedBytes(length int) ([]byte, error) {
+	if length < 0 || length > reader.maxContainerLength {
+		return nil, fmt.Errorf("%w: fixed bytes length %d exceeds %d", ErrInvalidLength, length, reader.maxContainerLength)
+	}
+	if length > reader.reader.Len() {
+		return nil, fmt.Errorf("%w: fixed bytes length %d exceeds remaining %d", ErrInvalidLength, length, reader.reader.Len())
+	}
+
+	value := make([]byte, length)
+	if _, err := io.ReadFull(reader.reader, value); err != nil {
+		return nil, fmt.Errorf("%w: read fixed bytes: %w", ErrInvalidData, err)
 	}
 	return value, nil
 }

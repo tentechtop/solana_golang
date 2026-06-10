@@ -1,6 +1,8 @@
 package structure
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -55,6 +57,112 @@ func TestBlockRejectsTransactionsRootMismatch(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want ErrInvalidBlockHeader", err)
 	}
 }
+func TestBlockMarshalIsDeterministic(t *testing.T) {
+	block := newTestBlock(t)
+
+	firstEncoded, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(first) error = %v", err)
+	}
+	secondEncoded, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(second) error = %v", err)
+	}
+	if !bytes.Equal(firstEncoded, secondEncoded) {
+		t.Fatal("MarshalBinary() returned different bytes for same block")
+	}
+}
+func TestBlockMarshalExcludesRuntimeMeta(t *testing.T) {
+	block := newTestBlock(t)
+	encoded, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	blockHash, err := block.Hash()
+	if err != nil {
+		t.Fatalf("Hash() error = %v", err)
+	}
+
+	block.Meta = BlockMeta{
+		Status:            BlockStatusFinalized,
+		TotalFees:         9999,
+		ComputeUnitsUsed:  8888,
+		ReceivedTimeUnix:  1710000099,
+		FinalizedTimeUnix: 1710000100,
+	}
+	nextEncoded, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(changed meta) error = %v", err)
+	}
+	nextBlockHash, err := block.Hash()
+	if err != nil {
+		t.Fatalf("Hash(changed meta) error = %v", err)
+	}
+
+	if !bytes.Equal(encoded, nextEncoded) {
+		t.Fatal("MarshalBinary() changed after runtime meta mutation")
+	}
+	if blockHash != nextBlockHash {
+		t.Fatal("Hash() changed after runtime meta mutation")
+	}
+}
+func TestBlockHeaderMarshalGoldenLayout(t *testing.T) {
+	block := newTestBlock(t)
+	encoded, err := block.Header.MarshalBinary()
+	if err != nil {
+		t.Fatalf("Header.MarshalBinary() error = %v", err)
+	}
+
+	const headerSize = 326
+	if len(encoded) != headerSize {
+		t.Fatalf("Header encoded length = %d, want %d", len(encoded), headerSize)
+	}
+	assertLittleEndianUint16(t, encoded[0:2], block.Header.Version)
+	assertLittleEndianUint64(t, encoded[2:10], block.Header.Slot)
+	assertLittleEndianUint64(t, encoded[10:18], block.Header.ParentSlot)
+	assertLittleEndianUint64(t, encoded[18:26], block.Header.BlockHeight)
+	assertBytes(t, encoded[26:58], block.Header.ParentHash[:])
+	assertBytes(t, encoded[58:90], block.Header.PreviousBlockhash[:])
+	assertBytes(t, encoded[90:122], block.Header.Blockhash[:])
+	assertBytes(t, encoded[122:154], block.Header.TransactionsRoot[:])
+	assertBytes(t, encoded[154:186], block.Header.AccountsHash[:])
+	assertBytes(t, encoded[186:218], block.Header.StateRoot[:])
+	assertBytes(t, encoded[218:250], block.Header.RewardsHash[:])
+	assertBytes(t, encoded[250:282], block.Header.EntriesHash[:])
+	assertLittleEndianUint64(t, encoded[282:290], uint64(block.Header.TimestampUnix))
+	assertBytes(t, encoded[290:322], block.Header.Leader[:])
+	assertLittleEndianUint32(t, encoded[322:326], block.Header.TransactionCount)
+}
+func TestBlockMarshalPrefixesHeaderAndTransactionCount(t *testing.T) {
+	block := newTestBlock(t)
+	headerEncoded, err := block.Header.MarshalBinary()
+	if err != nil {
+		t.Fatalf("Header.MarshalBinary() error = %v", err)
+	}
+	blockEncoded, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	if !bytes.Equal(blockEncoded[:len(headerEncoded)], headerEncoded) {
+		t.Fatal("MarshalBinary() does not start with header bytes")
+	}
+	if blockEncoded[len(headerEncoded)] != byte(len(block.Transactions)) {
+		t.Fatalf("encoded transaction count = %d, want %d", blockEncoded[len(headerEncoded)], len(block.Transactions))
+	}
+	if len(blockEncoded) <= len(headerEncoded)+1 {
+		t.Fatal("MarshalBinary() did not append transaction bytes")
+	}
+}
+func TestBlockRejectsTransactionCountMismatch(t *testing.T) {
+	block := newTestBlock(t)
+	block.Header.TransactionCount = uint32(len(block.Transactions) + 1)
+
+	err := block.Validate()
+	if !errors.Is(err, ErrInvalidBlockHeader) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidBlockHeader", err)
+	}
+}
 func newTestBlock(t *testing.T) Block {
 	t.Helper()
 
@@ -90,4 +198,32 @@ func newTestBlock(t *testing.T) Block {
 	}
 	block.Header.TransactionsRoot = root
 	return block
+}
+
+func assertLittleEndianUint16(t *testing.T, encoded []byte, expected uint16) {
+	t.Helper()
+	if binary.LittleEndian.Uint16(encoded) != expected {
+		t.Fatalf("uint16 = %d, want %d", binary.LittleEndian.Uint16(encoded), expected)
+	}
+}
+
+func assertLittleEndianUint32(t *testing.T, encoded []byte, expected uint32) {
+	t.Helper()
+	if binary.LittleEndian.Uint32(encoded) != expected {
+		t.Fatalf("uint32 = %d, want %d", binary.LittleEndian.Uint32(encoded), expected)
+	}
+}
+
+func assertLittleEndianUint64(t *testing.T, encoded []byte, expected uint64) {
+	t.Helper()
+	if binary.LittleEndian.Uint64(encoded) != expected {
+		t.Fatalf("uint64 = %d, want %d", binary.LittleEndian.Uint64(encoded), expected)
+	}
+}
+
+func assertBytes(t *testing.T, encoded []byte, expected []byte) {
+	t.Helper()
+	if !bytes.Equal(encoded, expected) {
+		t.Fatalf("bytes = %v, want %v", encoded, expected)
+	}
 }

@@ -3,6 +3,7 @@ package structure
 import (
 	"fmt"
 
+	"solana_golang/codec/borsh"
 	"solana_golang/utils"
 )
 
@@ -130,29 +131,29 @@ func (header BlockHeader) Hash() (Hash, error) {
 	return NewHash(utils.SHA256(encoded))
 }
 
-// MarshalBinary 序列化区块头 + 使用小端整数兼容 Solana 数据习惯。
+// MarshalBinary 序列化区块头 + 使用 Borsh 固定字段顺序保证确定性字节。
 func (header BlockHeader) MarshalBinary() ([]byte, error) {
 	if err := header.Validate(); err != nil {
 		return nil, err
 	}
 
-	encoded := make([]byte, 0, 2+8+8+8+PublicKeySize*8+8+PublicKeySize+4)
-	encoded = append(encoded, utils.Uint16ToBytesLE(header.Version)...)
-	encoded = append(encoded, utils.Uint64ToBytesLE(header.Slot)...)
-	encoded = append(encoded, utils.Uint64ToBytesLE(header.ParentSlot)...)
-	encoded = append(encoded, utils.Uint64ToBytesLE(header.BlockHeight)...)
-	encoded = append(encoded, header.ParentHash[:]...)
-	encoded = append(encoded, header.PreviousBlockhash[:]...)
-	encoded = append(encoded, header.Blockhash[:]...)
-	encoded = append(encoded, header.TransactionsRoot[:]...)
-	encoded = append(encoded, header.AccountsHash[:]...)
-	encoded = append(encoded, header.StateRoot[:]...)
-	encoded = append(encoded, header.RewardsHash[:]...)
-	encoded = append(encoded, header.EntriesHash[:]...)
-	encoded = append(encoded, utils.Int64ToBytesLE(header.TimestampUnix)...)
-	encoded = append(encoded, header.Leader[:]...)
-	encoded = append(encoded, utils.Uint32ToBytesLE(header.TransactionCount)...)
-	return encoded, nil
+	writer := borsh.NewWriter(PublicKeySize)
+	writer.WriteUint16(header.Version)
+	writer.WriteUint64(header.Slot)
+	writer.WriteUint64(header.ParentSlot)
+	writer.WriteUint64(header.BlockHeight)
+	writer.WriteFixedBytes(header.ParentHash[:])
+	writer.WriteFixedBytes(header.PreviousBlockhash[:])
+	writer.WriteFixedBytes(header.Blockhash[:])
+	writer.WriteFixedBytes(header.TransactionsRoot[:])
+	writer.WriteFixedBytes(header.AccountsHash[:])
+	writer.WriteFixedBytes(header.StateRoot[:])
+	writer.WriteFixedBytes(header.RewardsHash[:])
+	writer.WriteFixedBytes(header.EntriesHash[:])
+	writer.WriteInt64(header.TimestampUnix)
+	writer.WriteFixedBytes(header.Leader[:])
+	writer.WriteUint32(header.TransactionCount)
+	return writer.Bytes(), nil
 }
 
 // ComputeTransactionsRoot 计算交易根 + 使用二叉 Merkle 树压缩交易哈希。

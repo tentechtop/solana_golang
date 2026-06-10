@@ -34,12 +34,11 @@ var (
 	DefaultRegistry     = NewRegistry()
 )
 
-// Codec 标识序列化格式 + 避免 protobuf、borsh、json raw bytes 混用。
+// Codec 标识序列化格式 + 避免 borsh、json、canonical raw bytes 混用。
 type Codec uint8
 
 const (
 	CodecUnknown Codec = iota
-	CodecProtobuf
 	CodecBorsh
 	CodecJSON
 	CodecCanonical
@@ -48,8 +47,6 @@ const (
 // String 返回编码名称 + 用于日志和数据库可读字段。
 func (codec Codec) String() string {
 	switch codec {
-	case CodecProtobuf:
-		return "protobuf"
 	case CodecBorsh:
 		return "borsh"
 	case CodecJSON:

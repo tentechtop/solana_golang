@@ -12,8 +12,8 @@ func TestRegistryDecodeEnvelope(t *testing.T) {
 		Key: SchemaKey{
 			Type:     "example.message",
 			Version:  1,
-			Codec:    CodecProtobuf,
-			SchemaID: "example.message.protobuf.v1",
+			Codec:    CodecBorsh,
+			SchemaID: "example.message.borsh.v1",
 		},
 		Decode: func(payload []byte) (any, error) {
 			return string(payload), nil
@@ -76,7 +76,7 @@ func TestRegistryRejectsDuplicateAndUnregistered(t *testing.T) {
 		t.Fatalf("Register(conflicting schema id) error = %v, want ErrSchemaRegistered", err)
 	}
 
-	envelope, err := NewEnvelope("missing.message", 1, CodecProtobuf, "missing.protobuf.v1", []byte("x"))
+	envelope, err := NewEnvelope("missing.message", 1, CodecBorsh, "missing.borsh.v1", []byte("x"))
 	if err != nil {
 		t.Fatalf("NewEnvelope() error = %v", err)
 	}
@@ -86,7 +86,7 @@ func TestRegistryRejectsDuplicateAndUnregistered(t *testing.T) {
 }
 
 func TestEnvelopeRejectsHashMismatch(t *testing.T) {
-	envelope, err := NewEnvelope("example.message", 1, CodecProtobuf, "example.message.protobuf.v1", []byte("hello"))
+	envelope, err := NewEnvelope("example.message", 1, CodecBorsh, "example.message.borsh.v1", []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewEnvelope() error = %v", err)
 	}

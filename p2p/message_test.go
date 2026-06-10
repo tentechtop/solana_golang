@@ -5,9 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	protobuf "google.golang.org/protobuf/proto"
-
-	p2pproto "solana_golang/p2p/proto"
+	"solana_golang/codec/borsh"
 	"solana_golang/schema"
 )
 
@@ -88,8 +86,8 @@ func TestMessageBinaryCarriesPeerRoute(t *testing.T) {
 		t.Fatalf("ToPeerID = %q, want %q", decoded.ToPeerID, toPeerID)
 	}
 }
-func TestMessageMarshalUsesProtobuf(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("protobuf"))
+func TestMessageMarshalUsesBorshLayout(t *testing.T) {
+	message, err := NewMessage(MessageTypePing, []byte("borsh"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -99,18 +97,56 @@ func TestMessageMarshalUsesProtobuf(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 
-	wireMessage := &p2pproto.P2PMessage{}
-	if err := protobuf.Unmarshal(encoded, wireMessage); err != nil {
-		t.Fatalf("protobuf.Unmarshal() error = %v", err)
+	reader := borsh.NewReader(encoded, DefaultMaxMessageSize)
+	version, err := reader.ReadUint16()
+	if err != nil {
+		t.Fatalf("ReadUint16(version) error = %v", err)
 	}
-	if wireMessage.Id != message.ID {
-		t.Fatalf("protobuf id = %q, want %q", wireMessage.Id, message.ID)
+	if version != MessageProtocolVersion {
+		t.Fatalf("version = %d, want %d", version, MessageProtocolVersion)
 	}
-	if wireMessage.Flag != p2pproto.MessageFlag_MESSAGE_FLAG_NOTIFY {
-		t.Fatalf("protobuf flag = %d, want notify", wireMessage.Flag)
+	messageID, err := reader.ReadString()
+	if err != nil {
+		t.Fatalf("ReadString(id) error = %v", err)
 	}
-	if !bytes.Equal(wireMessage.Payload, []byte("protobuf")) {
-		t.Fatalf("protobuf payload = %q, want protobuf", wireMessage.Payload)
+	if messageID != message.ID {
+		t.Fatalf("id = %q, want %q", messageID, message.ID)
+	}
+	messageType, err := reader.ReadUint32()
+	if err != nil {
+		t.Fatalf("ReadUint32(type) error = %v", err)
+	}
+	if MessageType(messageType) != MessageTypePing {
+		t.Fatalf("type = %d, want %d", messageType, MessageTypePing)
+	}
+	if _, err := reader.ReadString(); err != nil {
+		t.Fatalf("ReadString(from peer) error = %v", err)
+	}
+	if _, err := reader.ReadString(); err != nil {
+		t.Fatalf("ReadString(to peer) error = %v", err)
+	}
+	if _, err := reader.ReadString(); err != nil {
+		t.Fatalf("ReadString(request id) error = %v", err)
+	}
+	flag, err := reader.ReadUint8()
+	if err != nil {
+		t.Fatalf("ReadUint8(flag) error = %v", err)
+	}
+	if MessageFlag(flag) != MessageFlagNotify {
+		t.Fatalf("flag = %d, want notify", flag)
+	}
+	if _, err := reader.ReadInt64(); err != nil {
+		t.Fatalf("ReadInt64(created at) error = %v", err)
+	}
+	payload, err := reader.ReadBytes()
+	if err != nil {
+		t.Fatalf("ReadBytes(payload) error = %v", err)
+	}
+	if !bytes.Equal(payload, []byte("borsh")) {
+		t.Fatalf("payload = %q, want borsh", payload)
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		t.Fatalf("EnsureEOF() error = %v", err)
 	}
 }
 func TestMessageFrameRejectsChecksumMismatch(t *testing.T) {
@@ -130,26 +166,34 @@ func TestMessageFrameRejectsChecksumMismatch(t *testing.T) {
 		t.Fatalf("readMessageFrame(corrupt) error = %v, want ErrInvalidMessage", err)
 	}
 }
-func TestMessageRejectsUnknownProtobufFlag(t *testing.T) {
+func TestMessageRejectsUnknownBorshFlag(t *testing.T) {
 	message, err := NewMessage(MessageTypePing, []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
-	wireMessage := &p2pproto.P2PMessage{
-		Version:            uint32(MessageProtocolVersion),
-		Id:                 message.ID,
-		Type:               uint32(message.Type),
-		Flag:               p2pproto.MessageFlag_MESSAGE_FLAG_UNKNOWN,
-		Payload:            []byte("hello"),
-		CreatedAtUnixMilli: message.CreatedAtUnixMilli,
+	writer := borsh.NewWriter(DefaultMaxMessageSize)
+	writer.WriteUint16(MessageProtocolVersion)
+	if err := writer.WriteString(message.ID); err != nil {
+		t.Fatalf("WriteString(id) error = %v", err)
 	}
-	encoded, err := protobuf.Marshal(wireMessage)
-	if err != nil {
-		t.Fatalf("protobuf.Marshal() error = %v", err)
+	writer.WriteUint32(uint32(message.Type))
+	if err := writer.WriteString(""); err != nil {
+		t.Fatalf("WriteString(from peer) error = %v", err)
+	}
+	if err := writer.WriteString(""); err != nil {
+		t.Fatalf("WriteString(to peer) error = %v", err)
+	}
+	if err := writer.WriteString(""); err != nil {
+		t.Fatalf("WriteString(request id) error = %v", err)
+	}
+	writer.WriteUint8(uint8(MessageFlagUnknown))
+	writer.WriteInt64(message.CreatedAtUnixMilli)
+	if err := writer.WriteBytes([]byte("hello")); err != nil {
+		t.Fatalf("WriteBytes(payload) error = %v", err)
 	}
 
-	if _, err := UnmarshalBinary(encoded, DefaultMaxMessageSize); !errors.Is(err, ErrInvalidMessage) {
-		t.Fatalf("UnmarshalBinary(unknown flag) error = %v, want ErrInvalidMessage", err)
+	if _, err := UnmarshalBinary(writer.Bytes(), DefaultMaxMessageSize); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("UnmarshalBinary(unknown borsh flag) error = %v, want ErrInvalidMessage", err)
 	}
 }
 func TestP2PMessageSchemaEnvelope(t *testing.T) {
@@ -164,6 +208,9 @@ func TestP2PMessageSchemaEnvelope(t *testing.T) {
 	envelope, err := NewP2PMessageEnvelope(message)
 	if err != nil {
 		t.Fatalf("NewP2PMessageEnvelope() error = %v", err)
+	}
+	if envelope.Codec != schema.CodecBorsh {
+		t.Fatalf("envelope codec = %s, want borsh", envelope.Codec)
 	}
 
 	decoded, err := registry.DecodeEnvelope(envelope)

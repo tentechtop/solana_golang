@@ -11,9 +11,7 @@ import (
 	"strings"
 	"time"
 
-	protobuf "google.golang.org/protobuf/proto"
-
-	p2pproto "solana_golang/p2p/proto"
+	"solana_golang/codec/borsh"
 )
 
 const (
@@ -62,7 +60,7 @@ const (
 	MessageFlagResponse MessageFlag = 3
 )
 
-// Message 保存 P2P 消息事实模型 + protobuf 只作为节点通信 DTO。
+// Message 保存 P2P 消息事实模型 + 使用 Borsh 固定布局进行节点通信编码。
 type Message struct {
 	ID                 string      `json:"id"`
 	Type               MessageType `json:"type"`
@@ -109,7 +107,7 @@ func NewResponseMessage(senderPeerID string, messageType MessageType, requestID 
 	return message, message.Validate(DefaultMaxMessageSize)
 }
 
-// Validate 校验消息字段 + 防止畸形 protobuf 进入上层业务。
+// Validate 校验消息字段 + 防止畸形网络载荷进入上层业务。
 func (message Message) Validate(maxMessageSize int) error {
 	if message.effectiveVersion() != MessageProtocolVersion {
 		return fmt.Errorf("%w: unsupported version", ErrInvalidMessage)
@@ -181,69 +179,100 @@ func (message *Message) MarkAsResponse(requestID string) error {
 	return nil
 }
 
-// MarshalBinary 序列化消息 + P2P 通信统一使用 protobuf binary。
+// MarshalBinary 序列化消息 + P2P 通信使用 Borsh 固定字段布局。
 func (message Message) MarshalBinary(maxMessageSize int) ([]byte, error) {
 	if err := message.Validate(maxMessageSize); err != nil {
 		return nil, err
 	}
 
-	protobufFlag, err := toProtobufFlag(message.Flag)
-	if err != nil {
-		return nil, err
+	writer := borsh.NewWriter(maxPayloadSize(maxMessageSize))
+	writer.WriteUint16(message.effectiveVersion())
+	if err := writer.WriteString(strings.ToLower(message.ID)); err != nil {
+		return nil, fmt.Errorf("p2p: marshal message id: %w", err)
 	}
-	wireMessage := &p2pproto.P2PMessage{
-		Version:            uint32(message.effectiveVersion()),
-		Id:                 strings.ToLower(message.ID),
-		Type:               uint32(message.Type),
-		FromPeerId:         message.FromPeerID,
-		ToPeerId:           message.ToPeerID,
-		RequestId:          strings.ToLower(message.RequestID),
-		Flag:               protobufFlag,
-		Payload:            cloneBytes(message.Payload),
-		CreatedAtUnixMilli: message.CreatedAtUnixMilli,
+	writer.WriteUint32(uint32(message.Type))
+	if err := writer.WriteString(message.FromPeerID); err != nil {
+		return nil, fmt.Errorf("p2p: marshal from peer id: %w", err)
+	}
+	if err := writer.WriteString(message.ToPeerID); err != nil {
+		return nil, fmt.Errorf("p2p: marshal to peer id: %w", err)
+	}
+	if err := writer.WriteString(strings.ToLower(message.RequestID)); err != nil {
+		return nil, fmt.Errorf("p2p: marshal request id: %w", err)
+	}
+	writer.WriteUint8(uint8(message.Flag))
+	writer.WriteInt64(message.CreatedAtUnixMilli)
+	if err := writer.WriteBytes(message.Payload); err != nil {
+		return nil, fmt.Errorf("p2p: marshal payload: %w", err)
 	}
 
-	encoded, err := protobuf.Marshal(wireMessage)
-	if err != nil {
-		return nil, fmt.Errorf("p2p: marshal protobuf message: %w", err)
-	}
+	encoded := writer.Bytes()
 	if len(encoded) > maxPayloadSize(maxMessageSize) {
-		return nil, fmt.Errorf("%w: protobuf payload too large", ErrInvalidMessage)
+		return nil, fmt.Errorf("%w: message payload too large", ErrInvalidMessage)
 	}
 	return encoded, nil
 }
 
-// UnmarshalBinary 反序列化消息 + protobuf 解码后继续执行业务边界校验。
+// UnmarshalBinary 反序列化消息 + Borsh 解码后继续执行业务边界校验。
 func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 	if len(data) == 0 {
-		return Message{}, fmt.Errorf("%w: empty protobuf payload", ErrInvalidMessage)
+		return Message{}, fmt.Errorf("%w: empty message payload", ErrInvalidMessage)
 	}
 	if len(data) > maxPayloadSize(maxMessageSize) {
-		return Message{}, fmt.Errorf("%w: protobuf payload too large", ErrInvalidMessage)
+		return Message{}, fmt.Errorf("%w: message payload too large", ErrInvalidMessage)
 	}
 
-	wireMessage := &p2pproto.P2PMessage{}
-	if err := protobuf.Unmarshal(data, wireMessage); err != nil {
-		return Message{}, fmt.Errorf("p2p: unmarshal protobuf message: %w", err)
-	}
-	if wireMessage.Version > math.MaxUint16 {
-		return Message{}, fmt.Errorf("%w: invalid version", ErrInvalidMessage)
-	}
-
-	messageFlag, err := fromProtobufFlag(wireMessage.Flag)
+	reader := borsh.NewReader(data, maxPayloadSize(maxMessageSize))
+	version, err := reader.ReadUint16()
 	if err != nil {
-		return Message{}, err
+		return Message{}, fmt.Errorf("p2p: unmarshal version: %w", err)
 	}
+	messageID, err := reader.ReadString()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal message id: %w", err)
+	}
+	messageType, err := reader.ReadUint32()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal message type: %w", err)
+	}
+	fromPeerID, err := reader.ReadString()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal from peer id: %w", err)
+	}
+	toPeerID, err := reader.ReadString()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal to peer id: %w", err)
+	}
+	requestID, err := reader.ReadString()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal request id: %w", err)
+	}
+	flag, err := reader.ReadUint8()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal flag: %w", err)
+	}
+	createdAtUnixMilli, err := reader.ReadInt64()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal created time: %w", err)
+	}
+	payload, err := reader.ReadBytes()
+	if err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal payload: %w", err)
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal message: %w", err)
+	}
+
 	message := Message{
-		ID:                 strings.ToLower(wireMessage.Id),
-		Type:               MessageType(wireMessage.Type),
-		FromPeerID:         wireMessage.FromPeerId,
-		ToPeerID:           wireMessage.ToPeerId,
-		RequestID:          strings.ToLower(wireMessage.RequestId),
-		Flag:               messageFlag,
-		Payload:            cloneBytes(wireMessage.Payload),
-		CreatedAtUnixMilli: wireMessage.CreatedAtUnixMilli,
-		Version:            uint16(wireMessage.Version),
+		ID:                 strings.ToLower(messageID),
+		Type:               MessageType(messageType),
+		FromPeerID:         fromPeerID,
+		ToPeerID:           toPeerID,
+		RequestID:          strings.ToLower(requestID),
+		Flag:               MessageFlag(flag),
+		Payload:            payload,
+		CreatedAtUnixMilli: createdAtUnixMilli,
+		Version:            version,
 	}
 	if err := message.Validate(maxMessageSize); err != nil {
 		return Message{}, err
@@ -278,7 +307,7 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 	return nil
 }
 
-// readMessageFrame 读取 P2P 帧 + 先校验外层边界和 checksum 再解码 protobuf。
+// readMessageFrame 读取 P2P 帧 + 先校验外层边界和 checksum 再解码消息体。
 func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	header := make([]byte, messageFrameHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
@@ -420,7 +449,7 @@ func validateMessagePeerID(peerID string, optional bool) error {
 	return nil
 }
 
-// maxPayloadSize 计算 protobuf 载荷上限 + 从总帧大小中扣除固定帧头。
+// maxPayloadSize 计算消息体载荷上限 + 从总帧大小中扣除固定帧头。
 func maxPayloadSize(maxMessageSize int) int {
 	normalized := normalizeMaxMessageSize(maxMessageSize)
 	if normalized <= messageFrameHeaderSize {
@@ -440,32 +469,6 @@ func normalizeMaxMessageSize(maxMessageSize int) int {
 // isValidMessageFlag 校验消息标识 + UNKNOWN 不能作为业务消息发送。
 func isValidMessageFlag(flag MessageFlag) bool {
 	return flag == MessageFlagNotify || flag == MessageFlagRequest || flag == MessageFlagResponse
-}
-
-func toProtobufFlag(flag MessageFlag) (p2pproto.MessageFlag, error) {
-	switch flag {
-	case MessageFlagNotify:
-		return p2pproto.MessageFlag_MESSAGE_FLAG_NOTIFY, nil
-	case MessageFlagRequest:
-		return p2pproto.MessageFlag_MESSAGE_FLAG_REQUEST, nil
-	case MessageFlagResponse:
-		return p2pproto.MessageFlag_MESSAGE_FLAG_RESPONSE, nil
-	default:
-		return p2pproto.MessageFlag_MESSAGE_FLAG_UNKNOWN, fmt.Errorf("%w: invalid flag", ErrInvalidMessage)
-	}
-}
-
-func fromProtobufFlag(flag p2pproto.MessageFlag) (MessageFlag, error) {
-	switch flag {
-	case p2pproto.MessageFlag_MESSAGE_FLAG_NOTIFY:
-		return MessageFlagNotify, nil
-	case p2pproto.MessageFlag_MESSAGE_FLAG_REQUEST:
-		return MessageFlagRequest, nil
-	case p2pproto.MessageFlag_MESSAGE_FLAG_RESPONSE:
-		return MessageFlagResponse, nil
-	default:
-		return MessageFlagUnknown, fmt.Errorf("%w: invalid protobuf flag", ErrInvalidMessage)
-	}
 }
 
 type messageFrameHeader struct {

@@ -6,7 +6,6 @@ require (
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/quic-go/quic-go v0.57.1
 	github.com/syndtr/goleveldb v1.0.0
-	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -38,4 +37,5 @@ require (
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
+	google.golang.org/protobuf v1.33.0 // indirect
 )

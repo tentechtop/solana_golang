@@ -14,7 +14,9 @@ func TestWriterReaderGoldenBytes(t *testing.T) {
 	writer.WriteUint16(0x1234)
 	writer.WriteUint32(0x01020304)
 	writer.WriteUint64(0x0102030405060708)
+	writer.WriteInt64(-2)
 	writer.WriteBool(true)
+	writer.WriteFixedBytes([]byte{7, 6, 5})
 	if err := writer.WriteBytes([]byte{9, 8}); err != nil {
 		t.Fatalf("WriteBytes() error = %v", err)
 	}
@@ -27,7 +29,9 @@ func TestWriterReaderGoldenBytes(t *testing.T) {
 		0x34, 0x12,
 		0x04, 0x03, 0x02, 0x01,
 		0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+		0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 		1,
+		7, 6, 5,
 		2, 0, 0, 0, 9, 8,
 		3, 0, 0, 0, 's', 'o', 'l',
 	}
@@ -40,7 +44,9 @@ func TestWriterReaderGoldenBytes(t *testing.T) {
 	assertUint16(t, reader, 0x1234)
 	assertUint32(t, reader, 0x01020304)
 	assertUint64(t, reader, 0x0102030405060708)
+	assertInt64(t, reader, -2)
 	assertBool(t, reader, true)
+	assertFixedBytes(t, reader, 3, []byte{7, 6, 5})
 	assertBytes(t, reader, []byte{9, 8})
 	assertString(t, reader, "sol")
 	if err := reader.EnsureEOF(); err != nil {
@@ -57,6 +63,9 @@ func TestReaderRejectsInvalidBoundaries(t *testing.T) {
 	}
 	if _, err := NewReader([]byte{2}, 8).ReadBool(); !errors.Is(err, ErrInvalidBool) {
 		t.Fatalf("ReadBool(invalid) error = %v, want ErrInvalidBool", err)
+	}
+	if _, err := NewReader([]byte{1}, 8).ReadFixedBytes(2); !errors.Is(err, ErrInvalidLength) {
+		t.Fatalf("ReadFixedBytes(length exceeds remaining) error = %v, want ErrInvalidLength", err)
 	}
 	if _, err := NewReader([]byte{1, 0, 0, 0, 0xff}, 8).ReadString(); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("ReadString(invalid utf8) error = %v, want ErrInvalidData", err)
@@ -117,6 +126,17 @@ func assertUint64(t *testing.T, reader *Reader, expected uint64) {
 	}
 }
 
+func assertInt64(t *testing.T, reader *Reader, expected int64) {
+	t.Helper()
+	value, err := reader.ReadInt64()
+	if err != nil {
+		t.Fatalf("ReadInt64() error = %v", err)
+	}
+	if value != expected {
+		t.Fatalf("ReadInt64() = %d, want %d", value, expected)
+	}
+}
+
 func assertBool(t *testing.T, reader *Reader, expected bool) {
 	t.Helper()
 	value, err := reader.ReadBool()
@@ -125,6 +145,17 @@ func assertBool(t *testing.T, reader *Reader, expected bool) {
 	}
 	if value != expected {
 		t.Fatalf("ReadBool() = %t, want %t", value, expected)
+	}
+}
+
+func assertFixedBytes(t *testing.T, reader *Reader, length int, expected []byte) {
+	t.Helper()
+	value, err := reader.ReadFixedBytes(length)
+	if err != nil {
+		t.Fatalf("ReadFixedBytes() error = %v", err)
+	}
+	if !bytes.Equal(value, expected) {
+		t.Fatalf("ReadFixedBytes() = %v, want %v", value, expected)
 	}
 }
 
