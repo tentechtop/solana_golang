@@ -113,6 +113,8 @@ func (transport *TCPTransport) Close() error {
 	}
 	return errors.Join(closeErrors...)
 }
+
+// acceptLoop 持续接收入站 TCP 连接 + 每个连接交给独立协程处理避免阻塞监听。
 func (transport *TCPTransport) acceptLoop(ctx context.Context, listener net.Listener, handler ConnectionHandler) error {
 	for {
 		netConnection, err := listener.Accept()
@@ -123,6 +125,8 @@ func (transport *TCPTransport) acceptLoop(ctx context.Context, listener net.List
 		go handler(ctx, connection)
 	}
 }
+
+// acceptError 归一化接收错误 + 上下文取消和主动关闭不作为异常返回。
 func (transport *TCPTransport) acceptError(ctx context.Context, err error) error {
 	if ctx != nil && ctx.Err() != nil {
 		return nil
@@ -132,6 +136,8 @@ func (transport *TCPTransport) acceptError(ctx context.Context, err error) error
 	}
 	return fmt.Errorf("p2p: accept tcp connection: %w", err)
 }
+
+// addListener 注册监听器 + 持锁防止关闭和新增监听并发冲突。
 func (transport *TCPTransport) addListener(key string, listener net.Listener) error {
 	transport.mutex.Lock()
 	defer transport.mutex.Unlock()
@@ -141,11 +147,15 @@ func (transport *TCPTransport) addListener(key string, listener net.Listener) er
 	transport.listeners[key] = listener
 	return nil
 }
+
+// removeListener 移除监听器索引 + 监听退出后保持内部状态准确。
 func (transport *TCPTransport) removeListener(key string) {
 	transport.mutex.Lock()
 	delete(transport.listeners, key)
 	transport.mutex.Unlock()
 }
+
+// isClosed 读取传输关闭状态 + 持锁避免与 Close 并发读写。
 func (transport *TCPTransport) isClosed() bool {
 	transport.mutex.Lock()
 	defer transport.mutex.Unlock()
@@ -164,6 +174,7 @@ type TCPConnection struct {
 	closeErr       error
 }
 
+// newTCPConnection 创建 TCP 连接包装 + 生成连接 ID 并归一化消息大小上限。
 func newTCPConnection(netConnection net.Conn, remotePeerID string, maxMessageSize int) *TCPConnection {
 	connectionID, err := newMessageID()
 	if err != nil {
@@ -233,6 +244,8 @@ func (connection *TCPConnection) Close() error {
 	})
 	return connection.closeErr
 }
+
+// validateListenInput 校验监听参数 + 在建 listener 前拒绝错误协议和空处理器。
 func validateListenInput(address utils.MultiAddress, protocol utils.MultiAddressProtocol, handler ConnectionHandler) error {
 	if err := validateDialInput(address, protocol); err != nil {
 		return err
@@ -242,15 +255,21 @@ func validateListenInput(address utils.MultiAddress, protocol utils.MultiAddress
 	}
 	return nil
 }
+
+// validateDialInput 校验拨号地址协议 + 防止 TCP 传输误拨其他协议地址。
 func validateDialInput(address utils.MultiAddress, protocol utils.MultiAddressProtocol) error {
 	if address.Protocol != protocol {
 		return fmt.Errorf("%w: want %s got %s", ErrUnsupportedProtocol, protocol, address.Protocol)
 	}
 	return nil
 }
+
+// joinAddress 拼接网络地址 + 使用标准库处理 IPv6 方括号和端口格式。
 func joinAddress(address utils.MultiAddress) string {
 	return net.JoinHostPort(address.IPAddress, strconv.Itoa(address.Port))
 }
+
+// closeListenerOnContext 监听上下文取消 + 主动关闭 listener 解除 Accept 阻塞。
 func closeListenerOnContext(ctx context.Context, listener net.Listener) {
 	if ctx == nil {
 		return
@@ -258,6 +277,8 @@ func closeListenerOnContext(ctx context.Context, listener net.Listener) {
 	<-ctx.Done()
 	_ = listener.Close()
 }
+
+// armConnectionDeadline 绑定连接 deadline + 上下文取消时打断阻塞读写。
 func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) error) func() {
 	if ctx == nil {
 		ctx = context.Background()
@@ -280,6 +301,8 @@ func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) erro
 		_ = setDeadline(time.Time{})
 	}
 }
+
+// normalizeConnectionError 归一化连接错误 + 将 EOF 和关闭映射为统一连接关闭错误。
 func normalizeConnectionError(operation string, err error) error {
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 		return fmt.Errorf("%w: %s", ErrConnectionClosed, operation)

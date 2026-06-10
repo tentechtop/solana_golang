@@ -110,6 +110,8 @@ func (registry *ProtocolRegistry) Handle(ctx context.Context, message Message) (
 	}
 	return ProtocolHandleResult{Message: response, HasResponse: true}, nil
 }
+
+// register 注册协议处理器 + 同时维护协议 ID 和规范化名称索引。
 func (registry *ProtocolRegistry) register(spec ProtocolSpec, handler ProtocolHandler) error {
 	if err := spec.Validate(); err != nil {
 		return err
@@ -136,6 +138,8 @@ func (registry *ProtocolRegistry) register(spec ProtocolSpec, handler ProtocolHa
 	registry.nameToID[normalizedName] = spec.ID
 	return nil
 }
+
+// lookup 查找协议处理器 + 持读锁保证并发消息路由安全。
 func (registry *ProtocolRegistry) lookup(protocolID ProtocolID) (registeredProtocol, error) {
 	registry.mutex.RLock()
 	defer registry.mutex.RUnlock()
@@ -148,6 +152,8 @@ func (registry *ProtocolRegistry) lookup(protocolID ProtocolID) (registeredProto
 	}
 	return registered, nil
 }
+
+// responseFor 构造协议响应消息 + 自动回填目标节点和原请求 ID。
 func responseFor(request Message, senderPeerID string, messageType MessageType, payload []byte) (Message, error) {
 	response, err := NewResponseMessage(senderPeerID, messageType, request.ID, payload)
 	if err != nil {

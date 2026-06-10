@@ -172,6 +172,8 @@ func (block Block) ComputeTransactionsRoot() (Hash, error) {
 func (block Block) VerifyTransactionsRoot() error {
 	return block.validateTransactionsRoot()
 }
+
+// validateTransactionCount 校验交易数量一致性 + 允许空区块使用零计数。
 func (block Block) validateTransactionCount() error {
 	if block.Header.TransactionCount == 0 && len(block.Transactions) == 0 {
 		return nil
@@ -181,6 +183,8 @@ func (block Block) validateTransactionCount() error {
 	}
 	return nil
 }
+
+// validateTransactionsRoot 校验交易 Merkle 根 + 防止区块头与交易体不一致。
 func (block Block) validateTransactionsRoot() error {
 	computedRoot, err := block.ComputeTransactionsRoot()
 	if err != nil {
@@ -191,6 +195,8 @@ func (block Block) validateTransactionsRoot() error {
 	}
 	return nil
 }
+
+// merkleRoot 计算 Merkle 根 + 空交易列表返回确定性零哈希。
 func merkleRoot(hashes []Hash) (Hash, error) {
 	if len(hashes) == 0 {
 		return NewHash(make([]byte, PublicKeySize))
@@ -205,6 +211,8 @@ func merkleRoot(hashes []Hash) (Hash, error) {
 	}
 	return currentLevel[0], nil
 }
+
+// merkleParentLevel 构造上一层 Merkle 节点 + 奇数节点复制自身配对。
 func merkleParentLevel(currentLevel []Hash) ([]Hash, error) {
 	nextLevel := make([]Hash, 0, (len(currentLevel)+1)/2)
 	for index := 0; index < len(currentLevel); index += 2 {
@@ -221,6 +229,8 @@ func merkleParentLevel(currentLevel []Hash) ([]Hash, error) {
 	}
 	return nextLevel, nil
 }
+
+// hashPair 计算两个子节点父哈希 + 按左右顺序拼接保持确定性。
 func hashPair(left Hash, right Hash) (Hash, error) {
 	hash, err := NewHash(utils.SHA256(utils.ConcatBytes(left[:], right[:])))
 	if err != nil {
@@ -228,6 +238,8 @@ func hashPair(left Hash, right Hash) (Hash, error) {
 	}
 	return hash, nil
 }
+
+// cloneHashes 复制哈希切片 + 避免 Merkle 计算修改调用方输入。
 func cloneHashes(value []Hash) []Hash {
 	cloned := make([]Hash, len(value))
 	copy(cloned, value)

@@ -329,6 +329,8 @@ func (message SolanaMessage) Clone() SolanaMessage {
 func (message SolanaMessage) IsZero() bool {
 	return len(message.AccountKeys) == 0 && len(message.Instructions) == 0 && message.RecentBlockhash == (Blockhash{})
 }
+
+// totalAccountCount 统计消息账户总数 + 将地址表展开账户计入索引边界。
 func (message SolanaMessage) totalAccountCount() int {
 	accountCount := len(message.AccountKeys)
 	for _, lookup := range message.AddressTableLookups {
@@ -336,6 +338,8 @@ func (message SolanaMessage) totalAccountCount() int {
 	}
 	return accountCount
 }
+
+// validateAccounts 校验交易账户集合 + 保证唯一性、顺序和扣费账户可用。
 func (transaction Transaction) validateAccounts() error {
 	if len(transaction.Accounts) == 0 {
 		return ErrEmptyAccountKeys
@@ -354,6 +358,8 @@ func (transaction Transaction) validateAccounts() error {
 	}
 	return nil
 }
+
+// validateUniqueAccounts 校验账户唯一性 + 同时逐项执行账户元数据校验。
 func validateUniqueAccounts(accounts []AccountMeta) error {
 	seenAccounts := make(map[PublicKey]struct{}, len(accounts))
 	for accountIndex, account := range accounts {
@@ -367,6 +373,8 @@ func validateUniqueAccounts(accounts []AccountMeta) error {
 	}
 	return nil
 }
+
+// validateAccountOrder 校验账户排列顺序 + 保持与 Solana 消息头计数规则一致。
 func validateAccountOrder(accounts []AccountMeta) error {
 	lastGroup := 0
 	for accountIndex, account := range accounts {
@@ -378,15 +386,21 @@ func validateAccountOrder(accounts []AccountMeta) error {
 	}
 	return nil
 }
+
+// validateInstructions 校验交易指令集合 + 使用当前账户数量约束指令索引。
 func (transaction Transaction) validateInstructions() error {
 	return validateCompiledInstructions(transaction.Instructions, len(transaction.Accounts))
 }
+
+// validateSignatureCount 校验签名数量 + 必须与消息头必需签名数完全一致。
 func (transaction Transaction) validateSignatureCount(requiredSignatures uint8) error {
 	if len(transaction.Signatures) != int(requiredSignatures) {
 		return fmt.Errorf("structure: signatures count %d does not match required %d", len(transaction.Signatures), requiredSignatures)
 	}
 	return nil
 }
+
+// validateCompiledInstructions 校验编译后指令列表 + 限制数量并逐条检查索引。
 func validateCompiledInstructions(instructions []CompiledInstruction, accountCount int) error {
 	if len(instructions) == 0 {
 		return ErrEmptyInstructions
@@ -401,6 +415,8 @@ func validateCompiledInstructions(instructions []CompiledInstruction, accountCou
 	}
 	return nil
 }
+
+// validateInstruction 校验单条指令 + 防止程序索引、账户索引和数据长度越界。
 func validateInstruction(instruction CompiledInstruction, accountCount int) error {
 	if int(instruction.ProgramIDIndex) >= accountCount {
 		return fmt.Errorf("%w: program id index %d out of range", ErrInvalidInstruction, instruction.ProgramIDIndex)
@@ -418,6 +434,8 @@ func validateInstruction(instruction CompiledInstruction, accountCount int) erro
 	}
 	return nil
 }
+
+// validateMessageHeader 校验消息头计数 + 保证签名和只读账户数量不越界。
 func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
 	if header.NumRequiredSignatures == 0 {
 		return fmt.Errorf("%w: required signatures cannot be zero", ErrInvalidMessageHeader)
@@ -435,6 +453,8 @@ func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
 	}
 	return nil
 }
+
+// validateAddressTableLookups 校验地址表引用 + 地址表账户公钥不能为空。
 func validateAddressTableLookups(lookups []MessageAddressTableLookup) error {
 	for lookupIndex, lookup := range lookups {
 		if lookup.AccountKey.IsZero() {
@@ -443,6 +463,8 @@ func validateAddressTableLookups(lookups []MessageAddressTableLookup) error {
 	}
 	return nil
 }
+
+// appendSignatures 编码签名列表 + 使用 short_vec 长度匹配 Solana 格式。
 func appendSignatures(encoded *[]byte, signatures []Signature) error {
 	if err := appendShortVecLength(encoded, len(signatures)); err != nil {
 		return err
@@ -452,6 +474,8 @@ func appendSignatures(encoded *[]byte, signatures []Signature) error {
 	}
 	return nil
 }
+
+// appendPublicKeys 编码账户公钥列表 + 使用 short_vec 长度保持链上兼容。
 func appendPublicKeys(encoded *[]byte, publicKeys []PublicKey) error {
 	if err := appendShortVecLength(encoded, len(publicKeys)); err != nil {
 		return err
@@ -461,6 +485,8 @@ func appendPublicKeys(encoded *[]byte, publicKeys []PublicKey) error {
 	}
 	return nil
 }
+
+// appendInstructions 编码指令列表 + 为每条指令补充索引上下文错误。
 func appendInstructions(encoded *[]byte, instructions []CompiledInstruction) error {
 	if err := appendShortVecLength(encoded, len(instructions)); err != nil {
 		return err
@@ -472,6 +498,8 @@ func appendInstructions(encoded *[]byte, instructions []CompiledInstruction) err
 	}
 	return nil
 }
+
+// appendInstruction 编码单条指令 + 按程序索引、账户索引、数据顺序写入。
 func appendInstruction(encoded *[]byte, instruction CompiledInstruction) error {
 	*encoded = append(*encoded, instruction.ProgramIDIndex)
 	if err := appendUint8Indexes(encoded, instruction.AccountIndexes); err != nil {
@@ -483,6 +511,8 @@ func appendInstruction(encoded *[]byte, instruction CompiledInstruction) error {
 	*encoded = append(*encoded, instruction.Data...)
 	return nil
 }
+
+// appendUint8Indexes 编码 u8 索引列表 + 使用 short_vec 表达可变长度集合。
 func appendUint8Indexes(encoded *[]byte, indexes []uint8) error {
 	if err := appendShortVecLength(encoded, len(indexes)); err != nil {
 		return err
@@ -490,6 +520,8 @@ func appendUint8Indexes(encoded *[]byte, indexes []uint8) error {
 	*encoded = append(*encoded, indexes...)
 	return nil
 }
+
+// appendAddressTableLookups 编码地址表引用 + 分别写入可写和只读索引集合。
 func appendAddressTableLookups(encoded *[]byte, lookups []MessageAddressTableLookup) ([]byte, error) {
 	if err := appendShortVecLength(encoded, len(lookups)); err != nil {
 		return nil, err
@@ -505,6 +537,8 @@ func appendAddressTableLookups(encoded *[]byte, lookups []MessageAddressTableLoo
 	}
 	return *encoded, nil
 }
+
+// appendShortVecLength 追加 short_vec 长度 + 统一处理长度编码错误。
 func appendShortVecLength(encoded *[]byte, length int) error {
 	lengthBytes, err := utils.EncodeShortVecLength(length)
 	if err != nil {
@@ -513,6 +547,8 @@ func appendShortVecLength(encoded *[]byte, length int) error {
 	*encoded = append(*encoded, lengthBytes...)
 	return nil
 }
+
+// estimateMessageSize 估算消息编码大小 + 为序列化预分配容量降低分配次数。
 func estimateMessageSize(message SolanaMessage) int {
 	size := 3 + 3 + len(message.AccountKeys)*PublicKeySize + PublicKeySize
 	for _, instruction := range message.Instructions {
@@ -523,6 +559,8 @@ func estimateMessageSize(message SolanaMessage) int {
 	}
 	return size
 }
+
+// estimateAddressTableLookupSize 估算地址表编码大小 + 计入公钥和两组索引长度。
 func estimateAddressTableLookupSize(lookups []MessageAddressTableLookup) int {
 	size := 3
 	for _, lookup := range lookups {
@@ -530,6 +568,8 @@ func estimateAddressTableLookupSize(lookups []MessageAddressTableLookup) int {
 	}
 	return size
 }
+
+// buildMessageHeader 构建消息头 + 从账户权限统计签名和只读账户数量。
 func buildMessageHeader(accounts []AccountMeta) MessageHeader {
 	header := MessageHeader{}
 	for _, account := range accounts {
@@ -545,6 +585,8 @@ func buildMessageHeader(accounts []AccountMeta) MessageHeader {
 	}
 	return header
 }
+
+// accountPublicKeys 提取账户公钥顺序 + 保持与账户元数据排列一致。
 func accountPublicKeys(accounts []AccountMeta) []PublicKey {
 	publicKeys := make([]PublicKey, len(accounts))
 	for index, account := range accounts {
@@ -552,6 +594,8 @@ func accountPublicKeys(accounts []AccountMeta) []PublicKey {
 	}
 	return publicKeys
 }
+
+// accountPermissionGroup 计算账户排序分组 + 匹配 Solana 签名和写权限布局。
 func accountPermissionGroup(account AccountMeta) int {
 	if account.IsSigner && account.IsWritable {
 		return 0

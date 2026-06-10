@@ -264,17 +264,23 @@ func ParseDerivationPath(path string) ([]uint32, string, error) {
 func SolanaDerivationPath(accountIndex int, addressIndex int) string {
 	return fmt.Sprintf("m/%d'/%d'/%d'/%d'", bip44Purpose, solanaCoinType, accountIndex, addressIndex)
 }
+
+// hmacSHA512 计算 HMAC-SHA512 + 作为 SLIP-0010 主密钥和子密钥派生核心。
 func hmacSHA512(key []byte, data []byte) []byte {
 	mac := hmac.New(sha512.New, key)
 	mac.Write(data)
 	return mac.Sum(nil)
 }
+
+// validateSLIP10Seed 校验种子长度 + 拒绝过短或过长输入导致派生不兼容。
 func validateSLIP10Seed(seed []byte) error {
 	if len(seed) < slip10MinSeedLength || len(seed) > slip10MaxSeedLength {
 		return fmt.Errorf("utils: slip-0010 seed requires %d-%d bytes, got %d", slip10MinSeedLength, slip10MaxSeedLength, len(seed))
 	}
 	return nil
 }
+
+// appendPathIndex 追加路径索引 + 保留硬化标记生成规范化路径。
 func appendPathIndex(parentPath string, index uint32) string {
 	if parentPath == "" {
 		parentPath = "m"

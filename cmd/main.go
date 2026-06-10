@@ -22,7 +22,7 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
-// runtimeResources 保存启动资源 + 用统一关闭路径避免泄漏。
+// runtimeResources 保存进程级运行资源 + 统一生命周期关闭顺序避免泄漏。
 type runtimeResources struct {
 	logger       *slog.Logger
 	logCloser    io.Closer
@@ -39,6 +39,8 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// run 执行应用主流程 + 串联配置加载、资源启动和优雅停机。
 func run() error {
 	configPath := configPathFromFlag()
 	config, err := appconfig.Load(configPath)
@@ -65,6 +67,8 @@ func run() error {
 	}
 	return err
 }
+
+// configPathFromFlag 解析配置路径 + 按命令行、环境变量、默认值顺序降级。
 func configPathFromFlag() string {
 	configPath := flag.String("config", "", "config file path")
 	flag.Parse()
@@ -76,6 +80,8 @@ func configPathFromFlag() string {
 	}
 	return appconfig.DefaultPath
 }
+
+// startRuntime 启动核心运行时资源 + 按日志、数据库、P2P、RPC 顺序建立依赖。
 func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 	logger, logCloser, err := newConfiguredLogger(config.Log)
 	if err != nil {
@@ -98,6 +104,8 @@ func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 	resources.startRPC(config.RPC)
 	return resources, nil
 }
+
+// newConfiguredLogger 初始化日志器 + 支持控制台和文件输出并返回文件关闭器。
 func newConfiguredLogger(config appconfig.LogConfig) (*slog.Logger, io.Closer, error) {
 	var output io.Writer = os.Stdout
 	var closer io.Closer
@@ -124,6 +132,8 @@ func newConfiguredLogger(config appconfig.LogConfig) (*slog.Logger, io.Closer, e
 	}
 	return logger, closer, nil
 }
+
+// openDatabase 打开并健康检查数据库 + 失败时补充上下文并释放半初始化资源。
 func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig) error {
 	databaseInstance, err := database.NewDatabase(config.DatabaseOptions())
 	if err != nil {
@@ -141,6 +151,8 @@ func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig)
 	)
 	return nil
 }
+
+// startP2P 启动 P2P 监听 + 使用独立上下文控制网络协程退出。
 func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
 	host, err := p2p.NewHost(p2p.HostConfig{
 		PeerID:             config.PeerID,
@@ -169,6 +181,8 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig) error {
 	resources.logger.Info("p2p listener starting", slog.String("address", address.String()))
 	return nil
 }
+
+// handleP2PConnection 处理入站连接消息 + 持续读取并交给协议注册表分发。
 func (resources *runtimeResources) handleP2PConnection(ctx context.Context, connection p2p.Connection) {
 	defer connection.Close()
 	for {
@@ -189,6 +203,8 @@ func (resources *runtimeResources) handleP2PConnection(ctx context.Context, conn
 		}
 	}
 }
+
+// startRPC 启动 JSON-RPC 服务 + 将监听错误汇聚到主协程统一处理。
 func (resources *runtimeResources) startRPC(config appconfig.RPCConfig) {
 	resources.rpcServer = rpc.NewServer(rpc.ServerConfig{
 		Address:      config.Address,
@@ -202,6 +218,8 @@ func (resources *runtimeResources) startRPC(config appconfig.RPCConfig) {
 		}
 	}()
 }
+
+// waitForStop 等待停机事件 + 同时监听系统信号和后台服务错误。
 func waitForStop(resources *runtimeResources) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -215,6 +233,8 @@ func waitForStop(resources *runtimeResources) error {
 		return err
 	}
 }
+
+// close 按依赖逆序关闭资源 + 聚合错误保证所有资源都有机会释放。
 func (resources *runtimeResources) close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -240,12 +260,16 @@ func (resources *runtimeResources) close() error {
 	}
 	return errorsJoin(closeErrors)
 }
+
+// closeLog 关闭日志文件句柄 + 置空引用避免重复关闭。
 func (resources *runtimeResources) closeLog() {
 	if resources.logCloser != nil {
 		_ = resources.logCloser.Close()
 		resources.logCloser = nil
 	}
 }
+
+// errorsJoin 合并关闭错误 + 封装标准库实现便于测试覆盖。
 func errorsJoin(errs []error) error {
 	return errors.Join(errs...)
 }

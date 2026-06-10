@@ -112,10 +112,14 @@ func IsOnEd25519Curve(value []byte) bool {
 	}
 	return isQuadraticResidue(x2, ed25519Prime)
 }
+
+// littleEndianBytesToBigInt 转换小端字节整数 + Ed25519 压缩坐标采用小端表示。
 func littleEndianBytesToBigInt(value []byte) *big.Int {
 	reversed := utils.ReverseBytes(value)
 	return new(big.Int).SetBytes(reversed)
 }
+
+// isQuadraticResidue 判断二次剩余 + 用于确认压缩坐标能否还原曲线点。
 func isQuadraticResidue(value *big.Int, prime *big.Int) bool {
 	if value.Sign() == 0 {
 		return true

@@ -241,6 +241,8 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 	}
 	return message, nil
 }
+
+// writeMessageFrame 写入长度前缀消息帧 + 先校验编码大小防止超限载荷下发。
 func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) error {
 	encoded, err := message.MarshalBinary(maxMessageSize)
 	if err != nil {
@@ -260,6 +262,8 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 	}
 	return nil
 }
+
+// readMessageFrame 读取长度前缀消息帧 + 按声明长度精确读取避免粘包半包。
 func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	header := make([]byte, messageFrameHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
@@ -277,6 +281,8 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	}
 	return UnmarshalBinary(encoded, maxMessageSize)
 }
+
+// newBaseMessage 创建基础消息 + 生成唯一 ID、复制载荷并设置协议版本。
 func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
 	messageID, err := newMessageID()
 	if err != nil {
@@ -294,12 +300,16 @@ func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
 	}
 	return message, nil
 }
+
+// effectiveVersion 返回有效协议版本 + 兼容零值消息结构。
 func (message Message) effectiveVersion() uint16 {
 	if message.Version == 0 {
 		return MessageProtocolVersion
 	}
 	return message.Version
 }
+
+// validateRequestID 校验请求响应关系 + 防止响应错绑或普通消息伪装请求。
 func (message Message) validateRequestID() error {
 	if message.RequestID == "" {
 		if message.Flag == MessageFlagResponse {
@@ -318,6 +328,8 @@ func (message Message) validateRequestID() error {
 	}
 	return nil
 }
+
+// newMessageID 生成消息 ID + 前缀写入毫秒时间便于排序并保留随机熵。
 func newMessageID() (string, error) {
 	buffer := make([]byte, messageIDByteSize)
 	unixMillis := uint64(time.Now().UnixMilli())
@@ -334,6 +346,8 @@ func newMessageID() (string, error) {
 	buffer[8] = (buffer[8] & 0x3f) | 0x80
 	return hex.EncodeToString(buffer), nil
 }
+
+// messageIDBytes 解码消息 ID + 统一校验 16 字节十六进制格式。
 func messageIDBytes(value string) ([]byte, error) {
 	if !isValidMessageID(value) {
 		return nil, fmt.Errorf("%w: invalid message id", ErrInvalidMessage)
@@ -344,18 +358,24 @@ func messageIDBytes(value string) ([]byte, error) {
 	}
 	return decoded, nil
 }
+
+// messageRequestIDBytes 编码请求 ID + 空值写入全零字节表示普通消息。
 func messageRequestIDBytes(value string) ([]byte, error) {
 	if value == "" {
 		return make([]byte, messageIDByteSize), nil
 	}
 	return messageIDBytes(value)
 }
+
+// messageRequestIDString 解码请求 ID + 全零字节还原为空字符串。
 func messageRequestIDString(value []byte) string {
 	if isZeroBytes(value) {
 		return ""
 	}
 	return hex.EncodeToString(value)
 }
+
+// isValidMessageID 判断消息 ID 格式 + 仅接受固定长度十六进制字符串。
 func isValidMessageID(value string) bool {
 	if len(value) != messageIDByteSize*2 {
 		return false
@@ -363,10 +383,14 @@ func isValidMessageID(value string) bool {
 	_, err := hex.DecodeString(value)
 	return err == nil
 }
+
+// isZeroMessageID 判断是否全零消息 ID + 用于拒绝无效响应关联。
 func isZeroMessageID(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && isZeroBytes(decoded)
 }
+
+// messagePeerIDBytes 编码 PeerID + 使用 Base58 公钥并固定为 32 字节。
 func messagePeerIDBytes(peerID string) ([]byte, error) {
 	if peerID == "" {
 		return make([]byte, messagePeerIDByteSize), nil
@@ -380,12 +404,16 @@ func messagePeerIDBytes(peerID string) ([]byte, error) {
 	}
 	return decoded, nil
 }
+
+// messagePeerIDString 解码 PeerID + 全零字节表示未指定路由节点。
 func messagePeerIDString(value []byte) string {
 	if isZeroBytes(value) {
 		return ""
 	}
 	return utils.Base58Encode(value)
 }
+
+// validateMessagePeerID 校验消息路由节点 + 支持可选字段但拒绝畸形 ID。
 func validateMessagePeerID(peerID string, optional bool) error {
 	if peerID == "" && optional {
 		return nil
@@ -395,6 +423,8 @@ func validateMessagePeerID(peerID string, optional bool) error {
 	}
 	return nil
 }
+
+// maxPayloadSize 计算载荷上限 + 从总消息大小中扣除固定协议头。
 func maxPayloadSize(maxMessageSize int) int {
 	normalized := normalizeMaxMessageSize(maxMessageSize)
 	if normalized <= messageWireHeaderSize {
@@ -402,6 +432,8 @@ func maxPayloadSize(maxMessageSize int) int {
 	}
 	return normalized - messageWireHeaderSize
 }
+
+// normalizeMaxMessageSize 归一化消息大小上限 + 防止零值关闭防护。
 func normalizeMaxMessageSize(maxMessageSize int) int {
 	if maxMessageSize <= 0 {
 		return DefaultMaxMessageSize
