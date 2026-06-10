@@ -1,186 +1,932 @@
-# 系统研发说明
+# Solana Golang 总体设计文档
+
+版本：v3  
+状态：架构基线  
+适用范围：共识、P2P 网络、存储、序列化、区块结构、节点启动、RPC、可观测性和后续开发路线。
 
 ## 1. 系统定位
 
-本系统面向自研公链场景，核心目标是构建一条具备确定性节奏、可扩展网络传播、BFT 共识安全性和通用智能合约执行能力的区块链基础设施。
+本项目是一个自研公链原型，目标是构建一套可审计、可测试、可逐步生产化的区块链基础设施。
 
-系统采用固定 `400ms` 时钟驱动作为全局出块节奏，共识层采用 HotStuff，数据传播层采用 `QUIC + Kademlia DHT`，执行层采用 EVM。
+核心方向：
+
+1. 不使用 libp2p。
+2. 不使用 protobuf。
+3. P2P 传输使用 Go 标准库 TCP 和 `quic-go`。
+4. 节点间二进制消息使用 Borsh。
+5. 链上结构、共识消息、数据库 raw payload 使用确定性二进制编码。
+6. 外部 HTTP/RPC 使用 JSON DTO。
+7. 共识时钟不使用 PoH，采用本地单调时钟、固定 slot、超时 skip 和投票 QC。
+8. 存储优先使用 Pebble，保留 LevelDB 兼容能力。
+
+系统设计目标：
+
+1. 正确性优先：链上状态、共识状态、存储索引必须一致。
+2. 性能可控：网络、存储、执行、共识都必须有边界和限流。
+3. 安全可审计：所有关键消息必须可验证、可重放、可追踪。
+4. 实现简单：优先清晰直接的 Go domain model，避免过早抽象。
+5. 逐步生产化：当前允许原型，但每个模块要明确生产缺口。
 
 ## 2. 总体架构
 
-系统按职责划分为四个核心层次：
+```text
+cmd
+  -> config
+  -> database
+  -> schema registry
+  -> p2p host
+  -> consensus
+  -> rpc
 
-| 层级 | 技术方案 | 主要职责 |
-| --- | --- | --- |
-| 时钟层 | 固定 400ms tick | 驱动共识轮次、区块提议、超时检测和状态推进 |
-| 共识层 | HotStuff | 完成区块提议、投票聚合、提交确认和分叉收敛 |
-| 网络层 | QUIC + Kademlia DHT | 负责节点发现、连接维护、区块传播、交易广播和数据检索 |
-| 执行层 | EVM | 执行交易、更新状态、计算 gas、生成回执和状态根 |
+p2p
+  -> TCP / QUIC transport
+  -> frame
+  -> Borsh message
+  -> protocol handler
 
-## 3. 固定 400ms 时钟驱动
+consensus
+  -> slot clock
+  -> proposal
+  -> vote
+  -> QC
+  -> slot state
 
-系统使用固定 `400ms` 作为基础调度周期。每个 tick 驱动一次核心状态机检查，包括共识轮次推进、待打包交易选择、区块提议、投票超时和网络重传。
+structure
+  -> block
+  -> transaction
+  -> account
+  -> hash/signature/public key
 
-固定时钟的设计目的：
+database
+  -> Pebble / LevelDB
+  -> table namespace
+  -> read snapshot
+  -> atomic write batch
+  -> migration
 
-- 降低节点之间的调度不确定性，便于形成稳定的共识节奏。
-- 将共识推进、网络传播和执行调度统一到明确的时间边界。
-- 简化超时判断和性能观测，便于定位延迟来源。
-- 控制出块频率，避免提议过快导致网络拥塞或执行堆积。
+schema + codec/borsh
+  -> versioned raw bytes
+  -> payload hash
+  -> historical decoder
+```
 
-400ms tick 不表示每个 tick 必然成功提交一个区块。实际提交速度仍取决于网络传播延迟、验证节点响应、投票聚合速度、交易执行耗时和当前视图是否正常。
+模块职责：
 
-## 4. 为什么不采用 PoH
-
-本系统不采用 Solana PoH 作为核心时钟源，也不将 PoH 哈希链放入共识安全路径。固定 `400ms` tick 只负责本地调度和超时推进，不承担历史证明、交易排序证明或最终性证明。
-
-不采用 PoH 的主要原因：
-
-- HotStuff 已经负责区块排序、投票确认和最终提交，系统安全性来自法定数量签名、QC、锁定规则和视图切换，不依赖连续哈希链证明时间顺序。
-- PoH 需要持续计算可验证延迟哈希链，会引入额外 CPU 成本和实现复杂度；在采用 HotStuff 的架构下，这部分成本不能直接提升 BFT 安全性。
-- 固定 400ms tick 更适合作为工程调度节拍，便于控制出块尝试、超时检测、网络重传和执行预算；PoH 更适合作为高频排序时钟，不适合作为本系统的共识核心。
-- HotStuff 使用逻辑视图推进共识，节点只需要对提议、投票和 QC 达成一致，不要求所有节点验证同一条全局哈希时钟。
-- EVM 执行要求确定性输入和确定性状态根，交易顺序由共识层决定，不需要通过 PoH 在执行层额外证明顺序。
-- 网络层采用 `QUIC + Kademlia DHT` 后，数据传播的真实性依赖签名、哈希、Merkle 证明和 QC 校验，不依赖 PoH 证明消息产生时间。
-
-因此，本系统采用“固定 tick 调度 + HotStuff 逻辑视图 + QC 最终性”的组合。这个设计把时间调度、共识安全和交易执行拆开，职责更清晰，也更利于后续审计、测试和性能调优。
-
-如果后续需要引入可验证时间记录，PoH 只能作为辅助审计数据或排序参考，不能替代 HotStuff 的投票证书、锁定规则和提交规则。
-
-## 5. HotStuff 共识层
-
-共识层采用 HotStuff 作为 BFT 共识协议。HotStuff 通过线性通信复杂度和流水线提交机制，在保证安全性的同时降低多节点投票通信成本。
-
-核心流程包括：
-
-1. Leader 在当前视图中收集交易并提议新区块。
-2. 验证节点校验区块合法性，包括父块、状态根、交易、签名和共识规则。
-3. 验证节点对合法提议进行投票。
-4. Leader 收集达到阈值的投票并形成 QC。
-5. 节点根据 QC 推进锁定状态、提交状态和视图状态。
-
-HotStuff 在本系统中的职责边界：
-
-- 负责决定区块顺序。
-- 负责处理视图切换。
-- 负责聚合投票证书。
-- 负责防止双重提交和非法分叉。
-- 不直接负责交易执行细节，执行结果由执行层提供。
-
-共识层需要重点保证以下安全约束：
-
-- 同一高度不能提交两个冲突区块。
-- 节点只能对满足锁定规则的区块投票。
-- QC 必须由足够权重的有效签名组成。
-- 视图切换必须继承最高安全证书。
-- 区块提交前必须完成交易执行和状态根校验。
-
-## 6. QUIC + Kademlia DHT 数据传播
-
-网络层采用 `QUIC + Kademlia DHT` 的组合设计。
-
-QUIC 负责高效、可靠、低延迟的数据传输。相比传统 TCP 连接，QUIC 具备连接建立快、多路复用、拥塞控制和连接迁移等能力，适合区块链节点之间长期维持高频消息交换。
-
-Kademlia DHT 负责节点发现和数据定位。节点通过 DHT 维护邻居路由表，支持按节点 ID 进行查找、加入网络、发现验证节点、定位区块数据和传播网络拓扑信息。
-
-网络层主要消息类型：
-
-- 交易广播消息。
-- 区块提议消息。
-- 投票消息。
-- QC 同步消息。
-- 区块同步消息。
-- 状态同步消息。
-- 节点发现消息。
-
-传播策略：
-
-- 交易优先进入本地交易池，并向邻近节点扩散。
-- 区块提议优先发送给共识验证节点，再向全网扩散。
-- QC 和投票消息走低延迟通道，避免被大块数据阻塞。
-- 历史区块和状态数据通过 DHT 定位后按需拉取。
-- 节点需要对重复消息、过期消息和非法消息进行过滤。
-
-## 7. EVM 执行层
-
-执行层采用 EVM，用于执行智能合约交易并维护链上状态。
-
-EVM 执行层主要职责：
-
-- 解析交易调用参数。
-- 校验账户余额、nonce、gas limit 和签名。
-- 执行合约字节码。
-- 计算 gas 消耗。
-- 更新账户状态、合约存储和日志。
-- 生成交易回执。
-- 计算交易后状态根。
-
-执行层与共识层的关系：
-
-- 共识层决定交易顺序。
-- 执行层按照共识顺序执行交易。
-- 执行结果必须生成确定性的状态根。
-- 区块头中的状态根必须与执行层计算结果一致。
-- 任意节点在相同输入下必须得到相同输出。
-
-执行层需要严格控制非确定性来源，禁止直接依赖本地时间、随机数、本地文件、外部网络请求或节点私有状态影响执行结果。
-
-## 8. 区块生命周期
-
-一个区块从产生到提交的典型流程如下：
-
-1. 400ms tick 触发当前节点检查是否具备提议资格。
-2. Leader 从交易池选择交易并构造区块。
-3. 执行层预执行交易并生成状态根、交易根和回执根。
-4. Leader 将区块提议广播给验证节点。
-5. 验证节点校验区块结构、交易签名、执行结果和父块关系。
-6. 验证节点对合法区块投票。
-7. Leader 聚合投票形成 QC。
-8. 节点根据 HotStuff 规则推进锁定和提交。
-9. 已提交区块写入本地存储。
-10. 区块和相关证明通过网络层继续扩散。
-
-## 9. 关键设计约束
-
-- 时钟周期固定为 400ms，不随节点本地负载动态改变。
-- 共识安全优先于单轮出块成功率。
-- 网络传播必须区分高优先级共识消息和大体积同步数据。
-- 交易执行必须具备确定性。
-- 区块提交必须依赖有效 QC 和合法执行结果。
-- PoH 不作为区块提交条件，提交判断必须以 HotStuff QC 和执行校验为准。
-- 节点发现不能替代身份认证，验证节点身份必须通过链上或配置中的权重信息确认。
-- DHT 数据检索结果必须经过哈希、签名或 Merkle 证明校验。
-
-## 10. 模块边界建议
-
-建议代码层面保持以下边界：
-
-| 模块 | 建议职责 |
+| 模块 | 职责 |
 | --- | --- |
-| `poh` | 维护固定 tick、时间记录和调度触发；不承担 PoH 哈希链职责 |
-| `blockchain` | 管理区块存储、链状态和分叉选择结果 |
-| `structure` | 定义区块、交易、账户、签名、哈希、指令等核心结构 |
-| `p2p` | 管理节点发现、连接、DHT 路由和网络身份 |
-| `netsync` | 处理区块、状态和历史数据同步 |
-| `vm` | 封装 EVM 执行、状态读写、gas 计算和回执生成 |
-| `monitor` | 输出时钟延迟、共识延迟、传播延迟、执行耗时和错误指标 |
+| `cmd` | 启动入口、配置装配、数据库初始化、节点身份加载、P2P/RPC 生命周期 |
+| `config` | YAML 配置解析、默认值、启动参数校验 |
+| `p2p` | 自研 P2P 层，包含 TCP、QUIC、连接、心跳、KAD、协议分发 |
+| `consensus` | slot 时钟、skip、投票、QC、后续 proposal/finality 状态机 |
+| `structure` | 区块、交易、账户、哈希、公钥、签名等核心事实模型 |
+| `codec/borsh` | Borsh 基础编解码工具 |
+| `schema` | raw bytes envelope、schema registry、历史版本解码 |
+| `database` | 本地 KV 存储、表命名空间、事务、迁移、快照读 |
+| `rpc` | JSON-RPC 外部接口、DTO 转换、请求边界校验 |
+| `utils` | 无业务状态的通用工具，如日志、编码、哈希、ed25519 |
+| `monitor` | 后续承载指标、延迟、错误率、资源使用观测 |
+| `netsync` | 后续承载历史区块、状态、缺口补齐同步 |
+| `vm` | 后续承载交易执行和状态转换 |
 
-## 11. 风险与改进方向
+## 3. 核心数据流
 
-当前架构需要重点关注以下风险：
+### 3.1 启动数据流
 
-- 400ms 周期对网络延迟和执行耗时要求较高，需要持续观测 P95/P99 延迟。
-- HotStuff 对 Leader 可用性敏感，需要可靠的视图切换和超时策略。
-- QUIC 连接数量过多时需要控制内存、文件句柄和拥塞窗口。
-- DHT 节点发现需要防 Sybil 攻击和恶意路由污染。
-- EVM 执行需要限制资源消耗，避免单笔交易拖慢整个出块周期。
-- 状态存储需要支持高频读写和快速回滚。
+```text
+读取 YAML 配置
+  -> 校验 config
+  -> 初始化 slog
+  -> 打开数据库
+  -> 执行数据库 migration
+  -> 注册 schema
+  -> 检查或创建节点身份
+  -> 创建 P2P Host
+  -> 注册协议 handler
+  -> 启动 P2P listener
+  -> 启动 RPC server
+  -> 等待关闭信号
+```
 
-后续实现应优先完成以下闭环：
+启动要求：
 
-1. 400ms tick 与共识视图状态机联动。
-2. HotStuff 提议、投票、QC、提交路径。
-3. QUIC 节点连接和共识消息优先级通道。
-4. Kademlia DHT 节点发现和数据定位。
-5. EVM 交易执行与状态根校验。
-6. 区块落盘、回滚和状态同步。
+1. 配置必须先校验再使用。
+2. 数据库必须先迁移再读写业务数据。
+3. 核心 schema 缺失时节点必须启动失败。
+4. P2P peer id 必须来自数据库身份或启动时创建的身份。
+5. 节点身份创建使用 `utils/ed25519.go` 生成 32 字节公钥和 32 字节私钥。
+6. 私钥不得出现在日志和 RPC 响应中。
+
+### 3.2 交易到区块数据流
+
+```text
+P2P/RPC 收到交易
+  -> 解析 Borsh 或 JSON DTO
+  -> 转换为 Transaction domain model
+  -> Validate
+  -> 进入交易池
+  -> leader 按 slot 选择交易
+  -> 执行交易
+  -> 生成 block
+  -> 共识 proposal
+  -> validator vote
+  -> QC
+  -> 写入 block/header/index/state
+  -> 广播 block/QC
+```
+
+约束：
+
+1. 交易进入业务层后必须以 Go domain struct 为权威事实。
+2. 区块 hash 必须来自确定性序列化结果。
+3. 交易执行结果必须可重复计算。
+4. 未确认交易不能写入 finalized 视图。
+
+### 3.3 共识数据流
+
+```text
+SlotClock.Tick
+  -> 当前 slot
+  -> 判断 leader
+  -> proposal 或等待 proposal
+  -> confirm vote 或 skip vote
+  -> VoteCollector
+  -> QuorumCertificate
+  -> slot state update
+  -> storage commit
+  -> P2P broadcast
+```
+
+关键规则：
+
+1. 本地超时只能触发 skip vote，不能直接确认 skip。
+2. slot skipped 必须由 skip QC 证明。
+3. 区块 confirmed 必须由 confirm QC 证明。
+4. finalized 必须由后续 finality 规则证明。
+
+## 4. 序列化架构
+
+系统不使用 protobuf。
+
+序列化边界：
+
+| 场景 | 格式 |
+| --- | --- |
+| P2P frame header | 固定二进制字段 |
+| P2P message body | Borsh |
+| P2P 业务 payload | Borsh |
+| 区块、交易、共识结构 | Borsh 或基于 Borsh 的固定字段顺序 |
+| 数据库 raw payload | schema envelope + Borsh payload |
+| 外部 HTTP/RPC | JSON DTO |
+| 安全 hash/sign | canonical payload |
+
+设计理由：
+
+1. Borsh 字段顺序确定，适合区块链 hash、签名、跨语言验证。
+2. protobuf 适合复杂 API 演进，但本项目当前协议结构不复杂。
+3. 保留 protobuf 会引入 proto 文件、生成代码、DTO/domain/Borsh 三层转换。
+4. 每个核心结构只维护一套 `MarshalBinary/Unmarshal...`，降低审计成本。
+
+硬性规则：
+
+1. Borsh 解码后必须 `EnsureEOF`。
+2. Borsh 解码后必须 `Validate`。
+3. 动态 bytes/string 必须有最大长度。
+4. 历史 raw bytes 必须带 `type/version/codec/schema_id/payload_hash`。
+5. JSON 不参与 P2P、链上编码、共识 hash、签名原文。
+6. 安全签名必须包含 domain separator、message type、version、canonical payload。
+
+## 5. 共识层设计
+
+详细共识文档见 `consensus/doc.md`。
+
+当前总方向：
+
+1. 不使用 PoH 作为时钟。
+2. 使用本地单调时钟推进 slot。
+3. slot 使用固定时长，开发默认值为 400ms。
+4. slot 内未收到有效 proposal，超过 skip timeout 后投 skip vote。
+5. 收到有效 proposal 后投 confirm vote。
+6. 达到 stake quorum 后生成 QC。
+7. confirmed 和 finalized 必须区分。
+
+当前已有代码：
+
+1. `SlotClock`：计算当前 slot 和 skip deadline。
+2. `Vote`：表达 confirm vote 和 skip vote。
+3. `Quorum`：计算 stake 阈值。
+4. `QuorumCertificate`：表达投票达到阈值后的证明。
+5. `VoteCollector`：聚合验证者投票，拒绝重复和冲突投票。
+
+生产化必须补齐：
+
+1. `Proposal`：leader 提议区块。
+2. `LeaderSchedule`：确定性 leader 选择。
+3. `ValidatorSet`：验证者集合、stake、版本、epoch。
+4. `VoteSignature`：投票签名和验签。
+5. `QCSignature`：签名列表或聚合签名。
+6. `SlotStateStore`：slot 状态落库和恢复。
+7. `ForkChoice`：分叉选择和回滚边界。
+8. `Finality`：最终确认规则。
+9. `P2P Handler`：proposal/vote/QC 网络处理。
+
+slot 状态建议：
+
+```text
+Open
+  -> Proposed
+  -> Confirmed
+  -> Finalized
+
+Open
+  -> SkipVoted
+  -> Skipped
+```
+
+共识安全规则：
+
+1. 未知 validator 的投票必须拒绝。
+2. 网络投票中的 stake 不可信，真实 stake 来自本地 validator set。
+3. 同一 validator 在同一 slot 的同一投票类型只能选择一个结果。
+4. confirm vote 必须绑定非空 block hash。
+5. skip vote 必须使用空 block hash。
+6. QC 的 voter 列表必须排序、唯一、可验签。
+7. 本地时间不构成最终确认依据。
+
+关于 Alpenglow：
+
+1. 当前不新建顶层 `Alpenglow` 目录。
+2. 通用共识能力保留在 `consensus/`。
+3. 如果后续实现协议特定状态机，使用 `consensus/alpenglow/`。
+4. 协议名称不能替代工程边界，proposal、vote、QC、slot clock 仍应清晰拆分。
+
+## 6. 网络层设计
+
+网络层目标是提供可控、可观测、可扩展的自研 P2P 能力。
+
+基本原则：
+
+1. 不使用 libp2p。
+2. TCP 使用 Go 标准库。
+3. QUIC 使用 `quic-go`。
+4. P2P message body 使用 Borsh。
+5. KAD 只负责发现和路由，不负责身份授权。
+6. 共识消息必须高优先级处理。
+
+### 6.1 网络地址
+
+系统使用 multi-address 风格表达节点地址：
+
+```text
+/ip4/127.0.0.1/tcp/5002/p2p/{peer_id}
+/ip4/127.0.0.1/quic/5002/p2p/{peer_id}
+```
+
+配置示例：
+
+```yaml
+p2p:
+  peer_id: "11111111111111111111111111111111"
+  ip_type: "ip4"
+  listen_ip: "0.0.0.0"
+  listen_port: 5002
+  default_protocol: "tcp"
+  max_peers: 64
+```
+
+peer id 规则：
+
+1. 配置里的默认 peer id 只用于启动占位。
+2. 启动时必须检查数据库是否已有节点身份。
+3. 数据库没有身份时，通过 ed25519 生成公钥/私钥并保存。
+4. 网络身份以数据库身份为准。
+5. 私钥只能本地保存，不进入 P2P 消息。
+
+### 6.2 P2P frame
+
+P2P 使用两层结构：
+
+```text
+frame header
+  magic
+  protocol_version
+  message_type
+  payload_length
+  checksum
+
+message body
+  Borsh fields
+```
+
+frame 职责：
+
+1. 快速识别非法流量。
+2. 限制 payload 长度。
+3. 校验 checksum。
+4. 提供 message type 路由。
+
+message body 职责：
+
+1. 表达业务消息。
+2. 携带 request/response 语义。
+3. 携带 peer route 字段。
+4. 使用 Borsh 保持确定性。
+
+### 6.3 协议注册
+
+协议必须注册到白名单。
+
+当前协议类别：
+
+1. ping/pong。
+2. handshake。
+3. block receive/query。
+4. transaction receive。
+5. peer hints。
+6. node status。
+7. find node request/response。
+8. consensus vote。
+9. consensus QC。
+
+新增协议流程：
+
+1. 在 `p2p/protocol.go` 定义 `ProtocolID`。
+2. 在 `DefaultProtocolSpecs` 注册协议名、响应语义、优先级。
+3. 定义 payload domain struct。
+4. 实现 Borsh 编解码和 Validate。
+5. 注册 schema。
+6. 注册 handler。
+7. 写 frame、decode、handler、异常输入测试。
+
+### 6.4 连接管理
+
+Host 负责：
+
+1. transport 注册。
+2. peer 表管理。
+3. connection 池管理。
+4. 连接状态记录。
+5. 心跳。
+6. 失败计数。
+7. idle 清理。
+8. 协议分发。
+
+连接状态至少包含：
+
+```text
+peer_id
+connection_id
+protocol
+local_address
+remote_address
+connected_at
+last_read
+last_write
+last_heartbeat
+failure_count
+```
+
+心跳要求：
+
+1. 周期性发送 ping。
+2. pong 超时计失败。
+3. 连续失败超过阈值关闭连接。
+4. 心跳不允许阻塞共识消息处理。
+5. 心跳日志必须包含 peer_id、connection_id、protocol。
+
+### 6.5 Kademlia DHT
+
+KAD 用于节点发现和邻居维护。
+
+当前设计：
+
+1. 32 字节 peer id 空间。
+2. 256 个 bucket。
+3. bucket 默认容量 20。
+4. bucket 满时按节点质量淘汰或进入候选集合。
+5. 节点质量包含成功次数、失败次数、连续失败、最近活跃时间。
+
+DHT 边界：
+
+1. DHT 发现的节点不自动获得 validator 权限。
+2. DHT 返回的数据必须经过 hash、签名或 schema 校验。
+3. DHT 不能替代共识层 validator set。
+4. DHT 需要防 Sybil、坏路由和地址投毒。
+
+### 6.6 网络优先级
+
+建议优先级：
+
+| 优先级 | 消息 |
+| --- | --- |
+| High | ping/pong、handshake、vote、QC、proposal |
+| Normal | transaction、block receive、peer hints、node status |
+| Low | 历史区块同步、批量状态同步 |
+
+QUIC 场景下后续应使用独立 stream 或队列区分共识消息和大块同步数据。
+
+## 7. 存储层设计
+
+存储层目标是提供可靠的本地状态、索引、raw bytes 审计和重启恢复能力。
+
+当前支持：
+
+1. Pebble。
+2. LevelDB。
+3. 表命名空间。
+4. 批量写。
+5. 读事务快照。
+6. 数据库 migration。
+7. checkpoint。
+8. cache policy。
+
+### 7.1 表职责
+
+当前主要表：
+
+| 表 | 职责 |
+| --- | --- |
+| `TableAccount` | 账户状态 |
+| `TableChain` | 链元信息 |
+| `TableBlock` | 完整区块 |
+| `TablePeer` | 节点信息 |
+| `TableHeightToHash` | 高度到 hash 索引 |
+| `TableHashToHeight` | hash 到高度索引 |
+| `TableBlockHeader` | 区块头 |
+| `TableBlockBody` | 区块体 |
+| `TableTxToBlock` | 交易到区块索引 |
+| `TableOrphan` | 临时孤块 |
+| `TableCheckpoint` | 检查点 |
+
+后续建议增加：
+
+1. `TableConsensusSlot`：slot state。
+2. `TableConsensusVote`：投票历史。
+3. `TableConsensusQC`：QC。
+4. `TableValidatorSet`：验证者集合。
+5. `TableSchemaPayload`：schema envelope raw bytes 索引。
+
+### 7.2 写一致性
+
+必须原子写入的组合：
+
+1. block header、block body、height index、hash index。
+2. transaction index 和 block index。
+3. proposal、vote/QC、slot state。
+4. finalized checkpoint 和 chain head。
+5. raw payload 和 payload hash 元信息。
+
+写入原则：
+
+1. 多表更新必须使用 `DataTransaction` 或等价原子批量写。
+2. 写入前必须完成 Validate。
+3. 写入 raw bytes 前必须完成 schema envelope 构造。
+4. 已 finalized 数据不能被普通分叉回滚覆盖。
+5. migration 必须单调递增并可审计。
+
+### 7.3 读一致性
+
+读取原则：
+
+1. 跨多 key 查询必须使用 read transaction snapshot。
+2. RPC 读取链状态必须明确 commitment。
+3. finalized 读取只能来自 finalized checkpoint 或已证明状态。
+4. confirmed 读取必须携带 QC。
+5. 未确认 proposal 不得伪装为 confirmed block。
+
+典型读取：
+
+```text
+GetBlock(slot)
+  -> read snapshot
+  -> height_to_hash
+  -> block_header
+  -> block_body
+  -> qc/status
+  -> build RPC DTO
+```
+
+### 7.4 key 设计
+
+key 必须稳定、可排序、可前缀扫描。
+
+建议：
+
+```text
+block:hash:{hash}
+block:height:{big_endian_height}
+tx:block:{tx_hash}
+slot:state:{big_endian_slot}
+slot:vote:{big_endian_slot}:{vote_type}:{validator_id}
+slot:qc:{big_endian_slot}:{qc_type}
+validator:set:{big_endian_epoch}
+schema:{type}:{version}:{schema_id}:{payload_hash}
+```
+
+要求：
+
+1. 数值索引用 big endian，保证字典序等于数值序。
+2. hash 使用固定长度 bytes 或 hex 文本，不能混用。
+3. key 前缀必须集中定义，避免散落拼接。
+4. 删除范围必须先验证前缀，避免误删。
+
+## 8. 区块与交易结构
+
+区块结构由 `structure` 包承载。
+
+区块头关键字段：
+
+1. version。
+2. slot。
+3. parent slot。
+4. block height。
+5. parent hash。
+6. previous blockhash。
+7. blockhash。
+8. transactions root。
+9. accounts hash。
+10. state root。
+11. rewards hash。
+12. entries hash。
+13. timestamp。
+14. leader。
+15. transaction count。
+
+区块规则：
+
+1. `ParentSlot < Slot`。
+2. `Blockhash` 不能为空。
+3. `Leader` 不能为空。
+4. `TimestampUnix` 必须为正。
+5. `TransactionCount` 必须和交易数量一致。
+6. `TransactionsRoot` 必须由交易 hash 计算得出。
+7. runtime meta 不参与区块 hash。
+
+交易规则：
+
+1. 交易签名必须覆盖明确的 canonical payload。
+2. 交易 hash 不应使用 JSON 或 protobuf。
+3. 交易排序由共识 proposal 决定。
+4. 执行层必须在相同输入下产出相同状态根。
+
+## 9. 执行层规划
+
+当前 `vm` 目录是后续执行层承载位置。
+
+执行层职责：
+
+1. 校验交易基本合法性。
+2. 检查账户、余额、nonce、权限。
+3. 执行指令或合约。
+4. 生成 receipt。
+5. 更新账户状态。
+6. 计算 state root、accounts hash、transactions root。
+
+执行层禁止：
+
+1. 依赖本地墙上时间产生执行结果。
+2. 依赖本地随机数产生执行结果。
+3. 直接访问外部网络影响执行结果。
+4. 使用非确定性 map 遍历结果生成 hash。
+5. 绕过共识层决定交易顺序。
+
+后续实现顺序：
+
+1. 先实现最小账户模型和转账交易。
+2. 再实现 instruction 执行。
+3. 再实现合约 VM。
+4. 最后实现并行执行和冲突检测。
+
+## 10. RPC 层设计
+
+RPC 使用 JSON DTO，只负责外部访问。
+
+职责：
+
+1. 解析请求。
+2. 校验参数。
+3. 调用 domain service。
+4. 转换响应 DTO。
+5. 输出结构化错误。
+
+边界：
+
+1. JSON DTO 不能直接进入链上编码。
+2. JSON DTO 不能作为 hash/sign 原文。
+3. RPC 不能绕过共识状态读取未确认数据。
+4. 大请求必须受 `max_body_bytes` 限制。
+5. batch 必须受 `max_batch_size` 限制。
+
+RPC commitment 建议：
+
+```text
+processed: 本地已处理，可能回滚
+confirmed: 有 QC，可能被最终规则回滚
+finalized: 已最终确认，不应回滚
+```
+
+## 11. 节点身份与密钥
+
+节点身份是 P2P 和共识安全的基础。
+
+设计：
+
+1. 节点启动时先读取数据库身份。
+2. 没有身份时生成 ed25519 公私钥。
+3. 公钥用于 peer id 或 peer id 派生。
+4. 私钥只保存在本地数据库或后续安全密钥存储。
+5. 配置文件里的 peer id 不能覆盖数据库里的真实身份。
+
+安全要求：
+
+1. 私钥不得写入日志。
+2. 私钥不得通过 RPC 返回。
+3. 私钥不得放入 P2P 消息。
+4. 身份不一致时启动应失败或明确告警。
+5. 后续生产环境应支持加密私钥和密钥轮换。
+
+## 12. 配置设计
+
+当前配置：
+
+```yaml
+rpc:
+  address: ":8899"
+  max_body_bytes: 1048576
+  max_batch_size: 32
+
+log:
+  level: "info"
+  format: "json"
+  output: "console"
+  file_path: "./logs/solana_golang.log"
+
+database:
+  engine: "pebble"
+  path: "./data/pebble"
+  wal: true
+
+p2p:
+  peer_id: "11111111111111111111111111111111"
+  ip_type: "ip4"
+  listen_ip: "0.0.0.0"
+  listen_port: 5002
+  default_protocol: "tcp"
+  max_peers: 64
+```
+
+建议新增：
+
+```yaml
+consensus:
+  enabled: true
+  initial_slot: 0
+  slot_duration_ms: 400
+  skip_timeout_ms: 250
+  quorum_numerator: 2
+  quorum_denominator: 3
+  clock_drift_tolerance_ms: 1000
+  validator_set_version: 1
+```
+
+配置要求：
+
+1. 所有外部可调字段必须有 Validate。
+2. 所有时间配置必须明确单位。
+3. 所有大小配置必须明确字节或 MB。
+4. 默认值必须能本地启动。
+5. 生产配置不得使用默认测试 peer id。
+
+## 13. 可观测性
+
+日志使用 `slog`。
+
+关键日志：
+
+1. 节点启动和关闭。
+2. 配置加载。
+3. 数据库打开、迁移、关闭。
+4. 节点身份创建和加载。
+5. P2P listener 启动。
+6. peer 连接、断开、心跳失败。
+7. P2P 解码失败和协议分发失败。
+8. slot 推进。
+9. proposal 接收和拒绝原因。
+10. vote 接收和拒绝原因。
+11. QC 生成和验证失败。
+12. 区块写入和 finalized checkpoint 更新。
+
+建议指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| `slot_lag_ms` | 本地 slot 推进延迟 |
+| `proposal_latency_ms` | proposal 从 slot start 到接收耗时 |
+| `vote_latency_ms` | vote 聚合耗时 |
+| `qc_latency_ms` | QC 生成耗时 |
+| `p2p_connections` | 当前连接数 |
+| `p2p_heartbeat_failures` | 心跳失败次数 |
+| `p2p_decode_errors` | 网络解码错误 |
+| `db_write_latency_ms` | 数据库写入耗时 |
+| `db_read_latency_ms` | 数据库读取耗时 |
+| `block_execute_latency_ms` | 区块执行耗时 |
+
+日志要求：
+
+1. 关键路径必须带 slot、block_hash、peer_id、protocol。
+2. 错误日志必须带可定位上下文。
+3. 不得记录私钥、签名原文、敏感配置。
+4. 高频日志必须限流或降级为 debug。
+
+## 14. 安全设计
+
+输入边界：
+
+1. P2P frame 长度。
+2. Borsh 容器长度。
+3. RPC body 大小。
+4. RPC batch 大小。
+5. peer id 格式。
+6. multi-address 格式。
+7. block/transaction/proposal/vote/QC 字段。
+8. 数据库 key 前缀和范围。
+
+拒绝规则：
+
+1. 未注册协议拒绝。
+2. checksum 不匹配拒绝。
+3. Borsh trailing bytes 拒绝。
+4. 未知 schema 拒绝。
+5. 未知 validator 拒绝。
+6. 非 leader proposal 拒绝。
+7. 重复投票拒绝。
+8. 冲突投票拒绝并记录证据。
+9. 无效签名拒绝。
+10. 超出 slot drift tolerance 的共识消息拒绝或降级处理。
+
+攻击面：
+
+1. P2P 大包耗尽内存。
+2. 心跳放大。
+3. DHT 地址投毒。
+4. Sybil 节点污染 routing table。
+5. 重复交易刷池。
+6. 冲突投票扰乱共识。
+7. 数据库范围删除误操作。
+8. RPC batch 放大。
+
+应对：
+
+1. 明确最大长度。
+2. 协议白名单。
+3. 节点质量评分。
+4. 连接失败惩罚。
+5. 交易去重。
+6. vote history。
+7. 原子写和 checkpoint。
+8. 参数校验和日志审计。
+
+## 15. 测试策略
+
+必须覆盖：
+
+1. Borsh golden bytes。
+2. Borsh round trip。
+3. schema envelope hash mismatch。
+4. P2P frame checksum mismatch。
+5. P2P payload 超长。
+6. TCP/QUIC 连接和心跳。
+7. KAD bucket 淘汰。
+8. slot clock 推进。
+9. skip QC。
+10. confirm QC。
+11. 重复投票。
+12. 冲突投票。
+13. 数据库事务原子性。
+14. 数据库 read snapshot 一致性。
+15. migration 重启后幂等。
+16. 区块 hash 确定性。
+17. 交易 root 校验。
+18. RPC 参数错误。
+
+测试分层：
+
+| 层级 | 目标 |
+| --- | --- |
+| 单元测试 | 编解码、校验、纯函数、边界条件 |
+| 集成测试 | P2P、数据库、RPC、共识 handler |
+| 回归测试 | golden bytes、schema 历史版本 |
+| 压力测试 | 大量连接、批量消息、数据库批写 |
+| 故障测试 | 断连、重连、重复消息、乱序消息 |
+
+## 16. 当前实现状态
+
+已完成或已有雏形：
+
+1. 配置加载和校验。
+2. 结构化日志。
+3. Pebble/LevelDB 存储抽象。
+4. 数据库 migration。
+5. P2P Host。
+6. TCP transport。
+7. QUIC transport。
+8. P2P frame + Borsh message。
+9. KAD routing table。
+10. schema registry。
+11. codec/borsh。
+12. 区块结构和确定性序列化。
+13. 共识 slot/vote/QC 示例。
+14. 节点身份创建和加载。
+
+仍需生产化：
+
+1. consensus proposal。
+2. leader schedule。
+3. validator set。
+4. 共识签名。
+5. consensus handler 接入 P2P。
+6. slot state 落库。
+7. finalized checkpoint。
+8. 交易池。
+9. 执行层状态机。
+10. netsync 历史同步。
+11. 完整 RPC 查询。
+12. 监控指标。
+
+## 17. 开发路线图
+
+阶段一：协议和存储基线
+
+1. 完成 Borsh/schema 规范。
+2. 完成 P2P frame/message。
+3. 完成节点身份。
+4. 完成数据库 migration。
+5. 完成区块基础结构。
+
+阶段二：共识最小闭环
+
+1. consensus config。
+2. validator set。
+3. leader schedule。
+4. proposal。
+5. signed vote。
+6. QC。
+7. slot state store。
+8. P2P vote/QC/proposal handler。
+
+阶段三：链状态闭环
+
+1. 交易池。
+2. 最小账户模型。
+3. 区块执行。
+4. state root。
+5. block commit。
+6. confirmed/finalized 查询。
+
+阶段四：网络同步
+
+1. peer discovery。
+2. node status。
+3. block headers sync。
+4. block body sync。
+5. common ancestor query。
+6. checkpoint sync。
+
+阶段五：生产强化
+
+1. 签名聚合或签名压缩。
+2. 惩罚证据。
+3. 防 Sybil。
+4. 资源限流。
+5. metrics。
+6. 压测。
+7. 故障恢复演练。
+
+## 18. 关键禁止事项
+
+1. 禁止引入 protobuf。
+2. 禁止使用 libp2p。
+3. 禁止用 JSON 做 P2P 或链上核心编码。
+4. 禁止直接信任网络消息里的 stake。
+5. 禁止没有签名就接受生产共识消息。
+6. 禁止将本地时间作为最终确认依据。
+7. 禁止把 confirmed 当 finalized。
+8. 禁止绕过 schema registry 持久化 raw bytes。
+9. 禁止多表状态更新不使用原子写。
+10. 禁止把私钥写入日志、RPC、P2P 消息。
+
+## 19. 总结
+
+本系统的主线是：
+
+```text
+自研 P2P
+  + TCP/quic-go
+  + Borsh
+  + Schema Registry
+  + Pebble/LevelDB
+  + 本地单调 slot
+  + skip/vote/QC
+  + 明确 confirmed/finalized
+```
+
+当前代码已经具备网络、存储、序列化和共识示例的基础。下一步应优先把共识从示例推进到最小可运行闭环：validator set、leader schedule、proposal、签名 vote、QC、slot state store 和 P2P handler。只有完成这些，系统才具备真正的区块确认能力。
