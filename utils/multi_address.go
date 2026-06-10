@@ -141,12 +141,10 @@ func ParseMultiAddressProtocol(value string) (MultiAddressProtocol, error) {
 	}
 }
 
-// ToRawAddress 返回规范字符串 + 保持 multi-address 输出格式一致。
 func (m MultiAddress) ToRawAddress() string {
 	return fmt.Sprintf("/%s/%s/%s/%d/p2p/%s", m.IPType, m.IPAddress, m.Protocol, m.Port, m.PeerID)
 }
 
-// String 返回规范字符串 + 便于日志和格式化输出。
 func (m MultiAddress) String() string {
 	return m.ToRawAddress()
 }

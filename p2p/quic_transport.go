@@ -27,7 +27,6 @@ func NewQUICTransportWithConfig(config QUICTransportConfig) *QUICTransport {
 	return &QUICTransport{maxMessageSize: normalizeMaxMessageSize(config.MaxMessageSize)}
 }
 
-// Protocol 返回传输协议 + 供 Host 按 multi-address 分发请求。
 func (transport *QUICTransport) Protocol() utils.MultiAddressProtocol {
 	return utils.ProtocolQUIC
 }

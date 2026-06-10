@@ -208,7 +208,6 @@ func (config P2PConfig) Validate() error {
 	return nil
 }
 
-// Protocol 返回默认传输协议 + 统一配置大小写处理。
 func (config P2PConfig) Protocol() utils.MultiAddressProtocol {
 	protocol, err := utils.ParseMultiAddressProtocol(config.DefaultProtocol)
 	if err != nil {

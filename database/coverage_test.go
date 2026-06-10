@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// TestDatabaseMetadataAndKeyCodecEdges 验证元数据和 key 编码边界 + 保证表映射和范围计算稳定。
 func TestDatabaseMetadataAndKeyCodecEdges(t *testing.T) {
 	if Table(9999).ColumnFamilyName() != "" {
 		t.Fatal("unknown table column family is not empty")
@@ -35,7 +34,6 @@ func TestDatabaseMetadataAndKeyCodecEdges(t *testing.T) {
 	}
 }
 
-// TestDatabaseCachePolicyAndRefresh 验证缓存策略和刷新路径 + 保证缓存淘汰、过期和刷新正确。
 func TestDatabaseCachePolicyAndRefresh(t *testing.T) {
 	db := newOpenTestDatabase(t, EnginePebble)
 	defer db.Close()
@@ -87,7 +85,6 @@ func TestDatabaseCachePolicyAndRefresh(t *testing.T) {
 	}
 }
 
-// TestDatabaseReadTransactionFullSurface 验证读事务完整读接口 + 保证快照读方法语义一致。
 func TestDatabaseReadTransactionFullSurface(t *testing.T) {
 	db := newOpenTestDatabase(t, EnginePebble)
 	defer db.Close()
@@ -142,7 +139,6 @@ func TestDatabaseReadTransactionFullSurface(t *testing.T) {
 	}
 }
 
-// TestDatabaseOperationsAdditionalSurface 验证数据库补充操作面 + 覆盖分页、迭代、维护和 WAL 边界。
 func TestDatabaseOperationsAdditionalSurface(t *testing.T) {
 	db := newOpenTestDatabase(t, EnginePebble)
 	defer db.Close()
@@ -209,7 +205,6 @@ func TestDatabaseOperationsAdditionalSurface(t *testing.T) {
 	}
 }
 
-// TestDatabaseFactoryAndClosedEdges 验证工厂和关闭边界 + 保证错误路径可观测。
 func TestDatabaseFactoryAndClosedEdges(t *testing.T) {
 	if _, err := NewDatabase(DatabaseConfig{Path: t.TempDir(), Engine: EngineType("bad")}); err == nil {
 		t.Fatal("NewDatabase(bad engine) error = nil, want unsupported engine")
@@ -224,7 +219,6 @@ func TestDatabaseFactoryAndClosedEdges(t *testing.T) {
 	}
 }
 
-// newOpenTestDatabase 创建测试数据库 + 保证每个用例使用隔离目录。
 func newOpenTestDatabase(t *testing.T, engine EngineType) Database {
 	t.Helper()
 	db, err := NewDatabase(DatabaseConfig{Path: t.TempDir(), Engine: engine, WAL: true})
@@ -234,7 +228,6 @@ func newOpenTestDatabase(t *testing.T, engine EngineType) Database {
 	return db
 }
 
-// assertKeyValues 校验键值序列 + 保证范围查询结果顺序和内容符合预期。
 func assertKeyValues(t *testing.T, pairs []KeyValue, wantKeys [][]byte, wantValues [][]byte) {
 	t.Helper()
 	if len(pairs) != len(wantKeys) || len(pairs) != len(wantValues) {

@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-// TestEngineCRUDBatchIteratorAndMaintenance 验证引擎基础能力 + 保证 CRUD、批量、迭代和维护操作稳定。
 func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {
@@ -86,7 +85,6 @@ func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	}
 }
 
-// TestEngineClosedOperationsReturnError 验证关闭状态错误路径 + 保证未打开引擎不会静默成功。
 func TestEngineClosedOperationsReturnError(t *testing.T) {
 	engine := NewEngine()
 
@@ -122,7 +120,6 @@ func TestEngineClosedOperationsReturnError(t *testing.T) {
 	}
 }
 
-// TestSnapshotKeepsStableReadView 验证快照稳定视图 + 保证后续写入不影响已有快照。
 func TestSnapshotKeepsStableReadView(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {
@@ -163,7 +160,6 @@ func TestSnapshotKeepsStableReadView(t *testing.T) {
 	}
 }
 
-// TestEngineAdditionalMethods 验证引擎补充方法 + 覆盖批删除、迭代方向和能力声明。
 func TestEngineAdditionalMethods(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {

@@ -65,12 +65,10 @@ func (publicKey PublicKey) Bytes() []byte {
 	return utils.CloneBytes(publicKey[:])
 }
 
-// String 返回 Base58 公钥 + 作为默认可读表示。
 func (publicKey PublicKey) String() string {
 	return utils.Base58Encode(publicKey[:])
 }
 
-// Hex 返回小写十六进制公钥 + 便于日志和调试。
 func (publicKey PublicKey) Hex() string {
 	return utils.BytesToHex(publicKey[:])
 }
@@ -118,12 +116,10 @@ func (hash Hash) Bytes() []byte {
 	return utils.CloneBytes(hash[:])
 }
 
-// String 返回 Base58 哈希 + 作为默认可读表示。
 func (hash Hash) String() string {
 	return utils.Base58Encode(hash[:])
 }
 
-// Hex 返回小写十六进制哈希 + 便于日志和调试。
 func (hash Hash) Hex() string {
 	return utils.BytesToHex(hash[:])
 }
@@ -171,12 +167,10 @@ func (signature Signature) Bytes() []byte {
 	return utils.CloneBytes(signature[:])
 }
 
-// String 返回 Base58 签名 + 作为默认可读表示。
 func (signature Signature) String() string {
 	return utils.Base58Encode(signature[:])
 }
 
-// Hex 返回小写十六进制签名 + 便于日志和调试。
 func (signature Signature) Hex() string {
 	return utils.BytesToHex(signature[:])
 }

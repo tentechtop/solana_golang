@@ -43,7 +43,6 @@ func NewTCPTransportWithConfig(config TCPTransportConfig) *TCPTransport {
 	}
 }
 
-// Protocol 返回传输协议 + 供 Host 按 multi-address 分发请求。
 func (transport *TCPTransport) Protocol() utils.MultiAddressProtocol {
 	return utils.ProtocolTCP
 }
@@ -178,27 +177,22 @@ func newTCPConnection(netConnection net.Conn, remotePeerID string, maxMessageSiz
 	}
 }
 
-// ID 返回连接 ID + 便于日志和连接池定位。
 func (connection *TCPConnection) ID() string {
 	return connection.id
 }
 
-// Protocol 返回连接协议 + 供上层统计不同传输的连接状态。
 func (connection *TCPConnection) Protocol() utils.MultiAddressProtocol {
 	return utils.ProtocolTCP
 }
 
-// RemotePeerID 返回远端节点 ID + 出站连接从拨号地址继承该值。
 func (connection *TCPConnection) RemotePeerID() string {
 	return connection.remotePeerID
 }
 
-// LocalAddress 返回本地地址 + 用于日志和连接诊断。
 func (connection *TCPConnection) LocalAddress() string {
 	return connection.netConnection.LocalAddr().String()
 }
 
-// RemoteAddress 返回远端地址 + 用于日志和连接诊断。
 func (connection *TCPConnection) RemoteAddress() string {
 	return connection.netConnection.RemoteAddr().String()
 }

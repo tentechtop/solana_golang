@@ -93,12 +93,10 @@ var tableMetadata = []TableMetadata{
 	{Table: TableTest2, Code: uint16(TableTest2), ColumnFamilyName: "height_to_hash"},
 }
 
-// Code 返回稳定表编码 + 用作底层 key 前缀。
 func (t Table) Code() uint16 {
 	return uint16(t)
 }
 
-// Metadata 返回表元数据 + 用于调用方获取物理表信息。
 func (t Table) Metadata() (TableMetadata, bool) {
 	for _, metadata := range tableMetadata {
 		if metadata.Table == t {
@@ -108,7 +106,6 @@ func (t Table) Metadata() (TableMetadata, bool) {
 	return TableMetadata{}, false
 }
 
-// ColumnFamilyName 返回物理存储名 + 用于兼容列族风格命名。
 func (t Table) ColumnFamilyName() string {
 	metadata, ok := t.Metadata()
 	if !ok {
@@ -117,7 +114,6 @@ func (t Table) ColumnFamilyName() string {
 	return metadata.ColumnFamilyName
 }
 
-// String 返回物理表名 + 用于日志和调试输出。
 func (t Table) String() string {
 	return t.ColumnFamilyName()
 }

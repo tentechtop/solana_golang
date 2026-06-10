@@ -67,7 +67,6 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	return host, nil
 }
 
-// PeerID 返回本地节点 ID + 供消息路由默认填充来源。
 func (host *Host) PeerID() string {
 	return host.peerID
 }
@@ -97,7 +96,7 @@ func (host *Host) RegisterResultHandler(spec ProtocolSpec, handler ResultProtoco
 	return host.registry.RegisterResultHandler(spec, handler)
 }
 
-// HandleMessage 处理入站消息 + 通过协议注册表执行对应处理器。
+// HandleMessage 处理入站消息 + 按消息协议 ID 分发到注册表处理器。
 func (host *Host) HandleMessage(ctx context.Context, message Message) (ProtocolHandleResult, error) {
 	return host.registry.Handle(ctx, message)
 }
@@ -193,7 +192,6 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 	return nil, fmt.Errorf("p2p: dial peer %s: %w", peerID, errors.Join(dialErrors...))
 }
 
-// Connection 查询连接 + 用于上层复用已经建立的连接。
 func (host *Host) Connection(peerID string) (Connection, bool) {
 	host.mutex.RLock()
 	defer host.mutex.RUnlock()

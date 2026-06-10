@@ -2,7 +2,6 @@ package utils
 
 import "testing"
 
-// TestNormalizeHex 验证十六进制规范化 + 保证空白和前缀处理稳定。
 func TestNormalizeHex(t *testing.T) {
 	cases := []struct {
 		name  string
