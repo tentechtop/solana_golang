@@ -2,26 +2,31 @@ package p2p
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
-	"solana_golang/utils"
+	protobuf "google.golang.org/protobuf/proto"
+
+	p2pproto "solana_golang/p2p/proto"
 )
 
 const (
-	// DefaultMaxMessageSize 定义默认消息上限 + 防止单连接占用过多内存。
+	// DefaultMaxMessageSize 定义默认消息上限 + 防止单连接通过大包耗尽内存。
 	DefaultMaxMessageSize = 4 * 1024 * 1024
-	// MessageProtocolVersion 定义当前消息版本 + 便于后续协议平滑升级。
+	// MessageProtocolVersion 定义当前消息版本 + 用于协议升级时显式拒绝未知版本。
 	MessageProtocolVersion uint16 = 1
 
-	messageFrameHeaderSize = 4
-	messagePeerIDByteSize  = 32
+	// messageFrameMagic 定义 P2P 帧魔数 + 快速识别非本协议流量。
+	messageFrameMagic uint32 = 0x53475032
+
+	messageFrameHeaderSize = 4 + 2 + 4 + 4 + sha256.Size
 	messageIDByteSize      = 16
-	messageWireHeaderSize  = 2 + 32 + 32 + 16 + 16 + 1 + 4 + 8 + 4
 )
 
 // MessageType 表示 P2P 消息类型 + 复用协议编号作为网络路由键。
@@ -34,7 +39,7 @@ const (
 	MessageTypePong MessageType = ProtocolPongV1
 	// MessageTypeTransaction 表示交易广播 + 用于交易池传播。
 	MessageTypeTransaction MessageType = ProtocolReceiveTransactionV1
-	// MessageTypeBlock 表示区块传播 + 用于同步新区块。
+	// MessageTypeBlock 表示区块广播 + 用于同步新区块。
 	MessageTypeBlock MessageType = ProtocolReceiveBlockV1
 	// MessageTypeVote 表示共识投票 + 用于 HotStuff 投票传播。
 	MessageTypeVote MessageType = ProtocolHotStuffVoteV1
@@ -44,17 +49,20 @@ const (
 	MessageTypePeer MessageType = ProtocolPeerHintsV1
 )
 
-// MessageFlag 表示请求响应标识 + 使用 1 字节降低网络开销。
+// MessageFlag 表示消息语义 + UNKNOWN=0 仅保留给协议演进和非法输入。
 type MessageFlag byte
 
 const (
-	// MessageFlagRequest 表示请求或普通消息 + request_id 全零时表示普通消息。
-	MessageFlagRequest MessageFlag = 0x00
+	MessageFlagUnknown MessageFlag = 0
+	// MessageFlagNotify 表示单向通知 + 用于广播和无需响应的消息。
+	MessageFlagNotify MessageFlag = 1
+	// MessageFlagRequest 表示请求消息 + request_id 必须等于自身消息 ID。
+	MessageFlagRequest MessageFlag = 2
 	// MessageFlagResponse 表示响应消息 + request_id 必须指向原请求消息 ID。
-	MessageFlagResponse MessageFlag = 0x01
+	MessageFlagResponse MessageFlag = 3
 )
 
-// Message 保存 P2P 消息 + 使用固定头部承载协议路由和请求响应关系。
+// Message 保存 P2P 消息事实模型 + protobuf 只作为节点通信 DTO。
 type Message struct {
 	ID                 string      `json:"id"`
 	Type               MessageType `json:"type"`
@@ -67,14 +75,14 @@ type Message struct {
 	Version            uint16      `json:"version"`
 }
 
-// NewMessage 创建普通消息 + 自动生成 ID 和创建时间避免上层重复处理。
+// NewMessage 创建单向消息 + 自动生成 ID 和创建时间避免上层重复处理。
 func NewMessage(messageType MessageType, payload []byte) (Message, error) {
 	message, err := newBaseMessage(messageType, payload)
 	if err != nil {
 		return Message{}, err
 	}
 	message.MarkAsNormal()
-	return message, nil
+	return message, message.Validate(DefaultMaxMessageSize)
 }
 
 // NewRequestMessage 创建请求消息 + 让响应可以通过 request_id 回到原请求。
@@ -101,10 +109,10 @@ func NewResponseMessage(senderPeerID string, messageType MessageType, requestID 
 	return message, message.Validate(DefaultMaxMessageSize)
 }
 
-// Validate 校验消息字段 + 防止畸形头部和超大负载进入网络层。
+// Validate 校验消息字段 + 防止畸形 protobuf 进入上层业务。
 func (message Message) Validate(maxMessageSize int) error {
-	if message.effectiveVersion() < MessageProtocolVersion {
-		return fmt.Errorf("%w: invalid version", ErrInvalidMessage)
+	if message.effectiveVersion() != MessageProtocolVersion {
+		return fmt.Errorf("%w: unsupported version", ErrInvalidMessage)
 	}
 	if _, err := messageIDBytes(message.ID); err != nil {
 		return err
@@ -115,13 +123,13 @@ func (message Message) Validate(maxMessageSize int) error {
 	if err := validateMessagePeerID(message.ToPeerID, true); err != nil {
 		return err
 	}
-	if message.Flag != MessageFlagRequest && message.Flag != MessageFlagResponse {
+	if !isValidMessageFlag(message.Flag) {
 		return fmt.Errorf("%w: invalid flag", ErrInvalidMessage)
 	}
 	if len(message.Payload) > maxPayloadSize(maxMessageSize) {
 		return fmt.Errorf("%w: payload too large", ErrInvalidMessage)
 	}
-	if message.CreatedAtUnixMilli < 0 {
+	if message.CreatedAtUnixMilli <= 0 {
 		return fmt.Errorf("%w: invalid created time", ErrInvalidMessage)
 	}
 	if err := message.validateRequestID(); err != nil {
@@ -136,24 +144,24 @@ func (message Message) Clone() Message {
 	return message
 }
 
-// IsRequestResponse 判断是否请求响应消息 + request_id 非全零时参与匹配。
+// IsRequestResponse 判断是否请求响应消息 + request_id 非空时参与匹配。
 func (message Message) IsRequestResponse() bool {
-	return isValidMessageID(message.RequestID) && !isZeroMessageID(message.RequestID)
+	return message.Flag == MessageFlagRequest || message.Flag == MessageFlagResponse
 }
 
 // IsRequest 判断是否请求消息 + 请求消息要求 request_id 等于自身 ID。
 func (message Message) IsRequest() bool {
-	return message.IsRequestResponse() && message.Flag == MessageFlagRequest
+	return message.Flag == MessageFlagRequest && strings.EqualFold(message.RequestID, message.ID)
 }
 
 // IsResponse 判断是否响应消息 + 响应消息要求 request_id 指向原请求。
 func (message Message) IsResponse() bool {
-	return message.IsRequestResponse() && message.Flag == MessageFlagResponse
+	return message.Flag == MessageFlagResponse && isValidMessageID(message.RequestID)
 }
 
-// MarkAsNormal 标记普通消息 + 清空 request_id 避免被当作请求响应。
+// MarkAsNormal 标记单向通知 + 清空 request_id 避免被当作请求响应。
 func (message *Message) MarkAsNormal() {
-	message.Flag = MessageFlagRequest
+	message.Flag = MessageFlagNotify
 	message.RequestID = ""
 }
 
@@ -173,68 +181,69 @@ func (message *Message) MarkAsResponse(requestID string) error {
 	return nil
 }
 
-// MarshalBinary 序列化消息 + 使用固定头部和大端序降低解析成本。
+// MarshalBinary 序列化消息 + P2P 通信统一使用 protobuf binary。
 func (message Message) MarshalBinary(maxMessageSize int) ([]byte, error) {
 	if err := message.Validate(maxMessageSize); err != nil {
 		return nil, err
 	}
 
-	senderID, err := messagePeerIDBytes(message.FromPeerID)
+	protobufFlag, err := toProtobufFlag(message.Flag)
 	if err != nil {
 		return nil, err
 	}
-	targetID, err := messagePeerIDBytes(message.ToPeerID)
-	if err != nil {
-		return nil, err
-	}
-	messageID, err := messageIDBytes(message.ID)
-	if err != nil {
-		return nil, err
-	}
-	requestID, err := messageRequestIDBytes(message.RequestID)
-	if err != nil {
-		return nil, err
+	wireMessage := &p2pproto.P2PMessage{
+		Version:            uint32(message.effectiveVersion()),
+		Id:                 strings.ToLower(message.ID),
+		Type:               uint32(message.Type),
+		FromPeerId:         message.FromPeerID,
+		ToPeerId:           message.ToPeerID,
+		RequestId:          strings.ToLower(message.RequestID),
+		Flag:               protobufFlag,
+		Payload:            cloneBytes(message.Payload),
+		CreatedAtUnixMilli: message.CreatedAtUnixMilli,
 	}
 
-	payloadLength := len(message.Payload)
-	encoded := make([]byte, messageWireHeaderSize+payloadLength)
-	binary.BigEndian.PutUint16(encoded[0:2], message.effectiveVersion())
-	copy(encoded[2:34], senderID)
-	copy(encoded[34:66], targetID)
-	copy(encoded[66:82], messageID)
-	copy(encoded[82:98], requestID)
-	encoded[98] = byte(message.Flag)
-	binary.BigEndian.PutUint32(encoded[99:103], uint32(message.Type))
-	binary.BigEndian.PutUint64(encoded[103:111], uint64(message.CreatedAtUnixMilli))
-	binary.BigEndian.PutUint32(encoded[111:115], uint32(payloadLength))
-	copy(encoded[messageWireHeaderSize:], message.Payload)
+	encoded, err := protobuf.Marshal(wireMessage)
+	if err != nil {
+		return nil, fmt.Errorf("p2p: marshal protobuf message: %w", err)
+	}
+	if len(encoded) > maxPayloadSize(maxMessageSize) {
+		return nil, fmt.Errorf("%w: protobuf payload too large", ErrInvalidMessage)
+	}
 	return encoded, nil
 }
 
-// UnmarshalBinary 反序列化消息 + 严格校验长度和请求响应约束。
+// UnmarshalBinary 反序列化消息 + protobuf 解码后继续执行业务边界校验。
 func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
-	if len(data) < messageWireHeaderSize {
-		return Message{}, fmt.Errorf("%w: frame too short", ErrInvalidMessage)
+	if len(data) == 0 {
+		return Message{}, fmt.Errorf("%w: empty protobuf payload", ErrInvalidMessage)
+	}
+	if len(data) > maxPayloadSize(maxMessageSize) {
+		return Message{}, fmt.Errorf("%w: protobuf payload too large", ErrInvalidMessage)
 	}
 
-	payloadLength := int(binary.BigEndian.Uint32(data[111:115]))
-	if payloadLength < 0 || payloadLength > maxPayloadSize(maxMessageSize) {
-		return Message{}, fmt.Errorf("%w: invalid payload length", ErrInvalidMessage)
+	wireMessage := &p2pproto.P2PMessage{}
+	if err := protobuf.Unmarshal(data, wireMessage); err != nil {
+		return Message{}, fmt.Errorf("p2p: unmarshal protobuf message: %w", err)
 	}
-	if len(data) != messageWireHeaderSize+payloadLength {
-		return Message{}, fmt.Errorf("%w: frame length mismatch", ErrInvalidMessage)
+	if wireMessage.Version > math.MaxUint16 {
+		return Message{}, fmt.Errorf("%w: invalid version", ErrInvalidMessage)
 	}
 
+	messageFlag, err := fromProtobufFlag(wireMessage.Flag)
+	if err != nil {
+		return Message{}, err
+	}
 	message := Message{
-		Version:            binary.BigEndian.Uint16(data[0:2]),
-		FromPeerID:         messagePeerIDString(data[2:34]),
-		ToPeerID:           messagePeerIDString(data[34:66]),
-		ID:                 hex.EncodeToString(data[66:82]),
-		RequestID:          messageRequestIDString(data[82:98]),
-		Flag:               MessageFlag(data[98]),
-		Type:               MessageType(binary.BigEndian.Uint32(data[99:103])),
-		CreatedAtUnixMilli: int64(binary.BigEndian.Uint64(data[103:111])),
-		Payload:            cloneBytes(data[messageWireHeaderSize:]),
+		ID:                 strings.ToLower(wireMessage.Id),
+		Type:               MessageType(wireMessage.Type),
+		FromPeerID:         wireMessage.FromPeerId,
+		ToPeerID:           wireMessage.ToPeerId,
+		RequestID:          strings.ToLower(wireMessage.RequestId),
+		Flag:               messageFlag,
+		Payload:            cloneBytes(wireMessage.Payload),
+		CreatedAtUnixMilli: wireMessage.CreatedAtUnixMilli,
+		Version:            uint16(wireMessage.Version),
 	}
 	if err := message.Validate(maxMessageSize); err != nil {
 		return Message{}, err
@@ -242,44 +251,63 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 	return message, nil
 }
 
-// writeMessageFrame 写入长度前缀消息帧 + 先校验编码大小防止超限载荷下发。
+// writeMessageFrame 写入 P2P 帧 + 固定头部承载 magic、版本、类型、长度和 checksum。
 func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) error {
-	encoded, err := message.MarshalBinary(maxMessageSize)
+	payload, err := message.MarshalBinary(maxMessageSize)
 	if err != nil {
 		return err
 	}
-	if len(encoded) > normalizeMaxMessageSize(maxMessageSize) {
-		return fmt.Errorf("%w: encoded frame too large", ErrInvalidMessage)
+	if len(payload) > maxPayloadSize(maxMessageSize) {
+		return fmt.Errorf("%w: frame payload too large", ErrInvalidMessage)
 	}
 
 	header := make([]byte, messageFrameHeaderSize)
-	binary.BigEndian.PutUint32(header, uint32(len(encoded)))
+	checksum := sha256.Sum256(payload)
+	binary.BigEndian.PutUint32(header[0:4], messageFrameMagic)
+	binary.BigEndian.PutUint16(header[4:6], message.effectiveVersion())
+	binary.BigEndian.PutUint32(header[6:10], uint32(message.Type))
+	binary.BigEndian.PutUint32(header[10:14], uint32(len(payload)))
+	copy(header[14:messageFrameHeaderSize], checksum[:])
+
 	if _, err := writer.Write(header); err != nil {
 		return fmt.Errorf("p2p: write message header: %w", err)
 	}
-	if _, err := writer.Write(encoded); err != nil {
+	if _, err := writer.Write(payload); err != nil {
 		return fmt.Errorf("p2p: write message body: %w", err)
 	}
 	return nil
 }
 
-// readMessageFrame 读取长度前缀消息帧 + 按声明长度精确读取避免粘包半包。
+// readMessageFrame 读取 P2P 帧 + 先校验外层边界和 checksum 再解码 protobuf。
 func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	header := make([]byte, messageFrameHeaderSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return Message{}, fmt.Errorf("p2p: read message header: %w", err)
 	}
 
-	frameSize := int(binary.BigEndian.Uint32(header))
-	if frameSize < messageWireHeaderSize || frameSize > normalizeMaxMessageSize(maxMessageSize) {
-		return Message{}, fmt.Errorf("%w: invalid frame size %d", ErrInvalidMessage, frameSize)
+	frameHeader, err := parseMessageFrameHeader(header, maxMessageSize)
+	if err != nil {
+		return Message{}, err
 	}
-
-	encoded := make([]byte, frameSize)
-	if _, err := io.ReadFull(reader, encoded); err != nil {
+	payload := make([]byte, frameHeader.payloadLength)
+	if _, err := io.ReadFull(reader, payload); err != nil {
 		return Message{}, fmt.Errorf("p2p: read message body: %w", err)
 	}
-	return UnmarshalBinary(encoded, maxMessageSize)
+	if sha256.Sum256(payload) != frameHeader.checksum {
+		return Message{}, fmt.Errorf("%w: checksum mismatch", ErrInvalidMessage)
+	}
+
+	message, err := UnmarshalBinary(payload, maxMessageSize)
+	if err != nil {
+		return Message{}, err
+	}
+	if message.Type != frameHeader.messageType {
+		return Message{}, fmt.Errorf("%w: frame type mismatch", ErrInvalidMessage)
+	}
+	if message.effectiveVersion() != frameHeader.version {
+		return Message{}, fmt.Errorf("%w: frame version mismatch", ErrInvalidMessage)
+	}
+	return message, nil
 }
 
 // newBaseMessage 创建基础消息 + 生成唯一 ID、复制载荷并设置协议版本。
@@ -291,6 +319,7 @@ func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
 	message := Message{
 		ID:                 messageID,
 		Type:               messageType,
+		Flag:               MessageFlagNotify,
 		Payload:            cloneBytes(payload),
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 		Version:            MessageProtocolVersion,
@@ -309,24 +338,30 @@ func (message Message) effectiveVersion() uint16 {
 	return message.Version
 }
 
-// validateRequestID 校验请求响应关系 + 防止响应错绑或普通消息伪装请求。
+// validateRequestID 校验请求响应关系 + 防止响应错绑或通知伪装请求。
 func (message Message) validateRequestID() error {
-	if message.RequestID == "" {
-		if message.Flag == MessageFlagResponse {
-			return fmt.Errorf("%w: empty response request id", ErrInvalidMessage)
+	switch message.Flag {
+	case MessageFlagNotify:
+		if message.RequestID != "" {
+			return fmt.Errorf("%w: notify request id must be empty", ErrInvalidMessage)
 		}
 		return nil
+	case MessageFlagRequest:
+		if !isValidMessageID(message.RequestID) || isZeroMessageID(message.RequestID) {
+			return fmt.Errorf("%w: invalid request id", ErrInvalidMessage)
+		}
+		if !strings.EqualFold(message.RequestID, message.ID) {
+			return fmt.Errorf("%w: request id must equal message id", ErrInvalidMessage)
+		}
+		return nil
+	case MessageFlagResponse:
+		if !isValidMessageID(message.RequestID) || isZeroMessageID(message.RequestID) {
+			return fmt.Errorf("%w: invalid response request id", ErrInvalidMessage)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid flag", ErrInvalidMessage)
 	}
-	if !isValidMessageID(message.RequestID) {
-		return fmt.Errorf("%w: invalid request id", ErrInvalidMessage)
-	}
-	if message.Flag == MessageFlagRequest && !strings.EqualFold(message.RequestID, message.ID) {
-		return fmt.Errorf("%w: request id must equal message id", ErrInvalidMessage)
-	}
-	if message.Flag == MessageFlagResponse && isZeroMessageID(message.RequestID) {
-		return fmt.Errorf("%w: zero response request id", ErrInvalidMessage)
-	}
-	return nil
 }
 
 // newMessageID 生成消息 ID + 前缀写入毫秒时间便于排序并保留随机熵。
@@ -359,22 +394,6 @@ func messageIDBytes(value string) ([]byte, error) {
 	return decoded, nil
 }
 
-// messageRequestIDBytes 编码请求 ID + 空值写入全零字节表示普通消息。
-func messageRequestIDBytes(value string) ([]byte, error) {
-	if value == "" {
-		return make([]byte, messageIDByteSize), nil
-	}
-	return messageIDBytes(value)
-}
-
-// messageRequestIDString 解码请求 ID + 全零字节还原为空字符串。
-func messageRequestIDString(value []byte) string {
-	if isZeroBytes(value) {
-		return ""
-	}
-	return hex.EncodeToString(value)
-}
-
 // isValidMessageID 判断消息 ID 格式 + 仅接受固定长度十六进制字符串。
 func isValidMessageID(value string) bool {
 	if len(value) != messageIDByteSize*2 {
@@ -390,29 +409,6 @@ func isZeroMessageID(value string) bool {
 	return err == nil && isZeroBytes(decoded)
 }
 
-// messagePeerIDBytes 编码 PeerID + 使用 Base58 公钥并固定为 32 字节。
-func messagePeerIDBytes(peerID string) ([]byte, error) {
-	if peerID == "" {
-		return make([]byte, messagePeerIDByteSize), nil
-	}
-	decoded, err := utils.Base58Decode(peerID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: invalid peer id", ErrInvalidMessage)
-	}
-	if len(decoded) != messagePeerIDByteSize {
-		return nil, fmt.Errorf("%w: invalid peer id length", ErrInvalidMessage)
-	}
-	return decoded, nil
-}
-
-// messagePeerIDString 解码 PeerID + 全零字节表示未指定路由节点。
-func messagePeerIDString(value []byte) string {
-	if isZeroBytes(value) {
-		return ""
-	}
-	return utils.Base58Encode(value)
-}
-
 // validateMessagePeerID 校验消息路由节点 + 支持可选字段但拒绝畸形 ID。
 func validateMessagePeerID(peerID string, optional bool) error {
 	if peerID == "" && optional {
@@ -424,13 +420,13 @@ func validateMessagePeerID(peerID string, optional bool) error {
 	return nil
 }
 
-// maxPayloadSize 计算载荷上限 + 从总消息大小中扣除固定协议头。
+// maxPayloadSize 计算 protobuf 载荷上限 + 从总帧大小中扣除固定帧头。
 func maxPayloadSize(maxMessageSize int) int {
 	normalized := normalizeMaxMessageSize(maxMessageSize)
-	if normalized <= messageWireHeaderSize {
+	if normalized <= messageFrameHeaderSize {
 		return 0
 	}
-	return normalized - messageWireHeaderSize
+	return normalized - messageFrameHeaderSize
 }
 
 // normalizeMaxMessageSize 归一化消息大小上限 + 防止零值关闭防护。
@@ -440,6 +436,77 @@ func normalizeMaxMessageSize(maxMessageSize int) int {
 	}
 	return maxMessageSize
 }
+
+// isValidMessageFlag 校验消息标识 + UNKNOWN 不能作为业务消息发送。
+func isValidMessageFlag(flag MessageFlag) bool {
+	return flag == MessageFlagNotify || flag == MessageFlagRequest || flag == MessageFlagResponse
+}
+
+func toProtobufFlag(flag MessageFlag) (p2pproto.MessageFlag, error) {
+	switch flag {
+	case MessageFlagNotify:
+		return p2pproto.MessageFlag_MESSAGE_FLAG_NOTIFY, nil
+	case MessageFlagRequest:
+		return p2pproto.MessageFlag_MESSAGE_FLAG_REQUEST, nil
+	case MessageFlagResponse:
+		return p2pproto.MessageFlag_MESSAGE_FLAG_RESPONSE, nil
+	default:
+		return p2pproto.MessageFlag_MESSAGE_FLAG_UNKNOWN, fmt.Errorf("%w: invalid flag", ErrInvalidMessage)
+	}
+}
+
+func fromProtobufFlag(flag p2pproto.MessageFlag) (MessageFlag, error) {
+	switch flag {
+	case p2pproto.MessageFlag_MESSAGE_FLAG_NOTIFY:
+		return MessageFlagNotify, nil
+	case p2pproto.MessageFlag_MESSAGE_FLAG_REQUEST:
+		return MessageFlagRequest, nil
+	case p2pproto.MessageFlag_MESSAGE_FLAG_RESPONSE:
+		return MessageFlagResponse, nil
+	default:
+		return MessageFlagUnknown, fmt.Errorf("%w: invalid protobuf flag", ErrInvalidMessage)
+	}
+}
+
+type messageFrameHeader struct {
+	version       uint16
+	messageType   MessageType
+	payloadLength int
+	checksum      [sha256.Size]byte
+}
+
+func parseMessageFrameHeader(header []byte, maxMessageSize int) (messageFrameHeader, error) {
+	if len(header) != messageFrameHeaderSize {
+		return messageFrameHeader{}, fmt.Errorf("%w: invalid header length", ErrInvalidMessage)
+	}
+	if binary.BigEndian.Uint32(header[0:4]) != messageFrameMagic {
+		return messageFrameHeader{}, fmt.Errorf("%w: invalid magic", ErrInvalidMessage)
+	}
+
+	version := binary.BigEndian.Uint16(header[4:6])
+	if version != MessageProtocolVersion {
+		return messageFrameHeader{}, fmt.Errorf("%w: unsupported frame version", ErrInvalidMessage)
+	}
+	frameMaxPayloadSize := maxPayloadSize(maxMessageSize)
+	if frameMaxPayloadSize > math.MaxUint32 {
+		frameMaxPayloadSize = math.MaxUint32
+	}
+	payloadLengthValue := binary.BigEndian.Uint32(header[10:14])
+	if payloadLengthValue == 0 || payloadLengthValue > uint32(frameMaxPayloadSize) {
+		return messageFrameHeader{}, fmt.Errorf("%w: invalid payload length", ErrInvalidMessage)
+	}
+	payloadLength := int(payloadLengthValue)
+
+	var checksum [sha256.Size]byte
+	copy(checksum[:], header[14:messageFrameHeaderSize])
+	return messageFrameHeader{
+		version:       version,
+		messageType:   MessageType(binary.BigEndian.Uint32(header[6:10])),
+		payloadLength: payloadLength,
+		checksum:      checksum,
+	}, nil
+}
+
 func cloneBytes(value []byte) []byte {
 	if value == nil {
 		return nil
@@ -448,6 +515,7 @@ func cloneBytes(value []byte) []byte {
 	copy(cloned, value)
 	return cloned
 }
+
 func isZeroBytes(value []byte) bool {
 	for _, item := range value {
 		if item != 0 {

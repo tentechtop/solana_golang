@@ -1,0 +1,403 @@
+Solana Golang 开发手册
+
+版本：v1
+适用范围：本手册用于指导后续开发者在本项目中新增业务、协议、序列化、P2P、链上数据、数据库存储和测试。
+
+一、开发总原则
+
+1. 先定义业务事实，再选择序列化格式。
+   系统内部权威数据只能是 Go domain struct，不能让 protobuf、Borsh、JSON 或数据库 blob 成为业务事实来源。
+
+2. 任何外部输入反序列化成功后，必须继续做业务校验。
+   protobuf 能解码、JSON 能解析、Borsh 字节长度正确，都不代表数据可信。
+
+3. raw bytes 必须带 schema 信息。
+   数据库中保存 protobuf 或 Borsh 原始字节时，必须同时保存 type、version、codec、schema_id、payload_hash。
+
+4. 协议升级只能新增版本，不能覆盖历史版本。
+   已发布字段编号、Borsh 字段顺序、schema_id 都视为历史契约。
+
+5. Hash 和 Sign 必须使用 canonical payload。
+   禁止把普通 proto.Marshal(message) 结果直接作为安全 hash 或签名原文。
+
+6. 所有改动必须可测试、可审计、可回滚。
+   新增协议、schema、raw bytes、链上结构、数据库写路径，都必须补单元测试。
+
+
+二、目录职责
+
+cmd/
+  进程启动、配置装配、核心 schema 注册、资源生命周期管理。
+
+schema/
+  Schema Registry、raw payload envelope、canonical hash。
+  任何 protobuf/Borsh raw bytes 存储和历史解码能力都必须经过这里。
+
+p2p/
+  P2P domain message、frame、TCP/QUIC transport、连接、心跳、协议分发。
+
+p2p/proto/
+  P2P protobuf schema 和 protoc 生成代码。
+  这里只放 wire DTO，不放业务逻辑。
+
+blockchain/borsh/
+  Borsh 基础编解码能力。
+  只处理确定性二进制规则，不放具体业务状态机。
+
+structure/
+  Solana 基础结构和交易、指令、签名等 domain model。
+
+api/、rpc/
+  对外 JSON DTO、JSON-RPC 路由、请求校验、响应转换。
+  JSON DTO 不得直接进入 P2P 或链上编码路径。
+
+database/
+  结构化持久化、KV 抽象、事务、批量写、raw payload 存取。
+  核心检索字段必须结构化，不得只依赖 opaque blob。
+
+utils/
+  无业务状态的通用工具方法。
+
+doc/
+  架构、规范、开发流程、演进路线和故障处理说明。
+
+
+三、标准开发流程
+
+新增任何核心功能，按以下顺序执行：
+
+1. 明确 domain model。
+   先在业务包中定义 Go struct、校验方法、Clone 方法和必要的状态转换。
+
+2. 明确数据边界。
+   判断该数据属于哪类边界：
+   - 节点通信：protobuf。
+   - Solana 链上账户或 instruction data：Borsh。
+   - 外部 HTTP/RPC：JSON DTO。
+   - 数据库存储：结构化字段优先，必要时加 raw envelope。
+   - 安全 hash/sign：canonical payload。
+
+3. 写显式转换函数。
+   必须使用以下转换链路：
+   - protobuf message <-> domain model。
+   - json dto <-> domain model。
+   - domain model <-> borsh payload。
+   禁止 protobuf bytes <-> Borsh bytes 直接互转。
+
+4. 注册 schema。
+   只要新增 raw bytes 存储或历史解码能力，就必须在 schema registry 中注册 type、version、codec、schema_id、decode、validate、migrate。
+
+5. 写边界校验。
+   所有长度、版本、枚举、数组数量、索引、时间戳、peer_id、公钥、签名都必须在入口处校验。
+
+6. 写测试。
+   至少覆盖正常路径、边界长度、非法版本、非法枚举、hash mismatch、未注册 schema、历史版本迁移。
+
+7. 自查。
+   检查是否破坏历史协议、是否绕过 Schema Registry、是否把 JSON DTO 当 domain 用、是否直接 hash protobuf bytes。
+
+
+四、P2P 开发规范
+
+1. P2P 通信统一使用 protobuf binary。
+   当前 P2P 消息 schema 位于：
+   p2p/proto/message.proto
+
+2. 修改 proto 后必须重新生成 Go 代码：
+   protoc --go_out=. --go_opt=paths=source_relative p2p/proto/message.proto
+
+3. protobuf enum 必须保留 UNKNOWN = 0。
+   UNKNOWN 只能用于协议演进和非法输入占位，不得作为业务消息发送。
+
+4. 已发布字段编号不得复用。
+   删除字段时必须在 proto 文件中使用 reserved 保留字段编号和字段名。
+
+5. P2P frame 外层负责快速防御。
+   frame 必须包含 magic、protocol_version、message_type、payload_length、checksum。
+   protobuf payload 解码前先校验 frame 长度和 checksum。
+
+6. P2P domain message 才是业务入口。
+   protobuf struct 只是 wire DTO，不能被业务层长期持有。
+
+7. 新增 P2P message type 的步骤：
+   1. 在 p2p/protocol.go 中定义新的 ProtocolID。
+   2. 在 DefaultProtocolSpecs 中注册协议名、响应语义和优先级。
+   3. 如需新增 payload schema，先定义 domain struct，再定义 protobuf message。
+   4. 写 protobuf <-> domain 显式转换。
+   5. 注册 Schema Registry。
+   6. 补 frame、decode、handler、异常输入测试。
+
+8. P2P 禁止事项：
+   - 禁止动态反射解析任意 protobuf 类型。
+   - 禁止未注册 message type 进入业务处理。
+   - 禁止无上限读取网络 payload。
+   - 禁止把网络输入直接写数据库。
+   - 禁止绕过 checksum 和 Validate。
+
+
+五、Borsh 开发规范
+
+1. Solana 链上账户和 instruction data 使用 Borsh。
+   Borsh 的作用是保证确定性、紧凑性和跨语言字节一致性。
+
+2. Borsh 结构必须带 Version 字段。
+   协议升级时只能尾部追加字段，不得中间插入字段，不得修改已发布字段类型。
+
+3. 动态容器必须有最大长度。
+   bytes、string、数组、列表都必须定义上限，反序列化时先校验长度。
+
+4. 禁止在链上核心结构中使用无序 map。
+   如果需要键值集合，必须定义排序规则并在编码前排序。
+
+5. Borsh 编码推荐使用：
+   blockchain/borsh
+
+6. 新增 Borsh 结构的步骤：
+   1. 定义 domain struct 和 Validate。
+   2. 定义 EncodeBorsh 或 MarshalBorsh。
+   3. 定义 DecodeBorsh 或 UnmarshalBorsh。
+   4. Decode 后必须调用 Validate。
+   5. 建立 schema.Schema，codec 使用 schema.CodecBorsh。
+   6. 写 golden bytes 测试。
+   7. 如涉及 Rust/Solana 程序，补 Go/Rust 字节级一致性测试。
+
+7. Borsh 禁止事项：
+   - 禁止用 JSON 代替链上编码。
+   - 禁止省略版本字段。
+   - 禁止无上限读取 bytes/string。
+   - 禁止解码成功后跳过业务校验。
+   - 禁止修改历史字段顺序和类型。
+
+
+六、JSON DTO 开发规范
+
+1. JSON 只用于外部 HTTP/RPC 展示和输入。
+   JSON DTO 不属于系统内部事实模型。
+
+2. DTO 必须显式转换为 domain model。
+   禁止将 JSON request struct 直接传入 P2P、Borsh、数据库核心写路径。
+
+3. JSON 输入必须校验：
+   - 必填字段。
+   - 字符串长度。
+   - 数组长度。
+   - 枚举值。
+   - 数字范围。
+   - 公钥、签名、hash 格式。
+
+4. JSON 输出不得泄露敏感信息。
+   私钥、助记词、seed、token、完整认证凭据不得出现在响应或日志中。
+
+
+七、数据库 raw bytes 开发规范
+
+1. 数据库以结构化字段为主。
+   核心检索字段必须拆列，例如 id、hash、type、version、codec、schema_id、slot、peer_id、status、created_at、updated_at。
+
+2. raw bytes 只能作为审计、重放、排障和历史兼容用途。
+   不得让业务查询完全依赖 opaque blob。
+
+3. 保存 raw bytes 必须使用 envelope。
+   推荐字段：
+   - type
+   - version
+   - codec
+   - schema_id
+   - payload_length
+   - payload_bytes
+   - payload_hash
+
+4. 写入 raw bytes 前必须完成：
+   - domain Validate。
+   - schema version 校验。
+   - payload hash 计算。
+   - Schema Registry 注册确认。
+
+5. raw bytes 写入后不得原地改写。
+   协议升级必须新增 version 或通过 migration 任务生成新记录。
+
+6. 读取历史 raw bytes 的流程：
+   1. 读取 envelope。
+   2. 校验 payload_hash。
+   3. 通过 type/version/codec/schema_id 查找 Schema Registry。
+   4. 使用历史 decoder 解码。
+   5. 执行历史 Validate。
+   6. 显式 migrate 到当前 domain model。
+
+
+八、Schema Registry 开发规范
+
+1. Schema Registry 的职责：
+   - 唯一定位 schema。
+   - 管理 decode、validate、migrate。
+   - 拒绝未注册 schema。
+   - 防止同一个 schema_id 指向不同结构。
+   - 支持历史数据解码和迁移。
+
+2. 新增 schema 时必须定义：
+   - Type：稳定业务类型，例如 p2p.message。
+   - Version：从 1 开始递增。
+   - Codec：protobuf、borsh、json、canonical。
+   - SchemaID：稳定唯一 ID，例如 p2p.message.protobuf.v1。
+   - Decode：只做字节到结构体。
+   - Validate：做业务校验。
+   - Migrate：历史版本到当前 domain model 的显式迁移。
+
+3. 启动时必须注册核心 schema。
+   缺少核心 schema 时，节点必须启动失败，不能带病运行。
+
+4. Schema Registry 测试必须覆盖：
+   - 正常注册。
+   - 重复注册。
+   - schema_id 冲突。
+   - 未注册解码拒绝。
+   - hash mismatch。
+   - migrate 失败上下文。
+
+
+九、Hash 和 Sign 开发规范
+
+1. 安全相关 hash/sign 必须使用 canonical payload。
+   必须加入 domain_separator、message_type、version、canonical_payload。
+
+2. 允许使用 protobuf bytes hash 的场景：
+   - P2P 去重。
+   - 日志 trace key。
+   - 缓存 key。
+   这些 hash 不得用于资产、账户状态、安全决策或签名。
+
+3. 必须使用 canonical payload 的场景：
+   - 账户状态。
+   - 资产变更。
+   - 订单或交易安全决策。
+   - 共识投票。
+   - 签名原文。
+
+4. 禁止事项：
+   - 禁止 SHA256(proto.Marshal(message)) 作为安全 hash。
+   - 禁止 JSON 字符串参与核心 hash。
+   - 禁止省略 domain separator。
+   - 禁止省略 message_type 和 version。
+
+
+十、错误处理规范
+
+1. 模块错误必须有模块前缀。
+   例如 p2p:、schema:、borsh:、database:。
+
+2. 底层错误向上传递必须使用 %w 包装。
+   需要保留 errors.Is 和 errors.As 的可判定能力。
+
+3. 外部输入错误必须返回明确上下文。
+   例如 invalid payload length、unsupported version、schema not registered。
+
+4. 不得吞掉错误。
+   只有明确可忽略的关闭错误或清理错误可以忽略，并且要保持上下文可解释。
+
+
+十一、并发和一致性规范
+
+1. 共享状态必须加锁或使用线程安全结构。
+   map、连接表、schema registry、peer 状态都不能裸并发读写。
+
+2. 读写一致性要求：
+   - 核心写路径必须先校验再提交。
+   - 批量写必须使用 transaction 或 batch。
+   - 不得暴露半提交状态。
+   - 读路径必须明确读取的是最新状态、快照还是缓存。
+
+3. goroutine 必须可退出。
+   网络监听、心跳、后台任务都必须接收 context 或关闭信号。
+
+4. 可变 []byte 必须明确所有权。
+   对外返回可变字节切片时必须拷贝，防止调用方修改内部状态。
+
+
+十二、测试要求
+
+每次新增功能至少考虑以下测试：
+
+1. domain Validate 测试。
+2. protobuf round trip 测试。
+3. Borsh golden bytes 测试。
+4. JSON DTO 转换测试。
+5. Schema Registry 注册和未注册拒绝测试。
+6. raw envelope hash mismatch 测试。
+7. P2P frame magic/version/type/length/checksum 测试。
+8. 非法枚举、非法版本、超长数组、空 payload 测试。
+9. 历史版本 migrate 测试。
+10. 并发路径 race 测试。
+
+常用命令：
+
+go test ./...
+go vet ./...
+go test -race ./p2p ./schema ./database/...
+
+修改 protobuf 后：
+
+protoc --go_out=. --go_opt=paths=source_relative p2p/proto/message.proto
+
+Windows 本机搜索请使用 PowerShell：
+
+Get-ChildItem -Recurse -File | Select-String -Pattern "关键字"
+
+
+十三、代码审查清单
+
+提交前逐项检查：
+
+1. 是否先定义 domain model，而不是直接使用 DTO。
+2. 是否选对序列化格式。
+3. 是否存在 protobuf bytes 和 Borsh bytes 直接互转。
+4. 是否新增或更新 Schema Registry。
+5. 是否保存 type/version/codec/schema_id/hash。
+6. 是否所有外部输入反序列化后都 Validate。
+7. 是否有最大长度限制。
+8. 是否有非法枚举和非法版本测试。
+9. 是否有 golden bytes 或 round trip 测试。
+10. 是否有错误上下文和 %w 包装。
+11. 是否有日志或可观测线索。
+12. 是否引入无必要第三方依赖。
+13. 是否破坏历史字段编号或 Borsh 字段顺序。
+14. 是否直接 hash proto.Marshal 结果用于安全场景。
+15. 是否触碰了无关文件或做了无关重构。
+
+
+十四、禁止清单
+
+以下行为禁止进入主干：
+
+1. P2P 使用 JSON 传输核心消息。
+2. 链上账户或 instruction data 使用 JSON。
+3. JSON DTO 直接进入 P2P 或 Borsh 编码。
+4. protobuf bytes 与 Borsh bytes 直接互转。
+5. raw bytes 不带 schema_id 保存到数据库。
+6. 未注册 schema 仍然尝试解码。
+7. 修改已发布 protobuf 字段编号。
+8. 修改已发布 Borsh 字段顺序或类型。
+9. 无上限读取网络 payload。
+10. 解码成功后跳过业务 Validate。
+11. 安全 hash 直接使用 proto.Marshal 结果。
+12. 私钥、助记词、seed、token 写入日志。
+13. 并发裸读写 map。
+14. goroutine 无退出路径。
+15. 为了短期方便绕过测试。
+
+
+十五、完成定义
+
+一个功能可以认为完成，必须同时满足：
+
+1. 业务模型清楚。
+2. 序列化边界清楚。
+3. Schema Registry 已注册。
+4. raw bytes 可追踪、可校验、可重放。
+5. 所有输入有边界校验。
+6. 错误有上下文。
+7. 核心路径有测试。
+8. 全量 go test ./... 通过。
+9. go vet ./... 通过。
+10. 自查没有违反本手册禁止清单。
+
+本项目未来的开发目标不是“代码能跑”，而是“协议可演进、数据可恢复、错误可定位、历史可重放、安全边界可证明”。

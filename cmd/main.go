@@ -93,6 +93,10 @@ func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 		serverErrors: make(chan error, 2),
 	}
 
+	if err := registerSerializationSchemas(); err != nil {
+		resources.closeLog()
+		return nil, err
+	}
 	if err := resources.openDatabase(config.Database); err != nil {
 		resources.closeLog()
 		return nil, err
@@ -109,6 +113,14 @@ func startRuntime(config appconfig.AppConfig) (*runtimeResources, error) {
 	}
 	resources.startRPC(config.RPC)
 	return resources, nil
+}
+
+// registerSerializationSchemas 注册核心序列化 schema + 缺失协议解码器时禁止节点启动。
+func registerSerializationSchemas() error {
+	if err := p2p.RegisterP2PMessageSchema(nil); err != nil {
+		return fmt.Errorf("cmd: register p2p message schema: %w", err)
+	}
+	return nil
 }
 
 // newConfiguredLogger 初始化日志器 + 支持控制台和文件输出并返回文件关闭器。

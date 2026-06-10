@@ -672,6 +672,9 @@ func (host *Host) prepareOutboundMessage(peerID string, message Message) (Messag
 	if outbound.CreatedAtUnixMilli == 0 {
 		outbound.CreatedAtUnixMilli = time.Now().UnixMilli()
 	}
+	if outbound.Flag == MessageFlagUnknown && outbound.RequestID == "" {
+		outbound.MarkAsNormal()
+	}
 	if outbound.FromPeerID == "" {
 		outbound.FromPeerID = host.peerID
 	}
