@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestEngineCRUDBatchIteratorAndMaintenance 验证目标行为 + 保证核心场景和边界条件稳定。
+// TestEngineCRUDBatchIteratorAndMaintenance 验证引擎基础能力 + 保证 CRUD、批量、迭代和维护操作稳定。
 func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {
@@ -92,12 +92,18 @@ func TestEngineCRUDBatchIteratorAndMaintenance(t *testing.T) {
 	}
 }
 
-// TestEngineClosedOperationsReturnError 验证目标行为 + 保证核心场景和边界条件稳定。
+// TestEngineClosedOperationsReturnError 验证关闭状态错误路径 + 保证未打开引擎不会静默成功。
 func TestEngineClosedOperationsReturnError(t *testing.T) {
 	engine := NewEngine()
 
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close(unopened) error = %v", err)
+	}
 	if err := engine.Set([]byte("a"), []byte("1")); err == nil {
 		t.Fatal("Set() error = nil, want not open error")
+	}
+	if err := engine.Delete([]byte("a")); err == nil {
+		t.Fatal("Delete() error = nil, want not open error")
 	}
 	if _, err := engine.Get([]byte("a")); err == nil {
 		t.Fatal("Get() error = nil, want not open error")
@@ -111,9 +117,21 @@ func TestEngineClosedOperationsReturnError(t *testing.T) {
 	if _, err := engine.NewSnapshot(); err == nil {
 		t.Fatal("NewSnapshot() error = nil, want not open error")
 	}
+	if err := engine.DeleteRange([]byte("a"), []byte("b")); err == nil {
+		t.Fatal("DeleteRange() error = nil, want not open error")
+	}
+	if err := engine.Flush(); err == nil {
+		t.Fatal("Flush() error = nil, want not open error")
+	}
+	if err := engine.Compact([]byte("a"), []byte("b")); err == nil {
+		t.Fatal("Compact() error = nil, want not open error")
+	}
+	if err := engine.Checkpoint(t.TempDir()); err == nil {
+		t.Fatal("Checkpoint() error = nil, want not open error")
+	}
 }
 
-// TestSnapshotKeepsStableReadView 验证目标行为 + 保证核心场景和边界条件稳定。
+// TestSnapshotKeepsStableReadView 验证快照稳定视图 + 保证后续写入不影响已有快照。
 func TestSnapshotKeepsStableReadView(t *testing.T) {
 	engine := NewEngine()
 	if err := engine.Open(t.TempDir(), true); err != nil {
@@ -148,5 +166,68 @@ func TestSnapshotKeepsStableReadView(t *testing.T) {
 	defer iter.Close()
 	if !iter.First() || !bytes.Equal(iter.Value(), []byte("old")) {
 		t.Fatalf("Snapshot iterator value = %q, want old", iter.Value())
+	}
+	if _, err := snapshot.Get([]byte("missing")); !snapshot.IsNotFound(err) {
+		t.Fatalf("Snapshot.Get(missing) error = %v, want not found", err)
+	}
+}
+
+// TestEngineAdditionalMethods 验证引擎补充方法 + 覆盖批删除、迭代方向和能力声明。
+func TestEngineAdditionalMethods(t *testing.T) {
+	engine := NewEngine()
+	if err := engine.Open(t.TempDir(), true); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	if !engine.SupportsCheckpoint() {
+		t.Fatal("SupportsCheckpoint() = false, want true")
+	}
+	if !engine.SupportsDisableWAL() {
+		t.Fatal("SupportsDisableWAL() = false, want true")
+	}
+	if err := engine.EnableWAL(true); err != nil {
+		t.Fatalf("EnableWAL(same) error = %v", err)
+	}
+	if err := engine.EnableWAL(false); err == nil {
+		t.Fatal("EnableWAL(change after open) error = nil, want error")
+	}
+
+	batch, err := engine.NewBatch()
+	if err != nil {
+		t.Fatalf("NewBatch() error = %v", err)
+	}
+	if err := batch.Set([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("Batch.Set(a) error = %v", err)
+	}
+	if err := batch.Set([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("Batch.Set(b) error = %v", err)
+	}
+	if err := batch.Delete([]byte("a")); err != nil {
+		t.Fatalf("Batch.Delete(a) error = %v", err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("Batch.Commit() error = %v", err)
+	}
+	if err := batch.Close(); err != nil {
+		t.Fatalf("Batch.Close() error = %v", err)
+	}
+
+	iter, err := engine.NewIterator([]byte("a"), []byte("c"))
+	if err != nil {
+		t.Fatalf("NewIterator() error = %v", err)
+	}
+	defer iter.Close()
+	if !iter.First() || !bytes.Equal(iter.Key(), []byte("b")) {
+		t.Fatalf("Iterator.First() key = %q, want b", iter.Key())
+	}
+	if iter.Next() {
+		t.Fatal("Iterator.Next() = true, want false at end")
+	}
+	if !iter.Last() || !bytes.Equal(iter.Key(), []byte("b")) {
+		t.Fatalf("Iterator.Last() key = %q, want b", iter.Key())
+	}
+	if iter.Prev() {
+		t.Fatal("Iterator.Prev() = true, want false at beginning")
 	}
 }
