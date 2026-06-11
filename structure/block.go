@@ -50,13 +50,19 @@ type BlockMeta struct {
 
 // TransactionStatusMeta 描述交易执行元数据 + 保持区块交易和执行结果分层。
 type TransactionStatusMeta struct {
-	Status               TransactionStatus `json:"status"`
-	Err                  string            `json:"err,omitempty"`
-	Fee                  uint64            `json:"fee"`
-	ComputeUnitsConsumed uint64            `json:"computeUnitsConsumed,omitempty"`
-	PreBalances          []uint64          `json:"preBalances,omitempty"`
-	PostBalances         []uint64          `json:"postBalances,omitempty"`
-	LogMessages          []string          `json:"logMessages,omitempty"`
+	Status               TransactionStatus      `json:"status"`
+	Err                  string                 `json:"err,omitempty"`
+	Fee                  uint64                 `json:"fee"`
+	ComputeUnitsConsumed uint64                 `json:"computeUnitsConsumed,omitempty"`
+	CostUnits            uint64                 `json:"costUnits,omitempty"`
+	PreBalances          []uint64               `json:"preBalances,omitempty"`
+	PostBalances         []uint64               `json:"postBalances,omitempty"`
+	PreTokenBalances     []TokenBalance         `json:"preTokenBalances,omitempty"`
+	PostTokenBalances    []TokenBalance         `json:"postTokenBalances,omitempty"`
+	InnerInstructions    []InnerInstruction     `json:"innerInstructions,omitempty"`
+	LogMessages          []string               `json:"logMessages,omitempty"`
+	LoadedAddresses      LoadedAddressView      `json:"loadedAddresses,omitempty"`
+	ReturnData           *TransactionReturnData `json:"returnData,omitempty"`
 }
 
 // TransactionWithStatusMeta 描述带执行结果的交易 + 用于区块查询视图返回完整交易状态。

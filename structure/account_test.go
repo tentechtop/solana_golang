@@ -66,9 +66,12 @@ func TestNewAccountRejectsInvalidRentState(t *testing.T) {
 		t.Fatalf("NewAccount(low lamports) error = %v, want ErrRentExemption", err)
 	}
 
-	_, err = NewAccount(minimumBalance, []byte{1}, PublicKey{}, false, 0)
-	if !errors.Is(err, ErrInvalidAccount) {
-		t.Fatalf("NewAccount(empty owner) error = %v, want ErrInvalidAccount", err)
+	systemOwnedAccount, err := NewAccount(minimumBalance, []byte{1}, DefaultBuiltinProgramIDs.System, false, 0)
+	if err != nil {
+		t.Fatalf("NewAccount(system owner) error = %v", err)
+	}
+	if systemOwnedAccount.Owner != DefaultBuiltinProgramIDs.System {
+		t.Fatal("NewAccount(system owner) did not preserve owner")
 	}
 }
 

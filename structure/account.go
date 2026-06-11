@@ -108,9 +108,6 @@ func (account Account) Validate() error {
 
 // ValidateWithRent 校验账户状态 + 将结构约束和租金豁免约束放在同一入口。
 func (account Account) ValidateWithRent(rentConfig RentConfig) error {
-	if account.Owner.IsZero() {
-		return fmt.Errorf("%w: owner is empty", ErrInvalidAccount)
-	}
 	if len(account.Data) > MaxAccountDataSize {
 		return fmt.Errorf("%w: data length %d exceeds %d", ErrAccountDataTooLarge, len(account.Data), MaxAccountDataSize)
 	}
@@ -302,11 +299,8 @@ func NewAccountMeta(publicKey PublicKey, isSigner bool, isWritable bool) (Accoun
 	return account, nil
 }
 
-// Validate 校验账户元数据 + 防止空账户污染消息账户列表。
+// Validate 校验账户元数据 + 公钥全零也是有效地址因此这里只保留结构入口。
 func (account AccountMeta) Validate() error {
-	if account.PublicKey.IsZero() {
-		return fmt.Errorf("%w: public key is empty", ErrInvalidAccountMeta)
-	}
 	return nil
 }
 
