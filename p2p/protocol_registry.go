@@ -125,6 +125,7 @@ func (registry *ProtocolRegistry) register(spec ProtocolSpec, handler ProtocolHa
 		return fmt.Errorf("%w: empty normalized name", ErrInvalidProtocol)
 	}
 	spec.Name = normalizedName
+	spec.Class = spec.EffectiveClass()
 
 	registry.mutex.Lock()
 	defer registry.mutex.Unlock()

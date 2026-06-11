@@ -13,6 +13,7 @@ import (
 
 const (
 	defaultWriteQueueSize = 1024
+	maxWriteQueueSize     = 16384
 	defaultWriteTimeout   = 5 * time.Second
 )
 
@@ -83,6 +84,9 @@ func newQueuedConnection(inner Connection, config queuedConnectionConfig) Connec
 func normalizeWriteQueueSize(size int) int {
 	if size <= 0 {
 		return defaultWriteQueueSize
+	}
+	if size > maxWriteQueueSize {
+		return maxWriteQueueSize
 	}
 	return size
 }

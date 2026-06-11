@@ -33,12 +33,8 @@ func (host *Host) hasConnection(peerID string) bool {
 func (host *Host) peerIDByConnectionID(connectionID string) (string, bool) {
 	host.mutex.RLock()
 	defer host.mutex.RUnlock()
-	for peerID, state := range host.connectionStates {
-		if state.ConnectionID == connectionID {
-			return peerID, true
-		}
-	}
-	return "", false
+	peerID, ok := host.connectionPeerIDs[connectionID]
+	return peerID, ok
 }
 
 // ConnectionState 查询连接状态 + 返回副本避免外部修改内部状态。
@@ -70,6 +66,7 @@ func (host *Host) Close() error {
 	transports := copyTransports(host.transports)
 	storedPeers := make([]Peer, 0, len(host.peers))
 	host.connections = make(map[string]Connection)
+	host.connectionPeerIDs = make(map[string]string)
 	host.connectionStates = make(map[string]ConnectionState)
 	host.resumptionTickets = make(map[string]SecureSessionResumptionTicket)
 	for peerID, peer := range host.peers {
@@ -136,10 +133,12 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	} else {
 		if existing != nil {
 			replacedConnection = existing
+			delete(host.connectionPeerIDs, existing.ID())
 		}
 		connection = host.wrapConnectionWriter(connection)
 	}
 	host.connections[peerID] = connection
+	host.connectionPeerIDs[connection.ID()] = peerID
 	now := time.Now().UnixMilli()
 	security := secureConnectionState(connection)
 	host.connectionStates[peerID] = ConnectionState{
@@ -223,6 +222,14 @@ func (host *Host) messagePriority(message Message) MessagePriority {
 	return spec.Priority
 }
 
+func (host *Host) messageTrafficClass(message Message) ProtocolClass {
+	spec, ok := host.registry.Spec(message.Type)
+	if !ok {
+		return defaultProtocolClass(message.Type)
+	}
+	return spec.EffectiveClass()
+}
+
 func (host *Host) writeQueueDepth() uint64 {
 	host.mutex.RLock()
 	defer host.mutex.RUnlock()
@@ -278,6 +285,7 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) error
 		}
 		host.connections[peerID] = connection
 	}
+	host.connectionPeerIDs[connection.ID()] = peerID
 	state := host.connectionStates[peerID]
 	if state.PeerID == "" {
 		now := time.Now().UnixMilli()
@@ -318,6 +326,7 @@ func (host *Host) markConnectionWrite(connection Connection, peerID string) {
 	}
 	host.mutex.Lock()
 	defer host.mutex.Unlock()
+	host.connectionPeerIDs[connection.ID()] = peerID
 	state := host.connectionStates[peerID]
 	if state.PeerID == "" {
 		now := time.Now().UnixMilli()
@@ -373,41 +382,41 @@ func remoteIPFromConnectionAddress(remoteAddress string) string {
 
 // recordConnectionError 记录连接错误 + 达到阈值后由心跳清理异常连接。
 func (host *Host) recordConnectionError(connection Connection, err error) {
-	if err == nil {
+	if err == nil || connection == nil {
 		return
 	}
 	var storedPeer Peer
 	shouldPersist := false
+	connectionID := connection.ID()
 	host.mutex.Lock()
-	for peerID, state := range host.connectionStates {
-		if state.ConnectionID != connection.ID() {
-			continue
-		}
-		state.FailureCount++
-		host.connectionStates[peerID] = state
-		if peer, ok := host.peers[peerID]; ok {
-			peer.RecordError(err)
-			host.peers[peerID] = peer
-			storedPeer = peer.Clone()
-			shouldPersist = true
-		}
-		host.routingTable.RecordPeerFailure(peerID)
+	peerID := host.connectionPeerIDs[connectionID]
+	state := host.connectionStates[peerID]
+	if peerID == "" || state.ConnectionID != connectionID {
 		host.mutex.Unlock()
-		if shouldPersist {
-			host.savePeerBestEffort(storedPeer)
-		}
-		if !isExpectedConnectionClose(err) {
-			host.penalizePeer(peerID, host.peerProtection.config.InvalidMessagePenalty, "connection-error")
-			host.logger.Warn("p2p connection error recorded",
-				slog.String("peer_id", peerID),
-				slog.String("connection_id", connection.ID()),
-				slog.Uint64("failure_count", uint64(state.FailureCount)),
-				slog.Any("error", err),
-			)
-		}
 		return
 	}
+	state.FailureCount++
+	host.connectionStates[peerID] = state
+	if peer, ok := host.peers[peerID]; ok {
+		peer.RecordError(err)
+		host.peers[peerID] = peer
+		storedPeer = peer.Clone()
+		shouldPersist = true
+	}
+	host.routingTable.RecordPeerFailure(peerID)
 	host.mutex.Unlock()
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
+	if !isExpectedConnectionClose(err) {
+		host.penalizePeer(peerID, host.peerProtection.config.InvalidMessagePenalty, "connection-error")
+		host.logger.Warn("p2p connection error recorded",
+			slog.String("peer_id", peerID),
+			slog.String("connection_id", connectionID),
+			slog.Uint64("failure_count", uint64(state.FailureCount)),
+			slog.Any("error", err),
+		)
+	}
 }
 
 // removeConnectionByID 移除指定连接 + 读循环退出时保持连接池准确。
@@ -415,32 +424,31 @@ func (host *Host) removeConnectionByID(connectionID string) {
 	var storedPeer Peer
 	shouldPersist := false
 	host.mutex.Lock()
-	for peerID, connection := range host.connections {
-		if connection.ID() != connectionID {
-			continue
-		}
-		delete(host.connections, peerID)
-		delete(host.connectionStates, peerID)
-		if peer, ok := host.peers[peerID]; ok {
-			if peer.Status != PeerStatusBlocked {
-				peer.MarkDisconnected()
-			}
-			host.peers[peerID] = peer
-			host.addPeerToRoutingTableLocked(peer)
-			storedPeer = peer.Clone()
-			shouldPersist = true
-		}
+	peerID := host.connectionPeerIDs[connectionID]
+	if peerID == "" {
 		host.mutex.Unlock()
-		host.logger.Debug("p2p connection removed",
-			slog.String("peer_id", peerID),
-			slog.String("connection_id", connectionID),
-		)
-		if shouldPersist {
-			host.savePeerBestEffort(storedPeer)
-		}
 		return
 	}
+	delete(host.connections, peerID)
+	delete(host.connectionStates, peerID)
+	delete(host.connectionPeerIDs, connectionID)
+	if peer, ok := host.peers[peerID]; ok {
+		if peer.Status != PeerStatusBlocked {
+			peer.MarkDisconnected()
+		}
+		host.peers[peerID] = peer
+		host.addPeerToRoutingTableLocked(peer)
+		storedPeer = peer.Clone()
+		shouldPersist = true
+	}
 	host.mutex.Unlock()
+	host.logger.Debug("p2p connection removed",
+		slog.String("peer_id", peerID),
+		slog.String("connection_id", connectionID),
+	)
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
 }
 
 // closePeerConnection 关闭并移除节点连接 + 心跳失败和过期清理共用。
@@ -451,6 +459,9 @@ func (host *Host) closePeerConnection(peerID string) {
 	connection := host.connections[peerID]
 	delete(host.connections, peerID)
 	delete(host.connectionStates, peerID)
+	if connection != nil {
+		delete(host.connectionPeerIDs, connection.ID())
+	}
 	if peer, ok := host.peers[peerID]; ok {
 		if peer.Status != PeerStatusBlocked {
 			peer.MarkDisconnected()

@@ -78,6 +78,7 @@ type Host struct {
 	transports           map[utils.MultiAddressProtocol]Transport
 	peers                map[string]Peer
 	connections          map[string]Connection
+	connectionPeerIDs    map[string]string
 	connectionStates     map[string]ConnectionState
 	resumptionTickets    map[string]SecureSessionResumptionTicket
 	registry             *ProtocolRegistry
@@ -149,11 +150,12 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		lifecycleContext:     hostContext,
 		lifecycleCancel:      hostCancel,
 		inboundSlots:         newInboundLimiter(maxPendingInbound),
-		peerProtection:       newPeerProtection(config.PeerProtection),
+		peerProtection:       newPeerProtection(config.PeerProtection, maxConnections),
 		advertisedAddresses:  cloneAddresses(config.AdvertisedAddresses),
 		transports:           make(map[utils.MultiAddressProtocol]Transport),
 		peers:                make(map[string]Peer),
 		connections:          make(map[string]Connection),
+		connectionPeerIDs:    make(map[string]string),
 		connectionStates:     make(map[string]ConnectionState),
 		resumptionTickets:    make(map[string]SecureSessionResumptionTicket),
 		registry:             normalizeRegistry(config.Registry),
@@ -197,6 +199,8 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		slog.Bool("secure_session", host.secureSession),
 		slog.Int("max_peers", host.maxPeers),
 		slog.Int("max_connections", host.maxConnections),
+		slog.Int("control_rate_limit", host.peerProtection.config.MaxControlMessagesPerSecond),
+		slog.Int("data_rate_limit", host.peerProtection.config.MaxDataMessagesPerSecond),
 		slog.Int("write_queue_size", host.writeQueueSize),
 		slog.Duration("write_timeout", host.writeTimeout),
 		slog.Int("broadcast_concurrency", host.broadcastConcurrency),

@@ -3,13 +3,23 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
+
+const requestManagerShardCount = 32
 
 // requestManager 管理等待中的请求 + 用 request_id 将读循环中的响应路由回调用方。
 type requestManager struct {
+	shards  [requestManagerShardCount]requestManagerShard
+	pending atomic.Int64
+}
+
+type requestManagerShard struct {
 	mutex   sync.Mutex
 	waiters map[string]pendingRequest
 }
@@ -22,9 +32,11 @@ type pendingRequest struct {
 }
 
 func newRequestManager() *requestManager {
-	return &requestManager{
-		waiters: make(map[string]pendingRequest),
+	manager := &requestManager{}
+	for index := range manager.shards {
+		manager.shards[index].waiters = make(map[string]pendingRequest)
 	}
+	return manager
 }
 
 func (manager *requestManager) register(requestID string, peerID string, responseType ProtocolID, requireResponseType bool) (<-chan Message, func(), error) {
@@ -33,19 +45,21 @@ func (manager *requestManager) register(requestID string, peerID string, respons
 		return nil, nil, fmt.Errorf("%w: invalid pending request id", ErrInvalidMessage)
 	}
 
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-	if _, exists := manager.waiters[normalizedID]; exists {
+	shard := manager.shard(normalizedID)
+	shard.mutex.Lock()
+	defer shard.mutex.Unlock()
+	if _, exists := shard.waiters[normalizedID]; exists {
 		return nil, nil, fmt.Errorf("%w: duplicated pending request id", ErrInvalidMessage)
 	}
 
 	waiter := make(chan Message, 1)
-	manager.waiters[normalizedID] = pendingRequest{
+	shard.waiters[normalizedID] = pendingRequest{
 		waiter:              waiter,
 		peerID:              peerID,
 		responseType:        responseType,
 		requireResponseType: requireResponseType,
 	}
+	manager.pending.Add(1)
 	unregister := func() {
 		manager.unregister(normalizedID)
 	}
@@ -53,9 +67,14 @@ func (manager *requestManager) register(requestID string, peerID string, respons
 }
 
 func (manager *requestManager) unregister(requestID string) {
-	manager.mutex.Lock()
-	delete(manager.waiters, strings.ToLower(requestID))
-	manager.mutex.Unlock()
+	normalizedID := strings.ToLower(strings.TrimSpace(requestID))
+	shard := manager.shard(normalizedID)
+	shard.mutex.Lock()
+	if _, exists := shard.waiters[normalizedID]; exists {
+		delete(shard.waiters, normalizedID)
+		manager.pending.Add(-1)
+	}
+	shard.mutex.Unlock()
 }
 
 func (manager *requestManager) fulfill(response Message) bool {
@@ -64,18 +83,35 @@ func (manager *requestManager) fulfill(response Message) bool {
 	}
 
 	requestID := strings.ToLower(response.RequestID)
-	manager.mutex.Lock()
-	pending, exists := manager.waiters[requestID]
-	if exists && pending.matches(response) {
-		delete(manager.waiters, requestID)
+	shard := manager.shard(requestID)
+	shard.mutex.Lock()
+	pending, exists := shard.waiters[requestID]
+	matched := exists && pending.matches(response)
+	if matched {
+		delete(shard.waiters, requestID)
+		manager.pending.Add(-1)
 	}
-	manager.mutex.Unlock()
-	if !exists || !pending.matches(response) {
+	shard.mutex.Unlock()
+	if !matched {
 		return false
 	}
 
 	pending.waiter <- response
 	return true
+}
+
+func (manager *requestManager) pendingCount() uint64 {
+	pending := manager.pending.Load()
+	if pending < 0 {
+		return 0
+	}
+	return uint64(pending)
+}
+
+func (manager *requestManager) shard(requestID string) *requestManagerShard {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(requestID))
+	return &manager.shards[int(hash.Sum32()%requestManagerShardCount)]
 }
 
 func (pending pendingRequest) matches(response Message) bool {
@@ -129,7 +165,9 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	if !outbound.IsRequest() {
 		return Message{}, fmt.Errorf("%w: request flag required", ErrInvalidMessage)
 	}
+	requestStartedAt := time.Now()
 	host.metrics.requestsStarted.Add(1)
+	defer host.metrics.recordRequestLatency(time.Since(requestStartedAt))
 
 	responseType, requireResponseType := expectedResponseType(outbound.Type)
 	waiter, unregister, err := host.requests.register(outbound.ID, peerID, responseType, requireResponseType)

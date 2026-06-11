@@ -22,19 +22,25 @@ import (
 )
 
 const (
-	quicApplicationProtocol = "solana-golang-p2p/1"
-	quicCloseCode           = quic.ApplicationErrorCode(0)
-	defaultQUICStreamAccept = 5 * time.Second
+	quicApplicationProtocol                   = "solana-golang-p2p/1"
+	quicCloseCode                             = quic.ApplicationErrorCode(0)
+	defaultQUICStreamAccept                   = 5 * time.Second
+	defaultQUICInitialStreamReceiveWindow     = 1024 * 1024
+	defaultQUICInitialConnectionReceiveWindow = 4 * 1024 * 1024
 )
 
 // QUICTransportConfig 保存 QUIC 配置 + 支持注入 TLS、quic-go 配置和日志。
 type QUICTransportConfig struct {
-	MaxMessageSize      int
-	MaxPendingInbound   int
-	MaxConnectionsPerIP int
-	TLSConfig           *tls.Config
-	QUICConfig          *quic.Config
-	Logger              *slog.Logger
+	MaxMessageSize                 int
+	MaxPendingInbound              int
+	MaxConnectionsPerIP            int
+	InitialStreamReceiveWindow     uint64
+	InitialConnectionReceiveWindow uint64
+	MaxStreamReceiveWindow         uint64
+	MaxConnectionReceiveWindow     uint64
+	TLSConfig                      *tls.Config
+	QUICConfig                     *quic.Config
+	Logger                         *slog.Logger
 }
 
 // QUICTransport 实现 QUIC 传输 + 基于 quic-go 提供低延迟多路复用连接。
@@ -60,12 +66,13 @@ func NewQUICTransportWithConfig(config QUICTransportConfig) (*QUICTransport, err
 	if err != nil {
 		return nil, err
 	}
+	maxMessageSize := normalizeMaxMessageSize(config.MaxMessageSize)
 	return &QUICTransport{
 		listeners:      make(map[string]*quic.Listener),
-		maxMessageSize: normalizeMaxMessageSize(config.MaxMessageSize),
+		maxMessageSize: maxMessageSize,
 		inboundLimiter: newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
 		tlsConfig:      tlsConfig,
-		quicConfig:     normalizeQUICConfig(config.QUICConfig),
+		quicConfig:     normalizeQUICConfig(config.QUICConfig, config, maxMessageSize),
 		logger:         utils.EnsureLogger(config.Logger),
 	}, nil
 }
@@ -359,20 +366,63 @@ func (transport *QUICTransport) clientTLSConfig() (*tls.Config, error) {
 }
 
 // normalizeQUICConfig 归一化 quic-go 配置 + 设置保守窗口避免异常内存占用。
-func normalizeQUICConfig(config *quic.Config) *quic.Config {
+func normalizeQUICConfig(config *quic.Config, transportConfig QUICTransportConfig, maxMessageSize int) *quic.Config {
 	if config != nil {
-		return config.Clone()
+		cloned := config.Clone()
+		applyQUICReceiveWindows(cloned, transportConfig, maxMessageSize)
+		return cloned
 	}
-	return &quic.Config{
-		HandshakeIdleTimeout:           5 * time.Second,
-		MaxIdleTimeout:                 30 * time.Second,
-		KeepAlivePeriod:                10 * time.Second,
-		MaxIncomingStreams:             256,
-		MaxIncomingUniStreams:          16,
-		MaxStreamReceiveWindow:         uint64(DefaultMaxMessageSize),
-		MaxConnectionReceiveWindow:     uint64(DefaultMaxMessageSize * 4),
-		InitialStreamReceiveWindow:     256 * 1024,
-		InitialConnectionReceiveWindow: 512 * 1024,
+	normalized := &quic.Config{
+		HandshakeIdleTimeout:  5 * time.Second,
+		MaxIdleTimeout:        30 * time.Second,
+		KeepAlivePeriod:       10 * time.Second,
+		MaxIncomingStreams:    256,
+		MaxIncomingUniStreams: 16,
+	}
+	applyQUICReceiveWindows(normalized, transportConfig, maxMessageSize)
+	return normalized
+}
+
+func applyQUICReceiveWindows(config *quic.Config, transportConfig QUICTransportConfig, maxMessageSize int) {
+	if config == nil {
+		return
+	}
+	maxStreamWindow := uint64(maxMessageSize)
+	maxConnectionWindow := uint64(maxMessageSize * 4)
+	if transportConfig.MaxStreamReceiveWindow > 0 {
+		maxStreamWindow = transportConfig.MaxStreamReceiveWindow
+	}
+	if transportConfig.MaxConnectionReceiveWindow > 0 {
+		maxConnectionWindow = transportConfig.MaxConnectionReceiveWindow
+	}
+	if config.MaxStreamReceiveWindow == 0 || transportConfig.MaxStreamReceiveWindow > 0 {
+		config.MaxStreamReceiveWindow = maxStreamWindow
+	}
+	if config.MaxConnectionReceiveWindow == 0 || transportConfig.MaxConnectionReceiveWindow > 0 {
+		config.MaxConnectionReceiveWindow = maxConnectionWindow
+	}
+	initialStreamWindow := uint64(defaultQUICInitialStreamReceiveWindow)
+	initialConnectionWindow := uint64(defaultQUICInitialConnectionReceiveWindow)
+	if transportConfig.InitialStreamReceiveWindow > 0 {
+		initialStreamWindow = transportConfig.InitialStreamReceiveWindow
+	}
+	if transportConfig.InitialConnectionReceiveWindow > 0 {
+		initialConnectionWindow = transportConfig.InitialConnectionReceiveWindow
+	}
+	if config.InitialStreamReceiveWindow == 0 || transportConfig.InitialStreamReceiveWindow > 0 {
+		if initialStreamWindow > config.MaxStreamReceiveWindow {
+			initialStreamWindow = config.MaxStreamReceiveWindow
+		}
+		config.InitialStreamReceiveWindow = initialStreamWindow
+	}
+	if config.InitialConnectionReceiveWindow == 0 || transportConfig.InitialConnectionReceiveWindow > 0 {
+		if initialConnectionWindow > config.MaxConnectionReceiveWindow {
+			initialConnectionWindow = config.MaxConnectionReceiveWindow
+		}
+		config.InitialConnectionReceiveWindow = initialConnectionWindow
+	}
+	if config.MaxConnectionReceiveWindow < config.MaxStreamReceiveWindow {
+		config.MaxConnectionReceiveWindow = config.MaxStreamReceiveWindow
 	}
 }
 

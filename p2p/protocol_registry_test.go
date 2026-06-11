@@ -78,3 +78,34 @@ func TestProtocolRegistryRejectsDuplicateProtocol(t *testing.T) {
 		t.Fatalf("RegisterVoidHandler() duplicate error = %v, want ErrProtocolConflict", err)
 	}
 }
+
+func TestProtocolRegistryDefaultsProtocolClass(t *testing.T) {
+	registry := NewProtocolRegistry()
+	pingSpec := ProtocolSpec{
+		ID:          ProtocolPingV1,
+		Name:        "/p2p/ping/1.0.0",
+		HasResponse: false,
+		Priority:    MessagePriorityHigh,
+	}
+	if err := registry.RegisterVoidHandler(pingSpec, func(ctx context.Context, message Message) error { return nil }); err != nil {
+		t.Fatalf("RegisterVoidHandler(ping) error = %v", err)
+	}
+	storedPingSpec, ok := registry.Spec(ProtocolPingV1)
+	if !ok || storedPingSpec.Class != ProtocolClassControl {
+		t.Fatalf("ping class = %d ok=%v, want control", storedPingSpec.Class, ok)
+	}
+
+	customSpec := ProtocolSpec{
+		ID:          ProtocolID(9000),
+		Name:        "/custom/business/1.0.0",
+		HasResponse: false,
+		Priority:    MessagePriorityNormal,
+	}
+	if err := registry.RegisterVoidHandler(customSpec, func(ctx context.Context, message Message) error { return nil }); err != nil {
+		t.Fatalf("RegisterVoidHandler(custom) error = %v", err)
+	}
+	storedCustomSpec, ok := registry.Spec(customSpec.ID)
+	if !ok || storedCustomSpec.Class != ProtocolClassData {
+		t.Fatalf("custom class = %d ok=%v, want data", storedCustomSpec.Class, ok)
+	}
+}

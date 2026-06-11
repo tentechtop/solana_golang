@@ -15,6 +15,7 @@ const (
 	defaultProtocolPartitions  = 4
 	maxProtocolWorkerCount     = 1024
 	defaultProtocolQueueSize   = 1024
+	maxProtocolQueueSize       = 16384
 	defaultProtocolJobTimeout  = 10 * time.Second
 )
 
@@ -88,19 +89,30 @@ func normalizeProtocolSchedulerConfig(config ProtocolSchedulerConfig) ProtocolSc
 		config.PartitionCount = 1
 		config.WorkerCount = 1
 	}
-	if config.HighQueueSize <= 0 {
-		config.HighQueueSize = defaultProtocolQueueSize
-	}
-	if config.NormalQueueSize <= 0 {
-		config.NormalQueueSize = defaultProtocolQueueSize
-	}
-	if config.LowQueueSize <= 0 {
-		config.LowQueueSize = defaultProtocolQueueSize
-	}
+	config.HighQueueSize = normalizeProtocolQueueSize(config.HighQueueSize, config.WorkerCount)
+	config.NormalQueueSize = normalizeProtocolQueueSize(config.NormalQueueSize, config.WorkerCount)
+	config.LowQueueSize = normalizeProtocolQueueSize(config.LowQueueSize, config.WorkerCount)
 	if config.JobTimeout <= 0 {
 		config.JobTimeout = defaultProtocolJobTimeout
 	}
 	return config
+}
+
+func normalizeProtocolQueueSize(size int, workerCount int) int {
+	if size > maxProtocolQueueSize {
+		return maxProtocolQueueSize
+	}
+	if size > 0 {
+		return size
+	}
+	autoSize := workerCount * 256
+	if autoSize < defaultProtocolQueueSize {
+		return defaultProtocolQueueSize
+	}
+	if autoSize > maxProtocolQueueSize {
+		return maxProtocolQueueSize
+	}
+	return autoSize
 }
 
 func (dispatcher *protocolDispatcher) start(ctx context.Context) {

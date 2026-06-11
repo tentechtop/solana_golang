@@ -7,43 +7,52 @@ import (
 )
 
 const (
-	defaultInboundMessagesPerSecond = 128
-	defaultMessageRateWindow        = time.Second
-	defaultDuplicateMessageTTL      = 2 * time.Minute
-	defaultMaxSeenMessageIDs        = 4096
-	defaultDialBackoffBase          = 2 * time.Second
-	defaultDialBackoffMax           = 2 * time.Minute
-	defaultPeerBlockDuration        = 10 * time.Minute
-	defaultPeerMinScore             = -100
-	defaultPeerMaxScore             = 100
-	defaultPeerBlockScore           = -80
-	defaultInvalidMessagePenalty    = 20
-	defaultRateLimitPenalty         = 15
-	defaultDuplicateMessagePenalty  = 5
-	defaultDialFailurePenalty       = 10
-	defaultPeerSuccessReward        = 1
-	defaultSlowHandlerThreshold     = 250 * time.Millisecond
+	defaultControlMessagesPerSecond      = 128
+	defaultDataMessagesPerSecond         = 2048
+	defaultAutoDataMessagesPerConnection = 128
+	defaultMaxAutoDataMessagesPerSecond  = 65536
+	defaultInboundMessagesPerSecond      = defaultControlMessagesPerSecond
+	defaultMessageRateWindow             = time.Second
+	defaultDuplicateMessageTTL           = 2 * time.Minute
+	defaultMaxSeenMessageIDs             = 4096
+	defaultDialBackoffBase               = 2 * time.Second
+	defaultDialBackoffMax                = 2 * time.Minute
+	defaultPeerBlockDuration             = 10 * time.Minute
+	defaultPeerMinScore                  = -100
+	defaultPeerMaxScore                  = 100
+	defaultPeerBlockScore                = -80
+	defaultInvalidMessagePenalty         = 20
+	defaultRateLimitPenalty              = 15
+	defaultDuplicateMessagePenalty       = 5
+	defaultDialFailurePenalty            = 10
+	defaultPeerSuccessReward             = 1
+	defaultSlowHandlerThreshold          = 250 * time.Millisecond
 )
 
 // PeerProtectionConfig 保存 P2P 防护配置 + 集中控制限速、退避、评分和广播边界。
 type PeerProtectionConfig struct {
-	MaxInboundMessagesPerSecond int
-	MessageRateWindow           time.Duration
-	DuplicateMessageTTL         time.Duration
-	MaxSeenMessageIDs           int
-	DialBackoffBase             time.Duration
-	DialBackoffMax              time.Duration
-	BlockDuration               time.Duration
-	MinScore                    int
-	MaxScore                    int
-	BlockScore                  int
-	InvalidMessagePenalty       int
-	RateLimitPenalty            int
-	DuplicateMessagePenalty     int
-	DialFailurePenalty          int
-	SuccessReward               int
-	MaxBroadcastPeers           int
-	SlowHandlerThreshold        time.Duration
+	MaxInboundMessagesPerSecond      int
+	MaxControlMessagesPerSecond      int
+	MaxDataMessagesPerSecond         int
+	AutoDataMessagesPerConnection    int
+	AutoDataMessagesPerSecondFloor   int
+	AutoDataMessagesPerSecondCeiling int
+	MessageRateWindow                time.Duration
+	DuplicateMessageTTL              time.Duration
+	MaxSeenMessageIDs                int
+	DialBackoffBase                  time.Duration
+	DialBackoffMax                   time.Duration
+	BlockDuration                    time.Duration
+	MinScore                         int
+	MaxScore                         int
+	BlockScore                       int
+	InvalidMessagePenalty            int
+	RateLimitPenalty                 int
+	DuplicateMessagePenalty          int
+	DialFailurePenalty               int
+	SuccessReward                    int
+	MaxBroadcastPeers                int
+	SlowHandlerThreshold             time.Duration
 }
 
 type peerProtection struct {
@@ -56,12 +65,17 @@ type peerProtection struct {
 
 type peerProtectionState struct {
 	score                     int
-	windowStartUnixMilli      int64
-	windowCount               int
+	controlRateWindow         peerRateWindow
+	dataRateWindow            peerRateWindow
 	blockedUntilUnixMilli     int64
 	dialBackoffUntilUnixMilli int64
 	dialFailures              uint32
 	lastPenaltyReason         string
+}
+
+type peerRateWindow struct {
+	startUnixMilli int64
+	count          int
 }
 
 type peerProtectionSnapshot struct {
@@ -73,17 +87,47 @@ type peerProtectionSnapshot struct {
 	Blocked                   bool
 }
 
-func newPeerProtection(config PeerProtectionConfig) *peerProtection {
+func newPeerProtection(config PeerProtectionConfig, maxConnections ...int) *peerProtection {
 	return &peerProtection{
-		config: normalizePeerProtectionConfig(config),
+		config: normalizePeerProtectionConfig(config, maxConnections...),
 		peers:  make(map[string]peerProtectionState),
 		seen:   make(map[string]int64),
 	}
 }
 
-func normalizePeerProtectionConfig(config PeerProtectionConfig) PeerProtectionConfig {
+func normalizePeerProtectionConfig(config PeerProtectionConfig, maxConnections ...int) PeerProtectionConfig {
+	connectionLimit := defaultMaxPeers
+	if len(maxConnections) > 0 && maxConnections[0] > 0 {
+		connectionLimit = maxConnections[0]
+	}
+	if config.MaxInboundMessagesPerSecond > 0 {
+		if config.MaxControlMessagesPerSecond <= 0 {
+			config.MaxControlMessagesPerSecond = config.MaxInboundMessagesPerSecond
+		}
+		if config.MaxDataMessagesPerSecond <= 0 {
+			config.MaxDataMessagesPerSecond = config.MaxInboundMessagesPerSecond
+		}
+	}
+	if config.MaxControlMessagesPerSecond <= 0 {
+		config.MaxControlMessagesPerSecond = defaultControlMessagesPerSecond
+	}
+	if config.AutoDataMessagesPerConnection <= 0 {
+		config.AutoDataMessagesPerConnection = defaultAutoDataMessagesPerConnection
+	}
+	if config.AutoDataMessagesPerSecondFloor <= 0 {
+		config.AutoDataMessagesPerSecondFloor = defaultDataMessagesPerSecond
+	}
+	if config.AutoDataMessagesPerSecondCeiling <= 0 {
+		config.AutoDataMessagesPerSecondCeiling = defaultMaxAutoDataMessagesPerSecond
+	}
+	if config.AutoDataMessagesPerSecondCeiling < config.AutoDataMessagesPerSecondFloor {
+		config.AutoDataMessagesPerSecondCeiling = config.AutoDataMessagesPerSecondFloor
+	}
+	if config.MaxDataMessagesPerSecond <= 0 {
+		config.MaxDataMessagesPerSecond = autoDataMessagesPerSecond(connectionLimit, config)
+	}
 	if config.MaxInboundMessagesPerSecond <= 0 {
-		config.MaxInboundMessagesPerSecond = defaultInboundMessagesPerSecond
+		config.MaxInboundMessagesPerSecond = config.MaxControlMessagesPerSecond
 	}
 	if config.MessageRateWindow <= 0 {
 		config.MessageRateWindow = defaultMessageRateWindow
@@ -139,7 +183,21 @@ func normalizePeerProtectionConfig(config PeerProtectionConfig) PeerProtectionCo
 	return config
 }
 
-func (protection *peerProtection) acceptInboundMessage(peerID string, messageID string, now time.Time) (peerProtectionSnapshot, error) {
+func autoDataMessagesPerSecond(connectionLimit int, config PeerProtectionConfig) int {
+	if connectionLimit <= 0 {
+		connectionLimit = defaultMaxPeers
+	}
+	rateLimit := connectionLimit * config.AutoDataMessagesPerConnection
+	if rateLimit < config.AutoDataMessagesPerSecondFloor {
+		return config.AutoDataMessagesPerSecondFloor
+	}
+	if rateLimit > config.AutoDataMessagesPerSecondCeiling {
+		return config.AutoDataMessagesPerSecondCeiling
+	}
+	return rateLimit
+}
+
+func (protection *peerProtection) acceptInboundMessage(peerID string, messageID string, trafficClass ProtocolClass, now time.Time) (peerProtectionSnapshot, error) {
 	if protection == nil || peerID == "" {
 		return peerProtectionSnapshot{}, nil
 	}
@@ -152,9 +210,9 @@ func (protection *peerProtection) acceptInboundMessage(peerID string, messageID 
 		return snapshotPeerProtection(peerID, state, now), fmt.Errorf("%w: until %d", ErrPeerBlocked, blockedUntil)
 	}
 	state = protection.resetExpiredBlock(state, now)
-	state, allowed := protection.allowMessageRate(state, now)
+	state, allowed := protection.allowMessageRate(state, trafficClass, now)
 	if !allowed {
-		state = protection.penalizeState(state, protection.config.RateLimitPenalty, "message-rate-limit", now)
+		state = protection.penalizeState(state, protection.config.RateLimitPenalty, rateLimitPenaltyReason(trafficClass), now)
 		protection.peers[peerID] = state
 		return snapshotPeerProtection(peerID, state, now), ErrRateLimited
 	}
@@ -263,17 +321,35 @@ func (protection *peerProtection) broadcastLimit() int {
 	return protection.config.MaxBroadcastPeers
 }
 
-func (protection *peerProtection) allowMessageRate(state peerProtectionState, now time.Time) (peerProtectionState, bool) {
-	windowStart := time.UnixMilli(state.windowStartUnixMilli)
-	if state.windowStartUnixMilli == 0 || now.Sub(windowStart) >= protection.config.MessageRateWindow {
-		state.windowStartUnixMilli = now.UnixMilli()
-		state.windowCount = 0
+func (protection *peerProtection) allowMessageRate(state peerProtectionState, trafficClass ProtocolClass, now time.Time) (peerProtectionState, bool) {
+	if trafficClass == ProtocolClassControl {
+		window, allowed := protection.allowRateWindow(state.controlRateWindow, protection.config.MaxControlMessagesPerSecond, now)
+		state.controlRateWindow = window
+		return state, allowed
 	}
-	if state.windowCount >= protection.config.MaxInboundMessagesPerSecond {
-		return state, false
+	window, allowed := protection.allowRateWindow(state.dataRateWindow, protection.config.MaxDataMessagesPerSecond, now)
+	state.dataRateWindow = window
+	return state, allowed
+}
+
+func (protection *peerProtection) allowRateWindow(window peerRateWindow, maxMessages int, now time.Time) (peerRateWindow, bool) {
+	windowStart := time.UnixMilli(window.startUnixMilli)
+	if window.startUnixMilli == 0 || now.Sub(windowStart) >= protection.config.MessageRateWindow {
+		window.startUnixMilli = now.UnixMilli()
+		window.count = 0
 	}
-	state.windowCount++
-	return state, true
+	if window.count >= maxMessages {
+		return window, false
+	}
+	window.count++
+	return window, true
+}
+
+func rateLimitPenaltyReason(trafficClass ProtocolClass) string {
+	if trafficClass == ProtocolClassControl {
+		return "control-message-rate-limit"
+	}
+	return "data-message-rate-limit"
 }
 
 func (protection *peerProtection) isDuplicateMessage(messageID string, now time.Time) bool {

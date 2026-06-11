@@ -8,7 +8,8 @@ import (
 )
 
 func (host *Host) acceptInboundMessage(message Message) error {
-	snapshot, err := host.peerProtection.acceptInboundMessage(message.FromPeerID, message.ID, time.Now())
+	trafficClass := host.messageTrafficClass(message)
+	snapshot, err := host.peerProtection.acceptInboundMessage(message.FromPeerID, message.ID, trafficClass, time.Now())
 	if err == nil {
 		return nil
 	}
@@ -17,6 +18,11 @@ func (host *Host) acceptInboundMessage(message Message) error {
 	switch {
 	case errors.Is(err, ErrRateLimited):
 		host.metrics.messagesRateLimited.Add(1)
+		if trafficClass == ProtocolClassControl {
+			host.metrics.controlMessagesRateLimited.Add(1)
+		} else {
+			host.metrics.dataMessagesRateLimited.Add(1)
+		}
 	case errors.Is(err, ErrDuplicateMessage):
 		host.metrics.duplicateMessages.Add(1)
 	case errors.Is(err, ErrPeerBlocked):
@@ -26,6 +32,7 @@ func (host *Host) acceptInboundMessage(message Message) error {
 		slog.String("peer_id", message.FromPeerID),
 		slog.String("message_id", message.ID),
 		slog.Uint64("protocol_id", uint64(message.Type)),
+		slog.Uint64("protocol_class", uint64(trafficClass)),
 		slog.Any("error", err),
 	)
 	return err

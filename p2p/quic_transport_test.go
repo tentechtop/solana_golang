@@ -83,6 +83,33 @@ func TestQUICTransportUsesTemporaryTLSAndSkipsCertificateChain(t *testing.T) {
 	}
 }
 
+func TestNormalizeQUICConfigUsesLargePayloadWindows(t *testing.T) {
+	config := normalizeQUICConfig(nil, QUICTransportConfig{}, DefaultMaxMessageSize)
+	if config.InitialStreamReceiveWindow != defaultQUICInitialStreamReceiveWindow {
+		t.Fatalf("InitialStreamReceiveWindow = %d, want %d",
+			config.InitialStreamReceiveWindow,
+			defaultQUICInitialStreamReceiveWindow,
+		)
+	}
+	if config.InitialConnectionReceiveWindow != defaultQUICInitialConnectionReceiveWindow {
+		t.Fatalf("InitialConnectionReceiveWindow = %d, want %d",
+			config.InitialConnectionReceiveWindow,
+			defaultQUICInitialConnectionReceiveWindow,
+		)
+	}
+
+	custom := normalizeQUICConfig(nil, QUICTransportConfig{
+		InitialStreamReceiveWindow:     2 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 6 * 1024 * 1024,
+	}, DefaultMaxMessageSize)
+	if custom.InitialStreamReceiveWindow != 2*1024*1024 {
+		t.Fatalf("custom InitialStreamReceiveWindow = %d", custom.InitialStreamReceiveWindow)
+	}
+	if custom.InitialConnectionReceiveWindow != 6*1024*1024 {
+		t.Fatalf("custom InitialConnectionReceiveWindow = %d", custom.InitialConnectionReceiveWindow)
+	}
+}
+
 func newInsecureQUICTransportForTest(t *testing.T) *QUICTransport {
 	t.Helper()
 	transport, err := NewQUICTransport()

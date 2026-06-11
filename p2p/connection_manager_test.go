@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -304,6 +305,16 @@ func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
 	if response.RequestID != request.ID {
 		t.Fatalf("response.RequestID = %q, want %q", response.RequestID, request.ID)
 	}
+	metrics := host.Metrics()
+	if metrics.PendingRequests != 0 {
+		t.Fatalf("PendingRequests = %d, want 0", metrics.PendingRequests)
+	}
+	if metrics.RequestLatencyP99Millis <= 0 {
+		t.Fatalf("RequestLatencyP99Millis = %.2f, want positive", metrics.RequestLatencyP99Millis)
+	}
+	if metrics.RuntimeGoroutines == 0 {
+		t.Fatal("RuntimeGoroutines = 0, want runtime metric")
+	}
 
 	pong := connection.waitWrite(t)
 	if pong.Type != ProtocolPongV1 {
@@ -472,6 +483,9 @@ func TestRequestManagerRequiresPeerAndResponseType(t *testing.T) {
 		t.Fatalf("register() error = %v", err)
 	}
 	defer unregister()
+	if manager.pendingCount() != 1 {
+		t.Fatalf("pendingCount() = %d, want 1", manager.pendingCount())
+	}
 
 	wrongPeerResponse, err := NewResponseMessage(otherPeerID, ProtocolFindNodeResponseV1, request.ID, nil)
 	if err != nil {
@@ -479,6 +493,9 @@ func TestRequestManagerRequiresPeerAndResponseType(t *testing.T) {
 	}
 	if manager.fulfill(wrongPeerResponse) {
 		t.Fatal("fulfill(wrong peer) = true, want false")
+	}
+	if manager.pendingCount() != 1 {
+		t.Fatalf("pendingCount() after wrong peer = %d, want 1", manager.pendingCount())
 	}
 	assertNoRequestResponse(t, waiter)
 
@@ -497,6 +514,9 @@ func TestRequestManagerRequiresPeerAndResponseType(t *testing.T) {
 	}
 	if !manager.fulfill(expectedResponse) {
 		t.Fatal("fulfill(expected) = false, want true")
+	}
+	if manager.pendingCount() != 0 {
+		t.Fatalf("pendingCount() after fulfill = %d, want 0", manager.pendingCount())
 	}
 	select {
 	case response := <-waiter:
@@ -569,15 +589,69 @@ func TestPeerProtectionRejectsDuplicateMessage(t *testing.T) {
 	protection := newPeerProtection(PeerProtectionConfig{})
 	peerID := testPeerID(43)
 	now := time.Now()
-	if _, err := protection.acceptInboundMessage(peerID, "message-1", now); err != nil {
+	if _, err := protection.acceptInboundMessage(peerID, "message-1", ProtocolClassData, now); err != nil {
 		t.Fatalf("acceptInboundMessage(first) error = %v", err)
 	}
-	snapshot, err := protection.acceptInboundMessage(peerID, "message-1", now.Add(time.Millisecond))
+	snapshot, err := protection.acceptInboundMessage(peerID, "message-1", ProtocolClassData, now.Add(time.Millisecond))
 	if !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("acceptInboundMessage(duplicate) error = %v, want ErrDuplicateMessage", err)
 	}
 	if snapshot.Score >= 0 {
 		t.Fatalf("snapshot.Score = %d, want negative score", snapshot.Score)
+	}
+}
+
+func TestPeerProtectionSeparatesControlAndDataRateLimits(t *testing.T) {
+	protection := newPeerProtection(PeerProtectionConfig{
+		MaxControlMessagesPerSecond: 1,
+		MaxDataMessagesPerSecond:    3,
+		MessageRateWindow:           time.Hour,
+		BlockScore:                  -1000,
+	})
+	peerID := testPeerID(59)
+	now := time.Now()
+	if _, err := protection.acceptInboundMessage(peerID, "control-1", ProtocolClassControl, now); err != nil {
+		t.Fatalf("accept control first error = %v", err)
+	}
+	snapshot, err := protection.acceptInboundMessage(peerID, "control-2", ProtocolClassControl, now.Add(time.Millisecond))
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("accept control second error = %v, want ErrRateLimited", err)
+	}
+	if snapshot.LastPenaltyReason != "control-message-rate-limit" {
+		t.Fatalf("LastPenaltyReason = %q, want control rate limit", snapshot.LastPenaltyReason)
+	}
+	for index := 0; index < 3; index++ {
+		messageID := fmt.Sprintf("data-%d", index)
+		if _, err := protection.acceptInboundMessage(peerID, messageID, ProtocolClassData, now.Add(time.Duration(index+2)*time.Millisecond)); err != nil {
+			t.Fatalf("accept data %d error = %v", index, err)
+		}
+	}
+	_, err = protection.acceptInboundMessage(peerID, "data-4", ProtocolClassData, now.Add(10*time.Millisecond))
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("accept data fourth error = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestPeerProtectionNormalizesLegacyAndAutoDataLimits(t *testing.T) {
+	autoConfig := normalizePeerProtectionConfig(PeerProtectionConfig{}, 16)
+	if autoConfig.MaxControlMessagesPerSecond != defaultControlMessagesPerSecond {
+		t.Fatalf("MaxControlMessagesPerSecond = %d, want %d", autoConfig.MaxControlMessagesPerSecond, defaultControlMessagesPerSecond)
+	}
+	if autoConfig.MaxDataMessagesPerSecond != defaultDataMessagesPerSecond {
+		t.Fatalf("MaxDataMessagesPerSecond = %d, want %d", autoConfig.MaxDataMessagesPerSecond, defaultDataMessagesPerSecond)
+	}
+
+	scaledConfig := normalizePeerProtectionConfig(PeerProtectionConfig{}, 64)
+	if scaledConfig.MaxDataMessagesPerSecond != 8192 {
+		t.Fatalf("scaled MaxDataMessagesPerSecond = %d, want 8192", scaledConfig.MaxDataMessagesPerSecond)
+	}
+
+	legacyConfig := normalizePeerProtectionConfig(PeerProtectionConfig{MaxInboundMessagesPerSecond: 7}, 64)
+	if legacyConfig.MaxControlMessagesPerSecond != 7 || legacyConfig.MaxDataMessagesPerSecond != 7 {
+		t.Fatalf("legacy control/data = %d/%d, want 7/7",
+			legacyConfig.MaxControlMessagesPerSecond,
+			legacyConfig.MaxDataMessagesPerSecond,
+		)
 	}
 }
 
@@ -726,6 +800,15 @@ func TestSplitWriteQueueSizeKeepsTotalCapacity(t *testing.T) {
 	highQueueSize, normalQueueSize, lowQueueSize = splitWriteQueueSize(1)
 	if highQueueSize+normalQueueSize+lowQueueSize != 1 || normalQueueSize != 1 {
 		t.Fatalf("small queue sizes = %d/%d/%d, want 0/1/0", highQueueSize, normalQueueSize, lowQueueSize)
+	}
+}
+
+func TestNormalizeWriteQueueSizeCapsOversizedQueue(t *testing.T) {
+	if got := normalizeWriteQueueSize(maxWriteQueueSize + 1); got != maxWriteQueueSize {
+		t.Fatalf("normalizeWriteQueueSize() = %d, want cap %d", got, maxWriteQueueSize)
+	}
+	if got := normalizeWriteQueueSize(0); got != defaultWriteQueueSize {
+		t.Fatalf("normalizeWriteQueueSize(default) = %d, want %d", got, defaultWriteQueueSize)
 	}
 }
 

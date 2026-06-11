@@ -67,12 +67,25 @@ const (
 	MessagePriorityHigh MessagePriority = 2
 )
 
+// ProtocolClass 表示协议流量类别 + 用于把控制面保护和高频数据面保护拆开。
+type ProtocolClass uint8
+
+const (
+	// ProtocolClassAuto 表示自动分类 + 保持旧注册代码兼容并按内置协议表兜底。
+	ProtocolClassAuto ProtocolClass = 0
+	// ProtocolClassControl 表示控制面协议 + 用于握手、发现、身份和心跳等低频关键流量。
+	ProtocolClassControl ProtocolClass = 1
+	// ProtocolClassData 表示数据面协议 + 用于区块、交易、共识和业务消息等高频流量。
+	ProtocolClassData ProtocolClass = 2
+)
+
 // ProtocolSpec 保存协议元数据 + 供注册表校验路由和响应语义。
 type ProtocolSpec struct {
 	ID          ProtocolID
 	Name        string
 	HasResponse bool
 	Priority    MessagePriority
+	Class       ProtocolClass
 }
 
 // Validate 校验协议定义 + 防止空名称和非法优先级进入注册表。
@@ -83,7 +96,38 @@ func (spec ProtocolSpec) Validate() error {
 	if spec.Priority > MessagePriorityHigh {
 		return fmt.Errorf("%w: invalid priority", ErrInvalidProtocol)
 	}
+	if spec.Class > ProtocolClassData {
+		return fmt.Errorf("%w: invalid protocol class", ErrInvalidProtocol)
+	}
 	return nil
+}
+
+// EffectiveClass 返回协议最终分类 + 兼容未显式声明分类的旧协议注册代码。
+func (spec ProtocolSpec) EffectiveClass() ProtocolClass {
+	if spec.Class != ProtocolClassAuto {
+		return spec.Class
+	}
+	return defaultProtocolClass(spec.ID)
+}
+
+// defaultProtocolClass 返回内置协议默认分类 + 防止高频业务协议被控制面限速误判。
+func defaultProtocolClass(protocolID ProtocolID) ProtocolClass {
+	switch protocolID {
+	case ProtocolPingV1,
+		ProtocolPongV1,
+		ProtocolHandshakeV1,
+		ProtocolFindNodeRequestV1,
+		ProtocolHandshakeSuccessV1,
+		ProtocolPeerHintsV1,
+		ProtocolNodeStatusV1,
+		ProtocolFindNodeResponseV1,
+		ProtocolSecureSessionV1,
+		ProtocolIdentifyRequestV1,
+		ProtocolIdentifyResponseV1:
+		return ProtocolClassControl
+	default:
+		return ProtocolClassData
+	}
 }
 
 // NormalizedName 返回规范协议名 + 消除大小写和多余分隔符差异。
