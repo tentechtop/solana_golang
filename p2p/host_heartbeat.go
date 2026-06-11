@@ -25,13 +25,13 @@ func (host *Host) StartHeartbeat(ctx context.Context) {
 
 // handleHeartbeatMessage 处理心跳消息 + ping 立即回复 pong，pong 仅刷新活跃时间。
 func (host *Host) handleHeartbeatMessage(ctx context.Context, connection Connection, message Message) bool {
-	if message.Type == MessageTypePong {
+	if message.Type == ProtocolPongV1 {
 		return true
 	}
-	if message.Type != MessageTypePing {
+	if message.Type != ProtocolPingV1 {
 		return false
 	}
-	response, err := responseFor(message, host.peerID, MessageTypePong, nil)
+	response, err := responseFor(message, host.peerID, ProtocolPongV1, nil)
 	if err != nil {
 		host.recordConnectionError(connection, err)
 		return true
@@ -51,7 +51,7 @@ func (host *Host) heartbeatOnce(ctx context.Context) {
 			host.closePeerConnection(peerID)
 			continue
 		}
-		message, err := NewRequestMessage(host.peerID, MessageTypePing, nil)
+		message, err := NewRequestMessage(host.peerID, ProtocolPingV1, nil)
 		if err != nil {
 			host.recordPeerError(peerID, err)
 			continue

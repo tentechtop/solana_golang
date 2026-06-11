@@ -266,7 +266,7 @@ func TestHandleP2PConnectionRejectsUnknownProtocol(t *testing.T) {
 	}
 	defer host.Close()
 
-	message, err := p2p.NewMessage(p2p.MessageTypePing, []byte("payload"))
+	message, err := p2p.NewMessage(p2p.ProtocolPingV1, []byte("payload"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}

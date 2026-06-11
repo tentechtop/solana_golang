@@ -27,26 +27,6 @@ const (
 	messageIDByteSize      = 16
 )
 
-// MessageType 表示 P2P 消息类型 + 复用协议编号作为网络路由键。
-type MessageType = ProtocolID
-
-const (
-	// MessageTypePing 表示探活请求 + 用于检测连接可用性。
-	MessageTypePing MessageType = ProtocolPingV1
-	// MessageTypePong 表示探活响应 + 用于确认远端仍可通信。
-	MessageTypePong MessageType = ProtocolPongV1
-	// MessageTypeTransaction 表示交易广播 + 用于交易池传播。
-	MessageTypeTransaction MessageType = ProtocolReceiveTransactionV1
-	// MessageTypeBlock 表示区块广播 + 用于同步新区块。
-	MessageTypeBlock MessageType = ProtocolReceiveBlockV1
-	// MessageTypeVote 表示共识投票 + 用于 HotStuff 投票传播。
-	MessageTypeVote MessageType = ProtocolHotStuffVoteV1
-	// MessageTypeQC 表示投票证书 + 用于 HotStuff 视图推进。
-	MessageTypeQC MessageType = ProtocolHotStuffQCV1
-	// MessageTypePeer 表示节点信息 + 用于节点发现和地址交换。
-	MessageTypePeer MessageType = ProtocolPeerHintsV1
-)
-
 // MessageFlag 表示消息语义 + UNKNOWN=0 仅保留给协议演进和非法输入。
 type MessageFlag byte
 
@@ -63,7 +43,7 @@ const (
 // Message 保存 P2P 消息事实模型 + 使用 Borsh 固定布局进行节点通信编码。
 type Message struct {
 	ID                 string      `json:"id"`
-	Type               MessageType `json:"type"`
+	Type               ProtocolID  `json:"type"`
 	FromPeerID         string      `json:"from_peer_id,omitempty"`
 	ToPeerID           string      `json:"to_peer_id,omitempty"`
 	RequestID          string      `json:"request_id,omitempty"`
@@ -74,8 +54,8 @@ type Message struct {
 }
 
 // NewMessage 创建单向消息 + 自动生成 ID 和创建时间避免上层重复处理。
-func NewMessage(messageType MessageType, payload []byte) (Message, error) {
-	message, err := newBaseMessage(messageType, payload)
+func NewMessage(protocolID ProtocolID, payload []byte) (Message, error) {
+	message, err := newBaseMessage(protocolID, payload)
 	if err != nil {
 		return Message{}, err
 	}
@@ -84,8 +64,8 @@ func NewMessage(messageType MessageType, payload []byte) (Message, error) {
 }
 
 // NewRequestMessage 创建请求消息 + 让响应可以通过 request_id 回到原请求。
-func NewRequestMessage(senderPeerID string, messageType MessageType, payload []byte) (Message, error) {
-	message, err := newBaseMessage(messageType, payload)
+func NewRequestMessage(senderPeerID string, protocolID ProtocolID, payload []byte) (Message, error) {
+	message, err := newBaseMessage(protocolID, payload)
 	if err != nil {
 		return Message{}, err
 	}
@@ -95,8 +75,8 @@ func NewRequestMessage(senderPeerID string, messageType MessageType, payload []b
 }
 
 // NewResponseMessage 创建响应消息 + 将 request_id 绑定到原请求消息 ID。
-func NewResponseMessage(senderPeerID string, messageType MessageType, requestID string, payload []byte) (Message, error) {
-	message, err := newBaseMessage(messageType, payload)
+func NewResponseMessage(senderPeerID string, protocolID ProtocolID, requestID string, payload []byte) (Message, error) {
+	message, err := newBaseMessage(protocolID, payload)
 	if err != nil {
 		return Message{}, err
 	}
@@ -231,7 +211,7 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 	if err != nil {
 		return Message{}, fmt.Errorf("p2p: unmarshal message id: %w", err)
 	}
-	messageType, err := reader.ReadUint32()
+	protocolID, err := reader.ReadUint32()
 	if err != nil {
 		return Message{}, fmt.Errorf("p2p: unmarshal message type: %w", err)
 	}
@@ -265,7 +245,7 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 
 	message := Message{
 		ID:                 strings.ToLower(messageID),
-		Type:               MessageType(messageType),
+		Type:               ProtocolID(protocolID),
 		FromPeerID:         fromPeerID,
 		ToPeerID:           toPeerID,
 		RequestID:          strings.ToLower(requestID),
@@ -333,7 +313,7 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-	if message.Type != frameHeader.messageType {
+	if message.Type != frameHeader.protocolID {
 		return Message{}, fmt.Errorf("%w: frame type mismatch", ErrInvalidMessage)
 	}
 	if message.effectiveVersion() != frameHeader.version {
@@ -343,14 +323,14 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 }
 
 // newBaseMessage 创建基础消息 + 生成唯一 ID、复制载荷并设置协议版本。
-func newBaseMessage(messageType MessageType, payload []byte) (Message, error) {
+func newBaseMessage(protocolID ProtocolID, payload []byte) (Message, error) {
 	messageID, err := newMessageID()
 	if err != nil {
 		return Message{}, err
 	}
 	message := Message{
 		ID:                 messageID,
-		Type:               messageType,
+		Type:               protocolID,
 		Flag:               MessageFlagNotify,
 		Payload:            cloneBytes(payload),
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
@@ -476,7 +456,7 @@ func isValidMessageFlag(flag MessageFlag) bool {
 
 type messageFrameHeader struct {
 	version       uint16
-	messageType   MessageType
+	protocolID    ProtocolID
 	payloadLength int
 	checksum      [sha256.Size]byte
 }
@@ -507,7 +487,7 @@ func parseMessageFrameHeader(header []byte, maxMessageSize int) (messageFrameHea
 	copy(checksum[:], header[14:messageFrameHeaderSize])
 	return messageFrameHeader{
 		version:       version,
-		messageType:   MessageType(binary.BigEndian.Uint32(header[6:10])),
+		protocolID:    ProtocolID(binary.BigEndian.Uint32(header[6:10])),
 		payloadLength: payloadLength,
 		checksum:      checksum,
 	}, nil

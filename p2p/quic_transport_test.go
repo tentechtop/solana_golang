@@ -42,7 +42,7 @@ func TestQUICTransportSendMessage(t *testing.T) {
 
 	dialContext, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer dialCancel()
-	message, err := NewMessage(MessageTypePing, []byte("quic"))
+	message, err := NewMessage(ProtocolPingV1, []byte("quic"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}

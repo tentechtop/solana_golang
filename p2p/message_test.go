@@ -10,7 +10,7 @@ import (
 )
 
 func TestMessageFrameRoundTrip(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("hello"))
+	message, err := NewMessage(ProtocolPingV1, []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -27,8 +27,8 @@ func TestMessageFrameRoundTrip(t *testing.T) {
 	if decoded.ID != message.ID {
 		t.Fatalf("ID = %q, want %q", decoded.ID, message.ID)
 	}
-	if decoded.Type != MessageTypePing {
-		t.Fatalf("Type = %d, want %d", decoded.Type, MessageTypePing)
+	if decoded.Type != ProtocolPingV1 {
+		t.Fatalf("Type = %d, want %d", decoded.Type, ProtocolPingV1)
 	}
 	if decoded.Version != MessageProtocolVersion {
 		t.Fatalf("Version = %d, want %d", decoded.Version, MessageProtocolVersion)
@@ -39,7 +39,7 @@ func TestMessageFrameRoundTrip(t *testing.T) {
 }
 
 func TestMessageFrameHandlesShortWriter(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("short-writer"))
+	message, err := NewMessage(ProtocolPingV1, []byte("short-writer"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -63,7 +63,7 @@ func TestMessageFrameHandlesShortWriter(t *testing.T) {
 
 func TestRequestResponseMessageRules(t *testing.T) {
 	peerID := testPeerID(10)
-	request, err := NewRequestMessage(peerID, MessageTypePing, []byte("ping"))
+	request, err := NewRequestMessage(peerID, ProtocolPingV1, []byte("ping"))
 	if err != nil {
 		t.Fatalf("NewRequestMessage() error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRequestResponseMessageRules(t *testing.T) {
 		t.Fatalf("RequestID = %q, want %q", request.RequestID, request.ID)
 	}
 
-	response, err := NewResponseMessage(peerID, MessageTypePong, request.ID, []byte("pong"))
+	response, err := NewResponseMessage(peerID, ProtocolPongV1, request.ID, []byte("pong"))
 	if err != nil {
 		t.Fatalf("NewResponseMessage() error = %v", err)
 	}
@@ -88,7 +88,7 @@ func TestRequestResponseMessageRules(t *testing.T) {
 func TestMessageBinaryCarriesPeerRoute(t *testing.T) {
 	fromPeerID := testPeerID(11)
 	toPeerID := testPeerID(12)
-	message, err := NewMessage(MessageTypeBlock, []byte("block"))
+	message, err := NewMessage(ProtocolReceiveBlockV1, []byte("block"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -111,7 +111,7 @@ func TestMessageBinaryCarriesPeerRoute(t *testing.T) {
 	}
 }
 func TestMessageMarshalUsesBorshLayout(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("borsh"))
+	message, err := NewMessage(ProtocolPingV1, []byte("borsh"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -136,12 +136,12 @@ func TestMessageMarshalUsesBorshLayout(t *testing.T) {
 	if messageID != message.ID {
 		t.Fatalf("id = %q, want %q", messageID, message.ID)
 	}
-	messageType, err := reader.ReadUint32()
+	protocolID, err := reader.ReadUint32()
 	if err != nil {
 		t.Fatalf("ReadUint32(type) error = %v", err)
 	}
-	if MessageType(messageType) != MessageTypePing {
-		t.Fatalf("type = %d, want %d", messageType, MessageTypePing)
+	if ProtocolID(protocolID) != ProtocolPingV1 {
+		t.Fatalf("type = %d, want %d", protocolID, ProtocolPingV1)
 	}
 	if _, err := reader.ReadString(); err != nil {
 		t.Fatalf("ReadString(from peer) error = %v", err)
@@ -174,7 +174,7 @@ func TestMessageMarshalUsesBorshLayout(t *testing.T) {
 	}
 }
 func TestMessageFrameRejectsChecksumMismatch(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("hello"))
+	message, err := NewMessage(ProtocolPingV1, []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -191,7 +191,7 @@ func TestMessageFrameRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 func TestMessageRejectsUnknownBorshFlag(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte("hello"))
+	message, err := NewMessage(ProtocolPingV1, []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -225,7 +225,7 @@ func TestP2PMessageSchemaEnvelope(t *testing.T) {
 	if err := RegisterP2PMessageSchema(registry); err != nil {
 		t.Fatalf("RegisterP2PMessageSchema() error = %v", err)
 	}
-	message, err := NewMessage(MessageTypePing, []byte("hello"))
+	message, err := NewMessage(ProtocolPingV1, []byte("hello"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -254,7 +254,7 @@ func TestMessageRejectsInvalidFields(t *testing.T) {
 		t.Fatalf("Validate(empty) error = %v, want ErrInvalidMessage", err)
 	}
 
-	message, err := NewMessage(MessageTypePing, bytes.Repeat([]byte{1}, 4))
+	message, err := NewMessage(ProtocolPingV1, bytes.Repeat([]byte{1}, 4))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -263,7 +263,7 @@ func TestMessageRejectsInvalidFields(t *testing.T) {
 	}
 }
 func TestMessageCloneIsolatesPayload(t *testing.T) {
-	message, err := NewMessage(MessageTypePing, []byte{1, 2, 3})
+	message, err := NewMessage(ProtocolPingV1, []byte{1, 2, 3})
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}

@@ -118,7 +118,7 @@ func TestSecureConnectionHandshakeAndEncryptedMessage(t *testing.T) {
 	}
 	serverSecure := result.connection
 
-	message, err := NewMessage(MessageTypePing, []byte("encrypted ping"))
+	message, err := NewMessage(ProtocolPingV1, []byte("encrypted ping"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}

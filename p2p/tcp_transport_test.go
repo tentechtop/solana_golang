@@ -50,7 +50,7 @@ func TestTCPTransportSendMessage(t *testing.T) {
 	}
 	defer connection.Close()
 
-	message, err := NewMessage(MessageTypePing, []byte("tcp"))
+	message, err := NewMessage(ProtocolPingV1, []byte("tcp"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}

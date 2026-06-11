@@ -22,7 +22,7 @@ func TestHostHandleConnectionRespondsPong(t *testing.T) {
 	}
 	defer host.Close()
 
-	request, err := NewRequestMessage(remotePeerID, MessageTypePing, nil)
+	request, err := NewRequestMessage(remotePeerID, ProtocolPingV1, nil)
 	if err != nil {
 		t.Fatalf("NewRequestMessage() error = %v", err)
 	}
@@ -34,8 +34,8 @@ func TestHostHandleConnectionRespondsPong(t *testing.T) {
 	go host.HandleConnection(ctx, connection)
 
 	response := connection.waitWrite(t)
-	if response.Type != MessageTypePong {
-		t.Fatalf("response.Type = %d, want %d", response.Type, MessageTypePong)
+	if response.Type != ProtocolPongV1 {
+		t.Fatalf("response.Type = %d, want %d", response.Type, ProtocolPongV1)
 	}
 	if response.RequestID != request.ID {
 		t.Fatalf("response.RequestID = %q, want %q", response.RequestID, request.ID)
@@ -67,8 +67,8 @@ func TestHostHeartbeatWritesPing(t *testing.T) {
 	host.heartbeatOnce(context.Background())
 
 	message := connection.waitWrite(t)
-	if message.Type != MessageTypePing {
-		t.Fatalf("message.Type = %d, want %d", message.Type, MessageTypePing)
+	if message.Type != ProtocolPingV1 {
+		t.Fatalf("message.Type = %d, want %d", message.Type, ProtocolPingV1)
 	}
 	if message.FromPeerID != localPeerID {
 		t.Fatalf("message.FromPeerID = %q, want %q", message.FromPeerID, localPeerID)
@@ -175,7 +175,7 @@ func TestHostRejectsSpoofedConnectionPeer(t *testing.T) {
 	}
 	defer host.Close()
 
-	message, err := NewMessage(MessageTypeTransaction, nil)
+	message, err := NewMessage(ProtocolReceiveTransactionV1, nil)
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -203,7 +203,7 @@ func TestHostRejectsEmptyInboundSender(t *testing.T) {
 	}
 	defer host.Close()
 
-	message, err := NewMessage(MessageTypeTransaction, nil)
+	message, err := NewMessage(ProtocolReceiveTransactionV1, nil)
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -257,7 +257,7 @@ func TestHostRejectsEmptyOutboundPeer(t *testing.T) {
 	}
 	defer host.Close()
 
-	message, err := NewMessage(MessageTypeTransaction, nil)
+	message, err := NewMessage(ProtocolReceiveTransactionV1, nil)
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -306,7 +306,7 @@ func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
 	}
 
 	pong := connection.waitWrite(t)
-	if pong.Type != MessageTypePong {
+	if pong.Type != ProtocolPongV1 {
 		t.Fatalf("interleaved response Type = %d, want pong", pong.Type)
 	}
 }
@@ -352,7 +352,7 @@ func TestProtocolQueueDoesNotBlockHeartbeatResponse(t *testing.T) {
 	}
 	slowMessage.FromPeerID = remotePeerID
 	slowMessage.ToPeerID = localPeerID
-	ping, err := NewRequestMessage(remotePeerID, MessageTypePing, nil)
+	ping, err := NewRequestMessage(remotePeerID, ProtocolPingV1, nil)
 	if err != nil {
 		t.Fatalf("NewRequestMessage(ping) error = %v", err)
 	}
@@ -369,7 +369,7 @@ func TestProtocolQueueDoesNotBlockHeartbeatResponse(t *testing.T) {
 		t.Fatal("timed out waiting for slow handler")
 	}
 	response := connection.waitWrite(t)
-	if response.Type != MessageTypePong {
+	if response.Type != ProtocolPongV1 {
 		t.Fatalf("response.Type = %d, want pong", response.Type)
 	}
 	close(release)
@@ -525,31 +525,43 @@ func TestHostRateLimitsInboundMessages(t *testing.T) {
 	}
 	defer host.Close()
 
-	first, err := NewRequestMessage(remotePeerID, MessageTypePing, nil)
+	first, err := NewRequestMessage(remotePeerID, ProtocolPingV1, nil)
 	if err != nil {
 		t.Fatalf("NewRequestMessage(first) error = %v", err)
 	}
 	first.ToPeerID = localPeerID
-	second, err := NewRequestMessage(remotePeerID, MessageTypePing, nil)
+	second, err := NewRequestMessage(remotePeerID, ProtocolPingV1, nil)
 	if err != nil {
 		t.Fatalf("NewRequestMessage(second) error = %v", err)
 	}
 	second.ToPeerID = localPeerID
-	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, []Message{first, second})
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, []Message{first})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	host.HandleConnection(ctx, connection)
+	done := make(chan struct{})
+	go func() {
+		host.HandleConnection(ctx, connection)
+		close(done)
+	}()
+
+	response := connection.waitWrite(t)
+	if response.Type != ProtocolPongV1 {
+		t.Fatalf("response.Type = %d, want pong", response.Type)
+	}
+
+	connection.reads <- second
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rate-limited connection close")
+	}
 
 	if !connection.closed {
 		t.Fatal("connection.closed = false, want rate-limited connection closed")
 	}
 	if host.Metrics().MessagesRateLimited != 1 {
 		t.Fatalf("MessagesRateLimited = %d, want 1", host.Metrics().MessagesRateLimited)
-	}
-	response := connection.waitWrite(t)
-	if response.Type != MessageTypePong {
-		t.Fatalf("response.Type = %d, want pong", response.Type)
 	}
 }
 
@@ -599,7 +611,7 @@ func TestHostBroadcastDeduplicatesAndLimitsPeers(t *testing.T) {
 		t.Fatalf("storeConnection(third) error = %v", err)
 	}
 
-	message, err := NewMessage(MessageTypeTransaction, []byte("broadcast"))
+	message, err := NewMessage(ProtocolReceiveTransactionV1, []byte("broadcast"))
 	if err != nil {
 		t.Fatalf("NewMessage() error = %v", err)
 	}
@@ -889,7 +901,7 @@ func (connection *responsiveConnection) WriteMessage(ctx context.Context, messag
 		return connection.scriptedConnection.WriteMessage(ctx, message)
 	}
 
-	ping, err := NewRequestMessage(connection.remotePeerID, MessageTypePing, nil)
+	ping, err := NewRequestMessage(connection.remotePeerID, ProtocolPingV1, nil)
 	if err != nil {
 		return err
 	}
@@ -1000,16 +1012,16 @@ func assertNoConnectionWrite(t *testing.T, connection *scriptedConnection) {
 	}
 }
 
-func testNetworkMessage(t *testing.T, messageType MessageType, fromPeerID string, toPeerID string) Message {
+func testNetworkMessage(t *testing.T, protocolID ProtocolID, fromPeerID string, toPeerID string) Message {
 	t.Helper()
-	message, err := NewMessage(messageType, nil)
+	message, err := NewMessage(protocolID, nil)
 	if err != nil {
-		t.Fatalf("NewMessage(%d) error = %v", messageType, err)
+		t.Fatalf("NewMessage(%d) error = %v", protocolID, err)
 	}
 	message.FromPeerID = fromPeerID
 	message.ToPeerID = toPeerID
 	if err := message.Validate(DefaultMaxMessageSize); err != nil {
-		t.Fatalf("message.Validate(%d) error = %v", messageType, err)
+		t.Fatalf("message.Validate(%d) error = %v", protocolID, err)
 	}
 	return message
 }

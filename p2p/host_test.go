@@ -99,7 +99,7 @@ func TestHostSendFallsBackFromQUICToTCP(t *testing.T) {
 	}()
 	waitForTCP(t, tcpAddress.Port)
 
-	message := Message{Type: MessageTypePing, Payload: []byte("host")}
+	message := Message{Type: ProtocolPingV1, Payload: []byte("host")}
 	sendContext, sendCancel := context.WithTimeout(context.Background(), time.Second)
 	defer sendCancel()
 	if err := clientHost.Send(sendContext, serverPeerID, message); err != nil {

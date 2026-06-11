@@ -17,7 +17,7 @@ type requestManager struct {
 type pendingRequest struct {
 	waiter              chan Message
 	peerID              string
-	responseType        MessageType
+	responseType        ProtocolID
 	requireResponseType bool
 }
 
@@ -27,7 +27,7 @@ func newRequestManager() *requestManager {
 	}
 }
 
-func (manager *requestManager) register(requestID string, peerID string, responseType MessageType, requireResponseType bool) (<-chan Message, func(), error) {
+func (manager *requestManager) register(requestID string, peerID string, responseType ProtocolID, requireResponseType bool) (<-chan Message, func(), error) {
 	normalizedID := strings.ToLower(strings.TrimSpace(requestID))
 	if !isValidMessageID(normalizedID) {
 		return nil, nil, fmt.Errorf("%w: invalid pending request id", ErrInvalidMessage)
@@ -172,7 +172,7 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 }
 
-func expectedResponseType(requestType MessageType) (MessageType, bool) {
+func expectedResponseType(requestType ProtocolID) (ProtocolID, bool) {
 	switch requestType {
 	case ProtocolFindNodeRequestV1:
 		return ProtocolFindNodeResponseV1, true

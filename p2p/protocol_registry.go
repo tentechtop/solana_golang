@@ -90,7 +90,7 @@ func (registry *ProtocolRegistry) SpecByName(name string) (ProtocolSpec, bool) {
 
 // Handle 执行协议处理器 + 按协议声明强制校验响应消息。
 func (registry *ProtocolRegistry) Handle(ctx context.Context, message Message) (ProtocolHandleResult, error) {
-	registered, err := registry.lookup(ProtocolID(message.Type))
+	registered, err := registry.lookup(message.Type)
 	if err != nil {
 		return ProtocolHandleResult{}, err
 	}
@@ -154,8 +154,8 @@ func (registry *ProtocolRegistry) lookup(protocolID ProtocolID) (registeredProto
 }
 
 // responseFor 构造协议响应消息 + 自动回填目标节点和原请求 ID。
-func responseFor(request Message, senderPeerID string, messageType MessageType, payload []byte) (Message, error) {
-	response, err := NewResponseMessage(senderPeerID, messageType, request.ID, payload)
+func responseFor(request Message, senderPeerID string, protocolID ProtocolID, payload []byte) (Message, error) {
+	response, err := NewResponseMessage(senderPeerID, protocolID, request.ID, payload)
 	if err != nil {
 		return Message{}, err
 	}

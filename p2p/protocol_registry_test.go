@@ -19,13 +19,13 @@ func TestProtocolRegistryHandlesResponseProtocol(t *testing.T) {
 	}
 
 	err := registry.RegisterResultHandler(spec, func(ctx context.Context, message Message) (Message, error) {
-		return responseFor(message, localPeerID, MessageTypePong, []byte("pong"))
+		return responseFor(message, localPeerID, ProtocolPongV1, []byte("pong"))
 	})
 	if err != nil {
 		t.Fatalf("RegisterResultHandler() error = %v", err)
 	}
 
-	request, err := NewRequestMessage(remotePeerID, MessageTypePing, []byte("ping"))
+	request, err := NewRequestMessage(remotePeerID, ProtocolPingV1, []byte("ping"))
 	if err != nil {
 		t.Fatalf("NewRequestMessage() error = %v", err)
 	}
