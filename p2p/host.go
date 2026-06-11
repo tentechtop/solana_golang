@@ -16,6 +16,7 @@ const (
 	defaultHeartbeatInterval = 15 * time.Second
 	defaultConnectionIdle    = 45 * time.Second
 	defaultMaxPeerFailures   = 3
+	defaultMaxPeers          = 64
 )
 
 // HostConfig 保存 Host 配置 + 支持注入节点身份、协议优先级和日志。
@@ -28,9 +29,12 @@ type HostConfig struct {
 	HeartbeatInterval   time.Duration
 	ConnectionIdle      time.Duration
 	MaxPeerFailures     uint32
+	MaxPeers            int
 	Logger              *slog.Logger
 	Registry            *ProtocolRegistry
 	RoutingTable        *KADRoutingTable
+	PeerStore           PeerStore
+	PersistedPeerLimit  int
 }
 
 // Host 管理 P2P 节点运行态 + 统一处理传输、节点表和连接池。
@@ -44,6 +48,7 @@ type Host struct {
 	heartbeatInterval  time.Duration
 	connectionIdle     time.Duration
 	maxPeerFailures    uint32
+	maxPeers           int
 	logger             *slog.Logger
 	transports         map[utils.MultiAddressProtocol]Transport
 	peers              map[string]Peer
@@ -52,6 +57,8 @@ type Host struct {
 	resumptionTickets  map[string]SecureSessionResumptionTicket
 	registry           *ProtocolRegistry
 	routingTable       *KADRoutingTable
+	peerStore          PeerStore
+	persistedPeerLimit int
 	closed             bool
 }
 
@@ -96,6 +103,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		heartbeatInterval:  normalizeHeartbeatInterval(config.HeartbeatInterval),
 		connectionIdle:     normalizeConnectionIdle(config.ConnectionIdle),
 		maxPeerFailures:    normalizeMaxPeerFailures(config.MaxPeerFailures),
+		maxPeers:           normalizeMaxPeers(config.MaxPeers),
 		logger:             normalizeLogger(config.Logger),
 		transports:         make(map[utils.MultiAddressProtocol]Transport),
 		peers:              make(map[string]Peer),
@@ -104,6 +112,8 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		resumptionTickets:  make(map[string]SecureSessionResumptionTicket),
 		registry:           normalizeRegistry(config.Registry),
 		routingTable:       routingTable,
+		peerStore:          normalizePeerStore(config.PeerStore),
+		persistedPeerLimit: normalizePeerStoreLimit(config.PersistedPeerLimit),
 	}
 
 	if len(transports) == 0 {
@@ -225,25 +235,42 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 
 // AddPeer 添加或更新节点 + 校验地址归属后写入节点表。
 func (host *Host) AddPeer(peer Peer) error {
+	return host.addPeer(peer, true)
+}
+
+func (host *Host) addPeer(peer Peer, persist bool) error {
 	if err := peer.Validate(); err != nil {
 		return err
 	}
 
+	var storedPeer Peer
 	host.mutex.Lock()
-	defer host.mutex.Unlock()
 	if host.closed {
+		host.mutex.Unlock()
 		return ErrHostClosed
+	}
+	if _, ok := host.peers[peer.ID]; !ok && len(host.peers) >= host.maxPeers {
+		host.mutex.Unlock()
+		return fmt.Errorf("%w: %d", ErrMaxPeersReached, host.maxPeers)
 	}
 	if current, ok := host.peers[peer.ID]; ok {
 		if err := current.Merge(peer); err != nil {
+			host.mutex.Unlock()
 			return err
 		}
 		host.peers[peer.ID] = current
-		_ = host.routingTable.AddPeer(current)
-		return nil
+		host.addPeerToRoutingTableLocked(current)
+		storedPeer = current.Clone()
+	} else {
+		host.peers[peer.ID] = peer.Clone()
+		host.addPeerToRoutingTableLocked(peer)
+		storedPeer = peer.Clone()
 	}
-	host.peers[peer.ID] = peer.Clone()
-	_ = host.routingTable.AddPeer(peer)
+	host.mutex.Unlock()
+
+	if persist {
+		return host.savePeer(context.Background(), storedPeer)
+	}
 	return nil
 }
 
@@ -272,6 +299,35 @@ func (host *Host) RoutingTableHealth() KADRoutingTableHealthSnapshot {
 }
 
 // Listen 启动监听 + 根据地址协议选择对应传输实现。
+// LoadStoredPeers 恢复持久化节点 + 启动时先填充 peer 表和 KAD 路由表。
+func (host *Host) LoadStoredPeers(ctx context.Context, limit int) (int, error) {
+	if host.peerStore == nil {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if limit <= 0 {
+		limit = host.persistedPeerLimit
+	}
+	peers, err := host.peerStore.LoadPeers(ctx, limit)
+	if err != nil {
+		return 0, fmt.Errorf("p2p: load stored peers: %w", err)
+	}
+
+	loaded := 0
+	for _, peer := range peers {
+		if peer.ID == host.peerID {
+			continue
+		}
+		if err := host.addPeer(peer, false); err != nil {
+			return loaded, fmt.Errorf("p2p: restore peer %s: %w", peer.ID, err)
+		}
+		loaded++
+	}
+	return loaded, nil
+}
+
 func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handler ConnectionHandler) error {
 	transport, err := host.transport(address.Protocol)
 	if err != nil {
@@ -341,6 +397,9 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 
 // dialCandidateAddresses 生成拨号候选地址 + 按协议优先级支持 QUIC 到 TCP 降级。
 func (host *Host) dialCandidateAddresses(peer Peer) []utils.MultiAddress {
+	if !peerDialable(peer, host.maxPeerFailures) {
+		return nil
+	}
 	addresses := make([]utils.MultiAddress, 0, len(host.preferredProtocols))
 	for _, protocol := range host.preferredProtocols {
 		address, ok := peer.firstAddressByProtocol(protocol)
@@ -445,14 +504,20 @@ func (host *Host) Close() error {
 	host.closed = true
 	connections := copyConnections(host.connections)
 	transports := copyTransports(host.transports)
+	storedPeers := make([]Peer, 0, len(host.peers))
 	host.connections = make(map[string]Connection)
 	host.connectionStates = make(map[string]ConnectionState)
 	host.resumptionTickets = make(map[string]SecureSessionResumptionTicket)
 	for peerID, peer := range host.peers {
 		peer.MarkDisconnected()
 		host.peers[peerID] = peer
+		storedPeers = append(storedPeers, peer.Clone())
 	}
 	host.mutex.Unlock()
+
+	for _, peer := range storedPeers {
+		host.savePeerBestEffort(peer)
+	}
 
 	var closeErrors []error
 	for _, connection := range connections {
@@ -483,10 +548,41 @@ func (host *Host) transport(protocol utils.MultiAddressProtocol) (Transport, err
 }
 
 // storeConnection 写入连接池 + 连接建立成功后同步更新节点在线状态。
+func (host *Host) addPeerToRoutingTableLocked(peer Peer) {
+	if !peerShareableInDHT(peer) {
+		return
+	}
+	_ = host.routingTable.AddPeer(peer)
+}
+
+func (host *Host) savePeer(ctx context.Context, peer Peer) error {
+	if host.peerStore == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := host.peerStore.SavePeer(ctx, peer); err != nil {
+		return fmt.Errorf("p2p: save peer %s: %w", peer.ID, err)
+	}
+	return nil
+}
+
+func (host *Host) savePeerBestEffort(peer Peer) {
+	if err := host.savePeer(context.Background(), peer); err != nil {
+		host.logger.Warn("p2p peer store save failed",
+			slog.String("peer_id", peer.ID),
+			slog.Any("error", err),
+		)
+	}
+}
+
 func (host *Host) storeConnection(peerID string, connection Connection) {
+	var storedPeer Peer
+	shouldPersist := false
 	host.mutex.Lock()
-	defer host.mutex.Unlock()
 	if host.closed {
+		host.mutex.Unlock()
 		_ = connection.Close()
 		return
 	}
@@ -514,7 +610,22 @@ func (host *Host) storeConnection(peerID string, connection Connection) {
 	if peer, ok := host.peers[peerID]; ok {
 		peer.MarkConnected()
 		host.peers[peerID] = peer
-		_ = host.routingTable.AddPeer(peer)
+		host.addPeerToRoutingTableLocked(peer)
+		storedPeer = peer.Clone()
+		shouldPersist = true
+	} else if peerID != "" && len(host.peers) < host.maxPeers {
+		peer, err := NewPeer(peerID, nil)
+		if err == nil {
+			peer.MarkConnected()
+			host.peers[peerID] = peer
+			storedPeer = peer.Clone()
+			shouldPersist = true
+		}
+	}
+	host.mutex.Unlock()
+
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
 	}
 }
 
@@ -643,7 +754,7 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) {
 	if peer, ok := host.peers[peerID]; ok {
 		peer.MarkConnected()
 		host.peers[peerID] = peer
-		_ = host.routingTable.AddPeer(peer)
+		host.addPeerToRoutingTableLocked(peer)
 		host.routingTable.TouchPeer(peerID)
 	}
 }
@@ -694,8 +805,9 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 	if err == nil {
 		return
 	}
+	var storedPeer Peer
+	shouldPersist := false
 	host.mutex.Lock()
-	defer host.mutex.Unlock()
 	for peerID, state := range host.connectionStates {
 		if state.ConnectionID != connection.ID() {
 			continue
@@ -705,16 +817,24 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 		if peer, ok := host.peers[peerID]; ok {
 			peer.RecordError(err)
 			host.peers[peerID] = peer
+			storedPeer = peer.Clone()
+			shouldPersist = true
 		}
 		host.routingTable.RecordPeerFailure(peerID)
+		host.mutex.Unlock()
+		if shouldPersist {
+			host.savePeerBestEffort(storedPeer)
+		}
 		return
 	}
+	host.mutex.Unlock()
 }
 
 // removeConnectionByID 移除指定连接 + 读循环退出时保持连接池准确。
 func (host *Host) removeConnectionByID(connectionID string) {
+	var storedPeer Peer
+	shouldPersist := false
 	host.mutex.Lock()
-	defer host.mutex.Unlock()
 	for peerID, connection := range host.connections {
 		if connection.ID() != connectionID {
 			continue
@@ -724,14 +844,23 @@ func (host *Host) removeConnectionByID(connectionID string) {
 		if peer, ok := host.peers[peerID]; ok {
 			peer.MarkDisconnected()
 			host.peers[peerID] = peer
-			_ = host.routingTable.AddPeer(peer)
+			host.addPeerToRoutingTableLocked(peer)
+			storedPeer = peer.Clone()
+			shouldPersist = true
+		}
+		host.mutex.Unlock()
+		if shouldPersist {
+			host.savePeerBestEffort(storedPeer)
 		}
 		return
 	}
+	host.mutex.Unlock()
 }
 
 // closePeerConnection 关闭并移除节点连接 + 心跳失败和过期清理共用。
 func (host *Host) closePeerConnection(peerID string) {
+	var storedPeer Peer
+	shouldPersist := false
 	host.mutex.Lock()
 	connection := host.connections[peerID]
 	delete(host.connections, peerID)
@@ -739,9 +868,14 @@ func (host *Host) closePeerConnection(peerID string) {
 	if peer, ok := host.peers[peerID]; ok {
 		peer.MarkDisconnected()
 		host.peers[peerID] = peer
-		_ = host.routingTable.AddPeer(peer)
+		host.addPeerToRoutingTableLocked(peer)
+		storedPeer = peer.Clone()
+		shouldPersist = true
 	}
 	host.mutex.Unlock()
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
 	if connection != nil {
 		_ = connection.Close()
 	}
@@ -749,13 +883,21 @@ func (host *Host) closePeerConnection(peerID string) {
 
 // recordPeerError 记录节点错误 + 将拨号失败沉淀到节点快照便于诊断。
 func (host *Host) recordPeerError(peerID string, err error) {
+	var storedPeer Peer
+	shouldPersist := false
 	host.mutex.Lock()
-	defer host.mutex.Unlock()
 	if peer, ok := host.peers[peerID]; ok {
 		peer.RecordError(err)
 		host.peers[peerID] = peer
+		storedPeer = peer.Clone()
+		shouldPersist = true
 	}
 	host.routingTable.RecordPeerFailure(peerID)
+	host.mutex.Unlock()
+
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
 }
 
 // prepareOutboundMessage 补齐出站消息路由字段 + 发送前统一做协议边界校验。
@@ -934,6 +1076,13 @@ func normalizeMaxPeerFailures(maxFailures uint32) uint32 {
 		return defaultMaxPeerFailures
 	}
 	return maxFailures
+}
+
+func normalizeMaxPeers(maxPeers int) int {
+	if maxPeers <= 0 {
+		return defaultMaxPeers
+	}
+	return maxPeers
 }
 
 // normalizeLogger 归一化日志器 + 使用默认日志器避免空指针分支散落业务代码。

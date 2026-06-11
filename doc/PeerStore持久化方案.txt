@@ -1,0 +1,80 @@
+PeerStore 持久化方案
+
+一、设计目标
+
+1. KAD routing table 保持内存热路径，不直接访问数据库。
+2. PeerStore 负责持久化已发现、已连接、失败过或配置引导得到的节点。
+3. P2P 核心只依赖 p2p.PeerStore 接口，不依赖 database 包。
+4. cmd 作为组合层，将 databasePeerStore 注入 Host。
+5. 节点重启后，Host 先从 PeerStore 恢复历史节点，再执行 bootstrap。
+
+二、存储边界
+
+PeerStore 保存：
+1. peer_id
+2. addresses
+3. status
+4. role
+5. capabilities
+6. protocol_version
+7. software_version
+8. latest_slot
+9. block_height
+10. best_block_hash
+11. validator
+12. stake_lamports
+13. score
+14. first_seen_unix_milli
+15. last_seen_unix_milli
+16. last_connected_unix_milli
+17. last_disconnected_unix_milli
+18. last_error_unix_milli
+19. last_error
+20. failure_count
+21. sent_bytes
+22. received_bytes
+23. last_round_trip_time_milli
+24. metadata
+
+PeerStore 不保存：
+1. 当前连接对象
+2. 当前连接密钥
+3. 明文方向密钥
+4. shared secret
+5. 临时 X25519 私钥
+6. 连接内 sequence
+
+三、编码格式
+
+1. PeerStore 记录使用 Borsh。
+2. 版本字段为 PeerStoreRecordVersion。
+3. 读取后必须调用 Peer.Validate。
+4. 地址必须满足 multi-address 中的 peer_id 和记录 peer_id 一致。
+5. metadata 按 key 排序后编码，保证字节结果稳定。
+
+四、数据库布局
+
+1. 表：database.TablePeer。
+2. key 前缀：peer_store/peer/。
+3. 完整 key：peer_store/peer/<peer_id>。
+4. 节点身份 key 仍然是 node_identity/public_key 和 node_identity/private_key。
+5. PeerStore key 不得覆盖节点身份 key。
+
+五、Host 接入点
+
+1. AddPeer：新增或更新节点后写入 PeerStore。
+2. LoadStoredPeers：启动监听前恢复历史节点。
+3. storeConnection：连接成功后刷新连接时间和状态。
+4. recordConnectionError：连接错误后刷新失败次数和最后错误。
+5. removeConnectionByID：连接循环退出后刷新断开状态。
+6. closePeerConnection：心跳清理连接后刷新断开状态。
+7. Close：Host 关闭时将现有 peer 标记为 disconnected 后写回。
+
+六、生产约束
+
+1. Host 强制 max_peers 上限。
+2. 已屏蔽节点不得进入 DHT 响应。
+3. 无地址节点不得进入 DHT 响应。
+4. failure_count 达到阈值的节点不得参与主动拨号。
+5. PeerStore 写入失败不应在连接事件路径里导致 Host 崩溃，但启动恢复失败应阻止启动。
+6. 后续可扩展黑名单、灰名单、节点记录签名和地址签名。

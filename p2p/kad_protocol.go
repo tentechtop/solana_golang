@@ -220,13 +220,15 @@ func UnmarshalKADFindNodeResponseBinary(data []byte) (KADFindNodeResponse, error
 
 // PeersToKADPeerHints 转换节点快照 + 避免 DHT 响应暴露 Host 内部可变结构。
 func PeersToKADPeerHints(peers []Peer) []KADPeerHint {
-	limit := len(peers)
-	if limit > maxKADPeerHints {
-		limit = maxKADPeerHints
-	}
-	hints := make([]KADPeerHint, 0, limit)
-	for index := 0; index < limit; index++ {
-		hints = append(hints, NewKADPeerHint(peers[index]))
+	hints := make([]KADPeerHint, 0, minInt(len(peers), maxKADPeerHints))
+	for _, peer := range peers {
+		if len(hints) >= maxKADPeerHints {
+			break
+		}
+		if !peerShareableInDHT(peer) {
+			continue
+		}
+		hints = append(hints, NewKADPeerHint(peer))
 	}
 	return hints
 }

@@ -282,6 +282,31 @@ func (peer *Peer) mergeNodeFields(next Peer) {
 	if next.LastSeenUnixMilli > peer.LastSeenUnixMilli {
 		peer.LastSeenUnixMilli = next.LastSeenUnixMilli
 	}
+	if next.FirstSeenUnixMilli > 0 && (peer.FirstSeenUnixMilli == 0 || next.FirstSeenUnixMilli < peer.FirstSeenUnixMilli) {
+		peer.FirstSeenUnixMilli = next.FirstSeenUnixMilli
+	}
+	if next.LastConnectedUnixMilli > peer.LastConnectedUnixMilli {
+		peer.LastConnectedUnixMilli = next.LastConnectedUnixMilli
+	}
+	if next.LastDisconnectedUnixMilli > peer.LastDisconnectedUnixMilli {
+		peer.LastDisconnectedUnixMilli = next.LastDisconnectedUnixMilli
+	}
+	if next.LastErrorUnixMilli > peer.LastErrorUnixMilli {
+		peer.LastErrorUnixMilli = next.LastErrorUnixMilli
+		peer.LastError = next.LastError
+	}
+	if next.FailureCount > peer.FailureCount {
+		peer.FailureCount = next.FailureCount
+	}
+	if next.SentBytes > peer.SentBytes {
+		peer.SentBytes = next.SentBytes
+	}
+	if next.ReceivedBytes > peer.ReceivedBytes {
+		peer.ReceivedBytes = next.ReceivedBytes
+	}
+	if next.LastRoundTripTimeMilli > 0 {
+		peer.LastRoundTripTimeMilli = next.LastRoundTripTimeMilli
+	}
 	peer.Metadata = mergeStringMap(peer.Metadata, next.Metadata)
 }
 func choosePeerStatus(current PeerStatus, next PeerStatus) PeerStatus {

@@ -1,0 +1,537 @@
+交易执行方案
+
+版本：v1
+范围：节点先不实现虚拟机，不支持用户部署合约；先实现固定内置指令集，保证基础账户、转账、代币、质押等能力闭环，并为未来接入 VM 保留执行层接口。
+
+
+一、核心结论
+
+当前阶段采用“固定指令集 + 原生执行器”的方案。
+
+执行路径：
+
+交易 -> 预检查 -> 账户加载 -> 指令路由 -> 内置模块执行 -> 写集生成 -> 原子提交
+
+不采用：
+
+交易 -> VM -> 用户合约字节码 -> 状态修改
+
+这样可以先完成节点基础能力，降低 VM、syscall、沙箱、合约部署、合约升级、跨合约调用带来的复杂度。后续接入 VM 时，只需要新增 VM 执行器，不推翻交易格式、账户模型和状态提交机制。
+
+
+二、设计目标
+
+1. 正确性优先
+   所有节点在相同交易、相同状态、相同区块上下文下必须得到相同执行结果。
+
+2. 固定指令先行
+   当前只允许调用内置 ProgramID，不允许部署或执行用户自定义合约。
+
+3. 状态修改原子化
+   一笔交易内多个指令必须在同一个状态事务中执行，失败时按规则回滚。
+
+4. 读写一致性
+   账户读取必须来自同一个状态快照，写入必须通过写集统一提交，禁止执行过程中直接写库。
+
+5. 可扩展到 VM
+   指令格式保留 ProgramID、Accounts、Data 三段式结构，未来 VM 可以作为新的执行器挂到同一套路由后面。
+
+6. 可测试和可审计
+   每条内置指令必须有独立校验、执行、错误码和单元测试，方便后续差分测试和回归验证。
+
+
+三、阶段边界
+
+当前阶段必须完成：
+
+1. 交易签名校验。
+2. recent blockhash 或等价交易时效校验。
+3. nonce 或状态序号防重放。
+4. 交易大小、指令数量、账户数量、指令数据长度限制。
+5. 账户加载和账户权限检查。
+6. 内置指令路由。
+7. 原生模块执行。
+8. 手续费扣除。
+9. 写集提交和失败回滚。
+10. 执行结果、错误码、关键日志输出。
+
+当前阶段不做：
+
+1. 不实现 SBF/eBPF VM。
+2. 不支持用户部署合约。
+3. 不支持任意合约升级。
+4. 不实现 syscall。
+5. 不实现 CPI 跨用户合约调用。
+6. 不引入 JIT。
+
+
+四、交易模型
+
+交易保持 Solana 风格的显式账户和指令模型。
+
+推荐结构：
+
+Transaction
+  Version
+  ChainID
+  Signatures
+  Message
+  Fee
+  Size
+  SubmitTime
+  Status
+
+Message
+  Header
+  AccountKeys
+  RecentBlockhash
+  Instructions
+  AddressTableLookups
+
+CompiledInstruction
+  ProgramIDIndex
+  AccountIndices
+  Data
+
+核心规则：
+
+1. 交易最大序列化长度默认 1232 字节。
+2. 签名数量必须等于 Header.NumRequiredSignatures。
+3. ProgramIDIndex 必须落在 AccountKeys 有效范围内。
+4. AccountIndices 每个索引必须落在 AccountKeys 有效范围内。
+5. Data 必须有最大长度限制，禁止无限 payload。
+6. 交易签名原文必须使用 canonical message bytes。
+7. 交易 ID 使用第一笔签名或明确的 canonical hash，规则发布后不得随意变更。
+8. JSON 只作为 RPC DTO，链上交易和签名原文不使用 JSON。
+
+
+五、内置 ProgramID
+
+当前只允许白名单 ProgramID。
+
+建议首批内置模块：
+
+1. SystemProgram
+   账户创建、账户分配、账户归属变更、原生币转账。
+
+2. BankProgram
+   手续费扣除、基础余额变更、节点内部资金结算。
+
+3. TokenProgram
+   代币创建、增发、销毁、转账、授权变更。
+
+4. StakeProgram
+   质押、解质押、委托、提取。
+
+5. VoteProgram
+   验证者投票、投票账户状态维护。
+
+6. ConfigProgram
+   链级参数只读访问或治理后参数更新。
+
+ProgramID 规则：
+
+1. 内置 ProgramID 必须固定，不得由配置文件随意覆盖。
+2. ProgramID 到执行器的映射必须在节点启动时注册。
+3. 未注册 ProgramID 必须拒绝执行，返回稳定错误码。
+4. 内置 ProgramID 可以使用 32 字节固定地址，保持未来与账户模型兼容。
+
+
+六、执行层架构
+
+建议分层：
+
+ExecutionEngine
+  交易级执行入口，负责预检查、账户加载、执行上下文、写集提交。
+
+InstructionRouter
+  根据 ProgramID 找到对应 ModuleExecutor。
+
+ModuleExecutor
+  内置模块执行接口，每个模块只处理自己的指令。
+
+StateReader
+  只读状态接口，读取指定高度或当前执行快照中的账户。
+
+StateWriter
+  写集构建接口，只记录变更，不直接落库。
+
+StateCommitter
+  数据库事务提交接口，负责原子写入和冲突检查。
+
+推荐接口语义：
+
+ModuleExecutor.Execute(context, instruction, accountView) -> InstructionResult
+
+接口约束：
+
+1. ModuleExecutor 不直接访问数据库。
+2. ModuleExecutor 不启动 goroutine 修改共享状态。
+3. ModuleExecutor 只能通过 accountView 读取账户，通过 writeSet 记录变更。
+4. ModuleExecutor 返回底层错误时必须附加模块名、指令名、账户地址等上下文。
+5. 所有模块必须保持确定性，不使用本地时间、随机数、map 随机遍历顺序。
+
+
+七、交易执行流程
+
+1. Decode
+   从 Borsh 或固定二进制格式解码交易，完成长度、版本、枚举、EOF 校验。
+
+2. ValidateBasic
+   校验交易结构，包括签名数量、账户数量、指令数量、索引范围、payload 大小。
+
+3. VerifySignature
+   使用 canonical message bytes 校验 Ed25519 签名。
+
+4. CheckRecentBlockhash
+   检查 recent blockhash 是否仍在有效窗口内，拒绝过期交易。
+
+5. CheckReplay
+   检查 nonce、签名缓存或状态序号，拒绝重放交易。
+
+6. LoadAccounts
+   按 AccountKeys 加载账户，形成交易级只读快照。
+
+7. ChargeFee
+   从 fee payer 扣除基础手续费。若后续指令失败，手续费是否保留必须有明确规则，建议手续费不回滚。
+
+8. ExecuteInstructions
+   按顺序执行每条指令。任一指令失败，停止后续指令。
+
+9. ValidateWriteSet
+   校验写集中的账户租金、余额、owner、data 长度、权限和溢出边界。
+
+10. CommitOrRollback
+   成功则原子提交写集；失败则回滚指令写集，按规则保留手续费状态。
+
+11. RecordResult
+   写入交易状态、错误码、消耗资源、日志摘要和变更账户列表。
+
+
+八、原子性规则
+
+推荐采用“手续费独立、业务状态原子”的规则。
+
+1. 交易签名、结构、blockhash、账户加载失败时，不扣手续费。
+2. 通过预检查并进入执行阶段后，先扣手续费。
+3. 任一业务指令失败，回滚所有业务写集。
+4. 手续费扣除不随业务失败回滚。
+5. 如果手续费扣除本身失败，整笔交易失败且不产生状态变更。
+6. 同一交易内多个指令共享同一个执行上下文和临时写集。
+7. 指令之间能读取前面指令产生的临时状态。
+8. 提交前必须重新校验写集合法性。
+
+如未来要兼容其他链语义，可以通过 TransactionVersion 或 FeatureGate 固化规则，不得静默改变历史交易执行语义。
+
+
+九、账户读写一致性
+
+账户读取规则：
+
+1. 交易开始时根据 AccountKeys 加载账户快照。
+2. 执行中读取账户时，优先读取交易临时写集。
+3. 写集中不存在时，读取交易开始加载的账户快照。
+4. 禁止指令临时读取未声明账户，除非未来通过明确的系统账户白名单开放。
+
+账户写入规则：
+
+1. 只有标记为 writable 的账户允许被写入。
+2. signer 权限必须来自交易签名或内置规则，不允许模块自行伪造。
+3. 账户 data 只能由 owner 对应的 ProgramID 修改。
+4. lamports 扣减必须检查余额充足和 uint64 下溢。
+5. lamports 增加必须检查 uint64 上溢。
+6. data 扩容必须检查单次增长上限、账户最大长度和租金豁免。
+7. 账户关闭必须通过数据库事务删除 key，并把余额转入目标账户。
+
+
+十、权限模型
+
+每条指令必须校验：
+
+1. 需要签名的账户必须在交易签名集合中。
+2. 需要写入的账户必须在 Message 中声明 writable。
+3. 被修改 data 的账户 owner 必须匹配当前 ProgramID。
+4. 系统账户创建、分配、转账必须校验付款人签名。
+5. Token mint、burn、set authority 必须校验 authority 签名。
+6. Stake 委托、解委托、提取必须校验对应 authority。
+7. 禁止只读账户发生余额、data、owner、executable、rent_epoch 变化。
+8. 禁止普通指令修改内置 ProgramID 账户本身。
+
+权限检查必须在模块内部和写集校验层双重执行。模块负责业务语义，写集校验层负责统一兜底。
+
+
+十一、内置指令建议
+
+P0 必须支持：
+
+1. SystemCreateAccount
+   创建账户，设置 owner、lamports、data 长度和 rent_epoch。
+
+2. SystemTransfer
+   原生币转账。
+
+3. SystemAssign
+   修改账户 owner，必须满足账户未被非法占用和签名要求。
+
+4. TokenCreateMint
+   创建代币 mint 状态。
+
+5. TokenMintTo
+   增发代币到目标 token account。
+
+6. TokenBurn
+   销毁指定 token account 中的代币。
+
+7. TokenTransfer
+   代币账户之间转账。
+
+8. TokenSetAuthority
+   修改 mint 或 token account 权限。
+
+P1 再支持：
+
+1. StakeCreateAccount
+2. StakeDelegate
+3. StakeDeactivate
+4. StakeWithdraw
+5. VoteInitialize
+6. VoteSubmit
+
+指令 Data 规则：
+
+1. 使用 Borsh 或固定字段二进制布局。
+2. 首字段必须是 InstructionVersion 或 InstructionType。
+3. 枚举值必须白名单校验。
+4. 动态 bytes/string 必须有最大长度。
+5. 解码后必须 EnsureEOF。
+6. 解码后必须 Validate。
+
+
+十二、手续费和资源限制
+
+即使没有 VM，也必须有资源限制，防止 DoS。
+
+建议限制项：
+
+1. MaxTransactionBytes
+2. MaxInstructionCount
+3. MaxAccountCount
+4. MaxInstructionDataBytes
+5. MaxWriteAccountCount
+6. MaxTokenTransferBatchSize
+7. MaxAccountDataLength
+8. MaxAccountDataIncreasePerInstruction
+
+费用建议：
+
+1. 基础签名费。
+2. 交易字节费。
+3. 指令数量费。
+4. 写账户数量费。
+5. 可选账户 data 增长费。
+
+费用计算必须确定性，不能依赖节点本地负载动态变化。动态费率只能通过链上参数或区块上下文确定，并且所有节点可验证。
+
+
+十三、并发执行策略
+
+第一阶段建议先实现串行执行，保证语义正确。
+
+第二阶段再基于 AccountKeys 的读写集做并行调度：
+
+1. 交易之间 writable 账户有交集时不能并发。
+2. 一个交易写账户，另一个交易读同账户时不能并发。
+3. 只读账户交集可以并发。
+4. 并发执行只生成写集，提交阶段按区块内交易顺序提交。
+5. 提交前必须做状态版本检查，发现冲突则回退到串行重放。
+
+并发要求：
+
+1. 共享状态必须只读快照化。
+2. 写集必须交易私有。
+3. 账户锁顺序必须稳定，建议按地址字节序排序。
+4. 禁止模块内部直接持有全局锁执行复杂业务。
+5. 并发结果必须与同区块串行执行结果一致。
+
+
+十四、错误分层
+
+错误分层建议：
+
+1. DecodeError
+   二进制解码失败、EOF、长度异常。
+
+2. ValidateError
+   交易结构、版本、索引、枚举、数量越界。
+
+3. SignatureError
+   签名数量错误、签名校验失败。
+
+4. ReplayError
+   blockhash 过期、nonce 已使用、交易重复。
+
+5. AccountLoadError
+   账户不存在、账户不可读、数据库读取失败。
+
+6. PermissionError
+   缺少签名、只读账户写入、owner 不匹配。
+
+7. InstructionError
+   模块业务错误，例如余额不足、mint authority 错误。
+
+8. CommitError
+   数据库事务提交失败、状态版本冲突。
+
+错误要求：
+
+1. 对外错误码必须稳定。
+2. 内部错误必须附加上下文后向上传递。
+3. 日志不得输出私钥、seed、完整敏感 payload。
+4. 共识相关错误不能依赖本地化文本判断。
+
+
+十五、日志与可观测性
+
+关键路径必须记录结构化日志：
+
+1. 交易进入执行。
+2. 预检查失败原因。
+3. 签名校验失败原因。
+4. 账户加载数量和耗时。
+5. 指令执行 ProgramID、指令类型、耗时。
+6. 写集账户数量。
+7. 提交成功或失败。
+8. 并发冲突和串行回退。
+
+日志字段建议：
+
+1. slot
+2. block_hash
+3. tx_id
+4. program_id
+5. instruction_index
+6. account_count
+7. write_account_count
+8. error_code
+9. duration_ms
+
+日志只用于排查问题，不参与共识，不影响状态计算。
+
+
+十六、测试方案
+
+单元测试必须覆盖：
+
+1. 正常转账。
+2. 余额不足。
+3. uint64 上溢和下溢。
+4. 缺少签名。
+5. 只读账户写入。
+6. owner 不匹配。
+7. ProgramID 未注册。
+8. 指令索引越界。
+9. 指令 data 超长。
+10. 交易签名失败。
+11. recent blockhash 过期。
+12. 重放交易。
+13. 多指令交易中间失败回滚。
+14. 手续费保留规则。
+15. token mint、burn、transfer 权限边界。
+16. 账户 data 扩容和租金校验。
+
+集成测试必须覆盖：
+
+1. 区块内多笔交易顺序执行。
+2. 同账户冲突交易。
+3. 只读账户并发交易。
+4. 数据库提交失败回滚。
+5. 节点重启后交易状态可恢复。
+
+性能测试必须覆盖：
+
+1. 单账户热点转账。
+2. 多账户无冲突批量转账。
+3. 大量签名校验。
+4. 大量账户加载。
+5. 写集提交吞吐。
+
+
+十七、未来 VM 扩展点
+
+当前阶段必须保留以下扩展点：
+
+1. ProgramID 抽象
+   当前 ProgramID 指向内置模块，未来可指向合约账户。
+
+2. ModuleExecutor 接口
+   当前实现 NativeModuleExecutor，未来新增 VMExecutor。
+
+3. ExecutionContext
+   当前包含区块高度、slot、时间戳、fee payer、日志收集器、资源计量器，未来 VM 复用。
+
+4. AccountView
+   当前给原生模块使用，未来给 VM syscall 或 host function 使用。
+
+5. ResourceMeter
+   当前按固定指令计费，未来映射到 compute unit 或 gas。
+
+6. ProgramRegistry
+   当前只注册内置 ProgramID，未来支持合约部署表和程序缓存。
+
+未来接入 VM 后的路由：
+
+InstructionRouter
+  如果 ProgramID 是内置地址 -> NativeModuleExecutor
+  如果 ProgramID 是已部署合约地址 -> VMExecutor
+  否则 -> ProgramNotFound
+
+接入 VM 前不得破坏现有交易格式和账户写集提交规则。
+
+
+十八、推荐开发顺序
+
+1. 定义交易执行接口和错误码。
+2. 实现交易 Decode、ValidateBasic、VerifySignature。
+3. 实现账户加载和交易级 AccountView。
+4. 实现写集 WriteSet 和原子提交接口。
+5. 实现 SystemProgram 的 create account 和 transfer。
+6. 实现手续费扣除和业务失败回滚。
+7. 实现 TokenProgram 基础 mint、burn、transfer。
+8. 补齐单元测试和集成测试。
+9. 实现串行区块执行。
+10. 在串行正确后再实现账户锁和并发调度。
+11. 最后预留 VMExecutor 空实现和 ProgramRegistry 扩展点。
+
+
+十九、自查清单
+
+编码前必须确认：
+
+1. 是否只修改当前需求相关文件。
+2. 是否没有改动 openapi.yml。
+3. 是否没有引入不必要第三方依赖。
+4. 是否没有让 structure 层直接写数据库。
+5. 是否所有输入都有长度、版本、索引和枚举校验。
+6. 是否所有状态修改都通过写集提交。
+7. 是否所有错误都带上下文向上传递。
+8. 是否关键路径有日志。
+9. 是否测试覆盖成功、失败、边界、回滚。
+10. 是否未来 VM 可以通过新增执行器接入，而不是推翻交易格式。
+
+
+二十、最终判断
+
+先不做虚拟机，先做固定指令集，是当前项目最合理的工程路线。
+
+这个方案能让节点先具备完整基础能力：
+
+1. 可收交易。
+2. 可验签。
+3. 可防重放。
+4. 可加载账户。
+5. 可执行内置业务。
+6. 可原子提交状态。
+7. 可记录交易结果。
+8. 可逐步扩展到并发执行和 VM。
+
+核心风险不在是否有 VM，而在交易执行语义、账户权限、状态提交和失败回滚是否稳定。只要这几层设计正确，未来接入 VM 是增量扩展；如果这几层设计错误，即使提前做 VM，也会产生更大的共识和资产安全风险。

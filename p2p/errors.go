@@ -12,6 +12,8 @@ var (
 	// ErrPeerNotFound 表示节点不存在 + 供拨号和发送路径明确失败原因。
 	ErrPeerNotFound = errors.New("p2p: peer not found")
 	// ErrUnsupportedProtocol 表示协议不支持 + 限制传输层只处理声明的协议。
+	// ErrMaxPeersReached 表示节点表已满 + 防止发现层无限写入内存。
+	ErrMaxPeersReached     = errors.New("p2p: max peers reached")
 	ErrUnsupportedProtocol = errors.New("p2p: unsupported protocol")
 	// ErrTransportUnavailable 表示传输不可用 + 允许 Host 降级尝试其他协议。
 	ErrTransportUnavailable = errors.New("p2p: transport unavailable")

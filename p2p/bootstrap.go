@@ -208,7 +208,7 @@ func (host *Host) connectDiscoveredPeers(ctx context.Context, config BootstrapCo
 		if connected+newConnections >= config.MinOutboundPeers {
 			break
 		}
-		if peer.ID == host.peerID || host.hasConnection(peer.ID) {
+		if peer.ID == host.peerID || host.hasConnection(peer.ID) || !peerDialable(peer, host.maxPeerFailures) {
 			continue
 		}
 		dialContext, cancel := context.WithTimeout(ctx, config.DialTimeout)

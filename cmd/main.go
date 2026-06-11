@@ -184,10 +184,18 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity
 		},
 		EnableSecureSession: true,
 		PreferredProtocols:  p2pProtocolOrder(config.Protocol()),
+		MaxPeers:            config.MaxPeers,
 		Logger:              resources.logger,
+		PeerStore:           newDatabasePeerStore(resources.database),
+		PersistedPeerLimit:  config.MaxPeers,
 	})
 	if err != nil {
 		return fmt.Errorf("cmd: create p2p host: %w", err)
+	}
+	restoredPeers, err := host.LoadStoredPeers(context.Background(), config.MaxPeers)
+	if err != nil {
+		_ = host.Close()
+		return fmt.Errorf("cmd: load stored p2p peers: %w", err)
 	}
 
 	address, err := utils.BuildMultiAddress(config.IPType, config.ListenIP, config.Protocol(), config.ListenPort, identity.PeerID)
@@ -212,7 +220,10 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity
 	}()
 	go host.StartHeartbeat(ctx)
 	go resources.bootstrapP2P(ctx, config, bootnodes)
-	resources.logger.Info("p2p listener starting", slog.String("address", address.String()))
+	resources.logger.Info("p2p listener starting",
+		slog.String("address", address.String()),
+		slog.Int("restored_peers", restoredPeers),
+	)
 	return nil
 }
 
