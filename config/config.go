@@ -69,6 +69,8 @@ type P2PConfig struct {
 	IPType                 string   `yaml:"ip_type"`
 	ListenIP               string   `yaml:"listen_ip"`
 	ListenPort             int      `yaml:"listen_port"`
+	AdvertisedIP           string   `yaml:"advertised_ip"`
+	AdvertisedPort         int      `yaml:"advertised_port"`
 	DefaultProtocol        string   `yaml:"default_protocol"`
 	MaxPeers               int      `yaml:"max_peers"`
 	NetworkID              string   `yaml:"network_id"`
@@ -205,6 +207,9 @@ func (config P2PConfig) Validate() error {
 	if config.ListenPort < 1 || config.ListenPort > 65535 {
 		return fmt.Errorf("p2p listen_port out of range 1-65535: %d", config.ListenPort)
 	}
+	if config.AdvertisedPort < 0 || config.AdvertisedPort > 65535 {
+		return fmt.Errorf("p2p advertised_port out of range 0-65535: %d", config.AdvertisedPort)
+	}
 	if config.MaxPeers <= 0 {
 		return errors.New("p2p max_peers must be positive")
 	}
@@ -213,6 +218,11 @@ func (config P2PConfig) Validate() error {
 	}
 	if err := validateP2PListenAddress(config.IPType, config.ListenIP); err != nil {
 		return err
+	}
+	if strings.TrimSpace(config.AdvertisedIP) != "" {
+		if err := validateP2PListenAddress(config.IPType, config.AdvertisedIP); err != nil {
+			return fmt.Errorf("p2p advertised_ip: %w", err)
+		}
 	}
 	if strings.TrimSpace(config.NetworkID) == "" {
 		return errors.New("p2p network_id cannot be empty")
@@ -255,6 +265,25 @@ func (config P2PConfig) BootstrapAddresses() ([]utils.MultiAddress, error) {
 		addresses = append(addresses, address)
 	}
 	return addresses, nil
+}
+
+func (config P2PConfig) AdvertisedAddress(peerID string) (utils.MultiAddress, bool, error) {
+	advertisedIP := strings.TrimSpace(config.AdvertisedIP)
+	if advertisedIP == "" {
+		if isUnspecifiedIP(config.ListenIP) {
+			return utils.MultiAddress{}, false, nil
+		}
+		advertisedIP = config.ListenIP
+	}
+	advertisedPort := config.AdvertisedPort
+	if advertisedPort == 0 {
+		advertisedPort = config.ListenPort
+	}
+	address, err := utils.BuildMultiAddress(config.IPType, advertisedIP, config.Protocol(), advertisedPort, peerID)
+	if err != nil {
+		return utils.MultiAddress{}, false, err
+	}
+	return address, true, nil
 }
 
 // DatabaseOptions 转换数据库配置 + 隔离 YAML 字段和数据库包类型。
@@ -308,4 +337,9 @@ func validateP2PListenAddress(ipType string, listenIP string) error {
 	default:
 		return fmt.Errorf("p2p ip_type must be ip4 or ip6, got %q", ipType)
 	}
+}
+
+func isUnspecifiedIP(value string) bool {
+	ip := net.ParseIP(value)
+	return ip != nil && ip.IsUnspecified()
 }

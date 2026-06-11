@@ -11,16 +11,23 @@ import (
 // requestManager 管理等待中的请求 + 用 request_id 将读循环中的响应路由回调用方。
 type requestManager struct {
 	mutex   sync.Mutex
-	waiters map[string]chan Message
+	waiters map[string]pendingRequest
+}
+
+type pendingRequest struct {
+	waiter              chan Message
+	peerID              string
+	responseType        MessageType
+	requireResponseType bool
 }
 
 func newRequestManager() *requestManager {
 	return &requestManager{
-		waiters: make(map[string]chan Message),
+		waiters: make(map[string]pendingRequest),
 	}
 }
 
-func (manager *requestManager) register(requestID string) (<-chan Message, func(), error) {
+func (manager *requestManager) register(requestID string, peerID string, responseType MessageType, requireResponseType bool) (<-chan Message, func(), error) {
 	normalizedID := strings.ToLower(strings.TrimSpace(requestID))
 	if !isValidMessageID(normalizedID) {
 		return nil, nil, fmt.Errorf("%w: invalid pending request id", ErrInvalidMessage)
@@ -33,7 +40,12 @@ func (manager *requestManager) register(requestID string) (<-chan Message, func(
 	}
 
 	waiter := make(chan Message, 1)
-	manager.waiters[normalizedID] = waiter
+	manager.waiters[normalizedID] = pendingRequest{
+		waiter:              waiter,
+		peerID:              peerID,
+		responseType:        responseType,
+		requireResponseType: requireResponseType,
+	}
 	unregister := func() {
 		manager.unregister(normalizedID)
 	}
@@ -53,16 +65,26 @@ func (manager *requestManager) fulfill(response Message) bool {
 
 	requestID := strings.ToLower(response.RequestID)
 	manager.mutex.Lock()
-	waiter, exists := manager.waiters[requestID]
-	if exists {
+	pending, exists := manager.waiters[requestID]
+	if exists && pending.matches(response) {
 		delete(manager.waiters, requestID)
 	}
 	manager.mutex.Unlock()
-	if !exists {
+	if !exists || !pending.matches(response) {
 		return false
 	}
 
-	waiter <- response
+	pending.waiter <- response
+	return true
+}
+
+func (pending pendingRequest) matches(response Message) bool {
+	if pending.peerID != "" && response.FromPeerID != pending.peerID {
+		return false
+	}
+	if pending.requireResponseType && response.Type != pending.responseType {
+		return false
+	}
 	return true
 }
 
@@ -96,7 +118,8 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 	host.metrics.requestsStarted.Add(1)
 
-	waiter, unregister, err := host.requests.register(outbound.ID)
+	responseType, requireResponseType := expectedResponseType(outbound.Type)
+	waiter, unregister, err := host.requests.register(outbound.ID, peerID, responseType, requireResponseType)
 	if err != nil {
 		host.metrics.requestsFailed.Add(1)
 		return Message{}, err
@@ -133,5 +156,16 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 		)
 		host.metrics.requestsFailed.Add(1)
 		return Message{}, fmt.Errorf("p2p: wait request %s response: %w", outbound.ID, ctx.Err())
+	}
+}
+
+func expectedResponseType(requestType MessageType) (MessageType, bool) {
+	switch requestType {
+	case ProtocolFindNodeRequestV1:
+		return ProtocolFindNodeResponseV1, true
+	case ProtocolIdentifyRequestV1:
+		return ProtocolIdentifyResponseV1, true
+	default:
+		return 0, false
 	}
 }

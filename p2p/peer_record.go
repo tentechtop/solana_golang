@@ -10,7 +10,7 @@ import (
 
 const (
 	// PeerRecordVersion 定义签名节点记录版本 + 支持后续地址记录格式升级。
-	PeerRecordVersion uint16 = 1
+	PeerRecordVersion uint16 = 2
 
 	defaultPeerRecordTTL   = 30 * time.Minute
 	maxPeerRecordTTL       = 24 * time.Hour
@@ -25,6 +25,7 @@ type SignedPeerRecord struct {
 	Version            uint16
 	PeerID             string
 	PublicKey          []byte
+	NetworkID          string
 	Addresses          []string
 	Role               PeerRole
 	Capabilities       PeerCapability
@@ -58,6 +59,7 @@ func NewSignedPeerRecord(peer Peer, identity SecureSessionIdentity, ttl time.Dur
 		Version:            PeerRecordVersion,
 		PeerID:             peer.ID,
 		PublicKey:          utils.CloneBytes(identity.PublicKey),
+		NetworkID:          identity.NetworkID,
 		Addresses:          peerRecordAddressStrings(peer.Addresses),
 		Role:               normalizePeerRole(peer.Role),
 		Capabilities:       peer.Capabilities,
@@ -109,7 +111,7 @@ func (record SignedPeerRecord) Verify() error {
 		return fmt.Errorf("%w: peer record issued in future", ErrInvalidMessage)
 	}
 	if now.After(expiresAt) {
-		return fmt.Errorf("%w: peer record expired", ErrInvalidMessage)
+		return fmt.Errorf("%w: %s", ErrPeerRecordExpired, record.PeerID)
 	}
 	signingBytes, err := record.signingBytes()
 	if err != nil {
@@ -117,6 +119,17 @@ func (record SignedPeerRecord) Verify() error {
 	}
 	if !utils.Ed25519Verify(record.PublicKey, signingBytes, record.Signature) {
 		return fmt.Errorf("%w: invalid peer record signature", ErrSecureSession)
+	}
+	return nil
+}
+
+// VerifyNetwork 验证节点记录所属网络 + 防止其他网络的地址记录污染本地路由表。
+func (record SignedPeerRecord) VerifyNetwork(expectedNetworkID string) error {
+	if err := record.Verify(); err != nil {
+		return err
+	}
+	if expectedNetworkID != "" && record.NetworkID != expectedNetworkID {
+		return fmt.Errorf("%w: want %s got %s", ErrPeerRecordNetworkMismatch, expectedNetworkID, record.NetworkID)
 	}
 	return nil
 }
@@ -146,6 +159,10 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 	publicKey, err := reader.ReadFixedBytes(utils.Ed25519KeySize)
 	if err != nil {
 		return SignedPeerRecord{}, fmt.Errorf("p2p: read peer record public key: %w", err)
+	}
+	networkID, err := reader.ReadString()
+	if err != nil {
+		return SignedPeerRecord{}, fmt.Errorf("p2p: read peer record network id: %w", err)
 	}
 	addresses, err := readPeerRecordStringSlice(reader, maxPeerRecordAddresses)
 	if err != nil {
@@ -207,6 +224,7 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 		Version:            version,
 		PeerID:             peerID,
 		PublicKey:          publicKey,
+		NetworkID:          networkID,
 		Addresses:          addresses,
 		Role:               PeerRole(role),
 		Capabilities:       PeerCapability(capabilities),
@@ -287,6 +305,9 @@ func (record SignedPeerRecord) marshalBinary(includeSignature bool) ([]byte, err
 		return nil, fmt.Errorf("p2p: marshal peer record id: %w", err)
 	}
 	writer.WriteFixedBytes(record.PublicKey)
+	if err := writer.WriteString(record.NetworkID); err != nil {
+		return nil, fmt.Errorf("p2p: marshal peer record network id: %w", err)
+	}
 	if err := writePeerRecordStringSlice(writer, record.Addresses); err != nil {
 		return nil, err
 	}
@@ -324,6 +345,9 @@ func (record SignedPeerRecord) validate(requireSignature bool) error {
 	}
 	if len(record.PublicKey) != utils.Ed25519KeySize {
 		return fmt.Errorf("%w: invalid peer record public key", ErrInvalidMessage)
+	}
+	if err := validateSecureSessionNetworkID(record.NetworkID); err != nil {
+		return err
 	}
 	if utils.Base58Encode(record.PublicKey) != record.PeerID {
 		return fmt.Errorf("%w: peer record id does not match public key", ErrSecureSession)
@@ -408,12 +432,15 @@ func normalizePeerRecordTTL(ttl time.Duration) time.Duration {
 	return ttl
 }
 
-func verifyPeerSignedRecord(peer Peer) error {
+func verifyPeerSignedRecord(peer Peer, expectedNetworkID string) error {
 	if len(peer.SignedRecord) == 0 {
 		return nil
 	}
 	record, err := UnmarshalSignedPeerRecordBinary(peer.SignedRecord)
 	if err != nil {
+		return err
+	}
+	if err := record.VerifyNetwork(expectedNetworkID); err != nil {
 		return err
 	}
 	if record.PeerID != peer.ID {
@@ -422,12 +449,15 @@ func verifyPeerSignedRecord(peer Peer) error {
 	return nil
 }
 
-func signedPeerRecordFromPeer(peer Peer) (SignedPeerRecord, bool, error) {
+func signedPeerRecordFromPeer(peer Peer, expectedNetworkID string) (SignedPeerRecord, bool, error) {
 	if len(peer.SignedRecord) == 0 {
 		return SignedPeerRecord{}, false, nil
 	}
 	record, err := UnmarshalSignedPeerRecordBinary(peer.SignedRecord)
 	if err != nil {
+		return SignedPeerRecord{}, false, err
+	}
+	if err := record.VerifyNetwork(expectedNetworkID); err != nil {
 		return SignedPeerRecord{}, false, err
 	}
 	if record.PeerID != peer.ID {

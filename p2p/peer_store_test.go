@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"solana_golang/utils"
 )
 
 func TestPeerBinaryRoundTrip(t *testing.T) {
@@ -134,8 +136,9 @@ func TestHostLoadsAndPersistsPeersThroughStore(t *testing.T) {
 	}
 
 	host, err := NewHost(HostConfig{
-		PeerID:    localPeerID,
-		PeerStore: store,
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+		PeerStore:     store,
 	})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
@@ -165,10 +168,60 @@ func TestHostLoadsAndPersistsPeersThroughStore(t *testing.T) {
 	}
 }
 
+func TestHostLoadsStoredPeerWithExpiredSignedRecord(t *testing.T) {
+	localIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
+	remoteIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.1")
+	remoteAddress := testAddress(t, utils.ProtocolTCP, 4029, remoteIdentity.PeerID)
+	storedPeer, err := NewPeer(remoteIdentity.PeerID, []utils.MultiAddress{remoteAddress})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	storedPeer.SignedRecord = expiredSignedPeerRecordBytes(t, storedPeer, remoteIdentity)
+
+	store := NewMemoryPeerStore()
+	if err := store.SavePeer(context.Background(), storedPeer); err != nil {
+		t.Fatalf("SavePeer(stored) error = %v", err)
+	}
+	host, err := NewHost(HostConfig{
+		PeerID:              localIdentity.PeerID,
+		SecureIdentity:      localIdentity,
+		EnableSecureSession: true,
+		PeerStore:           store,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	loaded, err := host.LoadStoredPeers(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("LoadStoredPeers() error = %v", err)
+	}
+	if loaded != 1 {
+		t.Fatalf("loaded = %d, want 1", loaded)
+	}
+	loadedPeer, ok := host.Peer(remoteIdentity.PeerID)
+	if !ok {
+		t.Fatal("stored peer was not restored")
+	}
+	if len(loadedPeer.SignedRecord) != 0 {
+		t.Fatal("expired SignedRecord was restored, want stripped")
+	}
+
+	peers, err := store.LoadPeers(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("LoadPeers() error = %v", err)
+	}
+	if len(peers) != 1 || len(peers[0].SignedRecord) != 0 {
+		t.Fatalf("persisted SignedRecord length = %d, want 0", len(peers[0].SignedRecord))
+	}
+}
+
 func TestHostRejectsPeersOverLimit(t *testing.T) {
 	host, err := NewHost(HostConfig{
-		PeerID:   kadTestPeerID(0),
-		MaxPeers: 1,
+		PeerID:        kadTestPeerID(0),
+		AllowInsecure: true,
+		MaxPeers:      1,
 	})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)

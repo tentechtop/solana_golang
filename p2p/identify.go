@@ -262,7 +262,7 @@ func (host *Host) IdentifyPeer(ctx context.Context, peerID string) error {
 func (host *Host) SendPeerHints(ctx context.Context, peerID string, peers []Peer) error {
 	records := make([][]byte, 0, len(peers))
 	for _, peer := range peers {
-		record, ok, err := signedPeerRecordFromPeer(peer)
+		record, ok, err := signedPeerRecordFromPeer(peer, host.expectedPeerRecordNetworkID())
 		if err != nil || !ok {
 			continue
 		}
@@ -311,6 +311,10 @@ func (host *Host) identifyPeerOnConnection(ctx context.Context, connection Conne
 		host.metrics.identifyFailed.Add(1)
 		return err
 	}
+	if response.Type != ProtocolIdentifyResponseV1 {
+		host.metrics.identifyFailed.Add(1)
+		return fmt.Errorf("%w: invalid identify response type", ErrInvalidMessage)
+	}
 	payload, err := UnmarshalIdentifyResponseBinary(response.Payload)
 	if err != nil {
 		host.metrics.identifyFailed.Add(1)
@@ -342,6 +346,9 @@ func (host *Host) identifyPeerAsync(connection Connection, peerID string) {
 func (host *Host) importSignedPeerRecord(recordBytes []byte, source string) error {
 	record, err := UnmarshalSignedPeerRecordBinary(recordBytes)
 	if err != nil {
+		return err
+	}
+	if err := record.VerifyNetwork(host.expectedPeerRecordNetworkID()); err != nil {
 		return err
 	}
 	peer, err := record.ToPeer()
@@ -381,6 +388,12 @@ func (host *Host) localSignedPeerRecord() (SignedPeerRecord, error) {
 
 func (host *Host) addAdvertisedAddress(address utils.MultiAddress) {
 	if address.PeerID != host.peerID {
+		return
+	}
+	if !isDialableAdvertisedAddress(address) {
+		host.logger.Warn("p2p advertised address skipped",
+			slog.String("address", address.String()),
+		)
 		return
 	}
 	rawAddress := address.String()

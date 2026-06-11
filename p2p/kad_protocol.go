@@ -243,7 +243,7 @@ func NewKADPeerHint(peer Peer) (KADPeerHint, error) {
 	if !peerShareableInDHT(peer) {
 		return KADPeerHint{}, fmt.Errorf("%w: peer is not shareable in dht", ErrInvalidMessage)
 	}
-	record, ok, err := signedPeerRecordFromPeer(peer)
+	record, ok, err := signedPeerRecordFromPeer(peer, "")
 	if err != nil {
 		return KADPeerHint{}, err
 	}

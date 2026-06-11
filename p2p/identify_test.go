@@ -83,7 +83,7 @@ func TestHostPeerHintsImportsSignedRecord(t *testing.T) {
 		t.Fatalf("MarshalBinary(payload) error = %v", err)
 	}
 
-	host, err := NewHost(HostConfig{PeerID: localIdentity.PeerID})
+	host, err := NewHost(HostConfig{PeerID: localIdentity.PeerID, AllowInsecure: true})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
 	}
@@ -107,5 +107,61 @@ func TestHostPeerHintsImportsSignedRecord(t *testing.T) {
 	}
 	if metrics := host.Metrics(); metrics.PeerRecordsAccepted != 1 {
 		t.Fatalf("PeerRecordsAccepted = %d, want 1", metrics.PeerRecordsAccepted)
+	}
+}
+
+func TestHostPeerHintsRejectsCrossNetworkSignedRecord(t *testing.T) {
+	localIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
+	remoteIdentity := testSecureSessionIdentity(t, "othernet", "node/1.0.1")
+	remoteAddress := testAddress(t, utils.ProtocolTCP, 5023, remoteIdentity.PeerID)
+	remotePeer, err := NewPeer(remoteIdentity.PeerID, []utils.MultiAddress{remoteAddress})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	record, err := NewSignedPeerRecord(remotePeer, remoteIdentity, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSignedPeerRecord() error = %v", err)
+	}
+	encodedRecord, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(record) error = %v", err)
+	}
+	payload, err := NewPeerHintsPayload([][]byte{encodedRecord})
+	if err != nil {
+		t.Fatalf("NewPeerHintsPayload() error = %v", err)
+	}
+	encodedPayload, err := payload.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(payload) error = %v", err)
+	}
+
+	host, err := NewHost(HostConfig{
+		PeerID:              localIdentity.PeerID,
+		SecureIdentity:      localIdentity,
+		EnableSecureSession: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+	message, err := NewMessage(ProtocolPeerHintsV1, encodedPayload)
+	if err != nil {
+		t.Fatalf("NewMessage() error = %v", err)
+	}
+	message.FromPeerID = remoteIdentity.PeerID
+	message.ToPeerID = localIdentity.PeerID
+
+	if _, err := host.HandleMessage(context.Background(), message); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+	if _, ok := host.Peer(remoteIdentity.PeerID); ok {
+		t.Fatal("cross-network peer was imported")
+	}
+	metrics := host.Metrics()
+	if metrics.PeerRecordsAccepted != 0 {
+		t.Fatalf("PeerRecordsAccepted = %d, want 0", metrics.PeerRecordsAccepted)
+	}
+	if metrics.PeerRecordsRejected != 1 {
+		t.Fatalf("PeerRecordsRejected = %d, want 1", metrics.PeerRecordsRejected)
 	}
 }

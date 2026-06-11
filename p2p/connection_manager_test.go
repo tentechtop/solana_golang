@@ -13,7 +13,8 @@ func TestHostHandleConnectionRespondsPong(t *testing.T) {
 	localPeerID := testPeerID(21)
 	remotePeerID := testPeerID(22)
 	host, err := NewHost(HostConfig{
-		PeerID: localPeerID,
+		PeerID:        localPeerID,
+		AllowInsecure: true,
 	})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
@@ -50,7 +51,8 @@ func TestHostHeartbeatWritesPing(t *testing.T) {
 	localPeerID := testPeerID(23)
 	remotePeerID := testPeerID(24)
 	host, err := NewHost(HostConfig{
-		PeerID: localPeerID,
+		PeerID:        localPeerID,
+		AllowInsecure: true,
 	})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
@@ -87,6 +89,7 @@ func TestHostHeartbeatClosesExpiredConnection(t *testing.T) {
 	remotePeerID := testPeerID(26)
 	host, err := NewHost(HostConfig{
 		PeerID:         localPeerID,
+		AllowInsecure:  true,
 		ConnectionIdle: time.Millisecond,
 	})
 	if err != nil {
@@ -112,6 +115,7 @@ func TestHostHeartbeatClosesExpiredConnection(t *testing.T) {
 func TestHostRejectsConnectionsOverLimit(t *testing.T) {
 	host, err := NewHost(HostConfig{
 		PeerID:         testPeerID(27),
+		AllowInsecure:  true,
 		MaxConnections: 1,
 	})
 	if err != nil {
@@ -136,7 +140,7 @@ func TestHostRejectsSpoofedConnectionPeer(t *testing.T) {
 	localPeerID := testPeerID(30)
 	remotePeerID := testPeerID(31)
 	spoofedPeerID := testPeerID(32)
-	host, err := NewHost(HostConfig{PeerID: localPeerID})
+	host, err := NewHost(HostConfig{PeerID: localPeerID, AllowInsecure: true})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
 	}
@@ -165,7 +169,7 @@ func TestHostRejectsSpoofedConnectionPeer(t *testing.T) {
 func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
 	localPeerID := testPeerID(33)
 	remotePeerID := testPeerID(34)
-	host, err := NewHost(HostConfig{PeerID: localPeerID})
+	host, err := NewHost(HostConfig{PeerID: localPeerID, AllowInsecure: true})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
 	}
@@ -204,6 +208,57 @@ func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
 	pong := connection.waitWrite(t)
 	if pong.Type != MessageTypePong {
 		t.Fatalf("interleaved response Type = %d, want pong", pong.Type)
+	}
+}
+
+func TestRequestManagerRequiresPeerAndResponseType(t *testing.T) {
+	localPeerID := testPeerID(38)
+	remotePeerID := testPeerID(39)
+	otherPeerID := testPeerID(40)
+	manager := newRequestManager()
+	request, err := NewRequestMessage(localPeerID, ProtocolFindNodeRequestV1, nil)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+
+	waiter, unregister, err := manager.register(request.ID, remotePeerID, ProtocolFindNodeResponseV1, true)
+	if err != nil {
+		t.Fatalf("register() error = %v", err)
+	}
+	defer unregister()
+
+	wrongPeerResponse, err := NewResponseMessage(otherPeerID, ProtocolFindNodeResponseV1, request.ID, nil)
+	if err != nil {
+		t.Fatalf("NewResponseMessage(wrong peer) error = %v", err)
+	}
+	if manager.fulfill(wrongPeerResponse) {
+		t.Fatal("fulfill(wrong peer) = true, want false")
+	}
+	assertNoRequestResponse(t, waiter)
+
+	wrongTypeResponse, err := NewResponseMessage(remotePeerID, ProtocolIdentifyResponseV1, request.ID, nil)
+	if err != nil {
+		t.Fatalf("NewResponseMessage(wrong type) error = %v", err)
+	}
+	if manager.fulfill(wrongTypeResponse) {
+		t.Fatal("fulfill(wrong type) = true, want false")
+	}
+	assertNoRequestResponse(t, waiter)
+
+	expectedResponse, err := NewResponseMessage(remotePeerID, ProtocolFindNodeResponseV1, request.ID, nil)
+	if err != nil {
+		t.Fatalf("NewResponseMessage(expected) error = %v", err)
+	}
+	if !manager.fulfill(expectedResponse) {
+		t.Fatal("fulfill(expected) = false, want true")
+	}
+	select {
+	case response := <-waiter:
+		if response.ID != expectedResponse.ID {
+			t.Fatalf("response.ID = %q, want %q", response.ID, expectedResponse.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expected response")
 	}
 }
 
@@ -322,5 +377,14 @@ func (connection *scriptedConnection) waitWrite(t *testing.T) Message {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for written message")
 		return Message{}
+	}
+}
+
+func assertNoRequestResponse(t *testing.T, waiter <-chan Message) {
+	t.Helper()
+	select {
+	case response := <-waiter:
+		t.Fatalf("unexpected response fulfilled: %+v", response)
+	default:
 	}
 }

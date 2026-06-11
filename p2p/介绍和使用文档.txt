@@ -1,0 +1,824 @@
+P2P 模块介绍和使用文档
+
+一、模块定位
+
+p2p 模块负责节点之间的网络连接、节点发现、消息收发、安全会话、心跳保活、PeerStore 持久化和协议分发。
+
+本模块不使用 libp2p，而是基于以下边界实现自己的网络层：
+
+1. TCP 使用 Go 标准库 net。
+2. QUIC 使用 quic-go。
+3. 节点间消息统一使用 Borsh 编码。
+4. 业务层不直接操作 TCP 或 QUIC，只通过 Host 发送请求、广播消息和注册协议处理器。
+5. 节点身份来自数据库中的 Ed25519 公私钥，不从配置文件写死 peer_id。
+
+核心目标是让交易池、区块同步、共识、账户状态同步等上层模块只依赖稳定的 P2P 抽象，不关心底层传输协议。
+
+
+二、核心文件职责
+
+1. host.go
+   Host 主结构、HostConfig、默认初始化、协议处理入口。
+
+2. host_transport.go
+   Listen、DialAddress、DialPeer 和传输协议选择。
+
+3. host_connection_loop.go
+   单连接读循环。这里是协议消息统一接收入口。
+
+4. host_messaging.go
+   Send、Broadcast 和出站消息补齐逻辑。这里是协议消息统一发送入口。
+
+5. request_manager.go
+   Host.Request 的请求响应匹配，按 request_id、peer_id、response_type 绑定响应。
+
+6. protocol.go
+   协议编号、协议名、响应语义和消息优先级。
+
+7. protocol_registry.go
+   协议注册表，负责把消息分发给具体协议处理器。
+
+8. message.go
+   P2P 消息结构、Borsh 编码、帧读写、消息校验。
+
+9. tcp_transport.go
+   TCP 监听、拨号和 Connection 封装。
+
+10. quic_transport.go
+    quic-go 监听、拨号和 Connection 封装。
+
+11. secure_session.go
+    节点认证、安全握手、会话密钥派生、AES-GCM 加解密。
+
+12. identify.go
+    identify/addr 协议，交换 signed peer record。
+
+13. peer_record.go
+    signed peer record 的编码、签名和校验。
+
+14. peer.go
+    Peer 模型、节点状态、角色、能力、地址和统计字段。
+
+15. peer_store.go
+    PeerStore 接口和内存实现。
+
+16. peerstore/database_peer_store.go
+    数据库存储实现。
+
+17. bootstrap.go
+    启动时连接引导节点、find-node 查询、补足出站连接。
+
+18. kad_*.go
+    KAD 路由表、距离计算、bucket 管理、find-node 协议。
+
+19. metrics.go
+    P2P 指标快照。
+
+
+三、启动流程
+
+程序启动时，cmd 层负责装配依赖，P2P 模块只接收已经准备好的配置和依赖。
+
+标准流程如下：
+
+1. 读取配置文件。
+2. 打开数据库。
+3. 从数据库读取节点身份。
+4. 如果数据库没有节点身份，调用 utils.GenerateEd25519KeyPairBytes 创建 32 字节公钥和 32 字节私钥。
+5. 使用公钥 Base58 编码生成 peer_id。
+6. 将公钥和私钥保存到数据库。
+7. 创建 p2p.Host。
+8. 从 PeerStore 恢复已知节点。
+9. 启动 Listen。
+10. 启动 StartHeartbeat。
+11. 执行 Bootstrap，连接 bootnodes 并拉取 DHT 邻近节点。
+12. 启动 RPC 或其他上层服务。
+
+配置中不应该再出现 peer_id。peer_id 是数据库中节点身份的派生结果。
+
+示例配置：
+
+p2p:
+  ip_type: "ip4"
+  listen_ip: "0.0.0.0"
+  listen_port: 5002
+  advertised_ip: "127.0.0.1"
+  advertised_port: 5002
+  default_protocol: "tcp"
+  max_peers: 64
+  network_id: "solana_golang:localnet:00000000000000000000000000000000"
+  software_version: "solana_golang/0.1.0"
+  min_outbound_peers: 8
+  bootstrap_timeout_millis: 5000
+  bootstrap:
+    - "/ip4/127.0.0.1/tcp/5003/p2p/<peer_id>"
+
+注意：
+
+1. listen_ip 可以是 0.0.0.0，用于本地监听。
+2. advertised_ip 不应该是 0.0.0.0，它是对外公布的可拨号地址。
+3. bootnodes 必须包含完整 multi-address 和 peer_id。
+4. default_protocol 决定优先拨号协议；如果设置 tcp，则优先 TCP，再尝试 QUIC；如果设置 quic，则优先 QUIC，再尝试 TCP。
+
+
+四、Host 创建方式
+
+生产启动时推荐由 cmd 层统一创建 Host：
+
+host, err := p2p.NewHost(p2p.HostConfig{
+    PeerID: identity.PeerID,
+    SecureIdentity: p2p.SecureSessionIdentity{
+        PeerID:             identity.PeerID,
+        PublicKey:          identity.PublicKey,
+        PrivateKey:         identity.PrivateKey,
+        NetworkID:          config.NetworkID,
+        SoftwareVersion:    config.SoftwareVersion,
+        MinProtocolVersion: p2p.MessageProtocolVersion,
+        MaxProtocolVersion: p2p.MessageProtocolVersion,
+    },
+    EnableSecureSession: true,
+    PreferredProtocols:  []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC},
+    MaxPeers:            config.MaxPeers,
+    Logger:              logger,
+    PeerStore:           peerstore.NewDatabasePeerStore(databaseInstance),
+    PersistedPeerLimit:  config.MaxPeers,
+    AdvertisedAddresses: advertisedAddresses,
+})
+if err != nil {
+    return err
+}
+
+关键要求：
+
+1. 生产环境必须启用 EnableSecureSession。
+2. 不要设置 AllowInsecure，除非单元测试或本地临时调试。
+3. SecureIdentity.PeerID 必须等于 HostConfig.PeerID。
+4. PeerID 必须等于 PublicKey 的 Base58 编码。
+5. PrivateKey 必须能推导出 PublicKey。
+6. NetworkID 用于防止跨网络误连。
+7. SoftwareVersion 用于日志、兼容性判断和问题定位。
+
+
+五、监听和拨号
+
+监听入口：
+
+err := host.Listen(ctx, listenAddress, host.HandleConnection)
+
+cmd 层当前使用 resources.handleP2PConnection 包一层，最终仍然调用：
+
+resources.p2pHost.HandleConnection(ctx, connection)
+
+拨号入口：
+
+connection, err := host.DialPeer(ctx, peerID)
+
+DialPeer 的行为：
+
+1. 从 Host 节点表读取 Peer。
+2. 按 PreferredProtocols 选择地址。
+3. 优先拨号第一个可用协议。
+4. 拨号失败时尝试下一个协议。
+5. 连接成功后执行安全握手。
+6. 安全握手成功后放入连接池。
+7. 启动连接读循环。
+8. 异步执行 identify，获取对端 signed peer record。
+
+直接拨号地址入口：
+
+connection, err := host.DialAddress(ctx, address)
+
+DialAddress 适合 bootstrap 连接 bootnode，业务模块通常使用 DialPeer。
+
+
+六、连接生命周期
+
+单条连接的生命周期：
+
+1. Transport 接收或建立底层连接。
+2. Host 执行 secure session 握手。
+3. Host 将安全连接写入连接池。
+4. Host.HandleConnection 开始持续读取消息。
+5. 心跳协程定期发送 ping。
+6. 对端收到 ping 后自动回复 pong。
+7. 连接读写失败会记录到 Peer 和 RoutingTable。
+8. 失败次数或空闲时间超过阈值后关闭连接。
+9. Host.Close 会关闭所有连接和传输监听器，并保存 Peer 状态。
+
+心跳入口：
+
+go host.StartHeartbeat(ctx)
+
+默认心跳策略：
+
+1. HeartbeatInterval 默认 15 秒。
+2. ConnectionIdle 默认 45 秒。
+3. MaxPeerFailures 默认 3 次。
+4. ping/pong 在 Host 内部自动处理，业务处理器不需要关心。
+
+
+七、消息发送入口
+
+P2P 框架中，协议消息统一从 Host 发出。
+
+1. 单向发送：
+
+message, err := p2p.NewMessage(p2p.ProtocolReceiveTransactionV1, payload)
+if err != nil {
+    return err
+}
+err = host.Send(ctx, peerID, message)
+
+Host.Send 做的事情：
+
+1. 如果没有连接，自动 DialPeer。
+2. 自动补齐 message.ID。
+3. 自动补齐 CreatedAtUnixMilli。
+4. 自动补齐 FromPeerID。
+5. 自动补齐 ToPeerID。
+6. 校验消息大小、版本、路由字段和 flag。
+7. 通过 Connection.WriteMessage 写入网络。
+8. 如果是 SecureConnection，会自动加密 payload。
+
+2. 广播发送：
+
+err := host.Broadcast(ctx, peerIDs, message)
+
+Broadcast 是逐个 peer 调用 Send，并聚合错误。上层后续可以按业务需要做 fanout、限速、去重和优先级队列。
+
+3. 请求响应：
+
+request, err := p2p.NewRequestMessage(host.PeerID(), p2p.ProtocolFindNodeRequestV1, payload)
+if err != nil {
+    return err
+}
+response, err := host.Request(ctx, peerID, request)
+
+Host.Request 做的事情：
+
+1. 如果没有连接，自动 DialPeer。
+2. 注册 pending request。
+3. 写出请求消息。
+4. 等待读循环收到 response。
+5. 按 request_id 匹配原请求。
+6. 按 peer_id 防止其他节点伪造响应。
+7. 对内置请求校验 response type。
+8. ctx 超时或取消时返回错误。
+
+
+八、消息接收入口
+
+P2P 框架中，协议消息统一在 Host.HandleConnection 接收。
+
+核心入口：
+
+func (host *Host) HandleConnection(ctx context.Context, connection Connection)
+
+读循环处理顺序：
+
+1. connection.ReadMessage(ctx) 读取一条消息。
+2. 如果是 SecureConnection，先自动解密 payload。
+3. validateConnectionMessage 校验 FromPeerID 和 ToPeerID。
+4. markConnectionRead 更新连接活跃状态。
+5. handleHeartbeatMessage 处理 ping/pong。
+6. requestManager.fulfill 尝试匹配请求响应。
+7. Host.HandleMessage 分发普通协议消息。
+8. ProtocolRegistry.Handle 调用注册的协议处理器。
+9. 如果处理器返回响应消息，Host 自动写回给请求方。
+
+因此，上层模块不应该自己循环读取 Connection，也不应该和 Host 抢读同一条连接。
+
+
+九、协议处理器怎么写
+
+新增协议通常分四步。
+
+第一步：声明协议编号。
+
+在 protocol.go 中增加稳定的 ProtocolID：
+
+const (
+    ProtocolReceiveFooV1 p2p.ProtocolID = 100
+)
+
+协议编号一旦发布就不能复用。协议升级时新增编号或新增版本协议名，不要改变旧协议语义。
+
+第二步：定义 payload 结构，并实现 Borsh 编解码。
+
+type FooPayload struct {
+    Version uint16
+    Value   string
+}
+
+func (payload FooPayload) MarshalBinary() ([]byte, error) {
+    if payload.Version != 1 {
+        return nil, fmt.Errorf("invalid foo payload version")
+    }
+    writer := borsh.NewWriter(p2p.DefaultMaxMessageSize)
+    writer.WriteUint16(payload.Version)
+    if err := writer.WriteString(payload.Value); err != nil {
+        return nil, err
+    }
+    return writer.Bytes(), nil
+}
+
+func UnmarshalFooPayloadBinary(data []byte) (FooPayload, error) {
+    reader := borsh.NewReader(data, p2p.DefaultMaxMessageSize)
+    version, err := reader.ReadUint16()
+    if err != nil {
+        return FooPayload{}, err
+    }
+    value, err := reader.ReadString()
+    if err != nil {
+        return FooPayload{}, err
+    }
+    if err := reader.EnsureEOF(); err != nil {
+        return FooPayload{}, err
+    }
+    payload := FooPayload{Version: version, Value: value}
+    if payload.Version != 1 {
+        return FooPayload{}, fmt.Errorf("invalid foo payload version")
+    }
+    return payload, nil
+}
+
+第三步：注册无响应协议处理器。
+
+err := host.RegisterVoidHandler(
+    p2p.ProtocolSpec{
+        ID:          p2p.ProtocolReceiveTransactionV1,
+        Name:        "/p2p/transaction/receive/1.0.0",
+        HasResponse: false,
+        Priority:    p2p.MessagePriorityNormal,
+    },
+    func(ctx context.Context, message p2p.Message) error {
+        payload, err := UnmarshalTransactionPayloadBinary(message.Payload)
+        if err != nil {
+            return err
+        }
+        return txPool.AcceptNetworkTransaction(ctx, payload.Transaction)
+    },
+)
+
+第四步：注册有响应协议处理器。
+
+err := host.RegisterResultHandler(
+    p2p.ProtocolSpec{
+        ID:          p2p.ProtocolQueryBlockByHeightV1,
+        Name:        "/p2p/block/query-by-height/1.0.0",
+        HasResponse: true,
+        Priority:    p2p.MessagePriorityNormal,
+    },
+    func(ctx context.Context, request p2p.Message) (p2p.Message, error) {
+        query, err := UnmarshalBlockHeightQueryBinary(request.Payload)
+        if err != nil {
+            return p2p.Message{}, err
+        }
+        block, err := blockStore.GetBlockByHeight(ctx, query.Height)
+        if err != nil {
+            return p2p.Message{}, err
+        }
+        payload, err := NewBlockResponse(block).MarshalBinary()
+        if err != nil {
+            return p2p.Message{}, err
+        }
+        return p2p.NewResponseMessage(host.PeerID(), p2p.ProtocolBlockV1, request.ID, payload)
+    },
+)
+
+处理器规则：
+
+1. 有响应协议必须用 RegisterResultHandler。
+2. 无响应协议必须用 RegisterVoidHandler。
+3. Result handler 返回的 Message 必须是 response。
+4. response.RequestID 必须等于 request.ID。
+5. handler 必须先反序列化 payload，再做业务校验。
+6. handler 不要直接写网络连接，返回响应即可。
+7. handler 不要阻塞太久，重任务应放到业务队列。
+8. handler 返回错误时，Host 会记录日志并丢弃该消息，不会自动回复错误包。
+
+
+十、内置协议
+
+当前默认注册的协议包括：
+
+1. ping/pong
+   用于连接心跳和保活。
+
+2. find-node
+   用于 KAD DHT 邻近节点查询。
+
+3. identify
+   用于连接建立后交换 signed peer record。
+
+4. peer-hints
+   用于传播多个 signed peer record。
+
+其他协议编号已经在 protocol.go 中预留或声明，包括交易接收、区块接收、区块查询、共识投票、QC、节点状态等。业务模块接入时需要注册自己的处理器。
+
+
+十一、序列化边界
+
+本项目当前统一使用 Borsh 作为 P2P 和链上结构的二进制编码方式。
+
+原则：
+
+1. P2P 外层 Message 使用 Borsh。
+2. P2P payload 使用各协议自己的 Borsh 结构。
+3. 区块、交易、账户、指令等核心数据结构使用 Borsh。
+4. Peer、SignedPeerRecord、KAD 请求响应也使用 Borsh。
+5. 不再使用 protobuf。
+
+这样做的好处：
+
+1. 每个结构体只维护一套二进制序列化方法。
+2. 网络传输和本地存储的结构边界一致。
+3. 字段顺序明确，利于签名、哈希和测试向量。
+4. 减少 protobuf、json、borsh 多套模型之间的转换错误。
+5. 对区块链系统更容易保证确定性。
+
+开发要求：
+
+1. 每个网络 payload 都必须有 Version 字段。
+2. MarshalBinary 前必须 Validate。
+3. Unmarshal 后必须 EnsureEOF。
+4. Unmarshal 后必须 Validate。
+5. 切片、字符串、数组数量必须设置上限。
+6. 用于签名或哈希的数据必须使用确定性编码。
+
+
+十二、安全模型
+
+TCP 本身不加密。QUIC 自带 TLS，但 TLS 只解决传输层加密，不应该作为唯一节点身份来源。
+
+本模块在 TCP 和 QUIC 之上统一使用 secure session：
+
+1. 节点长期身份使用 Ed25519 公私钥。
+2. peer_id 等于 Ed25519 公钥的 Base58 编码。
+3. 每次连接生成临时 X25519 密钥。
+4. 握手消息包含 peer_id、公钥、临时公钥、nonce、network_id、software_version、协议版本范围。
+5. 握手消息由长期 Ed25519 私钥签名。
+6. 双方验证 peer_id、公钥、签名、时间偏移和 network_id。
+7. 双方通过 X25519 派生共享密钥。
+8. 派生方向密钥后使用 AES-256-GCM 加密业务 payload。
+9. 每个方向有独立序列号，接收端要求严格递增，防止重放和乱序密文。
+10. 外层路由字段作为 associated data 参与认证，防止密文被改挂到其他协议或其他节点。
+
+当前安全边界：
+
+1. 直接连接上的业务 payload 会被加密。
+2. 外层 Message 路由字段仍然可见，包括 from、to、type、flag、request_id。
+3. 当前 resumption ticket 已有内存结构，但连接恢复仍以完整握手为主。
+4. 未来如果实现中转节点，最安全方案是端到端 secure session 穿透中转节点，中转节点只转发密文，不终止安全会话。
+
+生产要求：
+
+1. 生产环境不要关闭 EnableSecureSession。
+2. network_id 必须不同网络不同值。
+3. 节点私钥必须只保存在本地数据库或密钥管理系统。
+4. 日志中禁止打印私钥、会话密钥和明文敏感 payload。
+5. QUIC TLS 默认临时证书仅用于自发现和本地运行，正式生产可以注入可信 TLSConfig，但节点身份仍以 secure session 为准。
+
+
+十三、PeerStore 和节点发现
+
+PeerStore 用于持久化已知节点，避免每次启动都完全依赖 bootnodes。
+
+接口：
+
+type PeerStore interface {
+    LoadPeers(ctx context.Context, limit int) ([]Peer, error)
+    SavePeer(ctx context.Context, peer Peer) error
+    DeletePeer(ctx context.Context, peerID string) error
+}
+
+当前实现：
+
+1. MemoryPeerStore
+   用于测试和无数据库场景。
+
+2. peerstore.DatabasePeerStore
+   使用 database.TablePeer 保存 Peer 的 Borsh 编码。
+
+Host 会在以下场景保存 Peer：
+
+1. AddPeer 成功。
+2. 连接建立成功。
+3. 连接断开。
+4. 记录 peer 错误。
+5. Host.Close。
+
+启动时应调用：
+
+restoredPeers, err := host.LoadStoredPeers(ctx, config.MaxPeers)
+
+LoadStoredPeers 会：
+
+1. 从 PeerStore 读取节点。
+2. 跳过本节点。
+3. 校验 signed peer record。
+4. 过期 signed peer record 会被清理，但 Peer 可保留。
+5. 非法 signed peer record 对应 Peer 会被跳过。
+6. 写入 Host 节点表和 KAD 路由表。
+
+
+十四、Bootstrap 和 KAD DHT
+
+Bootstrap 的目标是冷启动时尽快获得可用邻居。
+
+入口：
+
+summary, err := host.Bootstrap(ctx, p2p.BootstrapConfig{
+    Bootnodes:            bootnodes,
+    MinOutboundPeers:     8,
+    QueryLimit:           20,
+    RefreshTargetCount:   8,
+    DialTimeout:          5 * time.Second,
+    StartConnectionLoops: true,
+})
+
+Bootstrap 流程：
+
+1. 将 bootnode 地址加入 Peer 表。
+2. 拨号 bootnode。
+3. 启动该连接的读循环。
+4. 对 bootnode 执行 identify。
+5. 使用 find-node 查询本节点 ID 附近的节点。
+6. 使用 KAD refresh target 查询更多桶范围。
+7. 将返回的 KADPeerHint 转换为 Peer。
+8. 校验 signed peer record。
+9. 写入 Peer 表、PeerStore 和 KAD 路由表。
+10. 尝试连接发现到的节点，直到满足 MinOutboundPeers。
+
+KAD 只负责发现和选择节点，不负责传输。真正拨号仍由 Host 根据 Peer.Addresses 选择 TCP 或 QUIC。
+
+find-node 响应必须只返回可分享节点：
+
+1. 节点不能是 blocked。
+2. 地址必须有效。
+3. 地址中的 peer_id 必须和节点 ID 一致。
+4. signed peer record 必须存在且校验通过。
+5. 返回数量受 maxKADPeerHints 限制。
+
+
+十五、Signed Peer Record 和 identify/addr
+
+Signed peer record 用于证明“某个 peer_id 声明了这些可拨号地址和节点元信息”。
+
+它解决的问题：
+
+1. 防止第三方随意伪造某个节点的地址。
+2. 防止跨网络污染节点表。
+3. 防止 DHT 中传播未签名地址。
+4. 让 identify、peer-hints、find-node 复用同一种可信节点记录。
+
+连接建立后，Host 会异步执行 identify：
+
+err := host.IdentifyPeer(ctx, peerID)
+
+identify 响应包含对端本地 signed peer record。Host 收到后会：
+
+1. 反序列化 record。
+2. 校验签名。
+3. 校验 network_id。
+4. 校验过期时间。
+5. 转换为 Peer。
+6. 写入 Peer 表和 PeerStore。
+
+主动发送 peer hints：
+
+err := host.SendPeerHints(ctx, peerID, peers)
+
+peer-hints 适合在 DHT 查询、节点状态交换或 gossip 过程中批量传播已签名节点记录。
+
+
+十六、指标和日志
+
+Host.Metrics 返回当前 P2P 指标快照：
+
+metrics := host.Metrics()
+
+关键指标：
+
+1. PeerCount
+2. ConnectionCount
+3. InboundRejected
+4. MaxConnectionRejected
+5. SecureHandshakeOK
+6. SecureHandshakeFailed
+7. MessagesRead
+8. MessagesWritten
+9. MessagesRejected
+10. RequestsStarted
+11. RequestsSucceeded
+12. RequestsFailed
+13. IdentifyStarted
+14. IdentifySucceeded
+15. IdentifyFailed
+16. PeerRecordsAccepted
+17. PeerRecordsRejected
+18. FindNodeQueries
+19. FindNodeFailures
+
+关键路径日志已经接入 slog：
+
+1. Host 初始化。
+2. TCP/QUIC listen。
+3. TCP/QUIC dial。
+4. secure session accept 失败或成功。
+5. bootstrap 开始和完成。
+6. find-node 失败。
+7. identify 完成或跳过。
+8. peer record 接收或拒绝。
+9. request 超时或完成。
+10. heartbeat 失败。
+11. connection error。
+12. Host 关闭。
+
+生产建议：
+
+1. 日志使用 JSON 格式。
+2. peer_id、connection_id、protocol_id、network_id 必须作为结构化字段输出。
+3. 错误必须带上下文向上传递。
+4. 指标后续应接入 Prometheus 或 RPC debug 接口。
+
+
+十七、最小本地运行方式
+
+准备两个配置文件，监听端口不同，并将第一个节点的 peer_id 写入第二个节点 bootstrap。
+
+节点 A：
+
+p2p:
+  ip_type: "ip4"
+  listen_ip: "127.0.0.1"
+  listen_port: 5002
+  advertised_ip: "127.0.0.1"
+  advertised_port: 5002
+  default_protocol: "tcp"
+  max_peers: 64
+  network_id: "localnet"
+  software_version: "solana_golang/0.1.0"
+  min_outbound_peers: 0
+  bootstrap_timeout_millis: 5000
+
+节点 B：
+
+p2p:
+  ip_type: "ip4"
+  listen_ip: "127.0.0.1"
+  listen_port: 5003
+  advertised_ip: "127.0.0.1"
+  advertised_port: 5003
+  default_protocol: "tcp"
+  max_peers: 64
+  network_id: "localnet"
+  software_version: "solana_golang/0.1.0"
+  min_outbound_peers: 1
+  bootstrap_timeout_millis: 5000
+  bootstrap:
+    - "/ip4/127.0.0.1/tcp/5002/p2p/<节点A的peer_id>"
+
+运行方式：
+
+go run ./cmd -config config/local/node-a.yaml
+go run ./cmd -config config/local/node-b.yaml
+
+预期现象：
+
+1. 两个节点都成功启动。
+2. 节点 B bootstrap 连接节点 A。
+3. secure session 握手成功。
+4. identify 完成。
+5. peer store 保存对端节点。
+6. heartbeat 持续发送。
+
+如果要拿到节点 A 的 peer_id，可以第一次启动节点 A 后查看日志中的 “p2p node identity created” 或 “p2p node identity loaded”。
+
+
+十八、业务模块接入建议
+
+交易池接入：
+
+1. 定义 TransactionPayload。
+2. 使用交易结构自己的 Borsh 编码。
+3. 注册 ProtocolReceiveTransactionV1 的 void handler。
+4. handler 内验证交易签名、账户引用、recent blockhash 和费用。
+5. 验证通过后进入交易池。
+6. 广播时使用 Host.Broadcast。
+
+区块同步接入：
+
+1. 注册区块头查询协议。
+2. 注册区块查询协议。
+3. 注册区块接收协议。
+4. 区块 payload 使用 Block 的 Borsh 编码。
+5. handler 中先校验区块哈希、签名、交易根、状态根，再入库。
+
+共识接入：
+
+1. 投票和 QC 使用高优先级协议。
+2. handler 必须快速验签并进入共识队列。
+3. 不要在 P2P handler 内执行重型状态机。
+4. 投票类消息必须做去重和来源校验。
+
+
+十九、开发规范
+
+新增 P2P 协议时必须满足：
+
+1. 协议编号稳定。
+2. 协议名小写，带版本号。
+3. payload 使用 Borsh。
+4. payload 有 Version 字段。
+5. payload 有 Validate。
+6. Unmarshal 后 EnsureEOF。
+7. 切片和字符串有上限。
+8. handler 不直接操作底层连接。
+9. handler 不阻塞网络读循环。
+10. 错误向上返回并带上下文。
+11. 关键路径输出 slog 结构化日志。
+12. 添加单元测试覆盖正常、非法 payload、响应不匹配、超时和边界数量。
+
+不要做：
+
+1. 不要在业务模块里直接 net.Dial。
+2. 不要绕过 Host.Send 或 Host.Request。
+3. 不要让多个协程同时读取同一个 Connection。
+4. 不要在配置里写 peer_id。
+5. 不要传播未签名的 DHT 地址。
+6. 不要把 protobuf 和 Borsh 混用到同一个结构体。
+7. 不要把私钥、会话密钥、明文敏感 payload 打到日志。
+
+
+二十、当前生产化程度和后续重点
+
+当前 P2P 层已经具备接近生产的骨架：
+
+1. TCP 和 QUIC 传输抽象已落地。
+2. quic-go 已接入。
+3. 统一 Message 帧协议已落地。
+4. Borsh 编码已落地。
+5. secure session 已落地。
+6. 心跳保活已落地。
+7. 请求响应匹配已落地。
+8. KAD find-node 已落地。
+9. PeerStore 已落地。
+10. signed peer record 已落地。
+11. identify/addr 已落地。
+12. metrics 已落地。
+13. 日志已覆盖关键路径。
+
+后续优先级建议：
+
+P0：
+
+1. 将交易接收、区块接收、区块查询协议接入真实业务处理器。
+2. 为 p2p handler 增加业务队列，避免重任务阻塞读循环。
+3. 为消息广播增加去重缓存和 fanout 策略。
+4. 增加单 IP、单 peer、全局消息速率限制。
+5. 增加黑名单和灰名单策略。
+
+P1：
+
+1. 将 metrics 暴露到 RPC 或 Prometheus。
+2. 增加连接退避和重连调度器。
+3. 增加 DHT 周期刷新。
+4. 增加 QUIC 多 stream 调度，按优先级隔离共识消息和大块同步消息。
+5. 完善 0RTT 恢复，但只允许幂等或可去重消息使用早期数据。
+
+P2：
+
+1. 支持 relay 场景下的端到端加密转发。
+2. 增加 NAT 探测和外网地址确认。
+3. 增加地址质量评分。
+4. 增加跨版本协议兼容测试。
+
+
+二十一、快速定位问题
+
+1. 节点无法启动
+   检查数据库是否可打开，节点身份是否完整，network_id 是否为空。
+
+2. 节点无法互连
+   检查 multi-address、端口、防火墙、advertised_ip、peer_id 是否和公钥一致。
+
+3. secure session 失败
+   检查两端 network_id 是否一致，系统时间是否偏差过大，私钥和公钥是否匹配。
+
+4. bootstrap 没有发现节点
+   检查 bootnode 是否支持 DHT，find-node handler 是否注册，返回的 Peer 是否有 signed record。
+
+5. 请求超时
+   检查对端是否注册了对应 Result handler，response type 是否正确，request_id 是否等于原请求 ID。
+
+6. 消息被拒绝
+   检查 Message.Version、Message.Flag、FromPeerID、ToPeerID、payload 大小和协议编号。
+
+7. identify 失败
+   检查对端 advertised address 是否为空或不可拨号，signed peer record 是否过期，network_id 是否匹配。
+
+
+二十二、一句话总结
+
+p2p 模块的使用方式是：启动时创建 Host 并执行 Listen、StartHeartbeat、Bootstrap；业务模块通过 RegisterVoidHandler 或 RegisterResultHandler 接入协议；发送消息只用 Host.Send、Host.Broadcast、Host.Request；所有网络 payload 使用 Borsh；所有生产连接启用 secure session。

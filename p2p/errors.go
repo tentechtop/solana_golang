@@ -37,4 +37,8 @@ var (
 	ErrProtocolResponseMismatch = errors.New("p2p: protocol response mismatch")
 	// ErrSecureSession 表示安全会话失败 + 防止未认证或未加密连接进入业务消息层。
 	ErrSecureSession = errors.New("p2p: secure session")
+	// ErrPeerRecordExpired 表示节点签名记录已过期 + 加载持久化节点时可降级为普通节点。
+	ErrPeerRecordExpired = errors.New("p2p: peer record expired")
+	// ErrPeerRecordNetworkMismatch 表示节点签名记录网络不匹配 + 防止跨网络地址污染路由表。
+	ErrPeerRecordNetworkMismatch = errors.New("p2p: peer record network mismatch")
 )

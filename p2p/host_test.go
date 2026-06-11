@@ -3,11 +3,58 @@ package p2p
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"solana_golang/utils"
 )
+
+func TestHostRequiresSecureSessionByDefault(t *testing.T) {
+	_, err := NewHost(HostConfig{PeerID: testPeerID(35)})
+	if !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("NewHost(insecure default) error = %v, want ErrSecureSession", err)
+	}
+}
+
+func TestHostRejectsWildcardAdvertisedAddress(t *testing.T) {
+	peerID := testPeerID(36)
+	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "0.0.0.0", utils.ProtocolTCP, 5031, peerID)
+	if err != nil {
+		t.Fatalf("BuildMultiAddress() error = %v", err)
+	}
+
+	_, err = NewHost(HostConfig{
+		PeerID:              peerID,
+		AllowInsecure:       true,
+		AdvertisedAddresses: []utils.MultiAddress{address},
+	})
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("NewHost(wildcard advertised) error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+func TestHostSkipsWildcardListenAddressAdvertisement(t *testing.T) {
+	peerID := testPeerID(37)
+	host, err := NewHost(HostConfig{
+		PeerID:        peerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "0.0.0.0", utils.ProtocolTCP, 5032, peerID)
+	if err != nil {
+		t.Fatalf("BuildMultiAddress() error = %v", err)
+	}
+	host.addAdvertisedAddress(address)
+
+	if addresses := host.advertisedAddressSnapshots(); len(addresses) != 0 {
+		t.Fatalf("advertised addresses = %+v, want none", addresses)
+	}
+}
 
 func TestHostSendFallsBackFromQUICToTCP(t *testing.T) {
 	clientPeerID := testPeerID(5)
@@ -15,11 +62,11 @@ func TestHostSendFallsBackFromQUICToTCP(t *testing.T) {
 	tcpAddress := testAddress(t, utils.ProtocolTCP, freeTCPPort(t), serverPeerID)
 	quicAddress := testAddress(t, utils.ProtocolQUIC, tcpAddress.Port, serverPeerID)
 
-	serverHost, err := NewHost(HostConfig{PeerID: serverPeerID}, NewTCPTransport())
+	serverHost, err := NewHost(HostConfig{PeerID: serverPeerID, AllowInsecure: true}, NewTCPTransport())
 	if err != nil {
 		t.Fatalf("NewHost(server) error = %v", err)
 	}
-	clientHost, err := NewHost(HostConfig{PeerID: clientPeerID})
+	clientHost, err := NewHost(HostConfig{PeerID: clientPeerID, AllowInsecure: true})
 	if err != nil {
 		t.Fatalf("NewHost(client) error = %v", err)
 	}

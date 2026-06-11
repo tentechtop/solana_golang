@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,49 @@ func TestValidateRejectsInvalidP2PAddress(t *testing.T) {
 		t.Fatal("Validate() error = nil, want listen ip error")
 	}
 }
+
+func TestValidateRejectsInvalidP2PAdvertisedPort(t *testing.T) {
+	config := Default()
+	config.P2P.AdvertisedPort = 70000
+
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want advertised port error")
+	}
+}
+
+func TestP2PAdvertisedAddressSkipsUnspecifiedListenIP(t *testing.T) {
+	config := Default().P2P
+	config.ListenIP = "0.0.0.0"
+	_, ok, err := config.AdvertisedAddress(configTestPeerID(1))
+	if err != nil {
+		t.Fatalf("AdvertisedAddress() error = %v", err)
+	}
+	if ok {
+		t.Fatal("AdvertisedAddress() ok = true, want false")
+	}
+}
+
+func TestP2PAdvertisedAddressUsesExplicitAddress(t *testing.T) {
+	config := Default().P2P
+	config.ListenIP = "0.0.0.0"
+	config.AdvertisedIP = "127.0.0.1"
+	config.AdvertisedPort = 6001
+
+	address, ok, err := config.AdvertisedAddress(configTestPeerID(2))
+	if err != nil {
+		t.Fatalf("AdvertisedAddress() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("AdvertisedAddress() ok = false, want true")
+	}
+	if address.IPAddress != "127.0.0.1" {
+		t.Fatalf("IPAddress = %q, want 127.0.0.1", address.IPAddress)
+	}
+	if address.Port != 6001 {
+		t.Fatalf("Port = %d, want 6001", address.Port)
+	}
+}
+
 func TestProtocolFallsBackForInvalidValue(t *testing.T) {
 	config := Default()
 	config.P2P.DefaultProtocol = "udp"
@@ -205,4 +249,8 @@ func TestDatabaseOptionsNormalizesEngine(t *testing.T) {
 	if options.Engine != database.EngineLevelDB {
 		t.Fatalf("Engine = %q, want leveldb", options.Engine)
 	}
+}
+
+func configTestPeerID(seed byte) string {
+	return utils.Base58Encode(bytes.Repeat([]byte{seed}, utils.Ed25519KeySize))
 }

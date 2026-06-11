@@ -257,8 +257,9 @@ func TestHandleP2PConnectionStopsOnReadError(t *testing.T) {
 }
 func TestHandleP2PConnectionRejectsUnknownProtocol(t *testing.T) {
 	host, err := p2p.NewHost(p2p.HostConfig{
-		PeerID: testNodeIdentity(t).PeerID,
-		Logger: discardLogger(),
+		PeerID:        testNodeIdentity(t).PeerID,
+		AllowInsecure: true,
+		Logger:        discardLogger(),
 	})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)

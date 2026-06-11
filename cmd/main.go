@@ -172,6 +172,19 @@ func (resources *runtimeResources) openDatabase(config appconfig.DatabaseConfig)
 
 // startP2P 启动 P2P 监听 + 使用独立上下文控制网络协程退出。
 func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity nodeIdentity) error {
+	address, err := utils.BuildMultiAddress(config.IPType, config.ListenIP, config.Protocol(), config.ListenPort, identity.PeerID)
+	if err != nil {
+		return fmt.Errorf("cmd: build p2p listen address: %w", err)
+	}
+	advertisedAddresses := make([]utils.MultiAddress, 0, 1)
+	advertisedAddress, ok, err := config.AdvertisedAddress(identity.PeerID)
+	if err != nil {
+		return fmt.Errorf("cmd: build p2p advertised address: %w", err)
+	}
+	if ok {
+		advertisedAddresses = append(advertisedAddresses, advertisedAddress)
+	}
+
 	host, err := p2p.NewHost(p2p.HostConfig{
 		PeerID: identity.PeerID,
 		SecureIdentity: p2p.SecureSessionIdentity{
@@ -189,6 +202,7 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity
 		Logger:              resources.logger,
 		PeerStore:           p2ppeerstore.NewDatabasePeerStore(resources.database),
 		PersistedPeerLimit:  config.MaxPeers,
+		AdvertisedAddresses: advertisedAddresses,
 	})
 	if err != nil {
 		return fmt.Errorf("cmd: create p2p host: %w", err)
@@ -199,11 +213,6 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity
 		return fmt.Errorf("cmd: load stored p2p peers: %w", err)
 	}
 
-	address, err := utils.BuildMultiAddress(config.IPType, config.ListenIP, config.Protocol(), config.ListenPort, identity.PeerID)
-	if err != nil {
-		_ = host.Close()
-		return fmt.Errorf("cmd: build p2p listen address: %w", err)
-	}
 	bootnodes, err := config.BootstrapAddresses()
 	if err != nil {
 		_ = host.Close()

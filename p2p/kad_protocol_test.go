@@ -100,7 +100,7 @@ func TestNewKADPeerHintRejectsUnsignedPeer(t *testing.T) {
 
 func TestHostFindNodeHandlerReturnsClosestPeers(t *testing.T) {
 	localPeerID := kadTestPeerID(0)
-	host, err := NewHost(HostConfig{PeerID: localPeerID})
+	host, err := NewHost(HostConfig{PeerID: localPeerID, AllowInsecure: true})
 	if err != nil {
 		t.Fatalf("NewHost() error = %v", err)
 	}

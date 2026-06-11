@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"sync"
 	"time"
 
@@ -131,7 +132,9 @@ func (transport *QUICTransport) Close() error {
 
 	var closeErrors []error
 	for _, listener := range listeners {
-		if err := listener.Close(); err != nil {
+		if err := listener.Close(); err != nil &&
+			!errors.Is(err, quic.ErrServerClosed) &&
+			!errors.Is(err, net.ErrClosed) {
 			closeErrors = append(closeErrors, err)
 		}
 	}

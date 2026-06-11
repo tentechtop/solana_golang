@@ -107,7 +107,7 @@ func (transport *TCPTransport) Close() error {
 
 	var closeErrors []error
 	for _, listener := range listeners {
-		if err := listener.Close(); err != nil {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			closeErrors = append(closeErrors, err)
 		}
 	}
