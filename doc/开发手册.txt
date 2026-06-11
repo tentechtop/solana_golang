@@ -147,13 +147,14 @@ doc/
 
 6. P0 结构层边界：
    - Instruction 表达未编译业务指令，CompiledInstruction 表达交易消息中的紧凑指令。
-   - SystemInstruction 只表达 create account、transfer、assign、allocate 的指令数据，不直接修改账户。
+   - SystemInstruction 表达 create account、transfer、assign、allocate 的指令数据，状态修改由模拟器或执行器完成。
    - FeeCalculator、FeeDetails、ComputeBudgetLimits 只负责费用和计算预算，不负责扣款。
    - ResolvedMessage、LoadedTransaction、LoadedAccount 只表达加载后的执行输入，不负责执行程序。
    - ExecutionResult、TransactionExecutionResult 只表达执行输出和元数据，不负责状态提交。
    - ClockSysvar、RentSysvar、InstructionsSysvar 是程序读取上下文的 domain model。
    - BlockhashQueue、StatusCacheEntry 是交易年龄检查和去重的基础结构。
-   - 真正的账户状态转换必须在执行器中通过数据库事务提交，结构层不得直接写库。
+   - TransactionSimulator 支持内存模拟执行系统指令，返回 TransactionExecutionResult 和账户写集。
+   - 真正的账户状态转换必须由执行器生成写集，并通过数据库事务提交，结构层不得直接写库。
 
 
 六、P2P 开发规范

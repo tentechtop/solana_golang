@@ -111,6 +111,12 @@ func (account Account) ValidateWithRent(rentConfig RentConfig) error {
 	if len(account.Data) > MaxAccountDataSize {
 		return fmt.Errorf("%w: data length %d exceeds %d", ErrAccountDataTooLarge, len(account.Data), MaxAccountDataSize)
 	}
+	if account.Lamports == 0 {
+		if len(account.Data) != 0 || account.Executable {
+			return fmt.Errorf("%w: zero lamport account must be empty and non-executable", ErrRentExemption)
+		}
+		return nil
+	}
 	minimumBalance, err := rentConfig.MinimumBalance(len(account.Data))
 	if err != nil {
 		return err
