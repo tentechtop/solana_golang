@@ -69,6 +69,15 @@ type KADRoutingTableHealthSnapshot struct {
 	LookupFailureCount uint64
 }
 
+// KADBucketSnapshot 保存 K 桶状态 + 用于 bootstrap 和监控判断覆盖度。
+type KADBucketSnapshot struct {
+	Index             int
+	PeerCount         int
+	Capacity          int
+	LastSeenUnixMilli int64
+	Sparse            bool
+}
+
 type kadCandidatePeer struct {
 	peer                 Peer
 	sourcePeerID         string
@@ -236,6 +245,47 @@ func (table *KADRoutingTable) BucketIndex(peerID string) (int, bool, error) {
 	}
 	index, ok := KADBucketIndex(table.localID, targetID)
 	return index, ok, nil
+}
+
+// BucketSnapshots 返回 K 桶快照 + 让 bootstrap 可以优先刷新空桶和稀疏桶。
+func (table *KADRoutingTable) BucketSnapshots() []KADBucketSnapshot {
+	table.mutex.RLock()
+	defer table.mutex.RUnlock()
+	snapshots := make([]KADBucketSnapshot, 0, len(table.buckets))
+	sparseLimit := maxInt(1, table.bucketSize/4)
+	for _, bucket := range table.buckets {
+		peerCount := bucket.size()
+		snapshots = append(snapshots, KADBucketSnapshot{
+			Index:             bucket.id,
+			PeerCount:         peerCount,
+			Capacity:          table.bucketSize,
+			LastSeenUnixMilli: bucket.lastSeenUnixMilli,
+			Sparse:            peerCount > 0 && peerCount < sparseLimit,
+		})
+	}
+	return snapshots
+}
+
+// RefreshTargetPeerIDs 生成 KAD 刷新目标 + 覆盖本节点附近、空桶和稀疏桶。
+func (table *KADRoutingTable) RefreshTargetPeerIDs(limit int) []string {
+	if limit <= 0 {
+		limit = defaultKADFindNodeSize
+	}
+	targets := []string{table.localPeerID}
+	for _, bucket := range table.BucketSnapshots() {
+		if len(targets) >= limit {
+			break
+		}
+		if bucket.PeerCount > 0 && !bucket.Sparse {
+			continue
+		}
+		target, err := KADRandomTargetForBucket(table.localID, bucket.Index)
+		if err != nil {
+			continue
+		}
+		targets = append(targets, KADPeerIDFromBytes(target))
+	}
+	return uniquePeerIDs(targets)
 }
 
 // CandidateSnapshots 返回候选节点快照 + 供后续探测任务消费。

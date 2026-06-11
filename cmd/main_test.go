@@ -129,7 +129,7 @@ func TestEnsureNodeIdentityCreatesAndPersistsKeyPair(t *testing.T) {
 		database: databaseInstance,
 	}
 
-	identity, err := resources.ensureNodeIdentity(appconfig.Default().P2P.PeerID)
+	identity, err := resources.ensureNodeIdentity()
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity() error = %v", err)
 	}
@@ -160,11 +160,11 @@ func TestEnsureNodeIdentityReusesStoredKeyPair(t *testing.T) {
 		database: databaseInstance,
 	}
 
-	firstIdentity, err := resources.ensureNodeIdentity("")
+	firstIdentity, err := resources.ensureNodeIdentity()
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity(first) error = %v", err)
 	}
-	secondIdentity, err := resources.ensureNodeIdentity("bad-config-peer-id")
+	secondIdentity, err := resources.ensureNodeIdentity()
 	if err != nil {
 		t.Fatalf("ensureNodeIdentity(second) error = %v", err)
 	}
@@ -178,9 +178,10 @@ func TestStartP2PRejectsInvalidConfig(t *testing.T) {
 		serverErrors: make(chan error, 1),
 	}
 	config := appconfig.Default().P2P
-	config.PeerID = "bad"
+	identity := testNodeIdentity(t)
+	identity.PeerID = "bad"
 
-	if err := resources.startP2P(config); err == nil {
+	if err := resources.startP2P(config, identity); err == nil {
 		t.Fatal("startP2P() error = nil, want peer id error")
 	}
 }
@@ -192,7 +193,7 @@ func TestStartP2PRejectsInvalidAddress(t *testing.T) {
 	config := appconfig.Default().P2P
 	config.ListenIP = "bad-ip"
 
-	if err := resources.startP2P(config); err == nil {
+	if err := resources.startP2P(config, testNodeIdentity(t)); err == nil {
 		t.Fatal("startP2P() error = nil, want listen address error")
 	}
 }
@@ -256,7 +257,7 @@ func TestHandleP2PConnectionStopsOnReadError(t *testing.T) {
 }
 func TestHandleP2PConnectionRejectsUnknownProtocol(t *testing.T) {
 	host, err := p2p.NewHost(p2p.HostConfig{
-		PeerID: appconfig.Default().P2P.PeerID,
+		PeerID: testNodeIdentity(t).PeerID,
 		Logger: discardLogger(),
 	})
 	if err != nil {
@@ -406,12 +407,15 @@ func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePa
 		"  path: \"" + filepath.ToSlash(databasePath) + "\"",
 		"  wal: true",
 		"p2p:",
-		"  peer_id: \"" + appconfig.Default().P2P.PeerID + "\"",
 		"  ip_type: \"ip4\"",
 		"  listen_ip: \"127.0.0.1\"",
 		"  listen_port: " + strconv.Itoa(p2pPort),
 		"  default_protocol: \"tcp\"",
 		"  max_peers: 64",
+		"  network_id: \"solana_golang:test:00000000000000000000000000000000\"",
+		"  software_version: \"solana_golang/test\"",
+		"  min_outbound_peers: 0",
+		"  bootstrap_timeout_millis: 1000",
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -421,6 +425,19 @@ func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePa
 }
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
+func testNodeIdentity(t *testing.T) nodeIdentity {
+	t.Helper()
+	publicKey, privateKey, err := utils.GenerateEd25519KeyPairBytes()
+	if err != nil {
+		t.Fatalf("GenerateEd25519KeyPairBytes() error = %v", err)
+	}
+	return nodeIdentity{
+		PeerID:     utils.Base58Encode(publicKey),
+		PublicKey:  publicKey,
+		PrivateKey: privateKey,
+	}
 }
 
 type failingConnection struct {

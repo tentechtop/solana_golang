@@ -47,6 +47,8 @@ const (
 	ProtocolHotStuffVoteV1 ProtocolID = 21
 	// ProtocolHotStuffQCV1 表示 HotStuff 证书 + 用于视图推进和提交证明。
 	ProtocolHotStuffQCV1 ProtocolID = 22
+	// ProtocolSecureSessionV1 表示安全会话握手 + 用于节点认证、临时密钥交换和会话密钥派生。
+	ProtocolSecureSessionV1 ProtocolID = 23
 )
 
 // MessagePriority 表示消息优先级 + 用于后续队列和 QUIC stream 调度。
@@ -116,5 +118,6 @@ func DefaultProtocolSpecs() []ProtocolSpec {
 		{ID: ProtocolFindNodeResponseV1, Name: "/p2p/find-node/response/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
 		{ID: ProtocolHotStuffVoteV1, Name: "/p2p/hotstuff/vote/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
 		{ID: ProtocolHotStuffQCV1, Name: "/p2p/hotstuff/qc/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
+		{ID: ProtocolSecureSessionV1, Name: "/p2p/secure-session/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
 	}
 }

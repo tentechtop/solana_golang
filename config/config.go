@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,8 @@ const (
 	defaultP2PListenIP     = "0.0.0.0"
 	defaultP2PListenPort   = 5002
 	defaultP2PProtocol     = utils.ProtocolTCP
+	defaultP2PNetworkID    = "solana_golang:localnet:00000000000000000000000000000000"
+	defaultP2PSoftware     = "solana_golang/0.1.0"
 )
 
 // AppConfig 保存启动配置 + 集中声明外部可调参数避免散落读取。
@@ -63,12 +66,16 @@ type DatabaseConfig struct {
 
 // P2PConfig 保存 P2P 配置 + 用显式字段构造安全 multi-address。
 type P2PConfig struct {
-	PeerID          string `yaml:"peer_id"`
-	IPType          string `yaml:"ip_type"`
-	ListenIP        string `yaml:"listen_ip"`
-	ListenPort      int    `yaml:"listen_port"`
-	DefaultProtocol string `yaml:"default_protocol"`
-	MaxPeers        int    `yaml:"max_peers"`
+	IPType                 string   `yaml:"ip_type"`
+	ListenIP               string   `yaml:"listen_ip"`
+	ListenPort             int      `yaml:"listen_port"`
+	DefaultProtocol        string   `yaml:"default_protocol"`
+	MaxPeers               int      `yaml:"max_peers"`
+	NetworkID              string   `yaml:"network_id"`
+	SoftwareVersion        string   `yaml:"software_version"`
+	Bootstrap              []string `yaml:"bootstrap"`
+	MinOutboundPeers       int      `yaml:"min_outbound_peers"`
+	BootstrapTimeoutMillis int      `yaml:"bootstrap_timeout_millis"`
 }
 
 // Load 读取配置文件 + 使用严格 YAML 解析提前发现拼写错误。
@@ -118,12 +125,15 @@ func Default() AppConfig {
 			WAL:    true,
 		},
 		P2P: P2PConfig{
-			PeerID:          defaultPeerID(),
-			IPType:          defaultP2PIPType,
-			ListenIP:        defaultP2PListenIP,
-			ListenPort:      defaultP2PListenPort,
-			DefaultProtocol: string(defaultP2PProtocol),
-			MaxPeers:        64,
+			IPType:                 defaultP2PIPType,
+			ListenIP:               defaultP2PListenIP,
+			ListenPort:             defaultP2PListenPort,
+			DefaultProtocol:        string(defaultP2PProtocol),
+			MaxPeers:               64,
+			NetworkID:              defaultP2PNetworkID,
+			SoftwareVersion:        defaultP2PSoftware,
+			MinOutboundPeers:       8,
+			BootstrapTimeoutMillis: 5_000,
 		},
 	}
 }
@@ -198,12 +208,31 @@ func (config P2PConfig) Validate() error {
 	if config.MaxPeers <= 0 {
 		return errors.New("p2p max_peers must be positive")
 	}
-	protocol, err := utils.ParseMultiAddressProtocol(config.DefaultProtocol)
-	if err != nil {
+	if _, err := utils.ParseMultiAddressProtocol(config.DefaultProtocol); err != nil {
 		return err
 	}
-	if _, err := utils.BuildMultiAddress(config.IPType, config.ListenIP, protocol, config.ListenPort, config.PeerID); err != nil {
+	if err := validateP2PListenAddress(config.IPType, config.ListenIP); err != nil {
 		return err
+	}
+	if strings.TrimSpace(config.NetworkID) == "" {
+		return errors.New("p2p network_id cannot be empty")
+	}
+	if strings.TrimSpace(config.SoftwareVersion) == "" {
+		return errors.New("p2p software_version cannot be empty")
+	}
+	if config.MinOutboundPeers < 0 {
+		return errors.New("p2p min_outbound_peers cannot be negative")
+	}
+	if config.MinOutboundPeers > config.MaxPeers {
+		return errors.New("p2p min_outbound_peers cannot exceed max_peers")
+	}
+	if config.BootstrapTimeoutMillis <= 0 {
+		return errors.New("p2p bootstrap_timeout_millis must be positive")
+	}
+	for _, rawAddress := range config.Bootstrap {
+		if _, err := utils.ParseMultiAddress(rawAddress); err != nil {
+			return fmt.Errorf("p2p bootstrap address %q: %w", rawAddress, err)
+		}
 	}
 	return nil
 }
@@ -216,6 +245,18 @@ func (config P2PConfig) Protocol() utils.MultiAddressProtocol {
 	return protocol
 }
 
+func (config P2PConfig) BootstrapAddresses() ([]utils.MultiAddress, error) {
+	addresses := make([]utils.MultiAddress, 0, len(config.Bootstrap))
+	for _, rawAddress := range config.Bootstrap {
+		address, err := utils.ParseMultiAddress(rawAddress)
+		if err != nil {
+			return nil, fmt.Errorf("p2p bootstrap address %q: %w", rawAddress, err)
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses, nil
+}
+
 // DatabaseOptions 转换数据库配置 + 隔离 YAML 字段和数据库包类型。
 func (config DatabaseConfig) DatabaseOptions() database.DatabaseConfig {
 	return database.DatabaseConfig{
@@ -223,9 +264,6 @@ func (config DatabaseConfig) DatabaseOptions() database.DatabaseConfig {
 		Path:   config.Path,
 		WAL:    config.WAL,
 	}
-}
-func defaultPeerID() string {
-	return strings.Repeat("1", 32)
 }
 func resolveConfigPath(path string) (string, error) {
 	cleanPath := filepath.Clean(path)
@@ -253,4 +291,21 @@ func resolveConfigPath(path string) (string, error) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func validateP2PListenAddress(ipType string, listenIP string) error {
+	switch strings.ToLower(strings.TrimSpace(ipType)) {
+	case utils.MultiAddressIP4:
+		if ip := net.ParseIP(listenIP); ip == nil || ip.To4() == nil {
+			return fmt.Errorf("p2p listen_ip must be valid IPv4: %q", listenIP)
+		}
+		return nil
+	case utils.MultiAddressIP6:
+		if ip := net.ParseIP(listenIP); ip == nil || ip.To4() != nil || ip.To16() == nil {
+			return fmt.Errorf("p2p listen_ip must be valid IPv6: %q", listenIP)
+		}
+		return nil
+	default:
+		return fmt.Errorf("p2p ip_type must be ip4 or ip6, got %q", ipType)
+	}
 }

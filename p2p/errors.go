@@ -29,4 +29,6 @@ var (
 	ErrNilProtocolHandler = errors.New("p2p: nil protocol handler")
 	// ErrProtocolResponseMismatch 表示协议响应语义不匹配 + 防止请求响应关系混乱。
 	ErrProtocolResponseMismatch = errors.New("p2p: protocol response mismatch")
+	// ErrSecureSession 表示安全会话失败 + 防止未认证或未加密连接进入业务消息层。
+	ErrSecureSession = errors.New("p2p: secure session")
 )

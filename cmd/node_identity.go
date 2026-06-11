@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"solana_golang/database"
 	"solana_golang/utils"
@@ -23,7 +22,7 @@ type nodeIdentity struct {
 }
 
 // ensureNodeIdentity 加载或创建节点身份 + 以数据库记录作为唯一可信来源。
-func (resources *runtimeResources) ensureNodeIdentity(configuredPeerID string) (nodeIdentity, error) {
+func (resources *runtimeResources) ensureNodeIdentity() (nodeIdentity, error) {
 	identity, found, err := resources.loadNodeIdentity()
 	if err != nil {
 		return nodeIdentity{}, err
@@ -37,12 +36,6 @@ func (resources *runtimeResources) ensureNodeIdentity(configuredPeerID string) (
 		return identity, nil
 	}
 
-	if shouldWarnConfiguredPeerID(configuredPeerID, identity.PeerID) {
-		resources.logger.Warn("p2p config peer_id ignored",
-			slog.String("configured_peer_id", configuredPeerID),
-			slog.String("database_peer_id", identity.PeerID),
-		)
-	}
 	resources.logger.Info("p2p node identity loaded", slog.String("peer_id", identity.PeerID))
 	return identity, nil
 }
@@ -132,13 +125,4 @@ func validateNodeIdentity(identity nodeIdentity) error {
 		return errors.New("cmd: node peer id does not match public key")
 	}
 	return nil
-}
-
-// shouldWarnConfiguredPeerID 判断配置 ID 是否冲突 + 占位值不触发噪声日志。
-func shouldWarnConfiguredPeerID(configuredPeerID string, databasePeerID string) bool {
-	configuredPeerID = strings.TrimSpace(configuredPeerID)
-	if configuredPeerID == "" || configuredPeerID == databasePeerID {
-		return false
-	}
-	return configuredPeerID != utils.Base58Encode(make([]byte, utils.Ed25519KeySize))
 }

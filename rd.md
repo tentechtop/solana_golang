@@ -285,19 +285,23 @@ Open
 
 ```yaml
 p2p:
-  peer_id: "11111111111111111111111111111111"
   ip_type: "ip4"
   listen_ip: "0.0.0.0"
   listen_port: 5002
   default_protocol: "tcp"
   max_peers: 64
+  network_id: "solana_golang:localnet:00000000000000000000000000000000"
+  software_version: "solana_golang/0.1.0"
+  min_outbound_peers: 8
+  bootstrap_timeout_millis: 5000
 ```
 
 peer id 规则：
 
-1. 配置里的默认 peer id 只用于启动占位。
+1. 配置文件不保存 peer id。
 2. 启动时必须检查数据库是否已有节点身份。
 3. 数据库没有身份时，通过 ed25519 生成公钥/私钥并保存。
+4. peer id 由数据库中的节点公钥 base58 派生。
 4. 网络身份以数据库身份为准。
 5. 私钥只能本地保存，不进入 P2P 消息。
 
@@ -666,12 +670,15 @@ database:
   wal: true
 
 p2p:
-  peer_id: "11111111111111111111111111111111"
   ip_type: "ip4"
   listen_ip: "0.0.0.0"
   listen_port: 5002
   default_protocol: "tcp"
   max_peers: 64
+  network_id: "solana_golang:localnet:00000000000000000000000000000000"
+  software_version: "solana_golang/0.1.0"
+  min_outbound_peers: 8
+  bootstrap_timeout_millis: 5000
 ```
 
 建议新增：

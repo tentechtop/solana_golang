@@ -1,0 +1,231 @@
+Solana Golang 任务安排
+
+版本：v1
+当前阶段：先跑通网络，再跑通交易和区块流转，最后接状态提交。
+
+
+一、总体顺序
+
+1. P2P 基础网络跑通。
+2. P2P 交易广播跑通。
+3. 交易验签和内存模拟执行跑通。
+4. 区块构建和区块广播跑通。
+5. 数据库状态提交跑通。
+6. 共识 proposal、vote、QC 和 finalized 流程接入。
+7. 地址表、nonce、loader、vote、stake 等高级结构逐步补齐。
+
+
+二、阶段 1：P2P 基础网络
+
+目标：
+两个本地节点可以通过 TCP 或 QUIC 建立连接，完成握手、心跳和断线清理。
+
+任务：
+1. 检查 `cmd` 启动时是否从数据库加载或创建 peer id。
+2. 确认 `p2p.Host` 可以同时启动 TCP 和 QUIC listener。
+3. 确认 peer 连接建立后写入连接管理器。
+4. 实现或验证 ping/pong 心跳协议。
+5. 增加连接超时、空闲断开、重复连接处理。
+6. 增加本地双节点启动脚本或测试说明。
+
+完成标准：
+1. 节点 A 能连接节点 B。
+2. 节点 A 和节点 B 能互相发送 ping/pong。
+3. 任一节点断开后连接管理器能清理状态。
+4. TCP 和 QUIC 至少各有一条本地连通测试。
+5. `go test ./p2p` 通过。
+
+
+三、阶段 2：P2P 消息闭环
+
+目标：
+节点之间可以发送 Borsh 编码业务消息，并完成 frame、checksum、decode、dispatch 全链路。
+
+任务：
+1. 复查 P2P frame header 字段：magic、protocol_version、message_type、payload_length、checksum。
+2. 确认 payload 长度有上限。
+3. 确认 checksum 校验失败会拒绝消息。
+4. 确认未知 message type 不进入业务 handler。
+5. 增加 demo 协议：echo 或 ping payload。
+6. 增加 frame 畸形输入测试。
+
+完成标准：
+1. 节点 A 发业务消息，节点 B handler 能收到 domain message。
+2. 节点 B 能回响应。
+3. payload 超长、checksum 错误、未知 type 都会失败。
+4. `go test ./p2p` 通过。
+
+
+四、阶段 3：交易广播
+
+目标：
+节点可以广播交易，接收节点能完成反序列化、结构校验和签名验证。
+
+任务：
+1. 定义交易广播 payload：
+   - version u16
+   - transaction_bytes bytes
+   - created_at_unix_milli i64
+2. 使用 `Transaction.MarshalBinary()` 生成 payload。
+3. 接收端使用 `UnmarshalTransactionBinary()` 解析交易。
+4. 接收端执行 `Validate()`。
+5. 接收端执行 `HasValidSignatures()`。
+6. 接收端检查 recent blockhash。
+7. 验证通过后进入交易池或临时内存队列。
+
+完成标准：
+1. 节点 A 构造并签名交易。
+2. 节点 A 通过 P2P 发给节点 B。
+3. 节点 B 能打印或记录交易 ID。
+4. 节点 B 能拒绝坏签名、过期 blockhash、超大交易。
+5. 交易广播测试覆盖成功和失败路径。
+
+
+五、阶段 4：交易内存模拟执行
+
+目标：
+接收交易后可以用内存账户快照模拟执行系统指令，得到写集和执行结果。
+
+当前已有能力：
+1. `TransactionSimulator`。
+2. 系统指令模拟执行：transfer、create account、assign、allocate。
+3. fee 计算和扣除。
+4. 签名验证。
+5. recent blockhash 校验。
+6. 返回 `TransactionExecutionResult` 和 `WrittenAccounts`。
+
+后续任务：
+1. 把 P2P 收到的交易接入 `TransactionSimulator`。
+2. 为模拟执行准备内存账户快照。
+3. 将模拟结果写入日志或临时结果缓存。
+4. 对失败交易输出明确原因。
+
+完成标准：
+1. 交易广播后，接收节点能完成模拟执行。
+2. 转账交易能得到正确余额变化。
+3. 创建账户交易能得到新账户写集。
+4. fee 不足时交易失败且账户状态不变。
+5. `go test ./structure ./p2p` 通过。
+
+
+六、阶段 5：区块构建和广播
+
+目标：
+leader 节点从交易池取交易，构建区块并广播；其他节点能校验区块。
+
+任务：
+1. 定义区块广播 payload：
+   - version u16
+   - slot u64
+   - block_hash [32]byte
+   - block_bytes bytes
+2. leader 从交易池取已验签交易。
+3. leader 对交易进行模拟执行。
+4. leader 生成 `TransactionStatusMeta`。
+5. leader 构建 `Block`。
+6. leader 计算 transactions root。
+7. validator 接收 block 后执行：
+   - 反序列化 block
+   - `Block.Validate()`
+   - 校验交易签名
+   - 校验 transactions root
+   - 可选重新模拟执行
+
+完成标准：
+1. 单节点能构建包含交易的区块。
+2. 双节点能广播并接收区块。
+3. 接收节点能拒绝错误 root、坏签名、非法 header。
+4. `go test ./structure ./p2p` 通过。
+
+
+七、阶段 6：数据库状态提交
+
+目标：
+将交易执行写集和区块索引通过数据库事务原子提交。
+
+任务：
+1. 定义账户数据库 key：
+   - account:{public_key}
+2. 定义交易状态 key：
+   - tx:{signature}
+3. 定义区块索引 key：
+   - block:{slot}
+   - blockhash:{hash}
+4. 将 `AddressedAccount` Borsh bytes 写入 `TableAccount`。
+5. 将 `TransactionExecutionResult` 或摘要写入交易状态表。
+6. 将 block raw bytes 写入区块表。
+7. 同一批交易写集必须使用数据库 transaction 或 batch。
+8. 失败交易只写状态，不提交账户写集。
+
+完成标准：
+1. 执行成功交易后账户余额可从数据库读取。
+2. 节点重启后账户状态不丢失。
+3. 区块和交易状态可按 key 查询。
+4. 批量提交失败时不会出现半提交状态。
+5. `go test ./database ./structure` 通过。
+
+
+八、阶段 7：共识接入
+
+目标：
+把已有 slot clock、vote、QC 和区块广播串成最小共识流程。
+
+任务：
+1. slot 到达时判断本节点是否 leader。
+2. leader 构建 proposal。
+3. validator 校验 proposal。
+4. validator 投 confirm vote 或 skip vote。
+5. 收集 vote 生成 QC。
+6. QC 达成后提交 confirmed block。
+7. 后续补 finalized 规则。
+
+完成标准：
+1. 单机多节点可以看到 slot 推进。
+2. leader slot 能产出 proposal。
+3. validator 能投票。
+4. 达到阈值后生成 QC。
+5. confirmed 和 skipped 能区分。
+
+
+九、当前不做
+
+1. 暂不接完整 VM。
+2. 暂不实现地址查找表账户完整生命周期。
+3. 暂不实现 nonce 账户。
+4. 暂不实现 loader 程序升级流程。
+5. 暂不实现 vote/stake 完整经济模型。
+6. 暂不做复杂 RPC 兼容层。
+7. 暂不做跨机器公网发现，先跑通本地双节点。
+
+
+十、每阶段通用要求
+
+1. 所有网络 payload 必须有长度上限。
+2. 所有 Borsh 解码后必须校验 EOF 和 Validate。
+3. 所有账户、交易、区块写入前必须通过校验。
+4. 所有失败路径必须返回明确错误上下文。
+5. 关键路径必须有日志。
+6. 单元测试必须覆盖成功路径和主要失败路径。
+7. 代码提交前必须执行：
+   go test ./...
+   go vet ./...
+
+
+十一、当前最近任务
+
+1. 编写本地双节点启动方式。
+2. 验证 TCP ping/pong。
+3. 验证 QUIC ping/pong。
+4. 定义交易广播 P2P payload。
+5. 将交易广播接入 `TransactionSimulator`。
+
+
+上层业务(交易构造/区块解析)
+        ↓
+【流量调度层】交易路由 + 连接优先级控制
+        ↓
+【核心网络层】
+  ├─ QUIC 传输层（主通信协议，交易/区块传输）
+  └─ 定制Kad DHT（节点发现、路由、备份节点维护）
+        ↓
+【链上元数据层】拉取 LeaderSchedule、Slot、Epoch、验证者列表

@@ -20,21 +20,25 @@ const (
 
 // HostConfig 保存 Host 配置 + 支持注入节点身份、协议优先级和日志。
 type HostConfig struct {
-	PeerID             string
-	PreferredProtocols []utils.MultiAddressProtocol
-	DialTimeout        time.Duration
-	HeartbeatInterval  time.Duration
-	ConnectionIdle     time.Duration
-	MaxPeerFailures    uint32
-	Logger             *slog.Logger
-	Registry           *ProtocolRegistry
-	RoutingTable       *KADRoutingTable
+	PeerID              string
+	SecureIdentity      SecureSessionIdentity
+	EnableSecureSession bool
+	PreferredProtocols  []utils.MultiAddressProtocol
+	DialTimeout         time.Duration
+	HeartbeatInterval   time.Duration
+	ConnectionIdle      time.Duration
+	MaxPeerFailures     uint32
+	Logger              *slog.Logger
+	Registry            *ProtocolRegistry
+	RoutingTable        *KADRoutingTable
 }
 
 // Host 管理 P2P 节点运行态 + 统一处理传输、节点表和连接池。
 type Host struct {
 	mutex              sync.RWMutex
 	peerID             string
+	secureSession      bool
+	secureIdentity     SecureSessionIdentity
 	preferredProtocols []utils.MultiAddressProtocol
 	dialTimeout        time.Duration
 	heartbeatInterval  time.Duration
@@ -45,6 +49,7 @@ type Host struct {
 	peers              map[string]Peer
 	connections        map[string]Connection
 	connectionStates   map[string]ConnectionState
+	resumptionTickets  map[string]SecureSessionResumptionTicket
 	registry           *ProtocolRegistry
 	routingTable       *KADRoutingTable
 	closed             bool
@@ -57,6 +62,10 @@ type ConnectionState struct {
 	Protocol               utils.MultiAddressProtocol
 	LocalAddress           string
 	RemoteAddress          string
+	Encrypted              bool
+	NetworkID              string
+	RemoteSoftwareVersion  string
+	NegotiatedProtocol     uint16
 	ConnectedAtUnixMilli   int64
 	LastReadUnixMilli      int64
 	LastWriteUnixMilli     int64
@@ -73,9 +82,15 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	secureSession, secureIdentity, err := normalizeSecureSessionIdentity(config)
+	if err != nil {
+		return nil, err
+	}
 
 	host := &Host{
 		peerID:             config.PeerID,
+		secureSession:      secureSession,
+		secureIdentity:     secureIdentity,
 		preferredProtocols: normalizedProtocolOrder(config.PreferredProtocols),
 		dialTimeout:        normalizeDialTimeout(config.DialTimeout),
 		heartbeatInterval:  normalizeHeartbeatInterval(config.HeartbeatInterval),
@@ -86,6 +101,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		peers:              make(map[string]Peer),
 		connections:        make(map[string]Connection),
 		connectionStates:   make(map[string]ConnectionState),
+		resumptionTickets:  make(map[string]SecureSessionResumptionTicket),
 		registry:           normalizeRegistry(config.Registry),
 		routingTable:       routingTable,
 	}
@@ -100,6 +116,9 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		if err := host.RegisterTransport(transport); err != nil {
 			return nil, err
 		}
+	}
+	if err := host.registerDefaultProtocolHandlers(); err != nil {
+		return nil, err
 	}
 	return host, nil
 }
@@ -137,6 +156,39 @@ func (host *Host) RegisterResultHandler(spec ProtocolSpec, handler ResultProtoco
 // HandleMessage 处理入站消息 + 按消息协议 ID 分发到注册表处理器。
 func (host *Host) HandleMessage(ctx context.Context, message Message) (ProtocolHandleResult, error) {
 	return host.registry.Handle(ctx, message)
+}
+
+func (host *Host) registerDefaultProtocolHandlers() error {
+	if _, ok := host.registry.Spec(ProtocolFindNodeRequestV1); ok {
+		return nil
+	}
+	spec := ProtocolSpec{
+		ID:          ProtocolFindNodeRequestV1,
+		Name:        "/p2p/find-node/request/1.0.0",
+		HasResponse: true,
+		Priority:    MessagePriorityNormal,
+	}
+	return host.RegisterResultHandler(spec, host.handleFindNodeRequest)
+}
+
+func (host *Host) handleFindNodeRequest(ctx context.Context, message Message) (Message, error) {
+	request, err := UnmarshalKADFindNodeRequestBinary(message.Payload)
+	if err != nil {
+		return Message{}, err
+	}
+	peers, err := host.ClosestPeers(request.TargetPeerID, int(request.Limit))
+	if err != nil {
+		return Message{}, err
+	}
+	responsePayload, err := NewKADFindNodeResponse(request.TargetPeerID, peers)
+	if err != nil {
+		return Message{}, err
+	}
+	payload, err := responsePayload.MarshalBinary()
+	if err != nil {
+		return Message{}, err
+	}
+	return responseFor(message, host.peerID, ProtocolFindNodeResponseV1, payload)
 }
 
 // HandleConnection 管理连接读循环 + 自动处理心跳并分发业务协议。
@@ -229,7 +281,7 @@ func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handle
 		slog.String("address", address.String()),
 		slog.String("protocol", string(address.Protocol)),
 	)
-	return transport.Listen(ctx, address, handler)
+	return transport.Listen(ctx, address, host.secureConnectionHandler(handler))
 }
 
 // DialAddress 拨号指定地址 + 成功后将连接放入连接池。
@@ -247,6 +299,13 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 		host.recordPeerError(address.PeerID, err)
 		return nil, err
 	}
+	securedConnection, err := host.secureOutboundConnection(dialContext, connection)
+	if err != nil {
+		_ = connection.Close()
+		host.recordPeerError(address.PeerID, err)
+		return nil, err
+	}
+	connection = securedConnection
 	host.storeConnection(address.PeerID, connection)
 	host.logger.Info("p2p host connected",
 		slog.String("peer_id", address.PeerID),
@@ -300,12 +359,34 @@ func (host *Host) Connection(peerID string) (Connection, bool) {
 	return connection, ok
 }
 
+// ConnectionCount 返回当前连接数量 + 供 bootstrap 判断是否需要补足出站连接。
+func (host *Host) ConnectionCount() int {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	return len(host.connections)
+}
+
+func (host *Host) hasConnection(peerID string) bool {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	_, ok := host.connections[peerID]
+	return ok
+}
+
 // ConnectionState 查询连接状态 + 返回副本避免外部修改内部状态。
 func (host *Host) ConnectionState(peerID string) (ConnectionState, bool) {
 	host.mutex.RLock()
 	defer host.mutex.RUnlock()
 	state, ok := host.connectionStates[peerID]
 	return state, ok
+}
+
+// SecureSessionTicket 查询安全会话恢复票据 + 返回副本避免外部修改 Host 内部恢复材料。
+func (host *Host) SecureSessionTicket(peerID string) (SecureSessionResumptionTicket, bool) {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	ticket, ok := host.resumptionTickets[peerID]
+	return ticket.Clone(), ok
 }
 
 // Send 发送消息到节点 + 自动拨号并补齐消息路由字段。
@@ -366,6 +447,7 @@ func (host *Host) Close() error {
 	transports := copyTransports(host.transports)
 	host.connections = make(map[string]Connection)
 	host.connectionStates = make(map[string]ConnectionState)
+	host.resumptionTickets = make(map[string]SecureSessionResumptionTicket)
 	for peerID, peer := range host.peers {
 		peer.MarkDisconnected()
 		host.peers[peerID] = peer
@@ -413,16 +495,22 @@ func (host *Host) storeConnection(peerID string, connection Connection) {
 	}
 	host.connections[peerID] = connection
 	now := time.Now().UnixMilli()
+	security := secureConnectionState(connection)
 	host.connectionStates[peerID] = ConnectionState{
-		PeerID:               peerID,
-		ConnectionID:         connection.ID(),
-		Protocol:             connection.Protocol(),
-		LocalAddress:         connection.LocalAddress(),
-		RemoteAddress:        connection.RemoteAddress(),
-		ConnectedAtUnixMilli: now,
-		LastReadUnixMilli:    now,
-		LastWriteUnixMilli:   now,
+		PeerID:                peerID,
+		ConnectionID:          connection.ID(),
+		Protocol:              connection.Protocol(),
+		LocalAddress:          connection.LocalAddress(),
+		RemoteAddress:         connection.RemoteAddress(),
+		Encrypted:             security.encrypted,
+		NetworkID:             security.networkID,
+		RemoteSoftwareVersion: security.remoteSoftwareVersion,
+		NegotiatedProtocol:    security.protocolVersion,
+		ConnectedAtUnixMilli:  now,
+		LastReadUnixMilli:     now,
+		LastWriteUnixMilli:    now,
 	}
+	host.storeResumptionTicketLocked(connection)
 	if peer, ok := host.peers[peerID]; ok {
 		peer.MarkConnected()
 		host.peers[peerID] = peer
@@ -534,18 +622,24 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) {
 	state := host.connectionStates[peerID]
 	if state.PeerID == "" {
 		now := time.Now().UnixMilli()
+		security := secureConnectionState(connection)
 		state = ConnectionState{
-			PeerID:               peerID,
-			ConnectionID:         connection.ID(),
-			Protocol:             connection.Protocol(),
-			LocalAddress:         connection.LocalAddress(),
-			RemoteAddress:        connection.RemoteAddress(),
-			ConnectedAtUnixMilli: now,
+			PeerID:                peerID,
+			ConnectionID:          connection.ID(),
+			Protocol:              connection.Protocol(),
+			LocalAddress:          connection.LocalAddress(),
+			RemoteAddress:         connection.RemoteAddress(),
+			Encrypted:             security.encrypted,
+			NetworkID:             security.networkID,
+			RemoteSoftwareVersion: security.remoteSoftwareVersion,
+			NegotiatedProtocol:    security.protocolVersion,
+			ConnectedAtUnixMilli:  now,
 		}
 	}
 	state.LastReadUnixMilli = time.Now().UnixMilli()
 	state.FailureCount = 0
 	host.connectionStates[peerID] = state
+	host.storeResumptionTicketLocked(connection)
 	if peer, ok := host.peers[peerID]; ok {
 		peer.MarkConnected()
 		host.peers[peerID] = peer
@@ -567,13 +661,18 @@ func (host *Host) markConnectionWrite(connection Connection, peerID string) {
 	state := host.connectionStates[peerID]
 	if state.PeerID == "" {
 		now := time.Now().UnixMilli()
+		security := secureConnectionState(connection)
 		state = ConnectionState{
-			PeerID:               peerID,
-			ConnectionID:         connection.ID(),
-			Protocol:             connection.Protocol(),
-			LocalAddress:         connection.LocalAddress(),
-			RemoteAddress:        connection.RemoteAddress(),
-			ConnectedAtUnixMilli: now,
+			PeerID:                peerID,
+			ConnectionID:          connection.ID(),
+			Protocol:              connection.Protocol(),
+			LocalAddress:          connection.LocalAddress(),
+			RemoteAddress:         connection.RemoteAddress(),
+			Encrypted:             security.encrypted,
+			NetworkID:             security.networkID,
+			RemoteSoftwareVersion: security.remoteSoftwareVersion,
+			NegotiatedProtocol:    security.protocolVersion,
+			ConnectedAtUnixMilli:  now,
 		}
 	}
 	state.LastWriteUnixMilli = time.Now().UnixMilli()
@@ -739,6 +838,94 @@ func normalizeConnectionIdle(idle time.Duration) time.Duration {
 		return defaultConnectionIdle
 	}
 	return idle
+}
+
+func normalizeSecureSessionIdentity(config HostConfig) (bool, SecureSessionIdentity, error) {
+	enabled := config.EnableSecureSession || hasSecureSessionIdentity(config.SecureIdentity)
+	if !enabled {
+		return false, SecureSessionIdentity{}, nil
+	}
+	if config.SecureIdentity.PeerID != config.PeerID {
+		return false, SecureSessionIdentity{}, fmt.Errorf("%w: secure identity peer id mismatch", ErrSecureSession)
+	}
+	if err := config.SecureIdentity.Validate(); err != nil {
+		return false, SecureSessionIdentity{}, err
+	}
+	return true, config.SecureIdentity.Clone(), nil
+}
+
+func hasSecureSessionIdentity(identity SecureSessionIdentity) bool {
+	return identity.PeerID != "" ||
+		len(identity.PublicKey) > 0 ||
+		len(identity.PrivateKey) > 0 ||
+		identity.NetworkID != "" ||
+		identity.SoftwareVersion != ""
+}
+
+func (host *Host) secureConnectionHandler(handler ConnectionHandler) ConnectionHandler {
+	if handler == nil {
+		return nil
+	}
+	if !host.secureSession {
+		return handler
+	}
+	return func(ctx context.Context, connection Connection) {
+		secureConnection, err := SecureAcceptConnection(ctx, connection, host.secureIdentity)
+		if err != nil {
+			host.logger.Warn("p2p secure session accept failed",
+				slog.String("connection_id", connection.ID()),
+				slog.Any("error", err),
+			)
+			_ = connection.Close()
+			return
+		}
+		host.storeConnection(secureConnection.RemotePeerID(), secureConnection)
+		handler(ctx, secureConnection)
+	}
+}
+
+func (host *Host) secureOutboundConnection(ctx context.Context, connection Connection) (Connection, error) {
+	if !host.secureSession {
+		return connection, nil
+	}
+	secureConnection, err := SecureDialConnection(ctx, connection, host.secureIdentity)
+	if err != nil {
+		return nil, err
+	}
+	return secureConnection, nil
+}
+
+func (host *Host) storeResumptionTicketLocked(connection Connection) {
+	secureConnection, ok := connection.(*SecureConnection)
+	if !ok {
+		return
+	}
+	ticket, err := secureConnection.Session().ResumptionTicket()
+	if err != nil {
+		return
+	}
+	host.resumptionTickets[ticket.RemotePeerID] = ticket
+}
+
+type secureConnectionStateSnapshot struct {
+	encrypted             bool
+	networkID             string
+	remoteSoftwareVersion string
+	protocolVersion       uint16
+}
+
+func secureConnectionState(connection Connection) secureConnectionStateSnapshot {
+	secureConnection, ok := connection.(*SecureConnection)
+	if !ok {
+		return secureConnectionStateSnapshot{}
+	}
+	session := secureConnection.Session()
+	return secureConnectionStateSnapshot{
+		encrypted:             true,
+		networkID:             session.NetworkID(),
+		remoteSoftwareVersion: session.RemoteSoftwareVersion(),
+		protocolVersion:       session.ProtocolVersion(),
+	}
 }
 
 // normalizeMaxPeerFailures 归一化失败阈值 + 防止零值导致首次错误即永久不可用。
