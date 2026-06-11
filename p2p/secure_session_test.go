@@ -202,6 +202,39 @@ func TestHostSecureHandlerStoresConnectionStateAndTicket(t *testing.T) {
 	}
 }
 
+func TestHostSecureHandlerTimesOutIdleHandshake(t *testing.T) {
+	serverIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.1")
+	host, err := NewHost(HostConfig{
+		PeerID:              serverIdentity.PeerID,
+		SecureIdentity:      serverIdentity,
+		EnableSecureSession: true,
+		HandshakeTimeout:    10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newScriptedConnection(utils.ProtocolTCP, "", nil)
+	handledConnection := make(chan Connection, 1)
+	handler := host.secureConnectionHandler(func(ctx context.Context, connection Connection) {
+		handledConnection <- connection
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	handler(ctx, connection)
+
+	select {
+	case <-handledConnection:
+		t.Fatal("handler was called, want idle handshake rejection")
+	default:
+	}
+	if !connection.closed {
+		t.Fatal("connection.closed = false, want timeout close")
+	}
+}
+
 type secureConnectionResult struct {
 	connection *SecureConnection
 	err        error

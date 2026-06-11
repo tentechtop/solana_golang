@@ -46,6 +46,11 @@ func (host *Host) Bootstrap(ctx context.Context, config BootstrapConfig) (Bootst
 	if len(normalized.Bootnodes) == 0 {
 		return summary, nil
 	}
+	host.logger.Info("p2p bootstrap started",
+		slog.Int("bootnodes", len(normalized.Bootnodes)),
+		slog.Int("min_outbound_peers", normalized.MinOutboundPeers),
+		slog.Int("query_limit", normalized.QueryLimit),
+	)
 
 	var bootstrapErrors []error
 	for _, address := range normalized.Bootnodes {
@@ -60,7 +65,17 @@ func (host *Host) Bootstrap(ctx context.Context, config BootstrapConfig) (Bootst
 	if err != nil {
 		bootstrapErrors = append(bootstrapErrors, err)
 	}
-	return summary, errors.Join(bootstrapErrors...)
+	joinedError := errors.Join(bootstrapErrors...)
+	host.logger.Info("p2p bootstrap completed",
+		slog.Int("bootnodes", summary.BootnodeCount),
+		slog.Int("connected_bootnodes", summary.ConnectedBootnodes),
+		slog.Int("discovered_peers", summary.DiscoveredPeers),
+		slog.Int("connected_peers", summary.ConnectedPeers),
+		slog.Int("find_node_queries", summary.FindNodeQueryCount),
+		slog.Int("find_node_failures", summary.FindNodeFailureCount),
+		slog.Any("error", joinedError),
+	)
+	return summary, joinedError
 }
 
 func (host *Host) bootstrapFromAddress(ctx context.Context, address utils.MultiAddress, config BootstrapConfig) (BootstrapSummary, error) {
@@ -80,6 +95,15 @@ func (host *Host) bootstrapFromAddress(ctx context.Context, address utils.MultiA
 	}
 	summary.ConnectedBootnodes++
 
+	loopContext := ctx
+	var stopLoop context.CancelFunc
+	if !config.StartConnectionLoops {
+		loopContext, stopLoop = context.WithCancel(ctx)
+		defer stopLoop()
+		defer connection.Close()
+	}
+	go host.HandleConnection(loopContext, connection)
+
 	targets := host.bootstrapTargetPeerIDs(config.RefreshTargetCount)
 	for _, targetPeerID := range targets {
 		querySummary, err := host.queryFindNode(ctx, connection, targetPeerID, config.QueryLimit, config.DialTimeout)
@@ -92,9 +116,6 @@ func (host *Host) bootstrapFromAddress(ctx context.Context, address utils.MultiA
 			)
 			continue
 		}
-	}
-	if config.StartConnectionLoops {
-		go host.HandleConnection(ctx, connection)
 	}
 	return summary, nil
 }
@@ -136,17 +157,11 @@ func (host *Host) queryFindNode(
 
 	queryContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := host.writeConnectionMessage(queryContext, connection, connection.RemotePeerID(), request); err != nil {
-		summary.FindNodeFailureCount = 1
-		return summary, err
-	}
-	response, err := connection.ReadMessage(queryContext)
+	response, err := host.requestOnConnection(queryContext, connection, connection.RemotePeerID(), request)
 	if err != nil {
 		summary.FindNodeFailureCount = 1
-		host.recordConnectionError(connection, err)
 		return summary, err
 	}
-	host.markConnectionRead(connection, response.FromPeerID)
 	peers, err := decodeFindNodeResponse(request, response, targetPeerID)
 	if err != nil {
 		summary.FindNodeFailureCount = 1

@@ -58,7 +58,9 @@ func TestHostHeartbeatWritesPing(t *testing.T) {
 	defer host.Close()
 
 	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
-	host.storeConnection(remotePeerID, connection)
+	if err := host.storeConnection(remotePeerID, connection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
 	host.heartbeatOnce(context.Background())
 
 	message := connection.waitWrite(t)
@@ -93,7 +95,9 @@ func TestHostHeartbeatClosesExpiredConnection(t *testing.T) {
 	defer host.Close()
 
 	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
-	host.storeConnection(remotePeerID, connection)
+	if err := host.storeConnection(remotePeerID, connection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
 	time.Sleep(2 * time.Millisecond)
 	host.heartbeatOnce(context.Background())
 
@@ -105,12 +109,151 @@ func TestHostHeartbeatClosesExpiredConnection(t *testing.T) {
 	}
 }
 
+func TestHostRejectsConnectionsOverLimit(t *testing.T) {
+	host, err := NewHost(HostConfig{
+		PeerID:         testPeerID(27),
+		MaxConnections: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	firstPeerID := testPeerID(28)
+	secondPeerID := testPeerID(29)
+	firstConnection := newScriptedConnection(utils.ProtocolTCP, firstPeerID, nil)
+	secondConnection := newScriptedConnection(utils.ProtocolTCP, secondPeerID, nil)
+
+	if err := host.storeConnection(firstPeerID, firstConnection); err != nil {
+		t.Fatalf("storeConnection(first) error = %v", err)
+	}
+	if err := host.storeConnection(secondPeerID, secondConnection); !errors.Is(err, ErrMaxConnectionsReached) {
+		t.Fatalf("storeConnection(second) error = %v, want ErrMaxConnectionsReached", err)
+	}
+}
+
+func TestHostRejectsSpoofedConnectionPeer(t *testing.T) {
+	localPeerID := testPeerID(30)
+	remotePeerID := testPeerID(31)
+	spoofedPeerID := testPeerID(32)
+	host, err := NewHost(HostConfig{PeerID: localPeerID})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	message, err := NewMessage(MessageTypeTransaction, nil)
+	if err != nil {
+		t.Fatalf("NewMessage() error = %v", err)
+	}
+	message.FromPeerID = spoofedPeerID
+	message.ToPeerID = localPeerID
+	if err := message.Validate(DefaultMaxMessageSize); err != nil {
+		t.Fatalf("message.Validate() error = %v", err)
+	}
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, []Message{message})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	host.HandleConnection(ctx, connection)
+
+	if _, ok := host.Connection(spoofedPeerID); ok {
+		t.Fatal("spoofed peer connection stored, want rejection")
+	}
+}
+
+func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
+	localPeerID := testPeerID(33)
+	remotePeerID := testPeerID(34)
+	host, err := NewHost(HostConfig{PeerID: localPeerID})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newResponsiveConnection(remotePeerID, localPeerID)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go host.HandleConnection(ctx, connection)
+
+	requestPayload, err := NewKADFindNodeRequest(localPeerID, 1)
+	if err != nil {
+		t.Fatalf("NewKADFindNodeRequest() error = %v", err)
+	}
+	payload, err := requestPayload.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	request, err := NewRequestMessage(localPeerID, ProtocolFindNodeRequestV1, payload)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+	request.ToPeerID = remotePeerID
+
+	response, err := host.requestOnConnection(ctx, connection, remotePeerID, request)
+	if err != nil {
+		t.Fatalf("requestOnConnection() error = %v", err)
+	}
+	if response.Type != ProtocolFindNodeResponseV1 {
+		t.Fatalf("response.Type = %d, want %d", response.Type, ProtocolFindNodeResponseV1)
+	}
+	if response.RequestID != request.ID {
+		t.Fatalf("response.RequestID = %q, want %q", response.RequestID, request.ID)
+	}
+
+	pong := connection.waitWrite(t)
+	if pong.Type != MessageTypePong {
+		t.Fatalf("interleaved response Type = %d, want pong", pong.Type)
+	}
+}
+
 type scriptedConnection struct {
 	protocol     utils.MultiAddressProtocol
 	remotePeerID string
 	reads        chan Message
 	writes       chan Message
 	closed       bool
+}
+
+type responsiveConnection struct {
+	*scriptedConnection
+	localPeerID string
+}
+
+func newResponsiveConnection(remotePeerID string, localPeerID string) *responsiveConnection {
+	return &responsiveConnection{
+		scriptedConnection: newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil),
+		localPeerID:        localPeerID,
+	}
+}
+
+func (connection *responsiveConnection) WriteMessage(ctx context.Context, message Message) error {
+	if message.Type != ProtocolFindNodeRequestV1 {
+		return connection.scriptedConnection.WriteMessage(ctx, message)
+	}
+
+	ping, err := NewRequestMessage(connection.remotePeerID, MessageTypePing, nil)
+	if err != nil {
+		return err
+	}
+	ping.ToPeerID = connection.localPeerID
+	connection.reads <- ping
+
+	responsePayload, err := NewKADFindNodeResponse(connection.localPeerID, nil)
+	if err != nil {
+		return err
+	}
+	payload, err := responsePayload.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	response, err := NewResponseMessage(connection.remotePeerID, ProtocolFindNodeResponseV1, message.ID, payload)
+	if err != nil {
+		return err
+	}
+	response.ToPeerID = connection.localPeerID
+	connection.reads <- response
+	return nil
 }
 
 func newScriptedConnection(protocol utils.MultiAddressProtocol, remotePeerID string, reads []Message) *scriptedConnection {

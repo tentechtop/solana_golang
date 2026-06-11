@@ -16,6 +16,7 @@ import (
 	appconfig "solana_golang/config"
 	"solana_golang/database"
 	"solana_golang/p2p"
+	p2ppeerstore "solana_golang/p2p/peerstore"
 	"solana_golang/rpc"
 	"solana_golang/utils"
 )
@@ -186,7 +187,7 @@ func (resources *runtimeResources) startP2P(config appconfig.P2PConfig, identity
 		PreferredProtocols:  p2pProtocolOrder(config.Protocol()),
 		MaxPeers:            config.MaxPeers,
 		Logger:              resources.logger,
-		PeerStore:           newDatabasePeerStore(resources.database),
+		PeerStore:           p2ppeerstore.NewDatabasePeerStore(resources.database),
 		PersistedPeerLimit:  config.MaxPeers,
 	})
 	if err != nil {

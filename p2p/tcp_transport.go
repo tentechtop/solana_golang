@@ -286,6 +286,11 @@ func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) erro
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = setDeadline(deadline)
 	}
+	if ctx.Done() == nil {
+		return func() {
+			_ = setDeadline(time.Time{})
+		}
+	}
 
 	done := make(chan struct{})
 	go func() {

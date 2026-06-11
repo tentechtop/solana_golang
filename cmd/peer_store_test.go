@@ -5,13 +5,14 @@ import (
 	"testing"
 
 	"solana_golang/p2p"
+	p2ppeerstore "solana_golang/p2p/peerstore"
 	"solana_golang/utils"
 )
 
 func TestDatabasePeerStoreSaveLoadDelete(t *testing.T) {
 	databaseInstance := openTestDatabase(t)
 	defer databaseInstance.Close()
-	store := newDatabasePeerStore(databaseInstance)
+	store := p2ppeerstore.NewDatabasePeerStore(databaseInstance)
 	peerID := testNodeIdentity(t).PeerID
 	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "127.0.0.1", utils.ProtocolTCP, 4101, peerID)
 	if err != nil {

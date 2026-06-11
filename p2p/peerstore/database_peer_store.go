@@ -1,4 +1,4 @@
-package main
+package peerstore
 
 import (
 	"context"
@@ -10,20 +10,20 @@ import (
 
 var databasePeerStorePrefix = []byte("peer_store/peer/")
 
-type databasePeerStore struct {
+type DatabasePeerStore struct {
 	database database.Database
 }
 
-// newDatabasePeerStore 创建数据库 PeerStore + 由 cmd 组合层连接 P2P 接口和本地 KV。
-func newDatabasePeerStore(databaseInstance database.Database) p2p.PeerStore {
+// NewDatabasePeerStore 创建数据库 PeerStore + 让启动层只负责组装不持有存储细节。
+func NewDatabasePeerStore(databaseInstance database.Database) p2p.PeerStore {
 	if databaseInstance == nil {
 		return nil
 	}
-	return &databasePeerStore{database: databaseInstance}
+	return &DatabasePeerStore{database: databaseInstance}
 }
 
 // LoadPeers 加载持久化节点 + 使用读事务保证启动恢复视图一致。
-func (store *databasePeerStore) LoadPeers(ctx context.Context, limit int) ([]p2p.Peer, error) {
+func (store *DatabasePeerStore) LoadPeers(ctx context.Context, limit int) ([]p2p.Peer, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -36,13 +36,13 @@ func (store *databasePeerStore) LoadPeers(ctx context.Context, limit int) ([]p2p
 
 	transaction, err := store.database.BeginReadTransaction()
 	if err != nil {
-		return nil, fmt.Errorf("cmd: begin peer store read: %w", err)
+		return nil, fmt.Errorf("p2p peerstore: begin read: %w", err)
 	}
 	defer transaction.Close()
 
 	pairs, err := transaction.PrefixQueryWithLimit(database.TablePeer, databasePeerStorePrefix, limit)
 	if err != nil {
-		return nil, fmt.Errorf("cmd: read peer store prefix: %w", err)
+		return nil, fmt.Errorf("p2p peerstore: read prefix: %w", err)
 	}
 	peers := make([]p2p.Peer, 0, len(pairs))
 	for _, pair := range pairs {
@@ -51,7 +51,7 @@ func (store *databasePeerStore) LoadPeers(ctx context.Context, limit int) ([]p2p
 		}
 		peer, err := p2p.UnmarshalPeerBinary(pair.Value)
 		if err != nil {
-			return nil, fmt.Errorf("cmd: decode stored peer %q: %w", string(pair.Key), err)
+			return nil, fmt.Errorf("p2p peerstore: decode peer %q: %w", string(pair.Key), err)
 		}
 		peers = append(peers, peer)
 	}
@@ -59,7 +59,7 @@ func (store *databasePeerStore) LoadPeers(ctx context.Context, limit int) ([]p2p
 }
 
 // SavePeer 保存节点快照 + 使用单条事务保持写入语义和后续扩展一致。
-func (store *databasePeerStore) SavePeer(ctx context.Context, peer p2p.Peer) error {
+func (store *DatabasePeerStore) SavePeer(ctx context.Context, peer p2p.Peer) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -68,18 +68,18 @@ func (store *databasePeerStore) SavePeer(ctx context.Context, peer p2p.Peer) err
 	}
 	encoded, err := peer.MarshalBinary()
 	if err != nil {
-		return fmt.Errorf("cmd: encode peer %s: %w", peer.ID, err)
+		return fmt.Errorf("p2p peerstore: encode peer %s: %w", peer.ID, err)
 	}
 	key := databasePeerStoreKey(peer.ID)
 	operation := database.NewUpdateOperation(database.TablePeer, key, encoded)
 	if err := store.database.DataTransaction([]database.DBOperation{operation}); err != nil {
-		return fmt.Errorf("cmd: save peer %s: %w", peer.ID, err)
+		return fmt.Errorf("p2p peerstore: save peer %s: %w", peer.ID, err)
 	}
 	return ctx.Err()
 }
 
 // DeletePeer 删除节点快照 + 用于屏蔽节点或运维清理。
-func (store *databasePeerStore) DeletePeer(ctx context.Context, peerID string) error {
+func (store *DatabasePeerStore) DeletePeer(ctx context.Context, peerID string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -87,10 +87,10 @@ func (store *databasePeerStore) DeletePeer(ctx context.Context, peerID string) e
 		return err
 	}
 	if _, err := p2p.NewPeer(peerID, nil); err != nil {
-		return fmt.Errorf("cmd: validate delete peer %s: %w", peerID, err)
+		return fmt.Errorf("p2p peerstore: validate delete peer %s: %w", peerID, err)
 	}
 	if err := store.database.Delete(database.TablePeer, databasePeerStoreKey(peerID)); err != nil {
-		return fmt.Errorf("cmd: delete peer %s: %w", peerID, err)
+		return fmt.Errorf("p2p peerstore: delete peer %s: %w", peerID, err)
 	}
 	return ctx.Err()
 }

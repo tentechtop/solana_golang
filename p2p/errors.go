@@ -9,11 +9,15 @@ var (
 	ErrNilHandler = errors.New("p2p: nil connection handler")
 	// ErrHostClosed 表示 Host 已关闭 + 防止关闭后继续写入连接池。
 	ErrHostClosed = errors.New("p2p: host closed")
-	// ErrPeerNotFound 表示节点不存在 + 供拨号和发送路径明确失败原因。
+	// ErrPeerNotFound 表示节点不存在 + 为拨号和发送路径提供明确失败原因。
 	ErrPeerNotFound = errors.New("p2p: peer not found")
-	// ErrUnsupportedProtocol 表示协议不支持 + 限制传输层只处理声明的协议。
 	// ErrMaxPeersReached 表示节点表已满 + 防止发现层无限写入内存。
-	ErrMaxPeersReached     = errors.New("p2p: max peers reached")
+	ErrMaxPeersReached = errors.New("p2p: max peers reached")
+	// ErrMaxConnectionsReached 表示连接池已满 + 防止恶意节点绕过 peer 表耗尽连接资源。
+	ErrMaxConnectionsReached = errors.New("p2p: max connections reached")
+	// ErrInboundLimitReached 表示入站连接并发已满 + 在握手前拒绝洪泛连接保护节点资源。
+	ErrInboundLimitReached = errors.New("p2p: inbound connection limit reached")
+	// ErrUnsupportedProtocol 表示协议不支持 + 限制传输层只处理声明的协议。
 	ErrUnsupportedProtocol = errors.New("p2p: unsupported protocol")
 	// ErrTransportUnavailable 表示传输不可用 + 允许 Host 降级尝试其他协议。
 	ErrTransportUnavailable = errors.New("p2p: transport unavailable")
