@@ -102,8 +102,8 @@ doc/
 1. 必须使用 Borsh 的场景：
    - P2P message body。
    - P2P 业务 payload。
-   - Solana instruction data。
-   - Solana account data。
+   - 链上 instruction data。
+   - 链上 account data。
    - 区块头固定字段编码。
    - 需要跨语言字节一致的结构。
    - 数据库 raw payload。
@@ -129,6 +129,21 @@ doc/
    - 新字段只能尾部追加。
    - 删除字段必须保留占位或新增版本。
    - 历史版本必须保留 decoder 和 migrate。
+
+5. 账户结构规范：
+   - Account 是地址到状态的 value，地址由数据库 key、交易账户列表或 PDA 规则提供，账户 payload 内不重复保存地址。
+   - 账户固定包含 5 个字段：lamports、data、owner、executable、rent_epoch。
+   - Borsh 字段顺序固定为：
+     1. lamports u64
+     2. data bytes
+     3. owner [32]byte
+     4. executable bool
+     5. rent_epoch u64
+   - 租金豁免最小余额使用公式：(data_len + 128) * 3480 * 2。
+   - 新建账户、扣减余额、扩容 data 后必须重新校验租金豁免。
+   - 单次指令内 data 增长不得超过 10 KiB。
+   - 账户 data 最大长度为 10 MiB。
+   - 关闭账户不应保存零余额脏状态，应在数据库事务中删除账户 key，并把 lamports 转入目标账户。
 
 
 六、P2P 开发规范

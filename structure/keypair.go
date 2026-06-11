@@ -19,7 +19,7 @@ type SolanaKeyPair struct {
 
 // KeyPairFromSeed 从 seed 派生密钥对 + 校验 32 字节 Ed25519 seed。
 func KeyPairFromSeed(seed []byte) (SolanaKeyPair, error) {
-	if err := requireValueLength(seed, SolanaPrivateKeySeedSize, "solana private key seed"); err != nil {
+	if err := requireValueLength(seed, SolanaPrivateKeySeedSize, "private key seed"); err != nil {
 		return SolanaKeyPair{}, err
 	}
 	publicKeyBytes, err := utils.DeriveEd25519PublicKeyFromPrivateKey(seed)
@@ -35,7 +35,7 @@ func KeyPairFromSeed(seed []byte) (SolanaKeyPair, error) {
 
 // KeyPairFromSecretKey64 加载 CLI 私钥 + 校验 seed 派生公钥与附带公钥一致。
 func KeyPairFromSecretKey64(secretKey []byte) (SolanaKeyPair, error) {
-	if err := requireValueLength(secretKey, SolanaSecretKeySize, "solana secret key"); err != nil {
+	if err := requireValueLength(secretKey, SolanaSecretKeySize, "secret key"); err != nil {
 		return SolanaKeyPair{}, err
 	}
 	keyPair, err := KeyPairFromSeed(secretKey[:SolanaPrivateKeySeedSize])
@@ -43,7 +43,7 @@ func KeyPairFromSecretKey64(secretKey []byte) (SolanaKeyPair, error) {
 		return SolanaKeyPair{}, err
 	}
 	if !utils.SecureEqual(keyPair.PublicKey[:], secretKey[SolanaPrivateKeySeedSize:]) {
-		return SolanaKeyPair{}, fmt.Errorf("structure: solana secret key public key does not match seed")
+		return SolanaKeyPair{}, fmt.Errorf("structure: secret key public key does not match seed")
 	}
 	return keyPair, nil
 }

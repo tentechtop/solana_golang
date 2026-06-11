@@ -48,6 +48,45 @@ type BlockMeta struct {
 	FinalizedTimeUnix int64
 }
 
+// TransactionStatusMeta 描述交易执行元数据 + 保持区块交易和执行结果分层。
+type TransactionStatusMeta struct {
+	Status               TransactionStatus `json:"status"`
+	Err                  string            `json:"err,omitempty"`
+	Fee                  uint64            `json:"fee"`
+	ComputeUnitsConsumed uint64            `json:"computeUnitsConsumed,omitempty"`
+	PreBalances          []uint64          `json:"preBalances,omitempty"`
+	PostBalances         []uint64          `json:"postBalances,omitempty"`
+	LogMessages          []string          `json:"logMessages,omitempty"`
+}
+
+// TransactionWithStatusMeta 描述带执行结果的交易 + 用于区块查询视图返回完整交易状态。
+type TransactionWithStatusMeta struct {
+	Transaction Transaction           `json:"transaction"`
+	Meta        TransactionStatusMeta `json:"meta"`
+}
+
+// BlockReward 描述区块奖励 + 用于区块查询视图展示奖励明细。
+type BlockReward struct {
+	Pubkey      string `json:"pubkey"`
+	Lamports    int64  `json:"lamports"`
+	PostBalance uint64 `json:"postBalance"`
+	RewardType  string `json:"rewardType,omitempty"`
+	Commission  *uint8 `json:"commission,omitempty"`
+}
+
+// ConfirmedBlockView 描述已确认区块查询视图 + 用于 RPC 和跨节点数据展示。
+type ConfirmedBlockView struct {
+	PreviousBlockhash   string                      `json:"previousBlockhash"`
+	Blockhash           string                      `json:"blockhash"`
+	ParentSlot          uint64                      `json:"parentSlot"`
+	Transactions        []TransactionWithStatusMeta `json:"transactions,omitempty"`
+	Signatures          []string                    `json:"signatures,omitempty"`
+	Rewards             []BlockReward               `json:"rewards,omitempty"`
+	NumRewardPartitions *uint64                     `json:"numRewardPartitions,omitempty"`
+	BlockTime           *int64                      `json:"blockTime,omitempty"`
+	BlockHeight         *uint64                     `json:"blockHeight,omitempty"`
+}
+
 // Block 描述完整区块 + 分离共识头、交易体和运行时元数据。
 type Block struct {
 	Header       BlockHeader
@@ -77,6 +116,43 @@ func (block Block) Validate() error {
 // Hash 计算区块哈希 + 使用区块头确定性序列化作为哈希输入。
 func (block Block) Hash() (Hash, error) {
 	return block.Header.Hash()
+}
+
+// ToConfirmedBlockView 转换已确认区块查询视图 + 保持内部共识字段和外部 RPC 结构分离。
+func (block Block) ToConfirmedBlockView() (ConfirmedBlockView, error) {
+	if err := block.Validate(); err != nil {
+		return ConfirmedBlockView{}, err
+	}
+
+	blockTime := block.Header.TimestampUnix
+	blockHeight := block.Header.BlockHeight
+	transactions := make([]TransactionWithStatusMeta, len(block.Transactions))
+	signatures := make([]string, len(block.Transactions))
+	for transactionIndex, transaction := range block.Transactions {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return ConfirmedBlockView{}, fmt.Errorf("structure: transaction %d id: %w", transactionIndex, err)
+		}
+		signatures[transactionIndex] = transactionID
+		transactions[transactionIndex] = TransactionWithStatusMeta{
+			Transaction: transaction.Clone(),
+			Meta: TransactionStatusMeta{
+				Status: transaction.Status,
+				Fee:    transaction.Fee,
+			},
+		}
+	}
+
+	return ConfirmedBlockView{
+		PreviousBlockhash: block.Header.PreviousBlockhash.String(),
+		Blockhash:         block.Header.Blockhash.String(),
+		ParentSlot:        block.Header.ParentSlot,
+		Transactions:      transactions,
+		Signatures:        signatures,
+		Rewards:           []BlockReward{},
+		BlockTime:         &blockTime,
+		BlockHeight:       &blockHeight,
+	}, nil
 }
 
 // MarshalBinary 序列化完整区块 + 为网络传输和持久化提供确定性格式。

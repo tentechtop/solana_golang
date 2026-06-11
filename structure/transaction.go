@@ -7,11 +7,15 @@ import (
 )
 
 const (
-	MaxAccountsPerTransaction     = 256
-	MaxInstructionsPerTransaction = 1024
-	MaxInstructionAccounts        = 256
-	MaxInstructionDataSize        = 64 * 1024
+	MaxSolanaTransactionSize      = 1232
+	MaxSignaturesPerTransaction   = 12
+	MaxAccountsPerTransaction     = 64
+	MaxInstructionsPerTransaction = 64
+	MaxInstructionAccounts        = MaxAccountsPerTransaction
+	MaxInstructionDataSize        = MaxSolanaTransactionSize
 	DefaultTransactionTTLMillis   = 400
+
+	solanaMessageVersionPrefixMask = 0x80
 )
 
 type TransactionStatus int16
@@ -30,14 +34,14 @@ type AccountMeta struct {
 	IsWritable bool
 }
 
-// MessageHeader 描述 Solana 消息头 + 用计数压缩账户签名和只读权限。
+// MessageHeader 描述交易消息头 + 用计数压缩账户签名和只读权限。
 type MessageHeader struct {
 	NumRequiredSignatures       uint8
 	NumReadonlySignedAccounts   uint8
 	NumReadonlyUnsignedAccounts uint8
 }
 
-// CompiledInstruction 描述 Solana 已编译指令 + 使用 u8 账户索引匹配链上格式。
+// CompiledInstruction 描述已编译指令 + 使用 u8 账户索引匹配链上格式。
 type CompiledInstruction struct {
 	ProgramIDIndex uint8
 	AccountIndexes []uint8
@@ -51,7 +55,7 @@ type MessageAddressTableLookup struct {
 	ReadonlyIndexes []uint8
 }
 
-// SolanaMessage 描述 Solana 可签名消息 + 作为交易签名和网络传输的核心结构。
+// SolanaMessage 描述可签名交易消息 + 作为交易签名和网络传输的核心结构。
 type SolanaMessage struct {
 	Header              MessageHeader
 	AccountKeys         []PublicKey
@@ -62,14 +66,6 @@ type SolanaMessage struct {
 	UsesAddressTable    bool
 }
 
-// PohRecord 描述交易关联 PoH 记录 + 为排序、过期和回放保护提供依据。
-type PohRecord struct {
-	Slot      uint64
-	Hash      Hash
-	Sequence  uint64
-	Timestamp int64
-}
-
 // Transaction 描述链上交易 + 覆盖交易池、打包、签名和执行所需字段。
 type Transaction struct {
 	Signatures      []Signature
@@ -77,7 +73,6 @@ type Transaction struct {
 	Instructions    []CompiledInstruction
 	RecentBlockhash Blockhash
 	Message         SolanaMessage
-	PohRecord       *PohRecord
 	Fee             uint64
 	Size            uint64
 	SubmitTime      int64
@@ -89,25 +84,28 @@ func (transaction Transaction) Validate() error {
 	if len(transaction.Signatures) == 0 {
 		return ErrEmptyTransactionSignatures
 	}
+	if len(transaction.Signatures) > MaxSignaturesPerTransaction {
+		return fmt.Errorf("%w: signatures count %d exceeds %d", ErrInvalidTransactionEncoding, len(transaction.Signatures), MaxSignaturesPerTransaction)
+	}
 	message, err := transaction.SolanaMessage()
 	if err != nil {
 		return err
 	}
 	if err := message.Validate(); err != nil {
-		return fmt.Errorf("structure: validate solana message: %w", err)
+		return fmt.Errorf("structure: validate transaction message: %w", err)
 	}
 	return transaction.validateSignatureCount(message.Header.NumRequiredSignatures)
 }
 
-// TxID 计算交易 ID + 使用首个签名的 SHA-256 作为稳定标识。
-func (transaction Transaction) TxID() (Hash, error) {
+// TxID 返回交易 ID + 使用第一笔签名保持公开交易格式语义。
+func (transaction Transaction) TxID() (Signature, error) {
 	if len(transaction.Signatures) == 0 {
-		return Hash{}, ErrEmptyTransactionSignatures
+		return Signature{}, ErrEmptyTransactionSignatures
 	}
-	return NewHash(utils.SHA256(transaction.Signatures[0][:]))
+	return transaction.Signatures[0], nil
 }
 
-// TxIDHex 返回交易 ID 十六进制 + 便于日志、索引和接口输出。
+// TxIDHex 返回交易 ID 十六进制 + 保留调试和本地索引可读性。
 func (transaction Transaction) TxIDHex() (string, error) {
 	transactionID, err := transaction.TxID()
 	if err != nil {
@@ -116,9 +114,22 @@ func (transaction Transaction) TxIDHex() (string, error) {
 	return transactionID.Hex(), nil
 }
 
-// Hash 计算交易哈希 + 保持与区块 Merkle Root 输入统一。
+// TxIDString 返回交易 ID 文本 + 使用 base58 签名便于外部接口展示。
+func (transaction Transaction) TxIDString() (string, error) {
+	transactionID, err := transaction.TxID()
+	if err != nil {
+		return "", err
+	}
+	return transactionID.String(), nil
+}
+
+// Hash 计算交易摘要 + 区块 Merkle 输入使用完整 wire bytes 避免混淆交易 ID 和摘要。
 func (transaction Transaction) Hash() (Hash, error) {
-	return transaction.TxID()
+	encoded, err := transaction.MarshalBinary()
+	if err != nil {
+		return Hash{}, err
+	}
+	return NewHash(utils.SHA256(encoded))
 }
 
 // Sender 返回交易发送方 + 使用第一个可写签名账户作为扣费账户。
@@ -176,7 +187,7 @@ func (transaction Transaction) BuildSignData() ([]byte, error) {
 	return message.MarshalBinary()
 }
 
-// MarshalBinary 序列化 Solana 交易 + 只包含签名和 message 避免业务元数据污染链上格式。
+// MarshalBinary 序列化链上交易 + 只包含签名和 message 避免业务元数据污染链上格式。
 func (transaction Transaction) MarshalBinary() ([]byte, error) {
 	if err := transaction.Validate(); err != nil {
 		return nil, err
@@ -191,7 +202,43 @@ func (transaction Transaction) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("structure: build sign data: %w", err)
 	}
 	encoded = append(encoded, signData...)
+	if len(encoded) > MaxSolanaTransactionSize {
+		return nil, fmt.Errorf("%w: got %d, max %d", ErrTransactionTooLarge, len(encoded), MaxSolanaTransactionSize)
+	}
 	return encoded, nil
+}
+
+// UnmarshalTransactionBinary 反序列化链上交易 + 支持 legacy 和 v0 版本化 wire format。
+func UnmarshalTransactionBinary(data []byte) (Transaction, error) {
+	if len(data) == 0 {
+		return Transaction{}, fmt.Errorf("%w: empty transaction", ErrInvalidTransactionEncoding)
+	}
+	if len(data) > MaxSolanaTransactionSize {
+		return Transaction{}, fmt.Errorf("%w: got %d, max %d", ErrTransactionTooLarge, len(data), MaxSolanaTransactionSize)
+	}
+
+	offset := 0
+	signatures, err := readSignatures(data, &offset)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("structure: decode signatures: %w", err)
+	}
+	message, err := readSolanaMessage(data, &offset)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("structure: decode message: %w", err)
+	}
+	if offset != len(data) {
+		return Transaction{}, fmt.Errorf("%w: %d trailing bytes", ErrInvalidTransactionEncoding, len(data)-offset)
+	}
+
+	transaction := Transaction{
+		Signatures:      signatures,
+		Accounts:        message.StaticAccountMetas(),
+		Instructions:    cloneInstructions(message.Instructions),
+		RecentBlockhash: message.RecentBlockhash,
+		Message:         message,
+		Size:            uint64(len(data)),
+	}
+	return transaction, transaction.Validate()
 }
 
 // EstimatedSize 估算交易大小 + 预分配容量减少热路径内存分配。
@@ -220,7 +267,6 @@ func (transaction Transaction) Clone() Transaction {
 		Instructions:    cloneInstructions(transaction.Instructions),
 		RecentBlockhash: transaction.RecentBlockhash,
 		Message:         transaction.Message.Clone(),
-		PohRecord:       clonePohRecord(transaction.PohRecord),
 		Fee:             transaction.Fee,
 		Size:            transaction.Size,
 		SubmitTime:      transaction.SubmitTime,
@@ -237,7 +283,7 @@ func (instruction CompiledInstruction) Clone() CompiledInstruction {
 	}
 }
 
-// SolanaMessage 返回 Solana 消息 + 优先使用显式 Message 否则从账户元数据构建。
+// SolanaMessage 返回交易消息 + 优先使用显式 Message 否则从账户元数据构建。
 func (transaction Transaction) SolanaMessage() (SolanaMessage, error) {
 	if !transaction.Message.IsZero() {
 		return transaction.Message.Clone(), nil
@@ -259,10 +305,13 @@ func (transaction Transaction) SolanaMessage() (SolanaMessage, error) {
 	}, nil
 }
 
-// Validate 校验 Solana 消息 + 防止账户索引、地址表和权限头越界。
+// Validate 校验交易消息 + 防止账户索引、地址表和权限头越界。
 func (message SolanaMessage) Validate() error {
 	if message.UsesAddressTable && message.Version != 0 {
-		return fmt.Errorf("%w: only solana v0 message is supported", ErrInvalidMessageVersion)
+		return fmt.Errorf("%w: only v0 message is supported", ErrInvalidMessageVersion)
+	}
+	if !message.UsesAddressTable && message.Version != 0 {
+		return fmt.Errorf("%w: legacy message cannot carry a version", ErrInvalidMessageVersion)
 	}
 	if !message.UsesAddressTable && len(message.AddressTableLookups) > 0 {
 		return fmt.Errorf("%w: legacy message cannot contain address table lookups", ErrInvalidAddressTableLookup)
@@ -286,7 +335,7 @@ func (message SolanaMessage) Validate() error {
 	return validateAddressTableLookups(message.AddressTableLookups)
 }
 
-// MarshalBinary 序列化 Solana 消息 + 使用 short_vec 编码兼容官方交易格式。
+// MarshalBinary 序列化交易消息 + 使用 short_vec 编码保持链上格式稳定。
 func (message SolanaMessage) MarshalBinary() ([]byte, error) {
 	if err := message.Validate(); err != nil {
 		return nil, err
@@ -294,7 +343,7 @@ func (message SolanaMessage) MarshalBinary() ([]byte, error) {
 
 	encoded := make([]byte, 0, estimateMessageSize(message))
 	if message.UsesAddressTable {
-		encoded = append(encoded, 0x80|message.Version)
+		encoded = append(encoded, solanaMessageVersionPrefixMask|message.Version)
 	}
 	encoded = append(encoded, message.Header.NumRequiredSignatures)
 	encoded = append(encoded, message.Header.NumReadonlySignedAccounts)
@@ -312,7 +361,23 @@ func (message SolanaMessage) MarshalBinary() ([]byte, error) {
 	return encoded, nil
 }
 
-// Clone 深拷贝 Solana 消息 + 避免交易结构跨协程共享切片。
+// UnmarshalSolanaMessageBinary 反序列化交易消息 + 自动识别 legacy 和 v0 前缀。
+func UnmarshalSolanaMessageBinary(data []byte) (SolanaMessage, error) {
+	if len(data) == 0 {
+		return SolanaMessage{}, fmt.Errorf("%w: empty message", ErrInvalidTransactionEncoding)
+	}
+	offset := 0
+	message, err := readSolanaMessage(data, &offset)
+	if err != nil {
+		return SolanaMessage{}, err
+	}
+	if offset != len(data) {
+		return SolanaMessage{}, fmt.Errorf("%w: %d trailing bytes", ErrInvalidTransactionEncoding, len(data)-offset)
+	}
+	return message, message.Validate()
+}
+
+// Clone 深拷贝交易消息 + 避免交易结构跨协程共享切片。
 func (message SolanaMessage) Clone() SolanaMessage {
 	return SolanaMessage{
 		Header:              message.Header,
@@ -328,6 +393,25 @@ func (message SolanaMessage) Clone() SolanaMessage {
 // IsZero 判断是否未显式设置消息 + 便于兼容账户元数据构建模式。
 func (message SolanaMessage) IsZero() bool {
 	return len(message.AccountKeys) == 0 && len(message.Instructions) == 0 && message.RecentBlockhash == (Blockhash{})
+}
+
+// StaticAccountMetas 还原静态账户权限 + 按 message header 计算 signer 和 writable。
+func (message SolanaMessage) StaticAccountMetas() []AccountMeta {
+	accounts := make([]AccountMeta, len(message.AccountKeys))
+	requiredSignatures := int(message.Header.NumRequiredSignatures)
+	readonlySignedStart := requiredSignatures - int(message.Header.NumReadonlySignedAccounts)
+	readonlyUnsignedStart := len(message.AccountKeys) - int(message.Header.NumReadonlyUnsignedAccounts)
+	for accountIndex, publicKey := range message.AccountKeys {
+		isSigner := accountIndex < requiredSignatures
+		isReadonlySigned := isSigner && accountIndex >= readonlySignedStart
+		isReadonlyUnsigned := !isSigner && accountIndex >= readonlyUnsignedStart
+		accounts[accountIndex] = AccountMeta{
+			PublicKey:  publicKey,
+			IsSigner:   isSigner,
+			IsWritable: !isReadonlySigned && !isReadonlyUnsigned,
+		}
+	}
+	return accounts
 }
 
 // totalAccountCount 统计消息账户总数 + 将地址表展开账户计入索引边界。
@@ -374,13 +458,13 @@ func validateUniqueAccounts(accounts []AccountMeta) error {
 	return nil
 }
 
-// validateAccountOrder 校验账户排列顺序 + 保持与 Solana 消息头计数规则一致。
+// validateAccountOrder 校验账户排列顺序 + 保持与消息头计数规则一致。
 func validateAccountOrder(accounts []AccountMeta) error {
 	lastGroup := 0
 	for accountIndex, account := range accounts {
 		group := accountPermissionGroup(account)
 		if group < lastGroup {
-			return fmt.Errorf("%w: account %d order violates solana header layout", ErrInvalidAccountMeta, accountIndex)
+			return fmt.Errorf("%w: account %d order violates message header layout", ErrInvalidAccountMeta, accountIndex)
 		}
 		lastGroup = group
 	}
@@ -464,7 +548,7 @@ func validateAddressTableLookups(lookups []MessageAddressTableLookup) error {
 	return nil
 }
 
-// appendSignatures 编码签名列表 + 使用 short_vec 长度匹配 Solana 格式。
+// appendSignatures 编码签名列表 + 使用 short_vec 长度保持链上格式稳定。
 func appendSignatures(encoded *[]byte, signatures []Signature) error {
 	if err := appendShortVecLength(encoded, len(signatures)); err != nil {
 		return err
@@ -548,6 +632,240 @@ func appendShortVecLength(encoded *[]byte, length int) error {
 	return nil
 }
 
+func readSignatures(data []byte, offset *int) ([]Signature, error) {
+	signatureCount, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	if signatureCount == 0 {
+		return nil, ErrEmptyTransactionSignatures
+	}
+	if signatureCount > MaxSignaturesPerTransaction {
+		return nil, fmt.Errorf("%w: signatures count %d exceeds %d", ErrInvalidTransactionEncoding, signatureCount, MaxSignaturesPerTransaction)
+	}
+
+	signatures := make([]Signature, signatureCount)
+	for signatureIndex := range signatures {
+		signatureBytes, err := readFixedBytes(data, offset, SignatureSize)
+		if err != nil {
+			return nil, fmt.Errorf("signature %d: %w", signatureIndex, err)
+		}
+		signature, err := NewSignature(signatureBytes)
+		if err != nil {
+			return nil, err
+		}
+		signatures[signatureIndex] = signature
+	}
+	return signatures, nil
+}
+
+func readSolanaMessage(data []byte, offset *int) (SolanaMessage, error) {
+	if *offset >= len(data) {
+		return SolanaMessage{}, fmt.Errorf("%w: missing message header", ErrInvalidTransactionEncoding)
+	}
+
+	firstByte, err := readUint8(data, offset)
+	if err != nil {
+		return SolanaMessage{}, err
+	}
+	message := SolanaMessage{}
+	if firstByte&solanaMessageVersionPrefixMask != 0 {
+		message.UsesAddressTable = true
+		message.Version = firstByte &^ solanaMessageVersionPrefixMask
+		if message.Version != 0 {
+			return SolanaMessage{}, fmt.Errorf("%w: unsupported version %d", ErrInvalidMessageVersion, message.Version)
+		}
+		message.Header.NumRequiredSignatures, err = readUint8(data, offset)
+	} else {
+		message.Header.NumRequiredSignatures = firstByte
+	}
+	if err != nil {
+		return SolanaMessage{}, err
+	}
+	if message.Header.NumReadonlySignedAccounts, err = readUint8(data, offset); err != nil {
+		return SolanaMessage{}, err
+	}
+	if message.Header.NumReadonlyUnsignedAccounts, err = readUint8(data, offset); err != nil {
+		return SolanaMessage{}, err
+	}
+
+	if message.AccountKeys, err = readPublicKeys(data, offset); err != nil {
+		return SolanaMessage{}, fmt.Errorf("account keys: %w", err)
+	}
+	blockhashBytes, err := readFixedBytes(data, offset, HashSize)
+	if err != nil {
+		return SolanaMessage{}, fmt.Errorf("recent blockhash: %w", err)
+	}
+	recentBlockhash, err := NewHash(blockhashBytes)
+	if err != nil {
+		return SolanaMessage{}, err
+	}
+	message.RecentBlockhash = recentBlockhash
+	if message.Instructions, err = readInstructions(data, offset); err != nil {
+		return SolanaMessage{}, fmt.Errorf("instructions: %w", err)
+	}
+	if message.UsesAddressTable {
+		if message.AddressTableLookups, err = readAddressTableLookups(data, offset); err != nil {
+			return SolanaMessage{}, fmt.Errorf("address table lookups: %w", err)
+		}
+	}
+	return message, message.Validate()
+}
+
+func readPublicKeys(data []byte, offset *int) ([]PublicKey, error) {
+	keyCount, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	if keyCount == 0 {
+		return nil, ErrEmptyAccountKeys
+	}
+	if keyCount > MaxAccountsPerTransaction {
+		return nil, fmt.Errorf("%w: account key count %d exceeds %d", ErrInvalidTransactionEncoding, keyCount, MaxAccountsPerTransaction)
+	}
+
+	publicKeys := make([]PublicKey, keyCount)
+	for keyIndex := range publicKeys {
+		keyBytes, err := readFixedBytes(data, offset, PublicKeySize)
+		if err != nil {
+			return nil, fmt.Errorf("account key %d: %w", keyIndex, err)
+		}
+		publicKey, err := NewPublicKey(keyBytes)
+		if err != nil {
+			return nil, err
+		}
+		publicKeys[keyIndex] = publicKey
+	}
+	return publicKeys, nil
+}
+
+func readInstructions(data []byte, offset *int) ([]CompiledInstruction, error) {
+	instructionCount, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	if instructionCount == 0 {
+		return nil, ErrEmptyInstructions
+	}
+	if instructionCount > MaxInstructionsPerTransaction {
+		return nil, fmt.Errorf("%w: instruction count %d exceeds %d", ErrInvalidTransactionEncoding, instructionCount, MaxInstructionsPerTransaction)
+	}
+
+	instructions := make([]CompiledInstruction, instructionCount)
+	for instructionIndex := range instructions {
+		instruction, err := readInstruction(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("instruction %d: %w", instructionIndex, err)
+		}
+		instructions[instructionIndex] = instruction
+	}
+	return instructions, nil
+}
+
+func readInstruction(data []byte, offset *int) (CompiledInstruction, error) {
+	programIDIndex, err := readUint8(data, offset)
+	if err != nil {
+		return CompiledInstruction{}, fmt.Errorf("program id index: %w", err)
+	}
+	accountIndexes, err := readUint8Indexes(data, offset)
+	if err != nil {
+		return CompiledInstruction{}, fmt.Errorf("account indexes: %w", err)
+	}
+	instructionData, err := readShortBytes(data, offset, MaxInstructionDataSize)
+	if err != nil {
+		return CompiledInstruction{}, fmt.Errorf("instruction data: %w", err)
+	}
+	return CompiledInstruction{
+		ProgramIDIndex: programIDIndex,
+		AccountIndexes: accountIndexes,
+		Data:           instructionData,
+	}, nil
+}
+
+func readAddressTableLookups(data []byte, offset *int) ([]MessageAddressTableLookup, error) {
+	lookupCount, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	lookups := make([]MessageAddressTableLookup, lookupCount)
+	for lookupIndex := range lookups {
+		accountKeyBytes, err := readFixedBytes(data, offset, PublicKeySize)
+		if err != nil {
+			return nil, fmt.Errorf("lookup %d account key: %w", lookupIndex, err)
+		}
+		accountKey, err := NewPublicKey(accountKeyBytes)
+		if err != nil {
+			return nil, err
+		}
+		writableIndexes, err := readUint8Indexes(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("lookup %d writable indexes: %w", lookupIndex, err)
+		}
+		readonlyIndexes, err := readUint8Indexes(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("lookup %d readonly indexes: %w", lookupIndex, err)
+		}
+		lookups[lookupIndex] = MessageAddressTableLookup{
+			AccountKey:      accountKey,
+			WritableIndexes: writableIndexes,
+			ReadonlyIndexes: readonlyIndexes,
+		}
+	}
+	return lookups, nil
+}
+
+func readUint8Indexes(data []byte, offset *int) ([]uint8, error) {
+	indexCount, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	if indexCount > MaxInstructionAccounts {
+		return nil, fmt.Errorf("%w: index count %d exceeds %d", ErrInvalidTransactionEncoding, indexCount, MaxInstructionAccounts)
+	}
+	return readFixedBytes(data, offset, indexCount)
+}
+
+func readShortBytes(data []byte, offset *int, maxLength int) ([]byte, error) {
+	length, err := readShortVecLength(data, offset)
+	if err != nil {
+		return nil, err
+	}
+	if length > maxLength {
+		return nil, fmt.Errorf("%w: byte length %d exceeds %d", ErrInvalidTransactionEncoding, length, maxLength)
+	}
+	return readFixedBytes(data, offset, length)
+}
+
+func readShortVecLength(data []byte, offset *int) (int, error) {
+	length, bytesRead, err := utils.DecodeShortVecLength(data[*offset:])
+	if err != nil {
+		return 0, err
+	}
+	*offset += bytesRead
+	return length, nil
+}
+
+func readUint8(data []byte, offset *int) (uint8, error) {
+	if *offset >= len(data) {
+		return 0, fmt.Errorf("%w: unexpected end", ErrInvalidTransactionEncoding)
+	}
+	value := data[*offset]
+	*offset = *offset + 1
+	return value, nil
+}
+
+func readFixedBytes(data []byte, offset *int, length int) ([]byte, error) {
+	if length < 0 {
+		return nil, fmt.Errorf("%w: negative length", ErrInvalidTransactionEncoding)
+	}
+	if len(data)-*offset < length {
+		return nil, fmt.Errorf("%w: need %d bytes, remaining %d", ErrInvalidTransactionEncoding, length, len(data)-*offset)
+	}
+	value := utils.CloneBytes(data[*offset : *offset+length])
+	*offset += length
+	return value, nil
+}
+
 // estimateMessageSize 估算消息编码大小 + 为序列化预分配容量降低分配次数。
 func estimateMessageSize(message SolanaMessage) int {
 	size := 3 + 3 + len(message.AccountKeys)*PublicKeySize + PublicKeySize
@@ -595,7 +913,7 @@ func accountPublicKeys(accounts []AccountMeta) []PublicKey {
 	return publicKeys
 }
 
-// accountPermissionGroup 计算账户排序分组 + 匹配 Solana 签名和写权限布局。
+// accountPermissionGroup 计算账户排序分组 + 匹配签名和写权限布局。
 func accountPermissionGroup(account AccountMeta) int {
 	if account.IsSigner && account.IsWritable {
 		return 0
@@ -655,13 +973,6 @@ func cloneAddressTableLookups(value []MessageAddressTableLookup) []MessageAddres
 		}
 	}
 	return cloned
-}
-func clonePohRecord(value *PohRecord) *PohRecord {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
 }
 func cloneUint8Slice(value []uint8) []uint8 {
 	if value == nil {

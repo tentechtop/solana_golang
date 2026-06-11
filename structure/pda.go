@@ -68,7 +68,7 @@ func FindProgramAddress(seeds [][]byte, programID PublicKey) (PublicKey, byte, e
 	return PublicKey{}, 0, fmt.Errorf("structure: unable to find a viable program address bump seed")
 }
 
-// CreateWithSeed 派生种子地址 + 匹配 Solana create_with_seed 规则。
+// CreateWithSeed 派生种子地址 + 匹配 create_with_seed 派生规则。
 func CreateWithSeed(base PublicKey, seed string, owner PublicKey) (PublicKey, error) {
 	if len(seed) > maxSeedStringLength {
 		return PublicKey{}, fmt.Errorf("structure: seed string exceeds %d bytes", maxSeedStringLength)

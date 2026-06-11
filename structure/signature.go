@@ -34,7 +34,7 @@ func VerifyMessageSignature(publicKey PublicKey, message []byte, signature Signa
 	return utils.Ed25519Verify(publicKey[:], message, signature[:])
 }
 
-// VerifySignatures 校验交易签名 + 按 Solana 账户顺序校验前 N 个签名账户。
+// VerifySignatures 校验交易签名 + 按消息账户顺序校验前 N 个签名账户。
 func (transaction Transaction) VerifySignatures() ([]SignatureVerification, error) {
 	message, err := transaction.SolanaMessage()
 	if err != nil {
@@ -76,7 +76,7 @@ func (transaction Transaction) HasValidSignatures() (bool, error) {
 	return true, nil
 }
 
-// Sign 使用账户私钥签署交易 + 按 Solana 签名账户顺序生成签名列表。
+// Sign 使用账户私钥签署交易 + 按消息签名账户顺序生成签名列表。
 func (transaction Transaction) Sign(privateKeys map[PublicKey][]byte) (Transaction, error) {
 	message, err := transaction.SolanaMessage()
 	if err != nil {

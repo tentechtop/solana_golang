@@ -44,7 +44,7 @@ func (instruction CompiledInstruction) HasAccountIndex(accountIndex uint8) bool 
 	return false
 }
 
-// MarshalBinary 序列化已编译指令 + 保持和 Solana message 指令格式一致。
+// MarshalBinary 序列化已编译指令 + 保持和交易消息指令格式一致。
 func (instruction CompiledInstruction) MarshalBinary() ([]byte, error) {
 	if err := instruction.Validate(MaxAccountsPerTransaction); err != nil {
 		return nil, err
@@ -56,7 +56,7 @@ func (instruction CompiledInstruction) MarshalBinary() ([]byte, error) {
 	return encoded, nil
 }
 
-// CompileInstruction 编译业务指令账户 + 使用公钥索引表生成 Solana 指令。
+// CompileInstruction 编译业务指令账户 + 使用公钥索引表生成已编译指令。
 func CompileInstruction(programID PublicKey, accountKeys []PublicKey, data []byte, accountIndexByKey map[PublicKey]uint8) (CompiledInstruction, error) {
 	programIDIndex, exists := accountIndexByKey[programID]
 	if !exists {

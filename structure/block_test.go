@@ -106,6 +106,34 @@ func TestBlockMarshalExcludesRuntimeMeta(t *testing.T) {
 		t.Fatal("Hash() changed after runtime meta mutation")
 	}
 }
+
+func TestBlockToConfirmedBlockView(t *testing.T) {
+	block := newTestBlock(t)
+
+	confirmedBlock, err := block.ToConfirmedBlockView()
+	if err != nil {
+		t.Fatalf("ToConfirmedBlockView() error = %v", err)
+	}
+	if confirmedBlock.Blockhash != block.Header.Blockhash.String() {
+		t.Fatalf("Blockhash = %q, want %q", confirmedBlock.Blockhash, block.Header.Blockhash.String())
+	}
+	if confirmedBlock.PreviousBlockhash != block.Header.PreviousBlockhash.String() {
+		t.Fatalf("PreviousBlockhash = %q, want %q", confirmedBlock.PreviousBlockhash, block.Header.PreviousBlockhash.String())
+	}
+	if confirmedBlock.ParentSlot != block.Header.ParentSlot {
+		t.Fatalf("ParentSlot = %d, want %d", confirmedBlock.ParentSlot, block.Header.ParentSlot)
+	}
+	if confirmedBlock.BlockHeight == nil || *confirmedBlock.BlockHeight != block.Header.BlockHeight {
+		t.Fatalf("BlockHeight = %v, want %d", confirmedBlock.BlockHeight, block.Header.BlockHeight)
+	}
+	if len(confirmedBlock.Transactions) != len(block.Transactions) {
+		t.Fatalf("Transactions length = %d, want %d", len(confirmedBlock.Transactions), len(block.Transactions))
+	}
+	if len(confirmedBlock.Signatures) != len(block.Transactions) {
+		t.Fatalf("Signatures length = %d, want %d", len(confirmedBlock.Signatures), len(block.Transactions))
+	}
+}
+
 func TestBlockHeaderMarshalGoldenLayout(t *testing.T) {
 	block := newTestBlock(t)
 	encoded, err := block.Header.MarshalBinary()

@@ -26,8 +26,18 @@ func TestTransactionValidateMarshalAndHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TxID() error = %v", err)
 	}
-	if transactionID == (Hash{}) {
+	if transactionID == (Signature{}) {
 		t.Fatal("TxID() returned zero hash")
+	}
+	if !transactionID.Equal(transaction.Signatures[0]) {
+		t.Fatal("TxID() did not return first signature")
+	}
+	transactionHash, err := transaction.Hash()
+	if err != nil {
+		t.Fatalf("Hash() error = %v", err)
+	}
+	if transactionHash == (Hash{}) {
+		t.Fatal("Hash() returned zero hash")
 	}
 }
 func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
@@ -99,6 +109,64 @@ func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
 
 	if err := transaction.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestTransactionUnmarshalLegacyRoundTrip(t *testing.T) {
+	transaction := newTestTransaction(t)
+	encoded, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	decoded, err := UnmarshalTransactionBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalTransactionBinary() error = %v", err)
+	}
+	reencoded, err := decoded.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(decoded) error = %v", err)
+	}
+	if string(reencoded) != string(encoded) {
+		t.Fatal("legacy transaction did not round trip")
+	}
+	if decoded.Message.UsesAddressTable {
+		t.Fatal("legacy message UsesAddressTable = true")
+	}
+}
+
+func TestVersionedMessageUsesPrefixAndRoundTrip(t *testing.T) {
+	transaction := newTestVersionedTransaction()
+	encoded, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+
+	messageOffset := 1 + SignatureSize
+	if encoded[messageOffset] != 0x80 {
+		t.Fatalf("version prefix = %#x, want 0x80", encoded[messageOffset])
+	}
+
+	decoded, err := UnmarshalTransactionBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalTransactionBinary() error = %v", err)
+	}
+	if !decoded.Message.UsesAddressTable {
+		t.Fatal("decoded message UsesAddressTable = false")
+	}
+	if decoded.Message.Version != 0 {
+		t.Fatalf("decoded version = %d, want 0", decoded.Message.Version)
+	}
+	if len(decoded.Message.AddressTableLookups) != 1 {
+		t.Fatalf("decoded lookups = %d, want 1", len(decoded.Message.AddressTableLookups))
+	}
+}
+
+func TestTransactionRejectsOversizedWireTransaction(t *testing.T) {
+	transaction := newOversizedWireTransaction()
+
+	if _, err := transaction.MarshalBinary(); !errors.Is(err, ErrTransactionTooLarge) {
+		t.Fatalf("MarshalBinary(oversized) error = %v, want ErrTransactionTooLarge", err)
 	}
 }
 func TestTransactionSenderAndSignerAccounts(t *testing.T) {
@@ -292,18 +360,75 @@ func newTestTransaction(t *testing.T) Transaction {
 			},
 		},
 		RecentBlockhash: newTestHash(3),
-		PohRecord: &PohRecord{
-			Slot:      2,
-			Hash:      newTestHash(4),
-			Sequence:  10,
-			Timestamp: 1000,
-		},
-		Fee:        5000,
-		Size:       0,
-		SubmitTime: 1000,
-		Status:     TransactionStatusPending,
+		Fee:             5000,
+		Size:            0,
+		SubmitTime:      1000,
+		Status:          TransactionStatusPending,
 	}
 }
+
+func newTestVersionedTransaction() Transaction {
+	return Transaction{
+		Signatures: []Signature{newTestSignature(1)},
+		Message: SolanaMessage{
+			Header: MessageHeader{
+				NumRequiredSignatures:       1,
+				NumReadonlySignedAccounts:   0,
+				NumReadonlyUnsignedAccounts: 0,
+			},
+			AccountKeys:     []PublicKey{newTestPublicKey(1)},
+			RecentBlockhash: newTestHash(3),
+			Instructions: []CompiledInstruction{
+				{
+					ProgramIDIndex: 1,
+					AccountIndexes: []uint8{0, 1},
+					Data:           []byte{1},
+				},
+			},
+			AddressTableLookups: []MessageAddressTableLookup{
+				{
+					AccountKey:      newTestPublicKey(9),
+					WritableIndexes: []uint8{2},
+				},
+			},
+			Version:          0,
+			UsesAddressTable: true,
+		},
+		Status: TransactionStatusPending,
+	}
+}
+
+func newOversizedWireTransaction() Transaction {
+	signatures := make([]Signature, MaxSignaturesPerTransaction)
+	accounts := make([]AccountMeta, 0, MaxSignaturesPerTransaction+1)
+	for index := range signatures {
+		signatures[index] = newTestSignature(byte(index + 1))
+		accounts = append(accounts, AccountMeta{
+			PublicKey:  newTestPublicKey(byte(index + 1)),
+			IsSigner:   true,
+			IsWritable: true,
+		})
+	}
+	accounts = append(accounts, AccountMeta{
+		PublicKey:  newTestPublicKey(30),
+		IsSigner:   false,
+		IsWritable: false,
+	})
+	return Transaction{
+		Signatures: signatures,
+		Accounts:   accounts,
+		Instructions: []CompiledInstruction{
+			{
+				ProgramIDIndex: uint8(len(accounts) - 1),
+				AccountIndexes: []uint8{0},
+				Data:           make([]byte, 20),
+			},
+		},
+		RecentBlockhash: newTestHash(3),
+		Status:          TransactionStatusPending,
+	}
+}
+
 func newTestPublicKey(seed byte) PublicKey {
 	var key PublicKey
 	for index := range key {

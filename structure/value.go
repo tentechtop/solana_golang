@@ -42,7 +42,7 @@ func PublicKeyFromBytes(value []byte) (PublicKey, error) {
 	return NewPublicKey(value)
 }
 
-// PublicKeyFromBase58 解码 Base58 公钥 + 兼容 Solana 地址格式。
+// PublicKeyFromBase58 解码 Base58 公钥 + 兼容链上地址格式。
 func PublicKeyFromBase58(value string) (PublicKey, error) {
 	decoded, err := utils.Base58Decode(value)
 	if err != nil {
