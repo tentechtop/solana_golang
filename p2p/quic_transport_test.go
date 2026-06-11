@@ -12,8 +12,8 @@ import (
 func TestQUICTransportSendMessage(t *testing.T) {
 	peerID := testPeerID(7)
 	address := testAddress(t, utils.ProtocolQUIC, freeUDPPort(t), peerID)
-	serverTransport := NewQUICTransport()
-	clientTransport := NewQUICTransport()
+	serverTransport := newInsecureQUICTransportForTest(t)
+	clientTransport := newInsecureQUICTransportForTest(t)
 	defer serverTransport.Close()
 	defer clientTransport.Close()
 
@@ -65,6 +65,31 @@ func TestQUICTransportSendMessage(t *testing.T) {
 	if err := <-listenErrors; err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
+}
+
+func TestQUICTransportUsesTemporaryTLSAndSkipsCertificateChain(t *testing.T) {
+	transport, err := NewQUICTransport()
+	if err != nil {
+		t.Fatalf("NewQUICTransport() error = %v", err)
+	}
+	defer transport.Close()
+
+	tlsConfig, err := transport.clientTLSConfig()
+	if err != nil {
+		t.Fatalf("clientTLSConfig() error = %v", err)
+	}
+	if !tlsConfig.InsecureSkipVerify {
+		t.Fatal("clientTLSConfig().InsecureSkipVerify = false, want true")
+	}
+}
+
+func newInsecureQUICTransportForTest(t *testing.T) *QUICTransport {
+	t.Helper()
+	transport, err := NewQUICTransport()
+	if err != nil {
+		t.Fatalf("NewQUICTransport() error = %v", err)
+	}
+	return transport
 }
 
 func dialQUICEventually(t *testing.T, transport *QUICTransport, address utils.MultiAddress) Connection {

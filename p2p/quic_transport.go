@@ -49,21 +49,25 @@ type QUICTransport struct {
 	logger         *slog.Logger
 }
 
-// NewQUICTransport 创建默认 QUIC 传输 + 使用安全消息上限和临时 TLS 证书。
-func NewQUICTransport() *QUICTransport {
+// NewQUICTransport 创建默认 QUIC 传输 + 使用临时自签证书满足 QUIC 握手要求。
+func NewQUICTransport() (*QUICTransport, error) {
 	return NewQUICTransportWithConfig(QUICTransportConfig{})
 }
 
-// NewQUICTransportWithConfig 创建 QUIC 传输 + 允许生产环境注入可信 TLS 配置。
-func NewQUICTransportWithConfig(config QUICTransportConfig) *QUICTransport {
+// NewQUICTransportWithConfig 创建 QUIC 传输 + 节点身份和业务加密由 SecureSession 统一保证。
+func NewQUICTransportWithConfig(config QUICTransportConfig) (*QUICTransport, error) {
+	tlsConfig, err := normalizeQUICTLSConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	return &QUICTransport{
 		listeners:      make(map[string]*quic.Listener),
 		maxMessageSize: normalizeMaxMessageSize(config.MaxMessageSize),
 		inboundLimiter: newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
-		tlsConfig:      normalizeQUICTLSConfig(config.TLSConfig),
+		tlsConfig:      tlsConfig,
 		quicConfig:     normalizeQUICConfig(config.QUICConfig),
 		logger:         utils.EnsureLogger(config.Logger),
-	}
+	}, nil
 }
 
 func (transport *QUICTransport) Protocol() utils.MultiAddressProtocol {
@@ -102,7 +106,11 @@ func (transport *QUICTransport) Dial(ctx context.Context, address utils.MultiAdd
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	connection, err := quic.DialAddr(ctx, joinAddress(address), clientQUICTLSConfig(transport.tlsConfig), transport.quicConfig.Clone())
+	tlsConfig, err := transport.clientTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	connection, err := quic.DialAddr(ctx, joinAddress(address), tlsConfig, transport.quicConfig.Clone())
 	if err != nil {
 		return nil, fmt.Errorf("p2p: dial quic %s: %w", address.String(), err)
 	}
@@ -317,36 +325,37 @@ func (connection *QUICConnection) Close() error {
 	return connection.closeErr
 }
 
-// normalizeQUICTLSConfig 归一化 TLS 配置 + 默认生成临时证书保证 QUIC 可启动。
-func normalizeQUICTLSConfig(config *tls.Config) *tls.Config {
-	if config != nil {
-		cloned := config.Clone()
+// normalizeQUICTLSConfig 归一化 TLS 配置 + 使用临时自签证书避免生产部署依赖外部 CA。
+func normalizeQUICTLSConfig(config QUICTransportConfig) (*tls.Config, error) {
+	if config.TLSConfig != nil {
+		cloned := config.TLSConfig.Clone()
 		ensureQUICNextProtos(cloned)
-		return cloned
+		return cloned, nil
 	}
 	certificate, err := generateQUICCertificate()
 	if err != nil {
-		panic(fmt.Errorf("p2p: generate quic certificate: %w", err))
+		return nil, fmt.Errorf("p2p: generate quic certificate: %w", err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		NextProtos:   []string{quicApplicationProtocol},
 		MinVersion:   tls.VersionTLS13,
-	}
+	}, nil
 }
 
-// clientQUICTLSConfig 生成客户端 TLS 配置 + 默认跳过自签证书校验支持节点自发现。
-func clientQUICTLSConfig(config *tls.Config) *tls.Config {
-	cloned := config.Clone()
+// clientTLSConfig 生成客户端 TLS 配置 + 跳过证书链校验是因为 SecureSession 已绑定 peer 身份并加密消息。
+func (transport *QUICTransport) clientTLSConfig() (*tls.Config, error) {
+	if transport == nil || transport.tlsConfig == nil {
+		return nil, fmt.Errorf("%w: nil quic tls config", ErrTransportUnavailable)
+	}
+	cloned := transport.tlsConfig.Clone()
 	cloned.Certificates = nil
 	if cloned.ServerName == "" {
 		cloned.ServerName = quicApplicationProtocol
 	}
-	if cloned.RootCAs == nil && cloned.VerifyPeerCertificate == nil {
-		cloned.InsecureSkipVerify = true
-	}
+	cloned.InsecureSkipVerify = true
 	ensureQUICNextProtos(cloned)
-	return cloned
+	return cloned, nil
 }
 
 // normalizeQUICConfig 归一化 quic-go 配置 + 设置保守窗口避免异常内存占用。

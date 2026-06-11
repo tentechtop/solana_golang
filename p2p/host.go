@@ -166,12 +166,17 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	host.protocolDispatcher.start(host.lifecycleContext)
 
 	if len(transports) == 0 {
+		quicTransport, err := NewQUICTransportWithConfig(QUICTransportConfig{
+			MaxPendingInbound:   maxPendingInbound,
+			MaxConnectionsPerIP: host.maxConnectionsPerIP,
+			Logger:              host.logger,
+		})
+		if err != nil {
+			host.lifecycleCancel()
+			return nil, err
+		}
 		transports = []Transport{
-			NewQUICTransportWithConfig(QUICTransportConfig{
-				MaxPendingInbound:   maxPendingInbound,
-				MaxConnectionsPerIP: host.maxConnectionsPerIP,
-				Logger:              host.logger,
-			}),
+			quicTransport,
 			NewTCPTransportWithConfig(TCPTransportConfig{
 				MaxPendingInbound:   maxPendingInbound,
 				MaxConnectionsPerIP: host.maxConnectionsPerIP,
