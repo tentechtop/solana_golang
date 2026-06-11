@@ -25,6 +25,10 @@ func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handle
 
 // DialAddress 拨号指定地址 + 成功后将连接放入连接池。
 func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (Connection, error) {
+	if err := host.checkPeerDialAllowed(address.PeerID); err != nil {
+		return nil, peerProtectionDialError(address.PeerID, err)
+	}
+
 	transport, err := host.transport(address.Protocol)
 	if err != nil {
 		return nil, err
@@ -45,11 +49,13 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 		return nil, err
 	}
 	connection = securedConnection
+	connection = host.wrapConnectionWriter(connection)
 	if err := host.storeConnection(address.PeerID, connection); err != nil {
 		_ = connection.Close()
 		host.recordPeerError(address.PeerID, err)
 		return nil, err
 	}
+	host.recordPeerProtectionSuccess(address.PeerID)
 	host.logger.Info("p2p host connected",
 		slog.String("peer_id", address.PeerID),
 		slog.String("protocol", string(address.Protocol)),
@@ -59,6 +65,10 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 
 // DialPeer 拨号节点 + 按协议优先级支持 QUIC 到 TCP 的降级。
 func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, error) {
+	if err := host.checkPeerDialAllowed(peerID); err != nil {
+		return nil, peerProtectionDialError(peerID, err)
+	}
+
 	peer, ok := host.Peer(peerID)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrPeerNotFound, peerID)
@@ -80,12 +90,16 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 	if len(dialErrors) == 0 {
 		return nil, fmt.Errorf("p2p: dial peer %s: no usable address", peerID)
 	}
+	host.recordPeerDialFailure(peerID)
 	return nil, fmt.Errorf("p2p: dial peer %s: %w", peerID, errors.Join(dialErrors...))
 }
 
 // dialCandidateAddresses 生成拨号候选地址 + 按协议优先级支持 QUIC 到 TCP 降级。
 func (host *Host) dialCandidateAddresses(peer Peer) []utils.MultiAddress {
 	if !peerDialable(peer, host.maxPeerFailures) {
+		return nil
+	}
+	if err := host.checkPeerDialAllowed(peer.ID); err != nil {
 		return nil
 	}
 	addresses := make([]utils.MultiAddress, 0, len(host.preferredProtocols))

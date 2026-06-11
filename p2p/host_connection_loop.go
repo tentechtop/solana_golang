@@ -8,6 +8,10 @@ import (
 
 // HandleConnection 管理连接读循环 + 自动处理心跳并分发业务协议。
 func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
+	if connection == nil {
+		return
+	}
+	connection = host.connectionWriterFor(connection)
 	defer host.removeConnectionByID(connection.ID())
 	defer connection.Close()
 	if ctx == nil {
@@ -31,6 +35,13 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 			)
 			return
 		}
+		if err := host.acceptInboundMessage(message); err != nil {
+			host.metrics.messagesRejected.Add(1)
+			if peerProtectionErrorClosesConnection(err) {
+				return
+			}
+			continue
+		}
 		if err := host.markConnectionRead(connection, message.FromPeerID); err != nil {
 			host.metrics.messagesRejected.Add(1)
 			host.logger.Warn("p2p connection rejected",
@@ -46,8 +57,7 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 		if host.requests.fulfill(message) {
 			continue
 		}
-		result, err := host.HandleMessage(ctx, message)
-		if err != nil {
+		if err := host.enqueueProtocolMessage(connection, message); err != nil {
 			host.metrics.messagesRejected.Add(1)
 			host.logger.Warn("p2p message rejected",
 				slog.String("connection_id", connection.ID()),
@@ -56,16 +66,13 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 			)
 			continue
 		}
-		if result.HasResponse {
-			if err := host.writeConnectionMessage(ctx, connection, message.FromPeerID, result.Message); err != nil {
-				host.recordConnectionError(connection, err)
-				return
-			}
-		}
 	}
 }
 
 func (host *Host) validateConnectionMessage(connection Connection, message Message) error {
+	if message.FromPeerID == "" {
+		return fmt.Errorf("%w: empty message sender", ErrInvalidMessage)
+	}
 	remotePeerID := connection.RemotePeerID()
 	if remotePeerID != "" && message.FromPeerID != "" && message.FromPeerID != remotePeerID {
 		return fmt.Errorf("%w: message sender does not match connection peer", ErrInvalidMessage)

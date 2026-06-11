@@ -90,6 +90,13 @@ func (pending pendingRequest) matches(response Message) bool {
 
 // Request 发送请求并等待响应 + 统一复用连接读循环防止多个调用方并发抢读。
 func (host *Host) Request(ctx context.Context, peerID string, request Message) (Message, error) {
+	if err := validateOutboundPeerID(peerID); err != nil {
+		return Message{}, err
+	}
+	if err := host.checkPeerDialAllowed(peerID); err != nil {
+		return Message{}, peerProtectionDialError(peerID, err)
+	}
+
 	connection, ok := host.Connection(peerID)
 	if !ok {
 		var err error
@@ -107,6 +114,12 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 	if connection == nil {
 		return Message{}, fmt.Errorf("%w: nil request connection", ErrConnectionClosed)
+	}
+	if err := validateOutboundPeerID(peerID); err != nil {
+		return Message{}, err
+	}
+	if err := host.checkPeerDialAllowed(peerID); err != nil {
+		return Message{}, peerProtectionDialError(peerID, err)
 	}
 
 	outbound, err := host.prepareOutboundMessage(peerID, request)

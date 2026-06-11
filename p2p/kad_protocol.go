@@ -90,12 +90,12 @@ func (request KADFindNodeRequest) MarshalBinary() ([]byte, error) {
 	}
 	writer.WriteUint16(request.Limit)
 	writer.WriteInt64(request.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 // UnmarshalKADFindNodeRequestBinary 反序列化 find-node 请求 + 解码后立即执行边界校验。
 func UnmarshalKADFindNodeRequestBinary(data []byte) (KADFindNodeRequest, error) {
-	reader := borsh.NewReader(data, DefaultMaxMessageSize)
+	reader := borsh.NewBorrowedReader(data, DefaultMaxMessageSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return KADFindNodeRequest{}, fmt.Errorf("p2p: read kad request version: %w", err)
@@ -174,12 +174,12 @@ func (response KADFindNodeResponse) MarshalBinary() ([]byte, error) {
 		}
 	}
 	writer.WriteInt64(response.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 // UnmarshalKADFindNodeResponseBinary 反序列化 find-node 响应 + 解码后校验每个节点提示。
 func UnmarshalKADFindNodeResponseBinary(data []byte) (KADFindNodeResponse, error) {
-	reader := borsh.NewReader(data, DefaultMaxMessageSize)
+	reader := borsh.NewBorrowedReader(data, DefaultMaxMessageSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return KADFindNodeResponse{}, fmt.Errorf("p2p: read kad response version: %w", err)

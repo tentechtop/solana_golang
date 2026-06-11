@@ -191,7 +191,7 @@ func UnmarshalSecureSessionHandshakeBinary(data []byte) (SecureSessionHandshake,
 		return SecureSessionHandshake{}, fmt.Errorf("%w: invalid handshake size", ErrSecureSession)
 	}
 
-	reader := borsh.NewReader(data, secureSessionHandshakeMaxSize)
+	reader := borsh.NewBorrowedReader(data, secureSessionHandshakeMaxSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return SecureSessionHandshake{}, fmt.Errorf("%w: read handshake version: %w", ErrSecureSession, err)
@@ -368,7 +368,7 @@ func (state *SecureSessionState) Finalize(remote SecureSessionHandshake, expecte
 	if err != nil {
 		return nil, err
 	}
-	return material.newSession(state.handshake.Role, state.identity.PeerID, remote.PeerID, remote.SoftwareVersion, protocolVersion), nil
+	return material.newSession(state.handshake.Role, state.identity.PeerID, remote.PeerID, remote.SoftwareVersion, protocolVersion)
 }
 
 // SecurePayload 保存加密后的业务载荷 + 将序号随密文发送以便接收端拒绝重放。
@@ -393,7 +393,7 @@ func (payload SecurePayload) MarshalBinary(maxMessageSize int) ([]byte, error) {
 	if err := writer.WriteBytes(payload.Ciphertext); err != nil {
 		return nil, fmt.Errorf("%w: marshal ciphertext: %w", ErrSecureSession, err)
 	}
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 // Validate 校验安全载荷 + 防止错误会话、空密文和超大密文进入解密路径。
@@ -419,7 +419,7 @@ func UnmarshalSecurePayloadBinary(data []byte, maxMessageSize int) (SecurePayloa
 		return SecurePayload{}, fmt.Errorf("%w: invalid secure payload size", ErrSecureSession)
 	}
 
-	reader := borsh.NewReader(data, maxPayloadSize(maxMessageSize))
+	reader := borsh.NewBorrowedReader(data, maxPayloadSize(maxMessageSize))
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return SecurePayload{}, fmt.Errorf("%w: read secure payload version: %w", ErrSecureSession, err)
@@ -462,6 +462,8 @@ type SecureSession struct {
 	sessionID          []byte
 	sendKey            []byte
 	receiveKey         []byte
+	sendAEAD           cipher.AEAD
+	receiveAEAD        cipher.AEAD
 	sendNoncePrefix    [secureSessionNoncePrefixSize]byte
 	receiveNoncePrefix [secureSessionNoncePrefixSize]byte
 	expiresAtUnixMilli int64
@@ -545,13 +547,9 @@ func (session *SecureSession) Seal(plaintext []byte, associatedData []byte) (Sec
 		return SecurePayload{}, fmt.Errorf("%w: send sequence exhausted", ErrSecureSession)
 	}
 
-	aead, err := newSecureSessionAEAD(session.sendKey)
-	if err != nil {
-		return SecurePayload{}, err
-	}
 	sequence := session.sendSequence
 	nonce := secureSessionNonce(session.sendNoncePrefix, sequence)
-	ciphertext := aead.Seal(nil, nonce, plaintext, associatedData)
+	ciphertext := session.sendAEAD.Seal(make([]byte, 0, len(plaintext)+utils.AESGCMTagSize), nonce[:], plaintext, associatedData)
 	session.sendSequence++
 
 	return SecurePayload{
@@ -583,12 +581,8 @@ func (session *SecureSession) Open(payload SecurePayload, associatedData []byte)
 		return nil, fmt.Errorf("%w: unexpected sequence", ErrSecureSession)
 	}
 
-	aead, err := newSecureSessionAEAD(session.receiveKey)
-	if err != nil {
-		return nil, err
-	}
 	nonce := secureSessionNonce(session.receiveNoncePrefix, payload.Sequence)
-	plaintext, err := aead.Open(nil, nonce, payload.Ciphertext, associatedData)
+	plaintext, err := session.receiveAEAD.Open(nil, nonce[:], payload.Ciphertext, associatedData)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decrypt payload: %w", ErrSecureSession, err)
 	}
@@ -630,6 +624,9 @@ func (session *SecureSession) validate() error {
 	}
 	if len(session.sendKey) != utils.AES256KeySize || len(session.receiveKey) != utils.AES256KeySize {
 		return fmt.Errorf("%w: invalid aes key size", ErrSecureSession)
+	}
+	if session.sendAEAD == nil || session.receiveAEAD == nil {
+		return fmt.Errorf("%w: missing aes gcm", ErrSecureSession)
 	}
 	if err := validateSecureSessionNetworkID(session.networkID); err != nil {
 		return err
@@ -812,7 +809,7 @@ func (connection *SecureConnection) ReadMessage(ctx context.Context) (Message, e
 
 // WriteMessage 加密并写入消息 + 只加密业务 payload，外层路由字段用于连接内分发和认证数据。
 func (connection *SecureConnection) WriteMessage(ctx context.Context, message Message) error {
-	outbound := message.Clone()
+	outbound := message
 	if err := outbound.Validate(DefaultMaxMessageSize); err != nil {
 		return err
 	}
@@ -871,7 +868,7 @@ func (handshake SecureSessionHandshake) marshalBinary(includeSignature bool) ([]
 	if includeSignature {
 		writer.WriteFixedBytes(handshake.Signature)
 	}
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func (handshake SecureSessionHandshake) validate(requireSignature bool) error {
@@ -1047,7 +1044,7 @@ func (material secureSessionMaterial) newSession(
 	remotePeerID string,
 	remoteSoftwareVersion string,
 	protocolVersion uint16,
-) *SecureSession {
+) (*SecureSession, error) {
 	session := &SecureSession{
 		localPeerID:        localPeerID,
 		remotePeerID:       remotePeerID,
@@ -1062,13 +1059,27 @@ func (material secureSessionMaterial) newSession(
 		session.receiveKey = cloneBytes(material.responderToKey)
 		session.sendNoncePrefix = material.initiatorNonce
 		session.receiveNoncePrefix = material.responderNonce
-		return session
+		return initializeSecureSessionAEAD(session)
 	}
 	session.sendKey = cloneBytes(material.responderToKey)
 	session.receiveKey = cloneBytes(material.initiatorToKey)
 	session.sendNoncePrefix = material.responderNonce
 	session.receiveNoncePrefix = material.initiatorNonce
-	return session
+	return initializeSecureSessionAEAD(session)
+}
+
+func initializeSecureSessionAEAD(session *SecureSession) (*SecureSession, error) {
+	sendAEAD, err := newSecureSessionAEAD(session.sendKey)
+	if err != nil {
+		return nil, err
+	}
+	receiveAEAD, err := newSecureSessionAEAD(session.receiveKey)
+	if err != nil {
+		return nil, err
+	}
+	session.sendAEAD = sendAEAD
+	session.receiveAEAD = receiveAEAD
+	return session, nil
 }
 
 func secureSessionTranscript(local SecureSessionHandshake, remote SecureSessionHandshake) ([]byte, error) {
@@ -1095,7 +1106,7 @@ func secureSessionTranscript(local SecureSessionHandshake, remote SecureSessionH
 	if err := writer.WriteBytes(responderBytes); err != nil {
 		return nil, fmt.Errorf("%w: marshal responder transcript: %w", ErrSecureSession, err)
 	}
-	return utils.SHA256(writer.Bytes()), nil
+	return utils.SHA256(writer.BytesView()), nil
 }
 
 func canonicalSecureSessionHandshakes(local SecureSessionHandshake, remote SecureSessionHandshake) (SecureSessionHandshake, SecureSessionHandshake, error) {
@@ -1135,8 +1146,8 @@ func secureSessionNoncePrefix(label string, transcript []byte) [secureSessionNon
 	return prefix
 }
 
-func secureSessionNonce(prefix [secureSessionNoncePrefixSize]byte, sequence uint64) []byte {
-	nonce := make([]byte, utils.AESGCMNonceSize)
+func secureSessionNonce(prefix [secureSessionNoncePrefixSize]byte, sequence uint64) [utils.AESGCMNonceSize]byte {
+	var nonce [utils.AESGCMNonceSize]byte
 	copy(nonce[:secureSessionNoncePrefixSize], prefix[:])
 	binary.BigEndian.PutUint64(nonce[secureSessionNoncePrefixSize:], sequence)
 	return nonce
@@ -1249,5 +1260,5 @@ func secureMessageAssociatedData(message Message) ([]byte, error) {
 	}
 	writer.WriteUint8(uint8(message.Flag))
 	writer.WriteInt64(message.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 )
 
@@ -61,7 +62,9 @@ func (host *Host) Close() error {
 	host.connectionStates = make(map[string]ConnectionState)
 	host.resumptionTickets = make(map[string]SecureSessionResumptionTicket)
 	for peerID, peer := range host.peers {
-		peer.MarkDisconnected()
+		if peer.Status != PeerStatusBlocked {
+			peer.MarkDisconnected()
+		}
 		host.peers[peerID] = peer
 		storedPeers = append(storedPeers, peer.Clone())
 	}
@@ -87,6 +90,9 @@ func (host *Host) Close() error {
 
 // storeConnection 写入连接池 + 连接建立成功后同步更新节点在线状态。
 func (host *Host) storeConnection(peerID string, connection Connection) error {
+	if connection == nil {
+		return fmt.Errorf("%w: nil connection", ErrConnectionClosed)
+	}
 	var storedPeer Peer
 	var replacedConnection Connection
 	shouldPersist := false
@@ -105,12 +111,22 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 		host.metrics.maxConnectionRejected.Add(1)
 		return fmt.Errorf("%w: %d", ErrMaxConnectionsReached, host.maxConnections)
 	}
+	if existing == nil && host.remoteIPConnectionCountLocked(connection.RemoteAddress()) >= host.maxConnectionsPerIP {
+		host.mutex.Unlock()
+		host.metrics.perIPRejected.Add(1)
+		return fmt.Errorf("%w: %d", ErrPeerIPLimitReached, host.maxConnectionsPerIP)
+	}
 	if _, ok := host.peers[peerID]; !ok && len(host.peers) >= host.maxPeers {
 		host.mutex.Unlock()
 		return fmt.Errorf("%w: %d", ErrMaxPeersReached, host.maxPeers)
 	}
-	if existing != nil && existing.ID() != connection.ID() {
-		replacedConnection = existing
+	if existing != nil && existing.ID() == connection.ID() {
+		connection = existing
+	} else {
+		if existing != nil {
+			replacedConnection = existing
+		}
+		connection = host.wrapConnectionWriter(connection)
 	}
 	host.connections[peerID] = connection
 	now := time.Now().UnixMilli()
@@ -156,6 +172,63 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	return nil
 }
 
+func (host *Host) wrapConnectionWriter(connection Connection) Connection {
+	return newQueuedConnection(connection, queuedConnectionConfig{
+		queueSize:    host.writeQueueSize,
+		writeTimeout: host.writeTimeout,
+		metrics:      &host.metrics,
+		logger:       host.logger,
+		priority:     host.messagePriority,
+		onWrite:      host.recordConnectionWrite,
+		onError:      host.recordConnectionError,
+	})
+}
+
+func (host *Host) connectionWriterFor(connection Connection) Connection {
+	if connection == nil {
+		return nil
+	}
+	if _, ok := connection.(*queuedConnection); ok {
+		return connection
+	}
+	peerID := connection.RemotePeerID()
+	if peerID == "" {
+		return host.wrapConnectionWriter(connection)
+	}
+	host.mutex.RLock()
+	storedConnection := host.connections[peerID]
+	host.mutex.RUnlock()
+	if storedConnection != nil && storedConnection.ID() == connection.ID() {
+		return storedConnection
+	}
+	return host.wrapConnectionWriter(connection)
+}
+
+func (host *Host) messagePriority(message Message) MessagePriority {
+	spec, ok := host.registry.Spec(ProtocolID(message.Type))
+	if !ok {
+		return MessagePriorityNormal
+	}
+	return spec.Priority
+}
+
+func (host *Host) writeQueueDepth() uint64 {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	total := uint64(0)
+	for _, connection := range host.connections {
+		if queued, ok := connection.(*queuedConnection); ok {
+			total += queued.queueDepth()
+		}
+	}
+	return total
+}
+
+func (host *Host) recordConnectionWrite(connection Connection, message Message) {
+	host.metrics.messagesWritten.Add(1)
+	host.markConnectionWrite(connection, message.ToPeerID)
+}
+
 // connectionSnapshots 复制连接池 + 避免心跳持锁执行网络写入。
 func (host *Host) connectionSnapshots() map[string]Connection {
 	host.mutex.RLock()
@@ -184,6 +257,10 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) error
 		if len(host.connections) >= host.maxConnections {
 			host.metrics.maxConnectionRejected.Add(1)
 			return fmt.Errorf("%w: %d", ErrMaxConnectionsReached, host.maxConnections)
+		}
+		if host.remoteIPConnectionCountLocked(connection.RemoteAddress()) >= host.maxConnectionsPerIP {
+			host.metrics.perIPRejected.Add(1)
+			return fmt.Errorf("%w: %d", ErrPeerIPLimitReached, host.maxConnectionsPerIP)
 		}
 		if _, exists := host.peers[peerID]; !exists && len(host.peers) >= host.maxPeers {
 			return fmt.Errorf("%w: %d", ErrMaxPeersReached, host.maxPeers)
@@ -252,7 +329,38 @@ func (host *Host) markConnectionWrite(connection Connection, peerID string) {
 	host.connectionStates[peerID] = state
 }
 
-// recordConnectionError 记录连接错误 + 达到阈值后由心跳清理。
+// remoteIPConnectionCountLocked 统计同 IP 连接数 + 在持有 Host 锁时保护连接池容量。
+func (host *Host) remoteIPConnectionCountLocked(remoteAddress string) int {
+	remoteIP := remoteIPFromConnectionAddress(remoteAddress)
+	if remoteIP == "" || host.maxConnectionsPerIP <= 0 {
+		return 0
+	}
+	count := 0
+	for _, state := range host.connectionStates {
+		if remoteIPFromConnectionAddress(state.RemoteAddress) == remoteIP {
+			count++
+		}
+	}
+	return count
+}
+
+func remoteIPFromConnectionAddress(remoteAddress string) string {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		parsedIP := net.ParseIP(remoteAddress)
+		if parsedIP == nil {
+			return ""
+		}
+		return parsedIP.String()
+	}
+	parsedIP := net.ParseIP(host)
+	if parsedIP == nil {
+		return ""
+	}
+	return parsedIP.String()
+}
+
+// recordConnectionError 记录连接错误 + 达到阈值后由心跳清理异常连接。
 func (host *Host) recordConnectionError(connection Connection, err error) {
 	if err == nil {
 		return
@@ -274,16 +382,17 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 		}
 		host.routingTable.RecordPeerFailure(peerID)
 		host.mutex.Unlock()
+		if shouldPersist {
+			host.savePeerBestEffort(storedPeer)
+		}
 		if !isExpectedConnectionClose(err) {
+			host.penalizePeer(peerID, host.peerProtection.config.InvalidMessagePenalty, "connection-error")
 			host.logger.Warn("p2p connection error recorded",
 				slog.String("peer_id", peerID),
 				slog.String("connection_id", connection.ID()),
 				slog.Uint64("failure_count", uint64(state.FailureCount)),
 				slog.Any("error", err),
 			)
-		}
-		if shouldPersist {
-			host.savePeerBestEffort(storedPeer)
 		}
 		return
 	}
@@ -302,7 +411,9 @@ func (host *Host) removeConnectionByID(connectionID string) {
 		delete(host.connections, peerID)
 		delete(host.connectionStates, peerID)
 		if peer, ok := host.peers[peerID]; ok {
-			peer.MarkDisconnected()
+			if peer.Status != PeerStatusBlocked {
+				peer.MarkDisconnected()
+			}
 			host.peers[peerID] = peer
 			host.addPeerToRoutingTableLocked(peer)
 			storedPeer = peer.Clone()
@@ -330,7 +441,9 @@ func (host *Host) closePeerConnection(peerID string) {
 	delete(host.connections, peerID)
 	delete(host.connectionStates, peerID)
 	if peer, ok := host.peers[peerID]; ok {
-		peer.MarkDisconnected()
+		if peer.Status != PeerStatusBlocked {
+			peer.MarkDisconnected()
+		}
 		host.peers[peerID] = peer
 		host.addPeerToRoutingTableLocked(peer)
 		storedPeer = peer.Clone()

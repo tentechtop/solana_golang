@@ -17,6 +17,8 @@ var (
 	ErrMaxConnectionsReached = errors.New("p2p: max connections reached")
 	// ErrInboundLimitReached 表示入站连接并发已满 + 在握手前拒绝洪泛连接保护节点资源。
 	ErrInboundLimitReached = errors.New("p2p: inbound connection limit reached")
+	// ErrPeerIPLimitReached 表示单 IP 连接数已满 + 避免同一来源耗尽连接池。
+	ErrPeerIPLimitReached = errors.New("p2p: peer ip connection limit reached")
 	// ErrUnsupportedProtocol 表示协议不支持 + 限制传输层只处理声明的协议。
 	ErrUnsupportedProtocol = errors.New("p2p: unsupported protocol")
 	// ErrTransportUnavailable 表示传输不可用 + 允许 Host 降级尝试其他协议。
@@ -41,4 +43,16 @@ var (
 	ErrPeerRecordExpired = errors.New("p2p: peer record expired")
 	// ErrPeerRecordNetworkMismatch 表示节点签名记录网络不匹配 + 防止跨网络地址污染路由表。
 	ErrPeerRecordNetworkMismatch = errors.New("p2p: peer record network mismatch")
+	// ErrPeerBlocked 表示节点已被临时封禁 + 阻止异常节点继续消耗连接和消息处理资源。
+	ErrPeerBlocked = errors.New("p2p: peer blocked")
+	// ErrPeerBackoff 表示节点处于拨号退避期 + 避免对持续失败节点进行高频重试。
+	ErrPeerBackoff = errors.New("p2p: peer dial backoff")
+	// ErrRateLimited 表示节点消息超过速率限制 + 保护读循环和协议处理器不被刷爆。
+	ErrRateLimited = errors.New("p2p: rate limited")
+	// ErrDuplicateMessage 表示消息 ID 重复 + 拒绝重放消息进入协议处理路径。
+	ErrDuplicateMessage = errors.New("p2p: duplicate message")
+	// ErrProtocolQueueFull 表示协议处理队列已满 + 防止业务处理堆积拖垮连接读循环。
+	ErrProtocolQueueFull = errors.New("p2p: protocol queue full")
+	// ErrWriteQueueFull 表示连接写队列已满 + 对慢连接施加背压避免内存无限堆积。
+	ErrWriteQueueFull = errors.New("p2p: write queue full")
 )

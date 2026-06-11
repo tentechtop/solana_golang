@@ -34,6 +34,16 @@ func normalizeMaxPendingInbound(maxPendingInbound int, maxConnections int) int {
 	return maxConnections
 }
 
+func normalizeMaxConnectionsPerIP(maxConnectionsPerIP int, maxConnections int) int {
+	if maxConnectionsPerIP > 0 {
+		return maxConnectionsPerIP
+	}
+	if maxConnections > 0 && maxConnections < defaultMaxConnectionsIP {
+		return maxConnections
+	}
+	return defaultMaxConnectionsIP
+}
+
 func newInboundLimiter(limit int) chan struct{} {
 	if limit <= 0 {
 		limit = defaultMaxPeers

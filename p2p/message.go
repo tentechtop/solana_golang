@@ -206,7 +206,7 @@ func (message Message) MarshalBinary(maxMessageSize int) ([]byte, error) {
 		return nil, fmt.Errorf("p2p: marshal payload: %w", err)
 	}
 
-	encoded := writer.Bytes()
+	encoded := writer.BytesView()
 	if len(encoded) > maxPayloadSize(maxMessageSize) {
 		return nil, fmt.Errorf("%w: message payload too large", ErrInvalidMessage)
 	}
@@ -222,7 +222,7 @@ func UnmarshalBinary(data []byte, maxMessageSize int) (Message, error) {
 		return Message{}, fmt.Errorf("%w: message payload too large", ErrInvalidMessage)
 	}
 
-	reader := borsh.NewReader(data, maxPayloadSize(maxMessageSize))
+	reader := borsh.NewBorrowedReader(data, maxPayloadSize(maxMessageSize))
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return Message{}, fmt.Errorf("p2p: unmarshal version: %w", err)
@@ -290,7 +290,8 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 		return fmt.Errorf("%w: frame payload too large", ErrInvalidMessage)
 	}
 
-	header := make([]byte, messageFrameHeaderSize)
+	header := acquireMessageFrameHeader()
+	defer releaseMessageFrameHeader(header)
 	checksum := sha256.Sum256(payload)
 	binary.BigEndian.PutUint32(header[0:4], messageFrameMagic)
 	binary.BigEndian.PutUint16(header[4:6], message.effectiveVersion())
@@ -309,7 +310,8 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 
 // readMessageFrame 读取 P2P 帧 + 先校验外层边界和 checksum 再解码消息体。
 func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
-	header := make([]byte, messageFrameHeaderSize)
+	header := acquireMessageFrameHeader()
+	defer releaseMessageFrameHeader(header)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return Message{}, fmt.Errorf("p2p: read message header: %w", err)
 	}
@@ -318,7 +320,8 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-	payload := make([]byte, frameHeader.payloadLength)
+	payload := acquireMessagePayloadBuffer(frameHeader.payloadLength)
+	defer releaseMessagePayloadBuffer(payload)
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return Message{}, fmt.Errorf("p2p: read message body: %w", err)
 	}

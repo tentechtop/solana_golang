@@ -234,6 +234,9 @@ func (host *Host) connectDiscoveredPeers(ctx context.Context, config BootstrapCo
 		if peer.ID == host.peerID || host.hasConnection(peer.ID) || !peerDialable(peer, host.maxPeerFailures) {
 			continue
 		}
+		if err := host.checkPeerDialAllowed(peer.ID); err != nil {
+			continue
+		}
 		dialContext, cancel := context.WithTimeout(ctx, config.DialTimeout)
 		_, err := host.DialPeer(dialContext, peer.ID)
 		cancel()

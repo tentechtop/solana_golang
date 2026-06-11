@@ -46,11 +46,11 @@ func (request IdentifyRequest) MarshalBinary() ([]byte, error) {
 	writer := borsh.NewWriter(maxPeerRecordSize)
 	writer.WriteUint16(request.Version)
 	writer.WriteInt64(request.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func UnmarshalIdentifyRequestBinary(data []byte) (IdentifyRequest, error) {
-	reader := borsh.NewReader(data, maxPeerRecordSize)
+	reader := borsh.NewBorrowedReader(data, maxPeerRecordSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return IdentifyRequest{}, fmt.Errorf("p2p: read identify version: %w", err)
@@ -95,11 +95,11 @@ func (response IdentifyResponse) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("p2p: marshal identify record: %w", err)
 	}
 	writer.WriteInt64(response.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func UnmarshalIdentifyResponseBinary(data []byte) (IdentifyResponse, error) {
-	reader := borsh.NewReader(data, maxPeerRecordSize)
+	reader := borsh.NewBorrowedReader(data, maxPeerRecordSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return IdentifyResponse{}, fmt.Errorf("p2p: read identify response version: %w", err)
@@ -154,11 +154,11 @@ func (payload PeerHintsPayload) MarshalBinary() ([]byte, error) {
 		}
 	}
 	writer.WriteInt64(payload.CreatedAtUnixMilli)
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func UnmarshalPeerHintsPayloadBinary(data []byte) (PeerHintsPayload, error) {
-	reader := borsh.NewReader(data, DefaultMaxMessageSize)
+	reader := borsh.NewBorrowedReader(data, DefaultMaxMessageSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return PeerHintsPayload{}, fmt.Errorf("p2p: read peer hints version: %w", err)

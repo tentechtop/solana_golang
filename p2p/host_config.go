@@ -48,6 +48,16 @@ func normalizeMaxPeers(maxPeers int) int {
 	return maxPeers
 }
 
+func normalizeBroadcastConcurrency(concurrency int) int {
+	if concurrency <= 0 {
+		return 32
+	}
+	if concurrency > 1024 {
+		return 1024
+	}
+	return concurrency
+}
+
 // normalizeLogger 归一化日志器 + 使用默认日志器避免空指针分支散落业务代码。
 func normalizeLogger(logger *slog.Logger) *slog.Logger {
 	return utils.EnsureLogger(logger)

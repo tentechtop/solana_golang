@@ -15,64 +15,76 @@ const (
 	defaultConnectionIdle    = 45 * time.Second
 	defaultMaxPeerFailures   = 3
 	defaultMaxPeers          = 64
+	defaultMaxConnectionsIP  = 16
 )
 
 // HostConfig 保存 Host 配置 + 支持注入节点身份、协议优先级和日志。
 type HostConfig struct {
-	PeerID              string
-	SecureIdentity      SecureSessionIdentity
-	EnableSecureSession bool
-	AllowInsecure       bool
-	PreferredProtocols  []utils.MultiAddressProtocol
-	DialTimeout         time.Duration
-	HandshakeTimeout    time.Duration
-	PeerRecordTTL       time.Duration
-	HeartbeatInterval   time.Duration
-	ConnectionIdle      time.Duration
-	MaxPeerFailures     uint32
-	MaxPeers            int
-	MaxConnections      int
-	MaxPendingInbound   int
-	Logger              *slog.Logger
-	Registry            *ProtocolRegistry
-	RoutingTable        *KADRoutingTable
-	PeerStore           PeerStore
-	PersistedPeerLimit  int
-	AdvertisedAddresses []utils.MultiAddress
+	PeerID               string
+	SecureIdentity       SecureSessionIdentity
+	EnableSecureSession  bool
+	AllowInsecure        bool
+	PreferredProtocols   []utils.MultiAddressProtocol
+	DialTimeout          time.Duration
+	HandshakeTimeout     time.Duration
+	PeerRecordTTL        time.Duration
+	HeartbeatInterval    time.Duration
+	ConnectionIdle       time.Duration
+	MaxPeerFailures      uint32
+	MaxPeers             int
+	MaxConnections       int
+	MaxPendingInbound    int
+	MaxConnectionsPerIP  int
+	PeerProtection       PeerProtectionConfig
+	ProtocolScheduler    ProtocolSchedulerConfig
+	AsyncWrite           AsyncWriteConfig
+	BroadcastConcurrency int
+	Logger               *slog.Logger
+	Registry             *ProtocolRegistry
+	RoutingTable         *KADRoutingTable
+	PeerStore            PeerStore
+	PersistedPeerLimit   int
+	AdvertisedAddresses  []utils.MultiAddress
 }
 
 // Host 管理 P2P 节点运行态 + 统一处理传输、节点表和连接池。
 type Host struct {
-	mutex               sync.RWMutex
-	peerID              string
-	secureSession       bool
-	secureIdentity      SecureSessionIdentity
-	preferredProtocols  []utils.MultiAddressProtocol
-	dialTimeout         time.Duration
-	handshakeTimeout    time.Duration
-	peerRecordTTL       time.Duration
-	heartbeatInterval   time.Duration
-	connectionIdle      time.Duration
-	maxPeerFailures     uint32
-	maxPeers            int
-	maxConnections      int
-	logger              *slog.Logger
-	lifecycleContext    context.Context
-	lifecycleCancel     context.CancelFunc
-	inboundSlots        chan struct{}
-	advertisedAddresses []utils.MultiAddress
-	transports          map[utils.MultiAddressProtocol]Transport
-	peers               map[string]Peer
-	connections         map[string]Connection
-	connectionStates    map[string]ConnectionState
-	resumptionTickets   map[string]SecureSessionResumptionTicket
-	registry            *ProtocolRegistry
-	requests            *requestManager
-	routingTable        *KADRoutingTable
-	peerStore           PeerStore
-	persistedPeerLimit  int
-	metrics             p2pMetrics
-	closed              bool
+	mutex                sync.RWMutex
+	peerID               string
+	secureSession        bool
+	secureIdentity       SecureSessionIdentity
+	preferredProtocols   []utils.MultiAddressProtocol
+	dialTimeout          time.Duration
+	handshakeTimeout     time.Duration
+	peerRecordTTL        time.Duration
+	heartbeatInterval    time.Duration
+	connectionIdle       time.Duration
+	maxPeerFailures      uint32
+	maxPeers             int
+	maxConnections       int
+	maxConnectionsPerIP  int
+	writeQueueSize       int
+	writeTimeout         time.Duration
+	broadcastConcurrency int
+	logger               *slog.Logger
+	lifecycleContext     context.Context
+	lifecycleCancel      context.CancelFunc
+	inboundSlots         chan struct{}
+	peerProtection       *peerProtection
+	protocolDispatcher   *protocolDispatcher
+	advertisedAddresses  []utils.MultiAddress
+	transports           map[utils.MultiAddressProtocol]Transport
+	peers                map[string]Peer
+	connections          map[string]Connection
+	connectionStates     map[string]ConnectionState
+	resumptionTickets    map[string]SecureSessionResumptionTicket
+	registry             *ProtocolRegistry
+	requests             *requestManager
+	routingTable         *KADRoutingTable
+	peerStore            PeerStore
+	persistedPeerLimit   int
+	metrics              p2pMetrics
+	closed               bool
 }
 
 // ConnectionState 保存连接运行态 + 供心跳、监控和故障清理使用。
@@ -115,34 +127,41 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	hostContext, hostCancel := context.WithCancel(context.Background())
 
 	host := &Host{
-		peerID:              config.PeerID,
-		secureSession:       secureSession,
-		secureIdentity:      secureIdentity,
-		preferredProtocols:  normalizedProtocolOrder(config.PreferredProtocols),
-		dialTimeout:         normalizeDialTimeout(config.DialTimeout),
-		handshakeTimeout:    normalizeHandshakeTimeout(config.HandshakeTimeout),
-		peerRecordTTL:       normalizePeerRecordTTL(config.PeerRecordTTL),
-		heartbeatInterval:   normalizeHeartbeatInterval(config.HeartbeatInterval),
-		connectionIdle:      normalizeConnectionIdle(config.ConnectionIdle),
-		maxPeerFailures:     normalizeMaxPeerFailures(config.MaxPeerFailures),
-		maxPeers:            maxPeers,
-		maxConnections:      maxConnections,
-		logger:              normalizeLogger(config.Logger),
-		lifecycleContext:    hostContext,
-		lifecycleCancel:     hostCancel,
-		inboundSlots:        newInboundLimiter(maxPendingInbound),
-		advertisedAddresses: cloneAddresses(config.AdvertisedAddresses),
-		transports:          make(map[utils.MultiAddressProtocol]Transport),
-		peers:               make(map[string]Peer),
-		connections:         make(map[string]Connection),
-		connectionStates:    make(map[string]ConnectionState),
-		resumptionTickets:   make(map[string]SecureSessionResumptionTicket),
-		registry:            normalizeRegistry(config.Registry),
-		requests:            newRequestManager(),
-		routingTable:        routingTable,
-		peerStore:           normalizePeerStore(config.PeerStore),
-		persistedPeerLimit:  normalizePeerStoreLimit(config.PersistedPeerLimit),
+		peerID:               config.PeerID,
+		secureSession:        secureSession,
+		secureIdentity:       secureIdentity,
+		preferredProtocols:   normalizedProtocolOrder(config.PreferredProtocols),
+		dialTimeout:          normalizeDialTimeout(config.DialTimeout),
+		handshakeTimeout:     normalizeHandshakeTimeout(config.HandshakeTimeout),
+		peerRecordTTL:        normalizePeerRecordTTL(config.PeerRecordTTL),
+		heartbeatInterval:    normalizeHeartbeatInterval(config.HeartbeatInterval),
+		connectionIdle:       normalizeConnectionIdle(config.ConnectionIdle),
+		maxPeerFailures:      normalizeMaxPeerFailures(config.MaxPeerFailures),
+		maxPeers:             maxPeers,
+		maxConnections:       maxConnections,
+		maxConnectionsPerIP:  normalizeMaxConnectionsPerIP(config.MaxConnectionsPerIP, maxConnections),
+		writeQueueSize:       normalizeWriteQueueSize(config.AsyncWrite.QueueSize),
+		writeTimeout:         normalizeWriteTimeout(config.AsyncWrite.WriteTimeout),
+		broadcastConcurrency: normalizeBroadcastConcurrency(config.BroadcastConcurrency),
+		logger:               normalizeLogger(config.Logger),
+		lifecycleContext:     hostContext,
+		lifecycleCancel:      hostCancel,
+		inboundSlots:         newInboundLimiter(maxPendingInbound),
+		peerProtection:       newPeerProtection(config.PeerProtection),
+		advertisedAddresses:  cloneAddresses(config.AdvertisedAddresses),
+		transports:           make(map[utils.MultiAddressProtocol]Transport),
+		peers:                make(map[string]Peer),
+		connections:          make(map[string]Connection),
+		connectionStates:     make(map[string]ConnectionState),
+		resumptionTickets:    make(map[string]SecureSessionResumptionTicket),
+		registry:             normalizeRegistry(config.Registry),
+		requests:             newRequestManager(),
+		routingTable:         routingTable,
+		peerStore:            normalizePeerStore(config.PeerStore),
+		persistedPeerLimit:   normalizePeerStoreLimit(config.PersistedPeerLimit),
 	}
+	host.protocolDispatcher = newProtocolDispatcher(host, config.ProtocolScheduler)
+	host.protocolDispatcher.start(host.lifecycleContext)
 
 	if len(transports) == 0 {
 		transports = []Transport{
@@ -163,6 +182,11 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		slog.Bool("secure_session", host.secureSession),
 		slog.Int("max_peers", host.maxPeers),
 		slog.Int("max_connections", host.maxConnections),
+		slog.Int("write_queue_size", host.writeQueueSize),
+		slog.Duration("write_timeout", host.writeTimeout),
+		slog.Int("broadcast_concurrency", host.broadcastConcurrency),
+		slog.Int("protocol_workers", host.protocolDispatcher.config.WorkerCount),
+		slog.Int("protocol_partitions", host.protocolDispatcher.config.PartitionCount),
 		slog.Duration("dial_timeout", host.dialTimeout),
 		slog.Duration("handshake_timeout", host.handshakeTimeout),
 	)

@@ -147,7 +147,7 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 	if len(data) == 0 || len(data) > maxPeerRecordSize {
 		return SignedPeerRecord{}, fmt.Errorf("%w: invalid peer record size", ErrInvalidMessage)
 	}
-	reader := borsh.NewReader(data, maxPeerRecordSize)
+	reader := borsh.NewBorrowedReader(data, maxPeerRecordSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return SignedPeerRecord{}, fmt.Errorf("p2p: read peer record version: %w", err)
@@ -292,7 +292,7 @@ func (record SignedPeerRecord) signingBytes() ([]byte, error) {
 	if err := writer.WriteBytes(payload); err != nil {
 		return nil, fmt.Errorf("p2p: marshal peer record payload: %w", err)
 	}
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func (record SignedPeerRecord) marshalBinary(includeSignature bool) ([]byte, error) {
@@ -333,7 +333,7 @@ func (record SignedPeerRecord) marshalBinary(includeSignature bool) ([]byte, err
 	if includeSignature {
 		writer.WriteFixedBytes(record.Signature)
 	}
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 func (record SignedPeerRecord) validate(requireSignature bool) error {

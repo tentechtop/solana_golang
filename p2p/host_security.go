@@ -81,13 +81,14 @@ func (host *Host) acceptSecureConnection(ctx context.Context, connection Connect
 		return nil, false
 	}
 	host.metrics.secureHandshakeOK.Add(1)
-	if err := host.storeConnection(secureConnection.RemotePeerID(), secureConnection); err != nil {
+	handledConnection := host.wrapConnectionWriter(secureConnection)
+	if err := host.storeConnection(secureConnection.RemotePeerID(), handledConnection); err != nil {
 		host.logger.Warn("p2p secure connection rejected",
 			slog.String("connection_id", secureConnection.ID()),
 			slog.String("peer_id", secureConnection.RemotePeerID()),
 			slog.Any("error", err),
 		)
-		_ = secureConnection.Close()
+		_ = handledConnection.Close()
 		return nil, false
 	}
 	session := secureConnection.Session()
@@ -98,7 +99,7 @@ func (host *Host) acceptSecureConnection(ctx context.Context, connection Connect
 		slog.String("remote_software", session.RemoteSoftwareVersion()),
 		slog.Uint64("protocol_version", uint64(session.ProtocolVersion())),
 	)
-	host.identifyPeerAsync(secureConnection, secureConnection.RemotePeerID())
+	host.identifyPeerAsync(handledConnection, secureConnection.RemotePeerID())
 	return secureConnection, true
 }
 
@@ -116,7 +117,7 @@ func (host *Host) secureOutboundConnection(ctx context.Context, connection Conne
 }
 
 func (host *Host) storeResumptionTicketLocked(connection Connection) {
-	secureConnection, ok := connection.(*SecureConnection)
+	secureConnection, ok := unwrapSecureConnection(connection)
 	if !ok {
 		return
 	}
@@ -135,7 +136,7 @@ type secureConnectionStateSnapshot struct {
 }
 
 func secureConnectionState(connection Connection) secureConnectionStateSnapshot {
-	secureConnection, ok := connection.(*SecureConnection)
+	secureConnection, ok := unwrapSecureConnection(connection)
 	if !ok {
 		return secureConnectionStateSnapshot{}
 	}
@@ -145,6 +146,17 @@ func secureConnectionState(connection Connection) secureConnectionStateSnapshot 
 		networkID:             session.NetworkID(),
 		remoteSoftwareVersion: session.RemoteSoftwareVersion(),
 		protocolVersion:       session.ProtocolVersion(),
+	}
+}
+
+func unwrapSecureConnection(connection Connection) (*SecureConnection, bool) {
+	switch typedConnection := connection.(type) {
+	case *SecureConnection:
+		return typedConnection, true
+	case *queuedConnection:
+		return unwrapSecureConnection(typedConnection.inner)
+	default:
+		return nil, false
 	}
 }
 

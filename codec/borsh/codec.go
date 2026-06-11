@@ -39,6 +39,11 @@ func (writer *Writer) Bytes() []byte {
 	return cloneBytes(writer.buffer.Bytes())
 }
 
+// BytesView 返回内部编码视图 + 热路径调用方立即接管字节时避免一次复制。
+func (writer *Writer) BytesView() []byte {
+	return writer.buffer.Bytes()
+}
+
 // WriteUint8 写入 u8 + 匹配 Borsh 整数格式。
 func (writer *Writer) WriteUint8(value uint8) {
 	writer.buffer.WriteByte(value)
@@ -112,6 +117,14 @@ type Reader struct {
 func NewReader(data []byte, maxContainerLength int) *Reader {
 	return &Reader{
 		reader:             bytes.NewReader(cloneBytes(data)),
+		maxContainerLength: normalizeMaxContainerLength(maxContainerLength),
+	}
+}
+
+// NewBorrowedReader 创建借用式 Borsh 读取器 + 网络热路径只在调用期间读取输入以减少整包复制。
+func NewBorrowedReader(data []byte, maxContainerLength int) *Reader {
+	return &Reader{
+		reader:             bytes.NewReader(data),
 		maxContainerLength: normalizeMaxContainerLength(maxContainerLength),
 	}
 }

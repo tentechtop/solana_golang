@@ -158,12 +158,12 @@ func (peer Peer) MarshalBinary() ([]byte, error) {
 	if err := writePeerSignedRecord(writer, peer.SignedRecord); err != nil {
 		return nil, err
 	}
-	return writer.Bytes(), nil
+	return writer.BytesView(), nil
 }
 
 // UnmarshalPeerBinary 反序列化 Peer + 读取后立即校验地址归属和字段边界。
 func UnmarshalPeerBinary(data []byte) (Peer, error) {
-	reader := borsh.NewReader(data, DefaultMaxMessageSize)
+	reader := borsh.NewBorrowedReader(data, DefaultMaxMessageSize)
 	version, err := reader.ReadUint16()
 	if err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer version: %w", err)
