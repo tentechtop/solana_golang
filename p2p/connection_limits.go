@@ -54,6 +54,7 @@ func (host *Host) acquireInboundSlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("p2p: acquire inbound slot: %w", ctx.Err())
 	default:
+		host.metrics.inboundRejected.Add(1)
 		return nil, ErrInboundLimitReached
 	}
 }

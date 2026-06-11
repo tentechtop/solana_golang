@@ -13,7 +13,7 @@ const (
 	ProtocolPingV1 ProtocolID = 0
 	// ProtocolPongV1 表示探活响应 + 与 ping 请求建立请求响应关系。
 	ProtocolPongV1 ProtocolID = 1
-	// ProtocolHandshakeV1 表示握手请求 + 交换链 ID、节点身份和能力。
+	// ProtocolHandshakeV1 表示通用握手请求 + 预留给非安全会话的链和能力协商。
 	ProtocolHandshakeV1 ProtocolID = 2
 	// ProtocolBlockV1 表示区块响应 + 承载按哈希或高度查询到的区块。
 	ProtocolBlockV1 ProtocolID = 3
@@ -37,7 +37,7 @@ const (
 	ProtocolHandshakeSuccessV1 ProtocolID = 16
 	// ProtocolQueryBlockHeadersV1 表示查询区块头 + 用于轻量同步和分叉判断。
 	ProtocolQueryBlockHeadersV1 ProtocolID = 17
-	// ProtocolPeerHintsV1 表示节点提示 + 用于交换可连接节点地址。
+	// ProtocolPeerHintsV1 表示节点提示 + 用于交换已签名的可连接节点地址。
 	ProtocolPeerHintsV1 ProtocolID = 18
 	// ProtocolNodeStatusV1 表示节点状态 + 用于传播同步高度和能力信息。
 	ProtocolNodeStatusV1 ProtocolID = 19
@@ -47,8 +47,12 @@ const (
 	ProtocolHotStuffVoteV1 ProtocolID = 21
 	// ProtocolHotStuffQCV1 表示 HotStuff 证书 + 用于视图推进和提交证明。
 	ProtocolHotStuffQCV1 ProtocolID = 22
-	// ProtocolSecureSessionV1 表示安全会话握手 + 用于节点认证、临时密钥交换和会话密钥派生。
+	// ProtocolSecureSessionV1 表示安全会话握手 + 用于节点认证和会话密钥派生。
 	ProtocolSecureSessionV1 ProtocolID = 23
+	// ProtocolIdentifyRequestV1 表示节点身份查询 + 用于连接建立后主动获取对端可拨地址。
+	ProtocolIdentifyRequestV1 ProtocolID = 24
+	// ProtocolIdentifyResponseV1 表示节点身份响应 + 返回对端签名的地址记录。
+	ProtocolIdentifyResponseV1 ProtocolID = 25
 )
 
 // MessagePriority 表示消息优先级 + 用于后续队列和 QUIC stream 调度。
@@ -119,5 +123,7 @@ func DefaultProtocolSpecs() []ProtocolSpec {
 		{ID: ProtocolHotStuffVoteV1, Name: "/p2p/hotstuff/vote/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
 		{ID: ProtocolHotStuffQCV1, Name: "/p2p/hotstuff/qc/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
 		{ID: ProtocolSecureSessionV1, Name: "/p2p/secure-session/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
+		{ID: ProtocolIdentifyRequestV1, Name: "/p2p/identify/request/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
+		{ID: ProtocolIdentifyResponseV1, Name: "/p2p/identify/response/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
 	}
 }

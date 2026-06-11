@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -48,6 +49,52 @@ func TestPeerBinaryRoundTrip(t *testing.T) {
 	}
 	if decoded.Metadata["zone"] != "local" {
 		t.Fatalf("metadata zone = %q, want local", decoded.Metadata["zone"])
+	}
+}
+
+func TestPeerBinaryRoundTripPreservesSignedRecord(t *testing.T) {
+	peer := signedKADTestPeer(t, 4027)
+
+	encoded, err := peer.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	decoded, err := UnmarshalPeerBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalPeerBinary() error = %v", err)
+	}
+
+	if !bytes.Equal(decoded.SignedRecord, peer.SignedRecord) {
+		t.Fatal("SignedRecord was not preserved")
+	}
+}
+
+func TestUnmarshalPeerBinaryAcceptsVersionOneWithoutSignedRecord(t *testing.T) {
+	peer := kadTestPeer(t, 0x47, 4028)
+	encoded, err := peer.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	if len(encoded) < 6 {
+		t.Fatalf("encoded length = %d, want >= 6", len(encoded))
+	}
+	if !bytes.Equal(encoded[len(encoded)-4:], []byte{0, 0, 0, 0}) {
+		t.Fatal("test fixture expected empty v2 signed record suffix")
+	}
+
+	encoded[0] = 1
+	encoded[1] = 0
+	encoded = encoded[:len(encoded)-4]
+
+	decoded, err := UnmarshalPeerBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalPeerBinary(v1) error = %v", err)
+	}
+	if decoded.ID != peer.ID {
+		t.Fatalf("ID = %q, want %q", decoded.ID, peer.ID)
+	}
+	if len(decoded.SignedRecord) != 0 {
+		t.Fatalf("len(SignedRecord) = %d, want 0", len(decoded.SignedRecord))
 	}
 }
 

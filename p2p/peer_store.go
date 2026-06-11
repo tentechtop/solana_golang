@@ -12,7 +12,7 @@ import (
 
 const (
 	// PeerStoreRecordVersion 定义 PeerStore 记录版本 + 便于后续存储格式平滑升级。
-	PeerStoreRecordVersion uint16 = 1
+	PeerStoreRecordVersion uint16 = 2
 
 	defaultPeerStoreLoadLimit = 1024
 	maxPeerStoreAddresses     = 16
@@ -155,6 +155,9 @@ func (peer Peer) MarshalBinary() ([]byte, error) {
 	if err := writePeerMetadata(writer, peer.Metadata); err != nil {
 		return nil, err
 	}
+	if err := writePeerSignedRecord(writer, peer.SignedRecord); err != nil {
+		return nil, err
+	}
 	return writer.Bytes(), nil
 }
 
@@ -165,7 +168,7 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 	if err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer version: %w", err)
 	}
-	if version != PeerStoreRecordVersion {
+	if version != 1 && version != PeerStoreRecordVersion {
 		return Peer{}, fmt.Errorf("%w: unsupported peer store version", ErrInvalidMessage)
 	}
 	peerID, err := reader.ReadString()
@@ -264,6 +267,13 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 	if err != nil {
 		return Peer{}, err
 	}
+	var signedRecord []byte
+	if version >= 2 {
+		signedRecord, err = readPeerSignedRecord(reader)
+		if err != nil {
+			return Peer{}, err
+		}
+	}
 	if err := reader.EnsureEOF(); err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer eof: %w", err)
 	}
@@ -292,6 +302,7 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 		SentBytes:                 sentBytes,
 		ReceivedBytes:             receivedBytes,
 		LastRoundTripTimeMilli:    lastRoundTripTimeMilli,
+		SignedRecord:              signedRecord,
 		Metadata:                  metadata,
 	}
 	peer = normalizePeerForStorage(peer)
@@ -379,6 +390,27 @@ func readPeerMetadata(reader *borsh.Reader) (map[string]string, error) {
 		return nil, nil
 	}
 	return metadata, nil
+}
+
+func writePeerSignedRecord(writer *borsh.Writer, signedRecord []byte) error {
+	if len(signedRecord) > maxPeerRecordSize {
+		return fmt.Errorf("%w: signed peer record too large", ErrInvalidMessage)
+	}
+	if err := writer.WriteBytes(signedRecord); err != nil {
+		return fmt.Errorf("p2p: marshal peer signed record: %w", err)
+	}
+	return nil
+}
+
+func readPeerSignedRecord(reader *borsh.Reader) ([]byte, error) {
+	signedRecord, err := reader.ReadBytes()
+	if err != nil {
+		return nil, fmt.Errorf("p2p: read peer signed record: %w", err)
+	}
+	if len(signedRecord) > maxPeerRecordSize {
+		return nil, fmt.Errorf("%w: signed peer record too large", ErrInvalidMessage)
+	}
+	return signedRecord, nil
 }
 
 func normalizePeerForStorage(peer Peer) Peer {

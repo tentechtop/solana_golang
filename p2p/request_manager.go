@@ -94,9 +94,11 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	if !outbound.IsRequest() {
 		return Message{}, fmt.Errorf("%w: request flag required", ErrInvalidMessage)
 	}
+	host.metrics.requestsStarted.Add(1)
 
 	waiter, unregister, err := host.requests.register(outbound.ID)
 	if err != nil {
+		host.metrics.requestsFailed.Add(1)
 		return Message{}, err
 	}
 	defer unregister()
@@ -108,11 +110,13 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 			slog.Uint64("protocol_id", uint64(outbound.Type)),
 			slog.Any("error", err),
 		)
+		host.metrics.requestsFailed.Add(1)
 		return Message{}, err
 	}
 
 	select {
 	case response := <-waiter:
+		host.metrics.requestsSucceeded.Add(1)
 		host.logger.Debug("p2p request completed",
 			slog.String("peer_id", peerID),
 			slog.String("request_id", outbound.ID),
@@ -127,6 +131,7 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 			slog.Uint64("protocol_id", uint64(outbound.Type)),
 			slog.Any("error", ctx.Err()),
 		)
+		host.metrics.requestsFailed.Add(1)
 		return Message{}, fmt.Errorf("p2p: wait request %s response: %w", outbound.ID, ctx.Err())
 	}
 }

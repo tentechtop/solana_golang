@@ -78,6 +78,7 @@ type Peer struct {
 	SentBytes                 uint64
 	ReceivedBytes             uint64
 	LastRoundTripTimeMilli    int64
+	SignedRecord              []byte
 	Metadata                  map[string]string
 }
 
@@ -106,6 +107,7 @@ type PeerSnapshot struct {
 	SentBytes                 uint64
 	ReceivedBytes             uint64
 	LastRoundTripTimeMilli    int64
+	HasSignedRecord           bool
 }
 
 // NewPeer 创建节点信息 + 统一校验节点 ID 和地址归属。
@@ -144,6 +146,7 @@ func (peer Peer) Validate() error {
 // Clone 复制节点信息 + 防止调用方修改 Host 内部状态。
 func (peer Peer) Clone() Peer {
 	peer.Addresses = cloneAddresses(peer.Addresses)
+	peer.SignedRecord = utils.CloneBytes(peer.SignedRecord)
 	peer.Metadata = cloneStringMap(peer.Metadata)
 	return peer
 }
@@ -228,6 +231,7 @@ func (peer Peer) Snapshot() PeerSnapshot {
 		SentBytes:                 peer.SentBytes,
 		ReceivedBytes:             peer.ReceivedBytes,
 		LastRoundTripTimeMilli:    peer.LastRoundTripTimeMilli,
+		HasSignedRecord:           len(peer.SignedRecord) > 0,
 	}
 }
 
@@ -306,6 +310,9 @@ func (peer *Peer) mergeNodeFields(next Peer) {
 	}
 	if next.LastRoundTripTimeMilli > 0 {
 		peer.LastRoundTripTimeMilli = next.LastRoundTripTimeMilli
+	}
+	if len(next.SignedRecord) > 0 {
+		peer.SignedRecord = utils.CloneBytes(next.SignedRecord)
 	}
 	peer.Metadata = mergeStringMap(peer.Metadata, next.Metadata)
 }

@@ -36,6 +36,7 @@ type KADFindNodeResponse struct {
 type KADPeerHint struct {
 	PeerID               string
 	Addresses            []string
+	SignedRecord         []byte
 	Role                 PeerRole
 	Capabilities         PeerCapability
 	ProtocolVersion      string
@@ -228,32 +229,51 @@ func PeersToKADPeerHints(peers []Peer) []KADPeerHint {
 		if !peerShareableInDHT(peer) {
 			continue
 		}
-		hints = append(hints, NewKADPeerHint(peer))
+		hint, err := NewKADPeerHint(peer)
+		if err != nil {
+			continue
+		}
+		hints = append(hints, hint)
 	}
 	return hints
 }
 
 // NewKADPeerHint 创建节点提示 + 将地址转换为字符串便于 Borsh 编码。
-func NewKADPeerHint(peer Peer) KADPeerHint {
-	addresses := make([]string, 0, len(peer.Addresses))
-	for _, address := range peer.Addresses {
-		addresses = append(addresses, address.String())
+func NewKADPeerHint(peer Peer) (KADPeerHint, error) {
+	if !peerShareableInDHT(peer) {
+		return KADPeerHint{}, fmt.Errorf("%w: peer is not shareable in dht", ErrInvalidMessage)
 	}
-	return KADPeerHint{
-		PeerID:               peer.ID,
-		Addresses:            addresses,
-		Role:                 peer.Role,
-		Capabilities:         peer.Capabilities,
-		ProtocolVersion:      peer.ProtocolVersion,
-		SoftwareVersion:      peer.SoftwareVersion,
-		LatestSlot:           peer.LatestSlot,
-		BlockHeight:          peer.BlockHeight,
-		BestBlockHash:        peer.BestBlockHash,
-		Validator:            peer.Validator,
-		StakeLamports:        peer.StakeLamports,
+	record, ok, err := signedPeerRecordFromPeer(peer)
+	if err != nil {
+		return KADPeerHint{}, err
+	}
+	if !ok {
+		return KADPeerHint{}, fmt.Errorf("%w: missing signed peer record", ErrInvalidMessage)
+	}
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		return KADPeerHint{}, err
+	}
+	hint := KADPeerHint{
+		PeerID:               record.PeerID,
+		Addresses:            append([]string(nil), record.Addresses...),
+		SignedRecord:         encoded,
+		Role:                 record.Role,
+		Capabilities:         record.Capabilities,
+		ProtocolVersion:      record.ProtocolVersion,
+		SoftwareVersion:      record.SoftwareVersion,
+		LatestSlot:           record.LatestSlot,
+		BlockHeight:          record.BlockHeight,
+		BestBlockHash:        record.BestBlockHash,
+		Validator:            record.Validator,
+		StakeLamports:        record.StakeLamports,
 		LastSeenUnixMilli:    peer.LastSeenUnixMilli,
 		LastConnectUnixMilli: peer.LastConnectedUnixMilli,
 	}
+	if err := hint.Validate(); err != nil {
+		return KADPeerHint{}, err
+	}
+	return hint, nil
 }
 
 // Validate 校验节点提示 + 确保地址中的 peer id 与提示身份一致。
@@ -264,6 +284,13 @@ func (hint KADPeerHint) Validate() error {
 	if len(hint.Addresses) == 0 || len(hint.Addresses) > maxKADAddressesPerPeer {
 		return fmt.Errorf("%w: invalid kad peer hint addresses", ErrInvalidMessage)
 	}
+	record, err := UnmarshalSignedPeerRecordBinary(hint.SignedRecord)
+	if err != nil {
+		return err
+	}
+	if record.PeerID != hint.PeerID {
+		return fmt.Errorf("%w: kad signed record id mismatch", ErrInvalidMessage)
+	}
 	for _, rawAddress := range hint.Addresses {
 		address, err := utils.ParseMultiAddress(rawAddress)
 		if err != nil {
@@ -271,6 +298,14 @@ func (hint KADPeerHint) Validate() error {
 		}
 		if address.PeerID != hint.PeerID {
 			return fmt.Errorf("%w: kad peer address id mismatch", ErrInvalidMessage)
+		}
+	}
+	if len(record.Addresses) != len(hint.Addresses) {
+		return fmt.Errorf("%w: kad signed record address mismatch", ErrInvalidMessage)
+	}
+	for index, rawAddress := range hint.Addresses {
+		if record.Addresses[index] != rawAddress {
+			return fmt.Errorf("%w: kad signed record address mismatch", ErrInvalidMessage)
 		}
 	}
 	return nil
@@ -281,27 +316,14 @@ func (hint KADPeerHint) ToPeer() (Peer, error) {
 	if err := hint.Validate(); err != nil {
 		return Peer{}, err
 	}
-	addresses := make([]utils.MultiAddress, 0, len(hint.Addresses))
-	for _, rawAddress := range hint.Addresses {
-		address, err := utils.ParseMultiAddress(rawAddress)
-		if err != nil {
-			return Peer{}, err
-		}
-		addresses = append(addresses, address)
-	}
-	peer, err := NewPeer(hint.PeerID, addresses)
+	record, err := UnmarshalSignedPeerRecordBinary(hint.SignedRecord)
 	if err != nil {
 		return Peer{}, err
 	}
-	peer.Role = normalizePeerRole(hint.Role)
-	peer.Capabilities = hint.Capabilities
-	peer.ProtocolVersion = hint.ProtocolVersion
-	peer.SoftwareVersion = hint.SoftwareVersion
-	peer.LatestSlot = hint.LatestSlot
-	peer.BlockHeight = hint.BlockHeight
-	peer.BestBlockHash = hint.BestBlockHash
-	peer.Validator = hint.Validator
-	peer.StakeLamports = hint.StakeLamports
+	peer, err := record.ToPeer()
+	if err != nil {
+		return Peer{}, err
+	}
 	peer.LastSeenUnixMilli = hint.LastSeenUnixMilli
 	peer.LastConnectedUnixMilli = hint.LastConnectUnixMilli
 	return peer, nil
@@ -316,6 +338,9 @@ func (hint KADPeerHint) marshalTo(writer *borsh.Writer) error {
 	}
 	if err := writeKADStringSlice(writer, hint.Addresses); err != nil {
 		return err
+	}
+	if err := writer.WriteBytes(hint.SignedRecord); err != nil {
+		return fmt.Errorf("p2p: marshal kad signed record: %w", err)
 	}
 	if err := writer.WriteString(string(normalizePeerRole(hint.Role))); err != nil {
 		return fmt.Errorf("p2p: marshal kad peer role: %w", err)
@@ -347,6 +372,13 @@ func unmarshalKADPeerHint(reader *borsh.Reader) (KADPeerHint, error) {
 	addresses, err := readKADStringSlice(reader, maxKADAddressesPerPeer)
 	if err != nil {
 		return KADPeerHint{}, err
+	}
+	signedRecord, err := reader.ReadBytes()
+	if err != nil {
+		return KADPeerHint{}, fmt.Errorf("p2p: read kad signed record: %w", err)
+	}
+	if len(signedRecord) > maxPeerRecordSize {
+		return KADPeerHint{}, fmt.Errorf("%w: kad signed record too large", ErrInvalidMessage)
 	}
 	role, err := reader.ReadString()
 	if err != nil {
@@ -395,6 +427,7 @@ func unmarshalKADPeerHint(reader *borsh.Reader) (KADPeerHint, error) {
 	hint := KADPeerHint{
 		PeerID:               peerID,
 		Addresses:            addresses,
+		SignedRecord:         signedRecord,
 		Role:                 PeerRole(role),
 		Capabilities:         PeerCapability(capabilities),
 		ProtocolVersion:      protocolVersion,

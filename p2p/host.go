@@ -27,6 +27,7 @@ type HostConfig struct {
 	PreferredProtocols  []utils.MultiAddressProtocol
 	DialTimeout         time.Duration
 	HandshakeTimeout    time.Duration
+	PeerRecordTTL       time.Duration
 	HeartbeatInterval   time.Duration
 	ConnectionIdle      time.Duration
 	MaxPeerFailures     uint32
@@ -38,37 +39,41 @@ type HostConfig struct {
 	RoutingTable        *KADRoutingTable
 	PeerStore           PeerStore
 	PersistedPeerLimit  int
+	AdvertisedAddresses []utils.MultiAddress
 }
 
 // Host 管理 P2P 节点运行态 + 统一处理传输、节点表和连接池。
 type Host struct {
-	mutex              sync.RWMutex
-	peerID             string
-	secureSession      bool
-	secureIdentity     SecureSessionIdentity
-	preferredProtocols []utils.MultiAddressProtocol
-	dialTimeout        time.Duration
-	handshakeTimeout   time.Duration
-	heartbeatInterval  time.Duration
-	connectionIdle     time.Duration
-	maxPeerFailures    uint32
-	maxPeers           int
-	maxConnections     int
-	logger             *slog.Logger
-	lifecycleContext   context.Context
-	lifecycleCancel    context.CancelFunc
-	inboundSlots       chan struct{}
-	transports         map[utils.MultiAddressProtocol]Transport
-	peers              map[string]Peer
-	connections        map[string]Connection
-	connectionStates   map[string]ConnectionState
-	resumptionTickets  map[string]SecureSessionResumptionTicket
-	registry           *ProtocolRegistry
-	requests           *requestManager
-	routingTable       *KADRoutingTable
-	peerStore          PeerStore
-	persistedPeerLimit int
-	closed             bool
+	mutex               sync.RWMutex
+	peerID              string
+	secureSession       bool
+	secureIdentity      SecureSessionIdentity
+	preferredProtocols  []utils.MultiAddressProtocol
+	dialTimeout         time.Duration
+	handshakeTimeout    time.Duration
+	peerRecordTTL       time.Duration
+	heartbeatInterval   time.Duration
+	connectionIdle      time.Duration
+	maxPeerFailures     uint32
+	maxPeers            int
+	maxConnections      int
+	logger              *slog.Logger
+	lifecycleContext    context.Context
+	lifecycleCancel     context.CancelFunc
+	inboundSlots        chan struct{}
+	advertisedAddresses []utils.MultiAddress
+	transports          map[utils.MultiAddressProtocol]Transport
+	peers               map[string]Peer
+	connections         map[string]Connection
+	connectionStates    map[string]ConnectionState
+	resumptionTickets   map[string]SecureSessionResumptionTicket
+	registry            *ProtocolRegistry
+	requests            *requestManager
+	routingTable        *KADRoutingTable
+	peerStore           PeerStore
+	persistedPeerLimit  int
+	metrics             p2pMetrics
+	closed              bool
 }
 
 // ConnectionState 保存连接运行态 + 供心跳、监控和故障清理使用。
@@ -102,37 +107,42 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateAdvertisedAddresses(config.AdvertisedAddresses, config.PeerID); err != nil {
+		return nil, err
+	}
 	maxPeers := normalizeMaxPeers(config.MaxPeers)
 	maxConnections := normalizeMaxConnections(config.MaxConnections, maxPeers)
 	maxPendingInbound := normalizeMaxPendingInbound(config.MaxPendingInbound, maxConnections)
 	hostContext, hostCancel := context.WithCancel(context.Background())
 
 	host := &Host{
-		peerID:             config.PeerID,
-		secureSession:      secureSession,
-		secureIdentity:     secureIdentity,
-		preferredProtocols: normalizedProtocolOrder(config.PreferredProtocols),
-		dialTimeout:        normalizeDialTimeout(config.DialTimeout),
-		handshakeTimeout:   normalizeHandshakeTimeout(config.HandshakeTimeout),
-		heartbeatInterval:  normalizeHeartbeatInterval(config.HeartbeatInterval),
-		connectionIdle:     normalizeConnectionIdle(config.ConnectionIdle),
-		maxPeerFailures:    normalizeMaxPeerFailures(config.MaxPeerFailures),
-		maxPeers:           maxPeers,
-		maxConnections:     maxConnections,
-		logger:             normalizeLogger(config.Logger),
-		lifecycleContext:   hostContext,
-		lifecycleCancel:    hostCancel,
-		inboundSlots:       newInboundLimiter(maxPendingInbound),
-		transports:         make(map[utils.MultiAddressProtocol]Transport),
-		peers:              make(map[string]Peer),
-		connections:        make(map[string]Connection),
-		connectionStates:   make(map[string]ConnectionState),
-		resumptionTickets:  make(map[string]SecureSessionResumptionTicket),
-		registry:           normalizeRegistry(config.Registry),
-		requests:           newRequestManager(),
-		routingTable:       routingTable,
-		peerStore:          normalizePeerStore(config.PeerStore),
-		persistedPeerLimit: normalizePeerStoreLimit(config.PersistedPeerLimit),
+		peerID:              config.PeerID,
+		secureSession:       secureSession,
+		secureIdentity:      secureIdentity,
+		preferredProtocols:  normalizedProtocolOrder(config.PreferredProtocols),
+		dialTimeout:         normalizeDialTimeout(config.DialTimeout),
+		handshakeTimeout:    normalizeHandshakeTimeout(config.HandshakeTimeout),
+		peerRecordTTL:       normalizePeerRecordTTL(config.PeerRecordTTL),
+		heartbeatInterval:   normalizeHeartbeatInterval(config.HeartbeatInterval),
+		connectionIdle:      normalizeConnectionIdle(config.ConnectionIdle),
+		maxPeerFailures:     normalizeMaxPeerFailures(config.MaxPeerFailures),
+		maxPeers:            maxPeers,
+		maxConnections:      maxConnections,
+		logger:              normalizeLogger(config.Logger),
+		lifecycleContext:    hostContext,
+		lifecycleCancel:     hostCancel,
+		inboundSlots:        newInboundLimiter(maxPendingInbound),
+		advertisedAddresses: cloneAddresses(config.AdvertisedAddresses),
+		transports:          make(map[utils.MultiAddressProtocol]Transport),
+		peers:               make(map[string]Peer),
+		connections:         make(map[string]Connection),
+		connectionStates:    make(map[string]ConnectionState),
+		resumptionTickets:   make(map[string]SecureSessionResumptionTicket),
+		registry:            normalizeRegistry(config.Registry),
+		requests:            newRequestManager(),
+		routingTable:        routingTable,
+		peerStore:           normalizePeerStore(config.PeerStore),
+		persistedPeerLimit:  normalizePeerStoreLimit(config.PersistedPeerLimit),
 	}
 
 	if len(transports) == 0 {
@@ -200,7 +210,7 @@ func (host *Host) HandleMessage(ctx context.Context, message Message) (ProtocolH
 
 func (host *Host) registerDefaultProtocolHandlers() error {
 	if _, ok := host.registry.Spec(ProtocolFindNodeRequestV1); ok {
-		return nil
+		return host.registerDefaultDiscoveryHandlers()
 	}
 	spec := ProtocolSpec{
 		ID:          ProtocolFindNodeRequestV1,
@@ -208,7 +218,36 @@ func (host *Host) registerDefaultProtocolHandlers() error {
 		HasResponse: true,
 		Priority:    MessagePriorityNormal,
 	}
-	return host.RegisterResultHandler(spec, host.handleFindNodeRequest)
+	if err := host.RegisterResultHandler(spec, host.handleFindNodeRequest); err != nil {
+		return err
+	}
+	return host.registerDefaultDiscoveryHandlers()
+}
+
+func (host *Host) registerDefaultDiscoveryHandlers() error {
+	if _, ok := host.registry.Spec(ProtocolIdentifyRequestV1); !ok {
+		spec := ProtocolSpec{
+			ID:          ProtocolIdentifyRequestV1,
+			Name:        "/p2p/identify/request/1.0.0",
+			HasResponse: true,
+			Priority:    MessagePriorityHigh,
+		}
+		if err := host.RegisterResultHandler(spec, host.handleIdentifyRequest); err != nil {
+			return err
+		}
+	}
+	if _, ok := host.registry.Spec(ProtocolPeerHintsV1); !ok {
+		spec := ProtocolSpec{
+			ID:          ProtocolPeerHintsV1,
+			Name:        "/p2p/peer-hints/1.0.0",
+			HasResponse: false,
+			Priority:    MessagePriorityNormal,
+		}
+		if err := host.RegisterVoidHandler(spec, host.handlePeerHints); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (host *Host) handleFindNodeRequest(ctx context.Context, message Message) (Message, error) {
@@ -244,8 +283,10 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 			host.recordConnectionError(connection, err)
 			return
 		}
+		host.metrics.messagesRead.Add(1)
 		if err := host.validateConnectionMessage(connection, message); err != nil {
 			host.recordConnectionError(connection, err)
+			host.metrics.messagesRejected.Add(1)
 			host.logger.Warn("p2p message peer mismatch",
 				slog.String("connection_id", connection.ID()),
 				slog.String("from_peer_id", message.FromPeerID),
@@ -255,6 +296,7 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 			return
 		}
 		if err := host.markConnectionRead(connection, message.FromPeerID); err != nil {
+			host.metrics.messagesRejected.Add(1)
 			host.logger.Warn("p2p connection rejected",
 				slog.String("connection_id", connection.ID()),
 				slog.String("peer_id", message.FromPeerID),
@@ -270,6 +312,7 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 		}
 		result, err := host.HandleMessage(ctx, message)
 		if err != nil {
+			host.metrics.messagesRejected.Add(1)
 			host.logger.Warn("p2p message rejected",
 				slog.String("connection_id", connection.ID()),
 				slog.String("message_id", message.ID),
@@ -304,6 +347,9 @@ func (host *Host) AddPeer(peer Peer) error {
 
 func (host *Host) addPeer(peer Peer, persist bool) error {
 	if err := peer.Validate(); err != nil {
+		return err
+	}
+	if err := verifyPeerSignedRecord(peer); err != nil {
 		return err
 	}
 
@@ -402,6 +448,7 @@ func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handle
 		slog.String("address", address.String()),
 		slog.String("protocol", string(address.Protocol)),
 	)
+	host.addAdvertisedAddress(address)
 	return transport.Listen(ctx, address, host.secureConnectionHandler(handler))
 }
 
@@ -454,6 +501,7 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 		cancel()
 		if err == nil {
 			go host.HandleConnection(host.lifecycleContext, connection)
+			host.identifyPeerAsync(connection, peerID)
 			return connection, nil
 		}
 		dialErrors = append(dialErrors, err)
@@ -663,6 +711,7 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	existing := host.connections[peerID]
 	if existing == nil && len(host.connections) >= host.maxConnections {
 		host.mutex.Unlock()
+		host.metrics.maxConnectionRejected.Add(1)
 		return fmt.Errorf("%w: %d", ErrMaxConnectionsReached, host.maxConnections)
 	}
 	if _, ok := host.peers[peerID]; !ok && len(host.peers) >= host.maxPeers {
@@ -722,6 +771,7 @@ func (host *Host) writeConnectionMessage(ctx context.Context, connection Connect
 		host.recordConnectionError(connection, err)
 		return err
 	}
+	host.metrics.messagesWritten.Add(1)
 	host.markConnectionWrite(connection, peerID)
 	return nil
 }
@@ -816,6 +866,7 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) error
 	}
 	if _, ok := host.connections[peerID]; !ok {
 		if len(host.connections) >= host.maxConnections {
+			host.metrics.maxConnectionRejected.Add(1)
 			return fmt.Errorf("%w: %d", ErrMaxConnectionsReached, host.maxConnections)
 		}
 		if _, exists := host.peers[peerID]; !exists && len(host.peers) >= host.maxPeers {
@@ -1133,6 +1184,7 @@ func (host *Host) secureConnectionHandler(handler ConnectionHandler) ConnectionH
 			secureConnection, err := SecureAcceptConnection(handshakeContext, connection, host.secureIdentity)
 			cancel()
 			if err != nil {
+				host.metrics.secureHandshakeFailed.Add(1)
 				host.logger.Warn("p2p secure session accept failed",
 					slog.String("connection_id", connection.ID()),
 					slog.Any("error", err),
@@ -1140,6 +1192,7 @@ func (host *Host) secureConnectionHandler(handler ConnectionHandler) ConnectionH
 				_ = connection.Close()
 				return
 			}
+			host.metrics.secureHandshakeOK.Add(1)
 			if err := host.storeConnection(secureConnection.RemotePeerID(), secureConnection); err != nil {
 				host.logger.Warn("p2p secure connection rejected",
 					slog.String("connection_id", secureConnection.ID()),
@@ -1157,6 +1210,7 @@ func (host *Host) secureConnectionHandler(handler ConnectionHandler) ConnectionH
 				slog.String("remote_software", session.RemoteSoftwareVersion()),
 				slog.Uint64("protocol_version", uint64(session.ProtocolVersion())),
 			)
+			host.identifyPeerAsync(secureConnection, secureConnection.RemotePeerID())
 			handledConnection = secureConnection
 		}
 		handler(ctx, handledConnection)
@@ -1169,8 +1223,10 @@ func (host *Host) secureOutboundConnection(ctx context.Context, connection Conne
 	}
 	secureConnection, err := SecureDialConnection(ctx, connection, host.secureIdentity)
 	if err != nil {
+		host.metrics.secureHandshakeFailed.Add(1)
 		return nil, err
 	}
+	host.metrics.secureHandshakeOK.Add(1)
 	return secureConnection, nil
 }
 
@@ -1248,6 +1304,15 @@ func normalizeRoutingTable(table *KADRoutingTable, peerID string) (*KADRoutingTa
 		return table, nil
 	}
 	return NewKADRoutingTable(KADRoutingTableConfig{LocalPeerID: peerID})
+}
+
+func validateAdvertisedAddresses(addresses []utils.MultiAddress, peerID string) error {
+	for _, address := range addresses {
+		if address.PeerID != peerID {
+			return fmt.Errorf("%w: advertised address owner mismatch", ErrInvalidMessage)
+		}
+	}
+	return nil
 }
 
 // copyConnections 复制连接集合 + 缩短 Host 锁持有时间后再关闭连接。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"solana_golang/utils"
 )
@@ -34,14 +35,15 @@ func TestKADFindNodeRequestRoundTrip(t *testing.T) {
 
 func TestKADFindNodeResponseRoundTrip(t *testing.T) {
 	targetPeerID := kadTestPeerID(8)
-	peer := kadTestPeer(t, 0x30, 4011)
-	peer.ProtocolVersion = "1"
-	peer.SoftwareVersion = "test/0.1.0"
-	peer.LatestSlot = 11
-	peer.BlockHeight = 9
-	peer.BestBlockHash = testPeerID(21)
-	peer.Validator = true
-	peer.StakeLamports = 100
+	peer := signedKADTestPeerWithConfig(t, 4011, func(peer *Peer) {
+		peer.ProtocolVersion = "1"
+		peer.SoftwareVersion = "test/0.1.0"
+		peer.LatestSlot = 11
+		peer.BlockHeight = 9
+		peer.BestBlockHash = testPeerID(21)
+		peer.Validator = true
+		peer.StakeLamports = 100
+	})
 
 	response, err := NewKADFindNodeResponse(targetPeerID, []Peer{peer})
 	if err != nil {
@@ -88,6 +90,14 @@ func TestKADPeerHintRejectsAddressOwnerMismatch(t *testing.T) {
 	}
 }
 
+func TestNewKADPeerHintRejectsUnsignedPeer(t *testing.T) {
+	peer := kadTestPeer(t, 0x48, 4015)
+
+	if _, err := NewKADPeerHint(peer); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("NewKADPeerHint() error = %v, want ErrInvalidMessage", err)
+	}
+}
+
 func TestHostFindNodeHandlerReturnsClosestPeers(t *testing.T) {
 	localPeerID := kadTestPeerID(0)
 	host, err := NewHost(HostConfig{PeerID: localPeerID})
@@ -96,8 +106,8 @@ func TestHostFindNodeHandlerReturnsClosestPeers(t *testing.T) {
 	}
 	defer host.Close()
 
-	targetPeer := kadTestPeer(t, 0x01, 4013)
-	otherPeer := kadTestPeer(t, 0x70, 4014)
+	targetPeer := signedKADTestPeer(t, 4013)
+	otherPeer := signedKADTestPeer(t, 4014)
 	if err := host.AddPeer(targetPeer); err != nil {
 		t.Fatalf("AddPeer(target) error = %v", err)
 	}
@@ -136,4 +146,33 @@ func TestHostFindNodeHandlerReturnsClosestPeers(t *testing.T) {
 	if response.Peers[0].PeerID != targetPeer.ID {
 		t.Fatalf("Peers[0] = %q, want %q", response.Peers[0].PeerID, targetPeer.ID)
 	}
+}
+
+func signedKADTestPeer(t *testing.T, port int) Peer {
+	return signedKADTestPeerWithConfig(t, port, nil)
+}
+
+func signedKADTestPeerWithConfig(t *testing.T, port int, configure func(peer *Peer)) Peer {
+	t.Helper()
+	identity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
+	address := testAddress(t, utils.ProtocolTCP, port, identity.PeerID)
+	peer, err := NewPeer(identity.PeerID, []utils.MultiAddress{address})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	peer.Role = PeerRoleFull
+	peer.Capabilities = PeerCapabilityDHT
+	if configure != nil {
+		configure(&peer)
+	}
+	record, err := NewSignedPeerRecord(peer, identity, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSignedPeerRecord() error = %v", err)
+	}
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(record) error = %v", err)
+	}
+	peer.SignedRecord = encoded
+	return peer
 }

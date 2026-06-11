@@ -103,6 +103,7 @@ func (host *Host) bootstrapFromAddress(ctx context.Context, address utils.MultiA
 		defer connection.Close()
 	}
 	go host.HandleConnection(loopContext, connection)
+	host.identifyPeerAsync(connection, address.PeerID)
 
 	targets := host.bootstrapTargetPeerIDs(config.RefreshTargetCount)
 	for _, targetPeerID := range targets {
@@ -138,19 +139,23 @@ func (host *Host) queryFindNode(
 	timeout time.Duration,
 ) (BootstrapSummary, error) {
 	summary := BootstrapSummary{FindNodeQueryCount: 1}
+	host.metrics.findNodeQueries.Add(1)
 	requestPayload, err := NewKADFindNodeRequest(targetPeerID, limit)
 	if err != nil {
 		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
 	payload, err := requestPayload.MarshalBinary()
 	if err != nil {
 		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
 	request, err := NewRequestMessage(host.peerID, ProtocolFindNodeRequestV1, payload)
 	if err != nil {
 		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
 	request.ToPeerID = connection.RemotePeerID()
@@ -160,11 +165,13 @@ func (host *Host) queryFindNode(
 	response, err := host.requestOnConnection(queryContext, connection, connection.RemotePeerID(), request)
 	if err != nil {
 		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
 	peers, err := decodeFindNodeResponse(request, response, targetPeerID)
 	if err != nil {
 		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
 	for _, peer := range peers {
@@ -173,6 +180,7 @@ func (host *Host) queryFindNode(
 		}
 		if err := host.AddPeer(peer); err != nil {
 			summary.FindNodeFailureCount = 1
+			host.metrics.findNodeFailures.Add(1)
 			return summary, err
 		}
 		summary.DiscoveredPeers++
