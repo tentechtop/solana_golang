@@ -37,6 +37,30 @@ func TestMessageFrameRoundTrip(t *testing.T) {
 		t.Fatalf("Payload = %q, want hello", decoded.Payload)
 	}
 }
+
+func TestMessageFrameHandlesShortWriter(t *testing.T) {
+	message, err := NewMessage(MessageTypePing, []byte("short-writer"))
+	if err != nil {
+		t.Fatalf("NewMessage() error = %v", err)
+	}
+
+	writer := &chunkedWriter{maxChunkSize: 3}
+	if err := writeMessageFrame(writer, message, DefaultMaxMessageSize); err != nil {
+		t.Fatalf("writeMessageFrame() error = %v", err)
+	}
+
+	decoded, err := readMessageFrame(bytes.NewReader(writer.buffer.Bytes()), DefaultMaxMessageSize)
+	if err != nil {
+		t.Fatalf("readMessageFrame() error = %v", err)
+	}
+	if decoded.ID != message.ID {
+		t.Fatalf("ID = %q, want %q", decoded.ID, message.ID)
+	}
+	if !bytes.Equal(decoded.Payload, message.Payload) {
+		t.Fatalf("Payload = %q, want %q", decoded.Payload, message.Payload)
+	}
+}
+
 func TestRequestResponseMessageRules(t *testing.T) {
 	peerID := testPeerID(10)
 	request, err := NewRequestMessage(peerID, MessageTypePing, []byte("ping"))
@@ -249,4 +273,16 @@ func TestMessageCloneIsolatesPayload(t *testing.T) {
 	if message.Payload[0] == 9 {
 		t.Fatal("Clone() shared payload, want isolated copy")
 	}
+}
+
+type chunkedWriter struct {
+	buffer       bytes.Buffer
+	maxChunkSize int
+}
+
+func (writer *chunkedWriter) Write(data []byte) (int, error) {
+	if len(data) > writer.maxChunkSize {
+		data = data[:writer.maxChunkSize]
+	}
+	return writer.buffer.Write(data)
 }

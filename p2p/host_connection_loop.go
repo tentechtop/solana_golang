@@ -18,7 +18,9 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 		ctx = host.lifecycleContext
 	}
 	for {
-		message, err := connection.ReadMessage(ctx)
+		readContext, cancelRead := host.connectionReadContext(ctx, connection)
+		message, err := connection.ReadMessage(readContext)
+		cancelRead()
 		if err != nil {
 			host.recordConnectionError(connection, err)
 			return
@@ -67,6 +69,22 @@ func (host *Host) HandleConnection(ctx context.Context, connection Connection) {
 			continue
 		}
 	}
+}
+
+// connectionReadContext 限制未识别连接首帧读取时间 + 防止慢连接长期占用 goroutine 和文件描述符。
+func (host *Host) connectionReadContext(ctx context.Context, connection Connection) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = host.lifecycleContext
+	}
+	if connection != nil && connection.RemotePeerID() != "" {
+		return context.WithCancel(ctx)
+	}
+	if connection != nil {
+		if _, ok := host.peerIDByConnectionID(connection.ID()); ok {
+			return context.WithCancel(ctx)
+		}
+	}
+	return host.withHandshakeTimeout(ctx)
 }
 
 func (host *Host) validateConnectionMessage(connection Connection, message Message) error {

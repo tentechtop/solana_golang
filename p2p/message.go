@@ -299,10 +299,10 @@ func writeMessageFrame(writer io.Writer, message Message, maxMessageSize int) er
 	binary.BigEndian.PutUint32(header[10:14], uint32(len(payload)))
 	copy(header[14:messageFrameHeaderSize], checksum[:])
 
-	if _, err := writer.Write(header); err != nil {
+	if err := writeFull(writer, header); err != nil {
 		return fmt.Errorf("p2p: write message header: %w", err)
 	}
-	if _, err := writer.Write(payload); err != nil {
+	if err := writeFull(writer, payload); err != nil {
 		return fmt.Errorf("p2p: write message body: %w", err)
 	}
 	return nil
@@ -511,6 +511,21 @@ func parseMessageFrameHeader(header []byte, maxMessageSize int) (messageFrameHea
 		payloadLength: payloadLength,
 		checksum:      checksum,
 	}, nil
+}
+
+// writeFull 完整写入字节流 + 避免短写导致网络帧被静默截断。
+func writeFull(writer io.Writer, data []byte) error {
+	for len(data) > 0 {
+		written, err := writer.Write(data)
+		if err != nil {
+			return err
+		}
+		if written <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[written:]
+	}
+	return nil
 }
 
 func cloneBytes(value []byte) []byte {

@@ -24,6 +24,7 @@ import (
 const (
 	quicApplicationProtocol = "solana-golang-p2p/1"
 	quicCloseCode           = quic.ApplicationErrorCode(0)
+	defaultQUICStreamAccept = 5 * time.Second
 )
 
 // QUICTransportConfig 保存 QUIC 配置 + 支持注入 TLS、quic-go 配置和日志。
@@ -157,13 +158,24 @@ func (transport *QUICTransport) acceptLoop(ctx context.Context, listener *quic.L
 
 // acceptStream 接收入站双向流 + 将 quic-go 连接包装为统一 Connection。
 func (transport *QUICTransport) acceptStream(ctx context.Context, connection *quic.Conn, handler ConnectionHandler) {
-	stream, err := connection.AcceptStream(ctx)
+	streamContext, cancel := context.WithTimeout(ctx, transport.streamAcceptTimeout())
+	defer cancel()
+
+	stream, err := connection.AcceptStream(streamContext)
 	if err != nil {
 		_ = connection.CloseWithError(quicCloseCode, "accept stream failed")
 		transport.logger.Warn("p2p quic accept stream failed", slog.String("error", err.Error()))
 		return
 	}
 	handler(ctx, newQUICConnection(connection, stream, "", transport.maxMessageSize))
+}
+
+// streamAcceptTimeout 限制首个业务流等待时间 + 防止 QUIC 空连接长期占用 goroutine。
+func (transport *QUICTransport) streamAcceptTimeout() time.Duration {
+	if transport.quicConfig != nil && transport.quicConfig.HandshakeIdleTimeout > 0 {
+		return transport.quicConfig.HandshakeIdleTimeout
+	}
+	return defaultQUICStreamAccept
 }
 
 // acceptError 归一化接收错误 + 上下文取消和主动关闭不作为异常返回。

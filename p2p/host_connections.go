@@ -30,6 +30,17 @@ func (host *Host) hasConnection(peerID string) bool {
 	return ok
 }
 
+func (host *Host) peerIDByConnectionID(connectionID string) (string, bool) {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	for peerID, state := range host.connectionStates {
+		if state.ConnectionID == connectionID {
+			return peerID, true
+		}
+	}
+	return "", false
+}
+
 // ConnectionState 查询连接状态 + 返回副本避免外部修改内部状态。
 func (host *Host) ConnectionState(peerID string) (ConnectionState, bool) {
 	host.mutex.RLock()

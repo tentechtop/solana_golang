@@ -219,6 +219,34 @@ func TestHostRejectsEmptyInboundSender(t *testing.T) {
 	}
 }
 
+func TestHostClosesUnidentifiedIdleConnection(t *testing.T) {
+	host, err := NewHost(HostConfig{
+		PeerID:           testPeerID(100),
+		AllowInsecure:    true,
+		HandshakeTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newScriptedConnection(utils.ProtocolTCP, "", nil)
+	done := make(chan struct{})
+	go func() {
+		host.HandleConnection(context.Background(), connection)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("HandleConnection() did not close unidentified idle connection")
+	}
+	if !connection.closed {
+		t.Fatal("connection.closed = false, want idle connection closed")
+	}
+}
+
 func TestHostRejectsEmptyOutboundPeer(t *testing.T) {
 	host, err := NewHost(HostConfig{
 		PeerID:        testPeerID(72),
