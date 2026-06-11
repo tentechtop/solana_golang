@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,15 +48,19 @@ type stressConfig struct {
 	duration        time.Duration
 	concurrency     int
 	payloadBytes    int
+	rateLimit       int
 	requestTimeout  time.Duration
 	reportInterval  time.Duration
 	startDelay      time.Duration
+	warmup          bool
 	maxRequests     uint64
 	maxPeers        int
 	maxConnections  int
 	writeQueueSize  int
 	protocolWorkers int
 	serverDelay     time.Duration
+	inboundRate     int
+	profileDir      string
 }
 
 type identityFile struct {
@@ -75,6 +81,11 @@ type stressStats struct {
 	errors          map[string]uint64
 }
 
+type requestRateLimiter struct {
+	tokens <-chan time.Time
+	stop   func()
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("p2p stress exited", slog.Any("error", err))
@@ -87,6 +98,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	enableRuntimeProfiles(config.profileDir)
 	identity, err := loadOrCreateIdentity(config.identityFile, config.networkID)
 	if err != nil {
 		return err
@@ -139,6 +151,9 @@ func run() error {
 		slog.Int("targets", len(targetPeerIDs)),
 		slog.Int("concurrency", config.concurrency),
 		slog.Int("payload_bytes", config.payloadBytes),
+		slog.Int("rate_limit", config.rateLimit),
+		slog.Int("inbound_rate_limit", config.inboundRate),
+		slog.Bool("warmup", config.warmup),
 	)
 	if len(targetPeerIDs) == 0 || config.concurrency <= 0 || config.duration <= 0 {
 		<-rootContext.Done()
@@ -150,6 +165,13 @@ func run() error {
 		case <-rootContext.Done():
 			return nil
 		}
+	}
+	if config.warmup {
+		warmed := warmupTargetConnections(rootContext, host, targetPeerIDs, config.requestTimeout, logger)
+		logger.Info("stress warmup completed",
+			slog.Int("succeeded", warmed),
+			slog.Int("targets", len(targetPeerIDs)),
+		)
 	}
 
 	return runLoad(rootContext, host, identity.PeerID, targetPeerIDs, config, logger)
@@ -167,15 +189,19 @@ func parseConfig() (stressConfig, error) {
 	duration := flag.Duration("duration", 0, "load duration; 0 means server only")
 	concurrency := flag.Int("concurrency", 0, "request worker count")
 	payloadBytes := flag.Int("payload", 1024, "request payload bytes")
+	rateLimit := flag.Int("rate-limit", 0, "global request rate limit per second; 0 means unlimited")
 	requestTimeout := flag.Duration("request-timeout", defaultRequestTimeout, "request timeout")
 	reportInterval := flag.Duration("report-interval", defaultReportInterval, "report interval")
 	startDelay := flag.Duration("start-delay", 0, "delay before load starts")
+	warmup := flag.Bool("warmup", false, "dial targets before load starts")
 	maxRequests := flag.Uint64("max-requests", 0, "stop after total requests; 0 disables limit")
 	maxPeers := flag.Int("max-peers", 512, "max peer count")
 	maxConnections := flag.Int("max-connections", 512, "max connection count")
 	writeQueueSize := flag.Int("write-queue", 4096, "async write queue size")
 	protocolWorkers := flag.Int("protocol-workers", 0, "protocol worker count; 0 uses default")
 	serverDelay := flag.Duration("server-delay", 0, "server handler artificial delay")
+	inboundRate := flag.Int("inbound-rate-limit", 0, "max inbound messages per second; 0 uses p2p default")
+	profileDir := flag.String("profile-dir", "", "directory for heap, goroutine, mutex and block profiles")
 	flag.Parse()
 
 	protocol, err := utils.ParseMultiAddressProtocol(*protocolValue)
@@ -187,6 +213,12 @@ func parseConfig() (stressConfig, error) {
 	}
 	if *payloadBytes < stressPayloadHeaderSize || *payloadBytes > p2p.DefaultMaxMessageSize/2 {
 		return stressConfig{}, fmt.Errorf("invalid payload size %d", *payloadBytes)
+	}
+	if *rateLimit < 0 {
+		return stressConfig{}, fmt.Errorf("invalid rate limit %d", *rateLimit)
+	}
+	if *inboundRate < 0 {
+		return stressConfig{}, fmt.Errorf("invalid inbound rate limit %d", *inboundRate)
 	}
 	return stressConfig{
 		protocol:        protocol,
@@ -200,15 +232,19 @@ func parseConfig() (stressConfig, error) {
 		duration:        *duration,
 		concurrency:     *concurrency,
 		payloadBytes:    *payloadBytes,
+		rateLimit:       *rateLimit,
 		requestTimeout:  *requestTimeout,
 		reportInterval:  *reportInterval,
 		startDelay:      *startDelay,
+		warmup:          *warmup,
 		maxRequests:     *maxRequests,
 		maxPeers:        *maxPeers,
 		maxConnections:  *maxConnections,
 		writeQueueSize:  *writeQueueSize,
 		protocolWorkers: *protocolWorkers,
 		serverDelay:     *serverDelay,
+		inboundRate:     *inboundRate,
+		profileDir:      strings.TrimSpace(*profileDir),
 	}, nil
 }
 
@@ -304,6 +340,9 @@ func newStressHost(
 			LowQueueSize:    config.writeQueueSize,
 			JobTimeout:      config.requestTimeout,
 		},
+		PeerProtection: p2p.PeerProtectionConfig{
+			MaxInboundMessagesPerSecond: config.inboundRate,
+		},
 		AdvertisedAddresses: []utils.MultiAddress{advertisedAddress},
 		Logger:              logger,
 	})
@@ -373,6 +412,27 @@ func addTargetPeers(host *p2p.Host, rawAddresses []string) ([]string, error) {
 	return peerIDs, nil
 }
 
+func warmupTargetConnections(
+	ctx context.Context,
+	host *p2p.Host,
+	targetPeerIDs []string,
+	timeout time.Duration,
+	logger *slog.Logger,
+) int {
+	succeeded := 0
+	for _, peerID := range targetPeerIDs {
+		dialContext, cancel := context.WithTimeout(ctx, timeout)
+		_, err := host.DialPeer(dialContext, peerID)
+		cancel()
+		if err != nil {
+			logger.Warn("stress warmup dial failed", slog.String("peer_id", peerID), slog.Any("error", err))
+			continue
+		}
+		succeeded++
+	}
+	return succeeded
+}
+
 func runLoad(
 	parent context.Context,
 	host *p2p.Host,
@@ -388,10 +448,14 @@ func runLoad(
 		latenciesMicros: make([]int64, 0, minInt(maxLatencySamples, 65536)),
 		errors:          make(map[string]uint64),
 	}
+	rateLimiter := makeRateLimiter(config.rateLimit)
+	if rateLimiter.stop != nil {
+		defer rateLimiter.stop()
+	}
 	var workers sync.WaitGroup
 	for workerID := 0; workerID < config.concurrency; workerID++ {
 		workers.Add(1)
-		go stressWorker(loadContext, &workers, host, localPeerID, targetPeerIDs, config, stats, workerID)
+		go stressWorker(loadContext, &workers, host, localPeerID, targetPeerIDs, config, stats, workerID, rateLimiter.tokens)
 	}
 	reportDone := make(chan struct{})
 	go reportLoop(loadContext, reportDone, stats, config, logger)
@@ -399,10 +463,64 @@ func runLoad(
 	cancel()
 	<-reportDone
 	printSummary(stats, config, logger)
+	if config.profileDir != "" {
+		dumpRuntimeProfiles(config.profileDir, logger)
+	}
 	if stats.failed.Load() > 0 {
 		return fmt.Errorf("stress completed with %d failures", stats.failed.Load())
 	}
 	return nil
+}
+
+func makeRateLimiter(rateLimit int) requestRateLimiter {
+	if rateLimit <= 0 {
+		return requestRateLimiter{}
+	}
+	interval := time.Second / time.Duration(rateLimit)
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	ticker := time.NewTicker(interval)
+	return requestRateLimiter{
+		tokens: ticker.C,
+		stop:   ticker.Stop,
+	}
+}
+
+func enableRuntimeProfiles(profileDir string) {
+	if strings.TrimSpace(profileDir) == "" {
+		return
+	}
+	runtime.SetMutexProfileFraction(10)
+	runtime.SetBlockProfileRate(int(time.Millisecond))
+}
+
+func dumpRuntimeProfiles(profileDir string, logger *slog.Logger) {
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		logger.Warn("stress profile directory create failed", slog.String("dir", profileDir), slog.Any("error", err))
+		return
+	}
+	names := []string{"heap", "goroutine", "mutex", "block"}
+	for _, name := range names {
+		path := profileDir + string(os.PathSeparator) + name + ".pprof"
+		file, err := os.Create(path)
+		if err != nil {
+			logger.Warn("stress profile create failed", slog.String("path", path), slog.Any("error", err))
+			continue
+		}
+		profile := pprof.Lookup(name)
+		if profile == nil {
+			_ = file.Close()
+			continue
+		}
+		writeError := profile.WriteTo(file, 0)
+		closeError := file.Close()
+		if writeError != nil || closeError != nil {
+			logger.Warn("stress profile write failed", slog.String("path", path), slog.Any("write_error", writeError), slog.Any("close_error", closeError))
+			continue
+		}
+		logger.Info("stress profile written", slog.String("path", path))
+	}
 }
 
 func stressWorker(
@@ -414,6 +532,7 @@ func stressWorker(
 	config stressConfig,
 	stats *stressStats,
 	workerID int,
+	rateLimiter <-chan time.Time,
 ) {
 	defer workers.Done()
 	payload := make([]byte, config.payloadBytes)
@@ -421,6 +540,13 @@ func stressWorker(
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		if rateLimiter != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-rateLimiter:
+			}
 		}
 		requestNumber := stats.sent.Add(1)
 		if config.maxRequests > 0 && requestNumber > config.maxRequests {
@@ -513,6 +639,9 @@ func printSummary(stats *stressStats, config stressConfig, logger *slog.Logger) 
 		slog.Duration("duration", time.Since(stats.startedAt)),
 		slog.Int("concurrency", config.concurrency),
 		slog.Int("payload_bytes", config.payloadBytes),
+		slog.Int("rate_limit", config.rateLimit),
+		slog.Int("inbound_rate_limit", config.inboundRate),
+		slog.Bool("warmup", config.warmup),
 		slog.Uint64("sent", stats.sent.Load()),
 		slog.Uint64("succeeded", stats.succeeded.Load()),
 		slog.Uint64("failed", stats.failed.Load()),
@@ -607,8 +736,28 @@ func memorySnapshot() map[string]uint64 {
 		"alloc":      memory.Alloc,
 		"sys":        memory.Sys,
 		"heap_alloc": memory.HeapAlloc,
+		"rss":        processRSSBytes(),
 		"goroutines": uint64(runtime.NumGoroutine()),
 	}
+}
+
+func processRSSBytes() uint64 {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "VmRSS:" {
+			continue
+		}
+		kib, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			return 0
+		}
+		return kib * 1024
+	}
+	return 0
 }
 
 func parseAddresses(rawAddresses []string) []utils.MultiAddress {
