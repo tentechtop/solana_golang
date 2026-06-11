@@ -22,8 +22,8 @@ func TestLoadLocalConfig(t *testing.T) {
 	if config.Log.Output != utils.LogOutputConsole {
 		t.Fatalf("Log.Output = %q, want console", config.Log.Output)
 	}
-	if config.P2P.Protocol() != utils.ProtocolTCP {
-		t.Fatalf("P2P.Protocol() = %q, want tcp", config.P2P.Protocol())
+	if config.P2P.Protocol() != utils.ProtocolQUIC {
+		t.Fatalf("P2P.Protocol() = %q, want quic", config.P2P.Protocol())
 	}
 }
 func TestLoadAbsoluteConfig(t *testing.T) {

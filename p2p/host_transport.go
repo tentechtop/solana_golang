@@ -23,7 +23,9 @@ func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handle
 		slog.String("address", address.String()),
 		slog.String("protocol", string(address.Protocol)),
 	)
-	host.addAdvertisedAddress(address)
+	if isDialableAdvertisedAddress(address) {
+		host.addAdvertisedAddress(address)
+	}
 	return transport.Listen(ctx, address, host.secureConnectionHandler(handler))
 }
 

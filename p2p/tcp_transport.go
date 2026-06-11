@@ -294,7 +294,7 @@ func closeListenerOnContext(ctx context.Context, listener net.Listener) {
 	_ = listener.Close()
 }
 
-// armConnectionDeadline 绑定连接 deadline + 上下文取消时打断阻塞读写。
+// armConnectionDeadline 绑定连接 deadline + 上下文取消时打断阻塞读写并避免清理后写入过期 deadline。
 func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) error) func() {
 	if ctx == nil {
 		ctx = context.Background()
@@ -308,16 +308,28 @@ func armConnectionDeadline(ctx context.Context, setDeadline func(time.Time) erro
 		}
 	}
 
+	var deadlineMutex sync.Mutex
+	stopped := false
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = setDeadline(time.Now())
+			deadlineMutex.Lock()
+			defer deadlineMutex.Unlock()
+			if !stopped {
+				_ = setDeadline(time.Now())
+			}
 		case <-done:
 		}
 	}()
 
 	return func() {
+		deadlineMutex.Lock()
+		defer deadlineMutex.Unlock()
+		if stopped {
+			return
+		}
+		stopped = true
 		close(done)
 		_ = setDeadline(time.Time{})
 	}

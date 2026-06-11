@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,5 +73,58 @@ func TestTCPTransportSendMessage(t *testing.T) {
 	cancel()
 	if err := <-listenErrors; err != nil {
 		t.Fatalf("Listen() error = %v", err)
+	}
+}
+
+func TestArmConnectionDeadlineDoesNotPoisonAfterCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var deadlineMutex sync.Mutex
+	deadlines := make([]time.Time, 0, 2)
+	enteredExpiredDeadline := make(chan struct{})
+	releaseExpiredDeadline := make(chan struct{})
+	stopReturned := make(chan struct{})
+	var enteredOnce sync.Once
+
+	stopDeadline := armConnectionDeadline(ctx, func(deadline time.Time) error {
+		if !deadline.IsZero() {
+			enteredOnce.Do(func() {
+				close(enteredExpiredDeadline)
+			})
+			<-releaseExpiredDeadline
+		}
+		deadlineMutex.Lock()
+		defer deadlineMutex.Unlock()
+		deadlines = append(deadlines, deadline)
+		return nil
+	})
+
+	cancel()
+	select {
+	case <-enteredExpiredDeadline:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expired deadline")
+	}
+
+	go func() {
+		stopDeadline()
+		close(stopReturned)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	close(releaseExpiredDeadline)
+
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deadline cleanup")
+	}
+
+	deadlineMutex.Lock()
+	defer deadlineMutex.Unlock()
+	if len(deadlines) != 2 {
+		t.Fatalf("deadline calls = %d, want 2: %v", len(deadlines), deadlines)
+	}
+	lastDeadline := deadlines[len(deadlines)-1]
+	if !lastDeadline.IsZero() {
+		t.Fatalf("deadline after cleanup = %v, want zero", lastDeadline)
 	}
 }

@@ -174,18 +174,32 @@ func (host *Host) queryFindNode(
 		host.metrics.findNodeFailures.Add(1)
 		return summary, err
 	}
+	discoveredPeers, err := host.importDiscoveredPeers(peers)
+	if err != nil {
+		summary.FindNodeFailureCount = 1
+		host.metrics.findNodeFailures.Add(1)
+		return summary, err
+	}
+	summary.DiscoveredPeers += discoveredPeers
+	return summary, nil
+}
+
+// importDiscoveredPeers 写入 KAD 查询结果 + 只统计首次出现的唯一节点避免多轮查询重复计数。
+func (host *Host) importDiscoveredPeers(peers []Peer) (int, error) {
+	discoveredPeers := 0
 	for _, peer := range peers {
 		if peer.ID == host.peerID {
 			continue
 		}
+		_, peerAlreadyKnown := host.Peer(peer.ID)
 		if err := host.AddPeer(peer); err != nil {
-			summary.FindNodeFailureCount = 1
-			host.metrics.findNodeFailures.Add(1)
-			return summary, err
+			return discoveredPeers, err
 		}
-		summary.DiscoveredPeers++
+		if !peerAlreadyKnown {
+			discoveredPeers++
+		}
 	}
-	return summary, nil
+	return discoveredPeers, nil
 }
 
 func decodeFindNodeResponse(request Message, response Message, targetPeerID string) ([]Peer, error) {
