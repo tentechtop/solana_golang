@@ -13,6 +13,7 @@ import (
 const (
 	defaultProtocolWorkerCount = 4
 	defaultProtocolPartitions  = 4
+	maxProtocolWorkerCount     = 1024
 	defaultProtocolQueueSize   = 1024
 	defaultProtocolJobTimeout  = 10 * time.Second
 )
@@ -71,14 +72,21 @@ func normalizeProtocolSchedulerConfig(config ProtocolSchedulerConfig) ProtocolSc
 	if config.WorkerCount <= 0 {
 		config.WorkerCount = minInt(maxInt(runtime.NumCPU(), defaultProtocolWorkerCount), 16)
 	}
-	if config.PartitionCount <= 0 {
-		config.PartitionCount = minInt(config.WorkerCount, defaultProtocolPartitions)
+	if config.WorkerCount > maxProtocolWorkerCount {
+		config.WorkerCount = maxProtocolWorkerCount
 	}
-	if config.PartitionCount > config.WorkerCount {
+	if config.PartitionCount <= 0 {
 		config.PartitionCount = config.WorkerCount
+	}
+	if config.PartitionCount > maxProtocolWorkerCount {
+		config.PartitionCount = maxProtocolWorkerCount
+	}
+	if config.PartitionCount != config.WorkerCount {
+		config.WorkerCount = config.PartitionCount
 	}
 	if config.PartitionCount <= 0 {
 		config.PartitionCount = 1
+		config.WorkerCount = 1
 	}
 	if config.HighQueueSize <= 0 {
 		config.HighQueueSize = defaultProtocolQueueSize

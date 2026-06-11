@@ -24,6 +24,8 @@ type HostConfig struct {
 	SecureIdentity       SecureSessionIdentity
 	EnableSecureSession  bool
 	AllowInsecure        bool
+	Production           bool
+	Environment          string
 	PreferredProtocols   []utils.MultiAddressProtocol
 	DialTimeout          time.Duration
 	HandshakeTimeout     time.Duration
@@ -165,8 +167,16 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 
 	if len(transports) == 0 {
 		transports = []Transport{
-			NewQUICTransport(),
-			NewTCPTransportWithConfig(TCPTransportConfig{Logger: host.logger}),
+			NewQUICTransportWithConfig(QUICTransportConfig{
+				MaxPendingInbound:   maxPendingInbound,
+				MaxConnectionsPerIP: host.maxConnectionsPerIP,
+				Logger:              host.logger,
+			}),
+			NewTCPTransportWithConfig(TCPTransportConfig{
+				MaxPendingInbound:   maxPendingInbound,
+				MaxConnectionsPerIP: host.maxConnectionsPerIP,
+				Logger:              host.logger,
+			}),
 		}
 	}
 	for _, transport := range transports {

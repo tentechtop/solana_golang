@@ -16,8 +16,10 @@ import (
 
 // TCPTransportConfig 保存 TCP 配置 + 允许测试和部署调整消息上限与日志。
 type TCPTransportConfig struct {
-	MaxMessageSize int
-	Logger         *slog.Logger
+	MaxMessageSize      int
+	MaxPendingInbound   int
+	MaxConnectionsPerIP int
+	Logger              *slog.Logger
 }
 
 // TCPTransport 实现 TCP 传输 + 为 Host 提供监听和拨号能力。
@@ -26,6 +28,7 @@ type TCPTransport struct {
 	listeners      map[string]net.Listener
 	closed         bool
 	maxMessageSize int
+	inboundLimiter *transportInboundLimiter
 	logger         *slog.Logger
 }
 
@@ -39,6 +42,7 @@ func NewTCPTransportWithConfig(config TCPTransportConfig) *TCPTransport {
 	return &TCPTransport{
 		listeners:      make(map[string]net.Listener),
 		maxMessageSize: normalizeMaxMessageSize(config.MaxMessageSize),
+		inboundLimiter: newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
 		logger:         utils.EnsureLogger(config.Logger),
 	}
 }
@@ -121,8 +125,20 @@ func (transport *TCPTransport) acceptLoop(ctx context.Context, listener net.List
 		if err != nil {
 			return transport.acceptError(ctx, err)
 		}
+		release, err := transport.inboundLimiter.acquire(netConnection.RemoteAddr().String())
+		if err != nil {
+			_ = netConnection.Close()
+			transport.logger.Warn("p2p tcp inbound rejected",
+				slog.String("remote_address", netConnection.RemoteAddr().String()),
+				slog.Any("error", err),
+			)
+			continue
+		}
 		connection := newTCPConnection(netConnection, "", transport.maxMessageSize)
-		go handler(ctx, connection)
+		go func() {
+			defer release()
+			handler(ctx, connection)
+		}()
 	}
 }
 

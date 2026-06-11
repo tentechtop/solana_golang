@@ -29,10 +29,12 @@ const (
 
 // QUICTransportConfig 保存 QUIC 配置 + 支持注入 TLS、quic-go 配置和日志。
 type QUICTransportConfig struct {
-	MaxMessageSize int
-	TLSConfig      *tls.Config
-	QUICConfig     *quic.Config
-	Logger         *slog.Logger
+	MaxMessageSize      int
+	MaxPendingInbound   int
+	MaxConnectionsPerIP int
+	TLSConfig           *tls.Config
+	QUICConfig          *quic.Config
+	Logger              *slog.Logger
 }
 
 // QUICTransport 实现 QUIC 传输 + 基于 quic-go 提供低延迟多路复用连接。
@@ -41,6 +43,7 @@ type QUICTransport struct {
 	listeners      map[string]*quic.Listener
 	closed         bool
 	maxMessageSize int
+	inboundLimiter *transportInboundLimiter
 	tlsConfig      *tls.Config
 	quicConfig     *quic.Config
 	logger         *slog.Logger
@@ -56,6 +59,7 @@ func NewQUICTransportWithConfig(config QUICTransportConfig) *QUICTransport {
 	return &QUICTransport{
 		listeners:      make(map[string]*quic.Listener),
 		maxMessageSize: normalizeMaxMessageSize(config.MaxMessageSize),
+		inboundLimiter: newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
 		tlsConfig:      normalizeQUICTLSConfig(config.TLSConfig),
 		quicConfig:     normalizeQUICConfig(config.QUICConfig),
 		logger:         utils.EnsureLogger(config.Logger),
@@ -152,7 +156,19 @@ func (transport *QUICTransport) acceptLoop(ctx context.Context, listener *quic.L
 		if err != nil {
 			return transport.acceptError(ctx, err)
 		}
-		go transport.acceptStream(ctx, connection, handler)
+		release, err := transport.inboundLimiter.acquire(connection.RemoteAddr().String())
+		if err != nil {
+			_ = connection.CloseWithError(quicCloseCode, "inbound limit reached")
+			transport.logger.Warn("p2p quic inbound rejected",
+				slog.String("remote_address", connection.RemoteAddr().String()),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		go func() {
+			defer release()
+			transport.acceptStream(ctx, connection, handler)
+		}()
 	}
 }
 

@@ -5,11 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 )
 
 func normalizeSecureSessionIdentity(config HostConfig) (bool, SecureSessionIdentity, error) {
 	enabled := config.EnableSecureSession || hasSecureSessionIdentity(config.SecureIdentity)
 	if !enabled {
+		if config.AllowInsecure && isProductionSecurityMode(config) {
+			return false, SecureSessionIdentity{}, fmt.Errorf("%w: insecure p2p disabled in production", ErrSecureSession)
+		}
 		if config.AllowInsecure {
 			return false, SecureSessionIdentity{}, nil
 		}
@@ -22,6 +27,18 @@ func normalizeSecureSessionIdentity(config HostConfig) (bool, SecureSessionIdent
 		return false, SecureSessionIdentity{}, err
 	}
 	return true, config.SecureIdentity.Clone(), nil
+}
+
+func isProductionSecurityMode(config HostConfig) bool {
+	if config.Production {
+		return true
+	}
+	environment := strings.TrimSpace(strings.ToLower(config.Environment))
+	if environment == "production" || environment == "prod" {
+		return true
+	}
+	processEnvironment := strings.TrimSpace(strings.ToLower(os.Getenv("P2P_ENV")))
+	return processEnvironment == "production" || processEnvironment == "prod"
 }
 
 func hasSecureSessionIdentity(identity SecureSessionIdentity) bool {

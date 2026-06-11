@@ -62,11 +62,12 @@ func newQueuedConnection(inner Connection, config queuedConnectionConfig) Connec
 		return inner
 	}
 	queueSize := normalizeWriteQueueSize(config.queueSize)
+	highQueueSize, normalQueueSize, lowQueueSize := splitWriteQueueSize(queueSize)
 	connection := &queuedConnection{
 		inner:        inner,
-		highWrites:   make(chan queuedWrite, queueSize),
-		normalWrites: make(chan queuedWrite, queueSize),
-		lowWrites:    make(chan queuedWrite, queueSize),
+		highWrites:   make(chan queuedWrite, highQueueSize),
+		normalWrites: make(chan queuedWrite, normalQueueSize),
+		lowWrites:    make(chan queuedWrite, lowQueueSize),
 		done:         make(chan struct{}),
 		writeTimeout: normalizeWriteTimeout(config.writeTimeout),
 		metrics:      config.metrics,
@@ -158,6 +159,24 @@ func (connection *queuedConnection) WriteMessage(ctx context.Context, message Me
 		})
 		return fmt.Errorf("%w: connection %s", ErrWriteQueueFull, connection.ID())
 	}
+}
+
+func splitWriteQueueSize(totalSize int) (int, int, int) {
+	totalSize = normalizeWriteQueueSize(totalSize)
+	if totalSize == 1 {
+		return 0, 1, 0
+	}
+	if totalSize == 2 {
+		return 1, 1, 0
+	}
+	highQueueSize := maxInt(1, totalSize/4)
+	lowQueueSize := maxInt(1, totalSize/4)
+	normalQueueSize := totalSize - highQueueSize - lowQueueSize
+	if normalQueueSize < 1 {
+		normalQueueSize = 1
+		lowQueueSize = totalSize - highQueueSize - normalQueueSize
+	}
+	return highQueueSize, normalQueueSize, lowQueueSize
 }
 
 func (connection *queuedConnection) Close() error {

@@ -17,6 +17,26 @@ func TestHostRequiresSecureSessionByDefault(t *testing.T) {
 	}
 }
 
+func TestHostRejectsInsecureProduction(t *testing.T) {
+	_, err := NewHost(HostConfig{
+		PeerID:        testPeerID(72),
+		AllowInsecure: true,
+		Production:    true,
+	})
+	if !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("NewHost(production insecure) error = %v, want ErrSecureSession", err)
+	}
+
+	_, err = NewHost(HostConfig{
+		PeerID:        testPeerID(73),
+		AllowInsecure: true,
+		Environment:   "production",
+	})
+	if !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("NewHost(environment production insecure) error = %v, want ErrSecureSession", err)
+	}
+}
+
 func TestHostRejectsWildcardAdvertisedAddress(t *testing.T) {
 	peerID := testPeerID(36)
 	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, "0.0.0.0", utils.ProtocolTCP, 5031, peerID)
@@ -31,6 +51,29 @@ func TestHostRejectsWildcardAdvertisedAddress(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("NewHost(wildcard advertised) error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+func TestHostDialAddressRejectsInvalidAddress(t *testing.T) {
+	host, err := NewHost(HostConfig{
+		PeerID:        testPeerID(74),
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	address := utils.MultiAddress{
+		IPType:    utils.MultiAddressIP4,
+		IPAddress: "127.0.0.1",
+		Protocol:  utils.ProtocolTCP,
+		Port:      70000,
+		PeerID:    testPeerID(75),
+	}
+	_, err = host.DialAddress(context.Background(), address)
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("DialAddress(invalid) error = %v, want ErrInvalidMessage", err)
 	}
 }
 

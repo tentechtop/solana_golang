@@ -714,6 +714,21 @@ func TestQueuedConnectionRejectsWriteAfterClose(t *testing.T) {
 	}
 }
 
+func TestSplitWriteQueueSizeKeepsTotalCapacity(t *testing.T) {
+	highQueueSize, normalQueueSize, lowQueueSize := splitWriteQueueSize(1024)
+	if highQueueSize+normalQueueSize+lowQueueSize != 1024 {
+		t.Fatalf("total queue size = %d, want 1024", highQueueSize+normalQueueSize+lowQueueSize)
+	}
+	if highQueueSize == 0 || normalQueueSize == 0 || lowQueueSize == 0 {
+		t.Fatalf("queue sizes = %d/%d/%d, want all priorities available", highQueueSize, normalQueueSize, lowQueueSize)
+	}
+
+	highQueueSize, normalQueueSize, lowQueueSize = splitWriteQueueSize(1)
+	if highQueueSize+normalQueueSize+lowQueueSize != 1 || normalQueueSize != 1 {
+		t.Fatalf("small queue sizes = %d/%d/%d, want 0/1/0", highQueueSize, normalQueueSize, lowQueueSize)
+	}
+}
+
 func TestHostAsyncWriteMetricsAfterFlush(t *testing.T) {
 	localPeerID := testPeerID(65)
 	remotePeerID := testPeerID(66)

@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"solana_golang/utils"
 )
 
 func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handler ConnectionHandler) error {
+	if err := validateHostListenAddress(address, host.peerID); err != nil {
+		return err
+	}
 	transport, err := host.transport(address.Protocol)
 	if err != nil {
 		return err
@@ -23,8 +27,21 @@ func (host *Host) Listen(ctx context.Context, address utils.MultiAddress, handle
 	return transport.Listen(ctx, address, host.secureConnectionHandler(handler))
 }
 
+func validateHostListenAddress(address utils.MultiAddress, peerID string) error {
+	if address.PeerID != peerID {
+		return fmt.Errorf("%w: listen address owner mismatch", ErrInvalidMessage)
+	}
+	if _, err := utils.ParseMultiAddress(address.String()); err != nil {
+		return fmt.Errorf("%w: invalid listen address: %w", ErrInvalidMessage, err)
+	}
+	return nil
+}
+
 // DialAddress 拨号指定地址 + 成功后将连接放入连接池。
 func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (Connection, error) {
+	if err := validateHostDialAddress(address); err != nil {
+		return nil, err
+	}
 	if err := host.checkPeerDialAllowed(address.PeerID); err != nil {
 		return nil, peerProtectionDialError(address.PeerID, err)
 	}
@@ -61,6 +78,22 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 		slog.String("protocol", string(address.Protocol)),
 	)
 	return connection, nil
+}
+
+func validateHostDialAddress(address utils.MultiAddress) error {
+	if err := validatePeerID(address.PeerID); err != nil {
+		return fmt.Errorf("%w: invalid dial peer id: %w", ErrInvalidMessage, err)
+	}
+	if _, err := utils.ParseMultiAddress(address.String()); err != nil {
+		return fmt.Errorf("%w: invalid dial address: %w", ErrInvalidMessage, err)
+	}
+	if net.ParseIP(address.IPAddress) == nil {
+		return fmt.Errorf("%w: invalid dial ip address", ErrInvalidMessage)
+	}
+	if address.Port < 1 || address.Port > 65535 {
+		return fmt.Errorf("%w: invalid dial port", ErrInvalidMessage)
+	}
+	return nil
 }
 
 // DialPeer 拨号节点 + 按协议优先级支持 QUIC 到 TCP 的降级。
