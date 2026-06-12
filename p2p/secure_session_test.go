@@ -83,6 +83,49 @@ func TestSecureSessionRejectsReplay(t *testing.T) {
 	}
 }
 
+func TestSecureSessionAcceptsOutOfOrderWithinReplayWindow(t *testing.T) {
+	initiatorSession, responderSession := testSecureSessionPair(t, "localnet")
+
+	firstPayload, err := initiatorSession.Seal([]byte("first"), []byte("aad-1"))
+	if err != nil {
+		t.Fatalf("Seal(first) error = %v", err)
+	}
+	secondPayload, err := initiatorSession.Seal([]byte("second"), []byte("aad-2"))
+	if err != nil {
+		t.Fatalf("Seal(second) error = %v", err)
+	}
+	secondPlaintext, err := responderSession.Open(secondPayload, []byte("aad-2"))
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	if !bytes.Equal(secondPlaintext, []byte("second")) {
+		t.Fatalf("second plaintext = %q, want second", secondPlaintext)
+	}
+	firstPlaintext, err := responderSession.Open(firstPayload, []byte("aad-1"))
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if !bytes.Equal(firstPlaintext, []byte("first")) {
+		t.Fatalf("first plaintext = %q, want first", firstPlaintext)
+	}
+	if _, err := responderSession.Open(secondPayload, []byte("aad-2")); !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("Open(second replay) error = %v, want ErrSecureSession", err)
+	}
+}
+
+func TestSecureSessionRejectsSequenceOutsideReplayWindow(t *testing.T) {
+	initiatorSession, responderSession := testSecureSessionPair(t, "localnet")
+
+	payload, err := initiatorSession.Seal([]byte("payload"), []byte("aad"))
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+	payload.Sequence = secureSessionReplayWindow + 1
+	if _, err := responderSession.Open(payload, []byte("aad")); !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("Open(outside window) error = %v, want ErrSecureSession", err)
+	}
+}
+
 func TestSecureSessionRejectsNetworkMismatch(t *testing.T) {
 	initiatorIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
 	responderIdentity := testSecureSessionIdentity(t, "othernet", "node/1.0.0")

@@ -181,6 +181,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 			MaxPendingInbound:   maxPendingInbound,
 			MaxConnectionsPerIP: host.maxConnectionsPerIP,
 			MaxMessageSize:      maxMessageSize,
+			MessagePriority:     host.messagePriority,
 			Logger:              host.logger,
 		})
 		if err != nil {

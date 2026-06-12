@@ -130,6 +130,31 @@ func defaultProtocolClass(protocolID ProtocolID) ProtocolClass {
 	}
 }
 
+// defaultProtocolPriority 返回内置协议默认优先级 + 让队列和 QUIC stream 调度使用同一套分类。
+func defaultProtocolPriority(protocolID ProtocolID) MessagePriority {
+	switch protocolID {
+	case ProtocolPingV1,
+		ProtocolPongV1,
+		ProtocolHandshakeV1,
+		ProtocolHandshakeSuccessV1,
+		ProtocolHotStuffVoteV1,
+		ProtocolHotStuffQCV1,
+		ProtocolSecureSessionV1,
+		ProtocolIdentifyRequestV1,
+		ProtocolIdentifyResponseV1:
+		return MessagePriorityHigh
+	case ProtocolBlockV1,
+		ProtocolGetResourceRequestV1,
+		ProtocolQueryBlockByHashV1,
+		ProtocolQueryBlockByHeightV1,
+		ProtocolQueryCommonAncestorV1,
+		ProtocolQueryBlockHeadersV1:
+		return MessagePriorityLow
+	default:
+		return MessagePriorityNormal
+	}
+}
+
 // NormalizedName 返回规范协议名 + 消除大小写和多余分隔符差异。
 func (spec ProtocolSpec) NormalizedName() string {
 	return NormalizeProtocolName(spec.Name)
@@ -147,27 +172,27 @@ func NormalizeProtocolName(name string) string {
 // DefaultProtocolSpecs 返回内置协议定义 + 覆盖发现、同步、交易和共识消息。
 func DefaultProtocolSpecs() []ProtocolSpec {
 	return []ProtocolSpec{
-		{ID: ProtocolPingV1, Name: "/p2p/ping/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
-		{ID: ProtocolPongV1, Name: "/p2p/pong/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
-		{ID: ProtocolHandshakeV1, Name: "/p2p/handshake/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
-		{ID: ProtocolBlockV1, Name: "/p2p/block/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolFindNodeRequestV1, Name: "/p2p/find-node/request/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolBroadcastResourceV1, Name: "/p2p/resource/broadcast/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolGetResourceRequestV1, Name: "/p2p/resource/get/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolReceiveBlockV1, Name: "/p2p/block/receive/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolReceiveTransactionV1, Name: "/p2p/transaction/receive/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolQueryBlockByHashV1, Name: "/p2p/block/query-by-hash/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolQueryBlockByHeightV1, Name: "/p2p/block/query-by-height/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolQueryCommonAncestorV1, Name: "/p2p/common-ancestor/query/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolHandshakeSuccessV1, Name: "/p2p/handshake-success/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
-		{ID: ProtocolQueryBlockHeadersV1, Name: "/p2p/block-headers/query/1.0.0", HasResponse: true, Priority: MessagePriorityNormal},
-		{ID: ProtocolPeerHintsV1, Name: "/p2p/peer-hints/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolNodeStatusV1, Name: "/p2p/node-status/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolFindNodeResponseV1, Name: "/p2p/find-node/response/1.0.0", HasResponse: false, Priority: MessagePriorityNormal},
-		{ID: ProtocolHotStuffVoteV1, Name: "/p2p/hotstuff/vote/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
-		{ID: ProtocolHotStuffQCV1, Name: "/p2p/hotstuff/qc/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
-		{ID: ProtocolSecureSessionV1, Name: "/p2p/secure-session/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
-		{ID: ProtocolIdentifyRequestV1, Name: "/p2p/identify/request/1.0.0", HasResponse: true, Priority: MessagePriorityHigh},
-		{ID: ProtocolIdentifyResponseV1, Name: "/p2p/identify/response/1.0.0", HasResponse: false, Priority: MessagePriorityHigh},
+		{ID: ProtocolPingV1, Name: "/p2p/ping/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolPingV1)},
+		{ID: ProtocolPongV1, Name: "/p2p/pong/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolPongV1)},
+		{ID: ProtocolHandshakeV1, Name: "/p2p/handshake/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolHandshakeV1)},
+		{ID: ProtocolBlockV1, Name: "/p2p/block/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolBlockV1)},
+		{ID: ProtocolFindNodeRequestV1, Name: "/p2p/find-node/request/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolFindNodeRequestV1)},
+		{ID: ProtocolBroadcastResourceV1, Name: "/p2p/resource/broadcast/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolBroadcastResourceV1)},
+		{ID: ProtocolGetResourceRequestV1, Name: "/p2p/resource/get/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolGetResourceRequestV1)},
+		{ID: ProtocolReceiveBlockV1, Name: "/p2p/block/receive/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolReceiveBlockV1)},
+		{ID: ProtocolReceiveTransactionV1, Name: "/p2p/transaction/receive/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolReceiveTransactionV1)},
+		{ID: ProtocolQueryBlockByHashV1, Name: "/p2p/block/query-by-hash/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockByHashV1)},
+		{ID: ProtocolQueryBlockByHeightV1, Name: "/p2p/block/query-by-height/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockByHeightV1)},
+		{ID: ProtocolQueryCommonAncestorV1, Name: "/p2p/common-ancestor/query/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryCommonAncestorV1)},
+		{ID: ProtocolHandshakeSuccessV1, Name: "/p2p/handshake-success/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHandshakeSuccessV1)},
+		{ID: ProtocolQueryBlockHeadersV1, Name: "/p2p/block-headers/query/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockHeadersV1)},
+		{ID: ProtocolPeerHintsV1, Name: "/p2p/peer-hints/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolPeerHintsV1)},
+		{ID: ProtocolNodeStatusV1, Name: "/p2p/node-status/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolNodeStatusV1)},
+		{ID: ProtocolFindNodeResponseV1, Name: "/p2p/find-node/response/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolFindNodeResponseV1)},
+		{ID: ProtocolHotStuffVoteV1, Name: "/p2p/hotstuff/vote/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHotStuffVoteV1)},
+		{ID: ProtocolHotStuffQCV1, Name: "/p2p/hotstuff/qc/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHotStuffQCV1)},
+		{ID: ProtocolSecureSessionV1, Name: "/p2p/secure-session/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolSecureSessionV1)},
+		{ID: ProtocolIdentifyRequestV1, Name: "/p2p/identify/request/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolIdentifyRequestV1)},
+		{ID: ProtocolIdentifyResponseV1, Name: "/p2p/identify/response/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolIdentifyResponseV1)},
 	}
 }

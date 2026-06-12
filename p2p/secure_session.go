@@ -29,6 +29,7 @@ const (
 	secureSessionPayloadOverhead  = 2 + 4 + secureSessionIDSize + 8 + 4 + utils.AESGCMTagSize
 	secureSessionDefaultTTL       = 30 * time.Minute
 	secureSessionHandshakeMaxSkew = 5 * time.Minute
+	secureSessionReplayWindow     = 4096
 )
 
 // SecureSessionRole 表示安全会话角色 + 用于派生方向密钥并避免两端角色混乱。
@@ -471,6 +472,7 @@ type SecureSession struct {
 	maxMessageSize     int
 	sendSequence       uint64
 	receiveSequence    uint64
+	receiveSequences   map[uint64]struct{}
 	sendMutex          sync.Mutex
 	receiveMutex       sync.Mutex
 }
@@ -560,16 +562,16 @@ func (session *SecureSession) Seal(plaintext []byte, associatedData []byte) (Sec
 	}
 
 	session.sendMutex.Lock()
-	defer session.sendMutex.Unlock()
 	if session.sendSequence == math.MaxUint64 {
+		session.sendMutex.Unlock()
 		return SecurePayload{}, fmt.Errorf("%w: send sequence exhausted", ErrSecureSession)
 	}
-
 	sequence := session.sendSequence
+	session.sendSequence++
+	session.sendMutex.Unlock()
+
 	nonce := secureSessionNonce(session.sendNoncePrefix, sequence)
 	ciphertext := session.sendAEAD.Seal(make([]byte, 0, len(plaintext)+utils.AESGCMTagSize), nonce[:], plaintext, associatedData)
-	session.sendSequence++
-
 	return SecurePayload{
 		Version:    SecureSessionProtocolVersion,
 		SessionID:  cloneBytes(session.sessionID),
@@ -578,7 +580,7 @@ func (session *SecureSession) Seal(plaintext []byte, associatedData []byte) (Sec
 	}, nil
 }
 
-// Open 解密业务载荷 + 按接收序号精确递增拒绝重放和乱序密文。
+// Open 解密业务载荷 + 使用有界乱序窗口适配 QUIC 多 stream 并拒绝重放。
 func (session *SecureSession) Open(payload SecurePayload, associatedData []byte) ([]byte, error) {
 	if err := session.validate(); err != nil {
 		return nil, err
@@ -595,8 +597,8 @@ func (session *SecureSession) Open(payload SecurePayload, associatedData []byte)
 
 	session.receiveMutex.Lock()
 	defer session.receiveMutex.Unlock()
-	if payload.Sequence != session.receiveSequence {
-		return nil, fmt.Errorf("%w: unexpected sequence", ErrSecureSession)
+	if err := session.validateReceiveSequence(payload.Sequence); err != nil {
+		return nil, err
 	}
 
 	nonce := secureSessionNonce(session.receiveNoncePrefix, payload.Sequence)
@@ -604,8 +606,43 @@ func (session *SecureSession) Open(payload SecurePayload, associatedData []byte)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decrypt payload: %w", ErrSecureSession, err)
 	}
-	session.receiveSequence++
+	session.markReceiveSequence(payload.Sequence)
 	return plaintext, nil
+}
+
+func (session *SecureSession) validateReceiveSequence(sequence uint64) error {
+	if sequence < session.receiveSequence {
+		return fmt.Errorf("%w: replay sequence", ErrSecureSession)
+	}
+	if sequence-session.receiveSequence > secureSessionReplayWindow {
+		return fmt.Errorf("%w: sequence outside replay window", ErrSecureSession)
+	}
+	if _, ok := session.receiveSequences[sequence]; ok {
+		return fmt.Errorf("%w: duplicate sequence", ErrSecureSession)
+	}
+	return nil
+}
+
+func (session *SecureSession) markReceiveSequence(sequence uint64) {
+	if sequence != session.receiveSequence {
+		session.rememberOutOfOrderSequence(sequence)
+		return
+	}
+	session.receiveSequence++
+	for {
+		if _, ok := session.receiveSequences[session.receiveSequence]; !ok {
+			return
+		}
+		delete(session.receiveSequences, session.receiveSequence)
+		session.receiveSequence++
+	}
+}
+
+func (session *SecureSession) rememberOutOfOrderSequence(sequence uint64) {
+	if session.receiveSequences == nil {
+		session.receiveSequences = make(map[uint64]struct{})
+	}
+	session.receiveSequences[sequence] = struct{}{}
 }
 
 // ResumptionTicket 生成恢复票据 + 只保存恢复材料而不持久化当前明文方向密钥。
@@ -849,28 +886,54 @@ func (connection *SecureConnection) ReadMessage(ctx context.Context) (Message, e
 
 // WriteMessage 加密并写入消息 + 只加密业务 payload，外层路由字段用于连接内分发和认证数据。
 func (connection *SecureConnection) WriteMessage(ctx context.Context, message Message) error {
-	outbound := message
-	maxMessageSize := connection.session.messageSizeLimit()
-	if err := outbound.Validate(maxMessageSize); err != nil {
-		return err
-	}
-	associatedData, err := secureMessageAssociatedData(outbound)
+	outbound, err := connection.secureOutboundMessage(message)
 	if err != nil {
-		return err
-	}
-	payload, err := connection.session.Seal(outbound.Payload, associatedData)
-	if err != nil {
-		return err
-	}
-	encodedPayload, err := payload.MarshalBinary(maxMessageSize)
-	if err != nil {
-		return err
-	}
-	outbound.Payload = encodedPayload
-	if err := outbound.Validate(maxMessageSize); err != nil {
 		return err
 	}
 	return connection.connection.WriteMessage(ctx, outbound)
+}
+
+// WriteMessageWithPriority 加密后按优先级写入底层连接 + 保留 QUIC 多 stream 调度能力。
+func (connection *SecureConnection) WriteMessageWithPriority(ctx context.Context, message Message, priority MessagePriority) error {
+	outbound, err := connection.secureOutboundMessage(message)
+	if err != nil {
+		return err
+	}
+	priorityWriter, ok := connection.connection.(priorityMessageWriter)
+	if ok {
+		return priorityWriter.WriteMessageWithPriority(ctx, outbound, priority)
+	}
+	return connection.connection.WriteMessage(ctx, outbound)
+}
+
+// PriorityIsolatedWrites 透传底层隔离能力 + 让异步写队列为 QUIC 启用并行 lane。
+func (connection *SecureConnection) PriorityIsolatedWrites() bool {
+	return supportsPriorityIsolatedWrites(connection.connection)
+}
+
+func (connection *SecureConnection) secureOutboundMessage(message Message) (Message, error) {
+	outbound := message
+	maxMessageSize := connection.session.messageSizeLimit()
+	if err := outbound.Validate(maxMessageSize); err != nil {
+		return Message{}, err
+	}
+	associatedData, err := secureMessageAssociatedData(outbound)
+	if err != nil {
+		return Message{}, err
+	}
+	payload, err := connection.session.Seal(outbound.Payload, associatedData)
+	if err != nil {
+		return Message{}, err
+	}
+	encodedPayload, err := payload.MarshalBinary(maxMessageSize)
+	if err != nil {
+		return Message{}, err
+	}
+	outbound.Payload = encodedPayload
+	if err := outbound.Validate(maxMessageSize); err != nil {
+		return Message{}, err
+	}
+	return outbound, nil
 }
 
 // Close 关闭底层连接 + 安全包装器不持有额外网络资源。

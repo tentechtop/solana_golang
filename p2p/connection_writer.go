@@ -33,6 +33,14 @@ type queuedConnectionConfig struct {
 	onError      func(Connection, error)
 }
 
+type priorityIsolatedConnection interface {
+	PriorityIsolatedWrites() bool
+}
+
+type priorityMessageWriter interface {
+	WriteMessageWithPriority(context.Context, Message, MessagePriority) error
+}
+
 type queuedConnection struct {
 	inner        Connection
 	highWrites   chan queuedWrite
@@ -77,7 +85,7 @@ func newQueuedConnection(inner Connection, config queuedConnectionConfig) Connec
 		onWrite:      config.onWrite,
 		onError:      config.onError,
 	}
-	go connection.writeLoop()
+	connection.startWriteLoops()
 	return connection
 }
 
@@ -206,6 +214,33 @@ func (connection *queuedConnection) writeLoop() {
 	}
 }
 
+// startWriteLoops 启动写循环 + QUIC 多 stream 连接按优先级并行写入避免大包阻塞共识消息。
+func (connection *queuedConnection) startWriteLoops() {
+	if supportsPriorityIsolatedWrites(connection.inner) {
+		go connection.writeQueueLoop(connection.highWrites)
+		go connection.writeQueueLoop(connection.normalWrites)
+		go connection.writeQueueLoop(connection.lowWrites)
+		return
+	}
+	go connection.writeLoop()
+}
+
+func supportsPriorityIsolatedWrites(connection Connection) bool {
+	isolated, ok := connection.(priorityIsolatedConnection)
+	return ok && isolated.PriorityIsolatedWrites()
+}
+
+func (connection *queuedConnection) writeQueueLoop(queue chan queuedWrite) {
+	for {
+		select {
+		case <-connection.done:
+			return
+		case write := <-queue:
+			connection.flush(write)
+		}
+	}
+}
+
 func (connection *queuedConnection) nextWrite() (queuedWrite, bool) {
 	for {
 		select {
@@ -266,7 +301,7 @@ func (connection *queuedConnection) flush(write queuedWrite) {
 	ctx, cancel := connection.writeContext()
 	defer cancel()
 
-	if err := connection.inner.WriteMessage(ctx, write.message); err != nil {
+	if err := connection.writeMessage(ctx, write.message); err != nil {
 		connection.recordWriteError(err)
 		return
 	}
@@ -284,6 +319,14 @@ func (connection *queuedConnection) flush(write queuedWrite) {
 			slog.Duration("delay", delay),
 		)
 	}
+}
+
+func (connection *queuedConnection) writeMessage(ctx context.Context, message Message) error {
+	priorityWriter, ok := connection.inner.(priorityMessageWriter)
+	if ok {
+		return priorityWriter.WriteMessageWithPriority(ctx, message, connection.messagePriority(message))
+	}
+	return connection.inner.WriteMessage(ctx, message)
 }
 
 func (connection *queuedConnection) writeContext() (context.Context, context.CancelFunc) {

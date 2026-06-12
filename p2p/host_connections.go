@@ -290,7 +290,7 @@ func (host *Host) connectionWriterFor(connection Connection) Connection {
 func (host *Host) messagePriority(message Message) MessagePriority {
 	spec, ok := host.registry.Spec(message.Type)
 	if !ok {
-		return MessagePriorityNormal
+		return defaultProtocolPriority(message.Type)
 	}
 	return spec.Priority
 }
