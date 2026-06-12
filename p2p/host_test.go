@@ -208,3 +208,74 @@ func TestHostDialCandidatesUseRemoteProtocolPreference(t *testing.T) {
 		t.Fatalf("first protocol = %q, want tcp", addresses[0].Protocol)
 	}
 }
+
+func TestHostDialAddressMarksVerifiedAndObservedAddress(t *testing.T) {
+	localPeerID := testPeerID(90)
+	remotePeerID := testPeerID(91)
+	dialAddress := testAddress(t, utils.ProtocolTCP, 5035, remotePeerID)
+	baseConnection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	host, err := NewHost(
+		HostConfig{PeerID: localPeerID, AllowInsecure: true},
+		dialOnlyTransport{protocol: utils.ProtocolTCP, connection: baseConnection},
+	)
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection, err := host.DialAddress(context.Background(), dialAddress)
+	if err != nil {
+		t.Fatalf("DialAddress() error = %v", err)
+	}
+	defer connection.Close()
+
+	peer, ok := host.Peer(remotePeerID)
+	if !ok {
+		t.Fatal("Peer() ok = false, want true")
+	}
+	if len(peer.AdvertisedAddresses) != 0 {
+		t.Fatalf("AdvertisedAddresses = %+v, want empty for direct dial", peer.AdvertisedAddresses)
+	}
+	if len(peer.VerifiedAddresses) != 1 || peer.VerifiedAddresses[0].String() != dialAddress.String() {
+		t.Fatalf("VerifiedAddresses = %+v, want dial address", peer.VerifiedAddresses)
+	}
+
+	state, ok := host.ConnectionState(remotePeerID)
+	if !ok {
+		t.Fatal("ConnectionState() ok = false, want true")
+	}
+	if state.ObservedRemoteAddress != baseConnection.RemoteAddress() {
+		t.Fatalf("ObservedRemoteAddress = %q, want %q", state.ObservedRemoteAddress, baseConnection.RemoteAddress())
+	}
+	if state.RemoteAddress != state.ObservedRemoteAddress {
+		t.Fatalf("RemoteAddress = %q, want compatibility with observed", state.RemoteAddress)
+	}
+}
+
+type dialOnlyTransport struct {
+	protocol   utils.MultiAddressProtocol
+	connection Connection
+}
+
+func (transport dialOnlyTransport) Protocol() utils.MultiAddressProtocol {
+	return transport.protocol
+}
+
+func (transport dialOnlyTransport) Listen(
+	ctx context.Context,
+	address utils.MultiAddress,
+	handler ConnectionHandler,
+) error {
+	return nil
+}
+
+func (transport dialOnlyTransport) Dial(ctx context.Context, address utils.MultiAddress) (Connection, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return transport.connection, nil
+}
+
+func (transport dialOnlyTransport) Close() error {
+	return nil
+}

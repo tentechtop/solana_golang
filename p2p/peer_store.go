@@ -12,7 +12,8 @@ import (
 
 const (
 	// PeerStoreRecordVersion 定义 PeerStore 记录版本 + 便于后续存储格式平滑升级。
-	PeerStoreRecordVersion uint16 = 3
+	PeerStoreRecordVersion   uint16 = 4
+	peerStoreRecordVersionV3 uint16 = 3
 
 	defaultPeerStoreLoadLimit = 1024
 	maxPeerStoreAddresses     = 16
@@ -117,7 +118,7 @@ func (peer Peer) MarshalBinary() ([]byte, error) {
 	if err := writer.WriteString(peer.ID); err != nil {
 		return nil, fmt.Errorf("p2p: marshal peer id: %w", err)
 	}
-	if err := writePeerAddressSlice(writer, peer.Addresses); err != nil {
+	if err := writePeerAddressSlice(writer, peer.advertisedAddressList()); err != nil {
 		return nil, err
 	}
 	if err := writer.WriteString(string(peer.Status)); err != nil {
@@ -134,6 +135,9 @@ func (peer Peer) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("p2p: marshal peer software version: %w", err)
 	}
 	if err := writePeerProtocolSlice(writer, peer.PreferredProtocols); err != nil {
+		return nil, err
+	}
+	if err := writePeerAddressSlice(writer, peer.VerifiedAddresses); err != nil {
 		return nil, err
 	}
 	writer.WriteUint64(peer.LatestSlot)
@@ -172,7 +176,7 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 	if err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer version: %w", err)
 	}
-	if version != 1 && version != 2 && version != PeerStoreRecordVersion {
+	if version != 1 && version != 2 && version != peerStoreRecordVersionV3 && version != PeerStoreRecordVersion {
 		return Peer{}, fmt.Errorf("%w: unsupported peer store version", ErrInvalidMessage)
 	}
 	peerID, err := reader.ReadString()
@@ -204,8 +208,15 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 		return Peer{}, fmt.Errorf("p2p: read peer software version: %w", err)
 	}
 	var preferredProtocols []utils.MultiAddressProtocol
-	if version >= PeerStoreRecordVersion {
+	if version >= peerStoreRecordVersionV3 {
 		preferredProtocols, err = readPeerProtocolSlice(reader)
+		if err != nil {
+			return Peer{}, err
+		}
+	}
+	var verifiedAddresses []utils.MultiAddress
+	if version >= PeerStoreRecordVersion {
+		verifiedAddresses, err = readPeerAddressSlice(reader)
 		if err != nil {
 			return Peer{}, err
 		}
@@ -291,6 +302,8 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 
 	peer := Peer{
 		ID:                        peerID,
+		AdvertisedAddresses:       addresses,
+		VerifiedAddresses:         verifiedAddresses,
 		Addresses:                 addresses,
 		Status:                    PeerStatus(status),
 		Role:                      PeerRole(role),
@@ -465,6 +478,10 @@ func readPeerSignedRecord(reader *borsh.Reader) ([]byte, error) {
 }
 
 func normalizePeerForStorage(peer Peer) Peer {
+	advertisedAddresses := peer.advertisedAddressList()
+	peer.AdvertisedAddresses = cloneAddresses(advertisedAddresses)
+	peer.Addresses = cloneAddresses(advertisedAddresses)
+	peer.VerifiedAddresses = cloneAddresses(peer.VerifiedAddresses)
 	if peer.Status == "" {
 		peer.Status = PeerStatusUnknown
 	}
@@ -496,11 +513,11 @@ func minInt(first int, second int) int {
 }
 
 func peerShareableInDHT(peer Peer) bool {
-	return peer.Status != PeerStatusBlocked && len(peer.Addresses) > 0
+	return peer.Status != PeerStatusBlocked && len(peer.advertisedAddressList()) > 0
 }
 
 func peerDialable(peer Peer, maxPeerFailures uint32) bool {
-	if peer.Status == PeerStatusBlocked || len(peer.Addresses) == 0 {
+	if peer.Status == PeerStatusBlocked || !peer.hasDialableAddress() {
 		return false
 	}
 	if maxPeerFailures > 0 && peer.FailureCount >= maxPeerFailures {

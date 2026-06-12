@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"solana_golang/utils"
 )
 
 // AddPeer 添加或更新节点 + 校验地址归属后写入节点表。
@@ -117,6 +119,29 @@ func (host *Host) addPeerToRoutingTableLocked(peer Peer) {
 		return
 	}
 	_ = host.routingTable.AddPeer(peer)
+}
+
+// markPeerAddressVerified 标记验证地址 + 仅由主动拨号成功路径提升地址可信度。
+func (host *Host) markPeerAddressVerified(peerID string, address utils.MultiAddress) {
+	if address.PeerID != peerID {
+		return
+	}
+
+	var storedPeer Peer
+	shouldPersist := false
+	host.mutex.Lock()
+	if peer, ok := host.peers[peerID]; ok {
+		peer.AddVerifiedAddress(address)
+		host.peers[peerID] = peer
+		host.addPeerToRoutingTableLocked(peer)
+		storedPeer = peer.Clone()
+		shouldPersist = true
+	}
+	host.mutex.Unlock()
+
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
 }
 
 func (host *Host) savePeer(ctx context.Context, peer Peer) error {

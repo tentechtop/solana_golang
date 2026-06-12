@@ -56,6 +56,8 @@ const (
 // Peer 保存节点信息 + 供 Host、连接池和 DHT 共享同一份节点描述。
 type Peer struct {
 	ID                        string
+	AdvertisedAddresses       []utils.MultiAddress
+	VerifiedAddresses         []utils.MultiAddress
 	Addresses                 []utils.MultiAddress
 	Status                    PeerStatus
 	Role                      PeerRole
@@ -86,6 +88,8 @@ type Peer struct {
 // PeerSnapshot 保存节点快照 + 供监控、调试和 DHT 状态导出。
 type PeerSnapshot struct {
 	ID                        string
+	AdvertisedAddresses       []utils.MultiAddress
+	VerifiedAddresses         []utils.MultiAddress
 	Addresses                 []utils.MultiAddress
 	Status                    PeerStatus
 	Role                      PeerRole
@@ -116,12 +120,13 @@ type PeerSnapshot struct {
 func NewPeer(peerID string, addresses []utils.MultiAddress) (Peer, error) {
 	now := time.Now().UnixMilli()
 	peer := Peer{
-		ID:                 peerID,
-		Addresses:          cloneAddresses(addresses),
-		Status:             PeerStatusUnknown,
-		Role:               PeerRoleUnknown,
-		FirstSeenUnixMilli: now,
-		LastSeenUnixMilli:  now,
+		ID:                  peerID,
+		AdvertisedAddresses: cloneAddresses(addresses),
+		Addresses:           cloneAddresses(addresses),
+		Status:              PeerStatusUnknown,
+		Role:                PeerRoleUnknown,
+		FirstSeenUnixMilli:  now,
+		LastSeenUnixMilli:   now,
 	}
 	if err := peer.Validate(); err != nil {
 		return Peer{}, err
@@ -137,10 +142,11 @@ func (peer Peer) Validate() error {
 	if peer.Role == "" {
 		return fmt.Errorf("p2p: peer role cannot be empty")
 	}
-	for _, address := range peer.Addresses {
-		if address.PeerID != peer.ID {
-			return fmt.Errorf("p2p: peer address id mismatch %q", address.PeerID)
-		}
+	if err := validatePeerAddressOwnership(peer.ID, peer.advertisedAddressList()); err != nil {
+		return err
+	}
+	if err := validatePeerAddressOwnership(peer.ID, peer.VerifiedAddresses); err != nil {
+		return err
 	}
 	if err := validatePeerPreferredProtocols(peer.PreferredProtocols); err != nil {
 		return err
@@ -150,7 +156,9 @@ func (peer Peer) Validate() error {
 
 // Clone 复制节点信息 + 防止调用方修改 Host 内部状态。
 func (peer Peer) Clone() Peer {
-	peer.Addresses = cloneAddresses(peer.Addresses)
+	peer.AdvertisedAddresses = cloneAddresses(peer.advertisedAddressList())
+	peer.VerifiedAddresses = cloneAddresses(peer.VerifiedAddresses)
+	peer.Addresses = cloneAddresses(peer.AdvertisedAddresses)
 	peer.PreferredProtocols = cloneProtocols(peer.PreferredProtocols)
 	peer.SignedRecord = utils.CloneBytes(peer.SignedRecord)
 	peer.Metadata = cloneStringMap(peer.Metadata)
@@ -165,25 +173,36 @@ func (peer *Peer) Merge(next Peer) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
-	for _, address := range next.Addresses {
-		peer.AddAddress(address)
+	for _, address := range next.advertisedAddressList() {
+		peer.AddAdvertisedAddress(address)
+	}
+	for _, address := range next.VerifiedAddresses {
+		peer.AddVerifiedAddress(address)
 	}
 	peer.mergeNodeFields(next)
 	return nil
 }
 
-// AddAddress 添加节点地址 + 去重后保持原有协议优先级。
+// AddAddress 添加兼容节点地址 + 保持旧调用方写入声明地址语义。
 func (peer *Peer) AddAddress(address utils.MultiAddress) {
+	peer.AddAdvertisedAddress(address)
+}
+
+// AddAdvertisedAddress 添加声明地址 + 对方签名或发现层声明后进入可拨候选。
+func (peer *Peer) AddAdvertisedAddress(address utils.MultiAddress) {
 	if address.PeerID != peer.ID {
 		return
 	}
-	rawAddress := address.String()
-	for _, existing := range peer.Addresses {
-		if existing.String() == rawAddress {
-			return
-		}
+	peer.AdvertisedAddresses = appendUniqueAddress(peer.advertisedAddressList(), address)
+	peer.Addresses = cloneAddresses(peer.AdvertisedAddresses)
+}
+
+// AddVerifiedAddress 添加验证地址 + 仅在本机拨通且 PeerID 匹配后提升优先级。
+func (peer *Peer) AddVerifiedAddress(address utils.MultiAddress) {
+	if address.PeerID != peer.ID {
+		return
 	}
-	peer.Addresses = append(peer.Addresses, address)
+	peer.VerifiedAddresses = appendUniqueAddress(peer.VerifiedAddresses, address)
 }
 
 // MarkConnected 标记已连接 + 刷新活跃时间并清理连续失败计数。
@@ -215,7 +234,9 @@ func (peer *Peer) RecordError(err error) {
 func (peer Peer) Snapshot() PeerSnapshot {
 	return PeerSnapshot{
 		ID:                        peer.ID,
-		Addresses:                 cloneAddresses(peer.Addresses),
+		AdvertisedAddresses:       cloneAddresses(peer.advertisedAddressList()),
+		VerifiedAddresses:         cloneAddresses(peer.VerifiedAddresses),
+		Addresses:                 cloneAddresses(peer.advertisedAddressList()),
 		Status:                    peer.Status,
 		Role:                      peer.Role,
 		Capabilities:              peer.Capabilities,
@@ -244,18 +265,24 @@ func (peer Peer) Snapshot() PeerSnapshot {
 
 // BestAddress 选择最合适地址 + 按协议优先级支持 QUIC 到 TCP 的降级。
 func (peer Peer) BestAddress(protocolOrder []utils.MultiAddressProtocol) (utils.MultiAddress, bool) {
-	if len(peer.Addresses) == 0 {
+	if !peer.hasDialableAddress() {
 		return utils.MultiAddress{}, false
 	}
 	for _, protocol := range peer.dialProtocolOrder(protocolOrder) {
-		if address, ok := peer.firstAddressByProtocol(protocol); ok {
+		if address, ok := peer.firstDialAddressByProtocol(protocol); ok {
 			return address, true
 		}
 	}
-	return peer.Addresses[0], true
+	return utils.MultiAddress{}, false
 }
-func (peer Peer) firstAddressByProtocol(protocol utils.MultiAddressProtocol) (utils.MultiAddress, bool) {
-	for _, address := range peer.Addresses {
+func (peer Peer) firstDialAddressByProtocol(protocol utils.MultiAddressProtocol) (utils.MultiAddress, bool) {
+	if address, ok := firstAddressByProtocol(peer.VerifiedAddresses, protocol); ok {
+		return address, true
+	}
+	return firstAddressByProtocol(peer.advertisedAddressList(), protocol)
+}
+func firstAddressByProtocol(addresses []utils.MultiAddress, protocol utils.MultiAddressProtocol) (utils.MultiAddress, bool) {
+	for _, address := range addresses {
 		if address.Protocol == protocol {
 			return address, true
 		}
@@ -355,6 +382,33 @@ func cloneAddresses(addresses []utils.MultiAddress) []utils.MultiAddress {
 	cloned := make([]utils.MultiAddress, len(addresses))
 	copy(cloned, addresses)
 	return cloned
+}
+func (peer Peer) advertisedAddressList() []utils.MultiAddress {
+	if len(peer.AdvertisedAddresses) > 0 {
+		return peer.AdvertisedAddresses
+	}
+	return peer.Addresses
+}
+func (peer Peer) hasDialableAddress() bool {
+	return len(peer.VerifiedAddresses) > 0 || len(peer.advertisedAddressList()) > 0
+}
+func validatePeerAddressOwnership(peerID string, addresses []utils.MultiAddress) error {
+	for _, address := range addresses {
+		if address.PeerID != peerID {
+			return fmt.Errorf("p2p: peer address id mismatch %q", address.PeerID)
+		}
+	}
+	return nil
+}
+func appendUniqueAddress(addresses []utils.MultiAddress, address utils.MultiAddress) []utils.MultiAddress {
+	rawAddress := address.String()
+	for _, existing := range addresses {
+		if existing.String() == rawAddress {
+			return cloneAddresses(addresses)
+		}
+	}
+	next := cloneAddresses(addresses)
+	return append(next, address)
 }
 func cloneStringMap(values map[string]string) map[string]string {
 	if values == nil {

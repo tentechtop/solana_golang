@@ -362,7 +362,7 @@ func (host *Host) importSignedPeerRecord(recordBytes []byte, source string) erro
 	host.logger.Debug("p2p peer record accepted",
 		slog.String("peer_id", peer.ID),
 		slog.String("source", source),
-		slog.Int("addresses", len(peer.Addresses)),
+		slog.Int("advertised_addresses", len(peer.advertisedAddressList())),
 	)
 	return nil
 }

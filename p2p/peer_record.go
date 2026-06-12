@@ -63,7 +63,7 @@ func NewSignedPeerRecord(peer Peer, identity SecureSessionIdentity, ttl time.Dur
 		PeerID:             peer.ID,
 		PublicKey:          utils.CloneBytes(identity.PublicKey),
 		NetworkID:          identity.NetworkID,
-		Addresses:          peerRecordAddressStrings(peer.Addresses),
+		Addresses:          peerRecordAddressStrings(peer.advertisedAddressList()),
 		PreferredProtocols: normalizedPeerRecordProtocols(peer.PreferredProtocols),
 		Role:               normalizePeerRole(peer.Role),
 		Capabilities:       peer.Capabilities,
@@ -277,6 +277,8 @@ func (record SignedPeerRecord) ToPeer() (Peer, error) {
 	if err != nil {
 		return Peer{}, err
 	}
+	peer.AdvertisedAddresses = cloneAddresses(addresses)
+	peer.Addresses = cloneAddresses(addresses)
 	peer.Role = normalizePeerRole(record.Role)
 	peer.Capabilities = record.Capabilities
 	peer.ProtocolVersion = record.ProtocolVersion

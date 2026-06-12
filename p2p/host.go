@@ -101,6 +101,7 @@ type ConnectionState struct {
 	ConnectionID           string
 	Protocol               utils.MultiAddressProtocol
 	LocalAddress           string
+	ObservedRemoteAddress  string
 	RemoteAddress          string
 	Encrypted              bool
 	NetworkID              string

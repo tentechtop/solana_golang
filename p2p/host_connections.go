@@ -152,6 +152,7 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 		ConnectionID:          connection.ID(),
 		Protocol:              connection.Protocol(),
 		LocalAddress:          connection.LocalAddress(),
+		ObservedRemoteAddress: connection.RemoteAddress(),
 		RemoteAddress:         connection.RemoteAddress(),
 		Encrypted:             security.encrypted,
 		NetworkID:             security.networkID,
@@ -367,6 +368,7 @@ func (host *Host) markConnectionRead(connection Connection, peerID string) error
 			ConnectionID:          connection.ID(),
 			Protocol:              connection.Protocol(),
 			LocalAddress:          connection.LocalAddress(),
+			ObservedRemoteAddress: connection.RemoteAddress(),
 			RemoteAddress:         connection.RemoteAddress(),
 			Encrypted:             security.encrypted,
 			NetworkID:             security.networkID,
@@ -408,6 +410,7 @@ func (host *Host) markConnectionWrite(connection Connection, peerID string) {
 			ConnectionID:          connection.ID(),
 			Protocol:              connection.Protocol(),
 			LocalAddress:          connection.LocalAddress(),
+			ObservedRemoteAddress: connection.RemoteAddress(),
 			RemoteAddress:         connection.RemoteAddress(),
 			Encrypted:             security.encrypted,
 			NetworkID:             security.networkID,
@@ -429,11 +432,18 @@ func (host *Host) remoteIPConnectionCountLocked(remoteAddress string) int {
 	}
 	count := 0
 	for _, state := range host.connectionStates {
-		if remoteIPFromConnectionAddress(state.RemoteAddress) == remoteIP {
+		if remoteIPFromConnectionAddress(state.observedRemoteAddress()) == remoteIP {
 			count++
 		}
 	}
 	return count
+}
+
+func (state ConnectionState) observedRemoteAddress() string {
+	if state.ObservedRemoteAddress != "" {
+		return state.ObservedRemoteAddress
+	}
+	return state.RemoteAddress
 }
 
 func remoteIPFromConnectionAddress(remoteAddress string) string {

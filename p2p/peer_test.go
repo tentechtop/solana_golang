@@ -45,6 +45,26 @@ func TestPeerBestAddressUsesRemoteProtocolPreference(t *testing.T) {
 	}
 }
 
+func TestPeerBestAddressPrefersVerifiedAddress(t *testing.T) {
+	peerID := testPeerID(15)
+	advertisedAddress := testAddress(t, utils.ProtocolTCP, 3001, peerID)
+	verifiedAddress := testAddress(t, utils.ProtocolTCP, 3002, peerID)
+
+	peer, err := NewPeer(peerID, []utils.MultiAddress{advertisedAddress})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	peer.AddVerifiedAddress(verifiedAddress)
+
+	address, ok := peer.BestAddress([]utils.MultiAddressProtocol{utils.ProtocolTCP})
+	if !ok {
+		t.Fatal("BestAddress() ok = false, want true")
+	}
+	if address.Port != verifiedAddress.Port {
+		t.Fatalf("BestAddress port = %d, want verified port %d", address.Port, verifiedAddress.Port)
+	}
+}
+
 func TestPeerRejectsAddressMismatch(t *testing.T) {
 	peerID := testPeerID(2)
 	otherPeerID := testPeerID(3)
@@ -78,6 +98,9 @@ func TestPeerMergeAndSnapshot(t *testing.T) {
 	}
 	if len(peer.Addresses) != 2 {
 		t.Fatalf("address count = %d, want 2", len(peer.Addresses))
+	}
+	if len(peer.AdvertisedAddresses) != 2 {
+		t.Fatalf("advertised address count = %d, want 2", len(peer.AdvertisedAddresses))
 	}
 	if peer.Role != PeerRoleValidator {
 		t.Fatalf("Role = %q, want %q", peer.Role, PeerRoleValidator)

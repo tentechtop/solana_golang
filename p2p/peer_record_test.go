@@ -12,10 +12,12 @@ import (
 func TestSignedPeerRecordRoundTrip(t *testing.T) {
 	identity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
 	address := testAddress(t, utils.ProtocolTCP, 5011, identity.PeerID)
+	verifiedAddress := testAddress(t, utils.ProtocolQUIC, 5015, identity.PeerID)
 	peer, err := NewPeer(identity.PeerID, []utils.MultiAddress{address})
 	if err != nil {
 		t.Fatalf("NewPeer() error = %v", err)
 	}
+	peer.AddVerifiedAddress(verifiedAddress)
 	peer.Role = PeerRoleValidator
 	peer.Capabilities = PeerCapabilityDHT | PeerCapabilityValidator
 	peer.PreferredProtocols = []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
@@ -48,6 +50,12 @@ func TestSignedPeerRecordRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(decodedPeer.SignedRecord, encoded) {
 		t.Fatal("SignedRecord was not preserved")
+	}
+	if len(decoded.Addresses) != 1 || decoded.Addresses[0] != address.String() {
+		t.Fatalf("record.Addresses = %+v, want only advertised address", decoded.Addresses)
+	}
+	if len(decodedPeer.VerifiedAddresses) != 0 {
+		t.Fatalf("decoded peer verified addresses = %+v, want none from signed record", decodedPeer.VerifiedAddresses)
 	}
 }
 

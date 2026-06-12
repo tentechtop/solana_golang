@@ -12,6 +12,8 @@ import (
 
 func TestPeerBinaryRoundTrip(t *testing.T) {
 	peer := kadTestPeer(t, 0x41, 4021)
+	verifiedAddress := testAddress(t, utils.ProtocolTCP, 4121, peer.ID)
+	peer.AddVerifiedAddress(verifiedAddress)
 	peer.Status = PeerStatusConnected
 	peer.Role = PeerRoleValidator
 	peer.ProtocolVersion = "1"
@@ -56,6 +58,12 @@ func TestPeerBinaryRoundTrip(t *testing.T) {
 	}
 	if len(decoded.PreferredProtocols) != 2 || decoded.PreferredProtocols[0] != utils.ProtocolTCP {
 		t.Fatalf("PreferredProtocols = %+v, want tcp first", decoded.PreferredProtocols)
+	}
+	if len(decoded.AdvertisedAddresses) != len(peer.AdvertisedAddresses) {
+		t.Fatalf("AdvertisedAddresses = %+v, want %+v", decoded.AdvertisedAddresses, peer.AdvertisedAddresses)
+	}
+	if len(decoded.VerifiedAddresses) != 1 || decoded.VerifiedAddresses[0].String() != verifiedAddress.String() {
+		t.Fatalf("VerifiedAddresses = %+v, want %s", decoded.VerifiedAddresses, verifiedAddress.String())
 	}
 }
 

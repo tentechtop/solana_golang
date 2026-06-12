@@ -97,6 +97,7 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 		host.recordPeerError(address.PeerID, storeError)
 		return nil, storeError
 	}
+	host.markPeerAddressVerified(address.PeerID, address)
 	host.recordPeerProtectionSuccess(address.PeerID)
 	host.logger.Info("p2p host connected",
 		slog.String("peer_id", address.PeerID),
@@ -184,7 +185,7 @@ func (host *Host) dialCandidateAddresses(peer Peer) []utils.MultiAddress {
 	protocols := peer.dialProtocolOrder(host.preferredProtocols)
 	addresses := make([]utils.MultiAddress, 0, len(protocols))
 	for _, protocol := range protocols {
-		address, ok := peer.firstAddressByProtocol(protocol)
+		address, ok := peer.firstDialAddressByProtocol(protocol)
 		if ok {
 			addresses = append(addresses, address)
 		}

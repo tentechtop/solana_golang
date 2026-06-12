@@ -10,8 +10,14 @@
 已修复 P2：从节点信息知道对方默认协议。
 - Peer 增加 PreferredProtocols。
 - SignedPeerRecord 版本升级到 3，携带 PreferredProtocols，并兼容读取版本 2。
-- PeerStore 版本升级到 3，持久化 PreferredProtocols，并兼容读取版本 1/2。
+- PeerStore 版本升级到 4，持久化 PreferredProtocols 和 VerifiedAddresses，并兼容读取版本 1/2/3。
 - DialPeer 候选地址排序优先使用远端 PreferredProtocols 与本地支持协议的交集。
+
+已修复 P2：地址信任层级拆分。
+- AdvertisedAddresses 表示对方声明或签名传播的可拨地址。
+- ObservedRemoteAddress 表示当前连接中本机看到的真实远端地址，用于连接状态和同 IP 限制。
+- VerifiedAddresses 表示本机主动拨通且 PeerID 校验通过的地址，拨号时优先使用。
+- 兼容旧 Addresses 字段，旧调用方仍读取声明地址。
 
 已确认：已同时支持 QUIC 和 TCP。
 - NewHost 默认注册 QUIC 和 TCP。
