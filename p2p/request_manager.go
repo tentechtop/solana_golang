@@ -136,7 +136,7 @@ func (host *Host) Request(ctx context.Context, peerID string, request Message) (
 	if err := validateOutboundPeerID(peerID); err != nil {
 		return Message{}, err
 	}
-	if err := host.checkPeerDialAllowed(peerID); err != nil {
+	if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
 		return Message{}, peerProtectionDialError(peerID, err)
 	}
 
@@ -189,7 +189,7 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	if err := validateOutboundPeerID(peerID); err != nil {
 		return Message{}, err
 	}
-	if err := host.checkPeerDialAllowed(peerID); err != nil {
+	if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
 		return Message{}, peerProtectionDialError(peerID, err)
 	}
 

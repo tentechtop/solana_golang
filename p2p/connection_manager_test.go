@@ -439,6 +439,53 @@ func TestHostRequestRetriesTimeoutOnlyWhenConnectionChanged(t *testing.T) {
 	}
 }
 
+func TestHostRequestUsesExistingConnectionDuringDialBackoff(t *testing.T) {
+	localPeerID := testPeerID(92)
+	remotePeerID := testPeerID(93)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+		PeerProtection: PeerProtectionConfig{
+			DialBackoffBase: time.Minute,
+			DialBackoffMax:  time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	peer, err := NewPeer(remotePeerID, []utils.MultiAddress{
+		testAddress(t, utils.ProtocolTCP, 5092, remotePeerID),
+	})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	if err := host.AddPeer(peer); err != nil {
+		t.Fatalf("AddPeer() error = %v", err)
+	}
+
+	connection := newRequestResponderConnection(remotePeerID, localPeerID)
+	setHostConnectionForTest(host, remotePeerID, connection)
+	host.recordPeerDialFailure(remotePeerID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go host.HandleConnection(ctx, connection)
+
+	request := testRequestMessage(t, localPeerID, remotePeerID)
+	response, err := host.Request(context.Background(), remotePeerID, request)
+	if err != nil {
+		t.Fatalf("Request() error = %v", err)
+	}
+	if response.FromPeerID != remotePeerID {
+		t.Fatalf("response.FromPeerID = %q, want %q", response.FromPeerID, remotePeerID)
+	}
+	if err := host.checkPeerDialAllowed(remotePeerID); err != nil {
+		t.Fatalf("checkPeerDialAllowed() error = %v, want cleared backoff", err)
+	}
+}
+
 func TestProtocolQueueDoesNotBlockHeartbeatResponse(t *testing.T) {
 	localPeerID := testPeerID(53)
 	remotePeerID := testPeerID(54)
@@ -862,6 +909,63 @@ func TestHostDialPeerBacksOffAfterAllAttemptsFail(t *testing.T) {
 	}
 }
 
+func TestHostDialPeerReturnsConcurrentExistingConnectionWithoutBackoff(t *testing.T) {
+	localPeerID := testPeerID(94)
+	remotePeerID := testPeerID(95)
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	var host *Host
+	transport := callbackDialTransport{
+		protocol: utils.ProtocolTCP,
+		err:      errors.New("simulated dial timeout"),
+		onDial: func(address utils.MultiAddress) {
+			if err := host.storeConnection(address.PeerID, connection); err != nil {
+				t.Errorf("storeConnection() error = %v", err)
+			}
+		},
+	}
+	var err error
+	host, err = NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+		PeerProtection: PeerProtectionConfig{
+			DialBackoffBase: time.Minute,
+			DialBackoffMax:  time.Minute,
+		},
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	peer, err := NewPeer(remotePeerID, []utils.MultiAddress{
+		testAddress(t, utils.ProtocolTCP, 5095, remotePeerID),
+	})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	if err := host.AddPeer(peer); err != nil {
+		t.Fatalf("AddPeer() error = %v", err)
+	}
+
+	gotConnection, err := host.DialPeer(context.Background(), remotePeerID)
+	if err != nil {
+		t.Fatalf("DialPeer() error = %v", err)
+	}
+	if gotConnection == nil || gotConnection.RemotePeerID() != remotePeerID {
+		t.Fatalf("DialPeer() connection = %v, want peer %s", gotConnection, remotePeerID)
+	}
+	if err := host.checkPeerDialAllowed(remotePeerID); err != nil {
+		t.Fatalf("checkPeerDialAllowed() error = %v, want no dial backoff", err)
+	}
+	peer, ok := host.Peer(remotePeerID)
+	if !ok {
+		t.Fatal("Peer() ok = false, want true")
+	}
+	if peer.FailureCount != 0 {
+		t.Fatalf("FailureCount = %d, want cleared by existing connection", peer.FailureCount)
+	}
+}
+
 func TestShouldRecordPeerDialFailureIgnoresExpectedConnectionErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1272,6 +1376,12 @@ type blockingWriteConnection struct {
 	blockedFirst bool
 }
 
+type callbackDialTransport struct {
+	protocol utils.MultiAddressProtocol
+	err      error
+	onDial   func(utils.MultiAddress)
+}
+
 func newBlockingWriteConnection(localPeerID string, remotePeerID string) *blockingWriteConnection {
 	return &blockingWriteConnection{
 		scriptedConnection: newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil),
@@ -1279,6 +1389,32 @@ func newBlockingWriteConnection(localPeerID string, remotePeerID string) *blocki
 		firstStarted:       make(chan struct{}),
 		releaseFirst:       make(chan struct{}),
 	}
+}
+
+func (transport callbackDialTransport) Protocol() utils.MultiAddressProtocol {
+	return transport.protocol
+}
+
+func (transport callbackDialTransport) Listen(
+	ctx context.Context,
+	address utils.MultiAddress,
+	handler ConnectionHandler,
+) error {
+	return nil
+}
+
+func (transport callbackDialTransport) Dial(ctx context.Context, address utils.MultiAddress) (Connection, error) {
+	if transport.onDial != nil {
+		transport.onDial(address)
+	}
+	if transport.err != nil {
+		return nil, transport.err
+	}
+	return nil, ErrTransportUnavailable
+}
+
+func (transport callbackDialTransport) Close() error {
+	return nil
 }
 
 func (connection *blockingWriteConnection) WriteMessage(ctx context.Context, message Message) error {

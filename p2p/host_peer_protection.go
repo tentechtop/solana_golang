@@ -50,6 +50,20 @@ func (host *Host) checkPeerDialAllowed(peerID string) error {
 	}
 }
 
+// checkPeerDialAllowedOrConnected 保护真实拨号失败 + 避免已有连接被拨号退避误伤。
+func (host *Host) checkPeerDialAllowedOrConnected(peerID string) error {
+	err := host.checkPeerDialAllowed(peerID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrPeerBackoff) || !host.hasConnection(peerID) {
+		return err
+	}
+	host.recordPeerProtectionSuccess(peerID)
+	host.recordPeerConnectionSuccess(peerID)
+	return nil
+}
+
 func (host *Host) recordPeerDialFailure(peerID string) {
 	snapshot := host.peerProtection.recordDialFailure(peerID, time.Now())
 	host.syncPeerProtectionSnapshot(snapshot)
@@ -134,7 +148,7 @@ func (host *Host) normalizeBroadcastPeers(peerIDs []string) []string {
 		if _, exists := seen[peerID]; exists || peerID == "" || peerID == host.peerID {
 			continue
 		}
-		if err := host.checkPeerDialAllowed(peerID); err != nil {
+		if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
 			continue
 		}
 		seen[peerID] = struct{}{}

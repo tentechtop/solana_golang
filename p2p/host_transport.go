@@ -124,6 +124,12 @@ func validateHostDialAddress(address utils.MultiAddress) error {
 
 // DialPeer 拨号节点 + 按协议优先级支持 QUIC 到 TCP 的降级。
 func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, error) {
+	if connection, ok := host.Connection(peerID); ok {
+		if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
+			return nil, peerProtectionDialError(peerID, err)
+		}
+		return connection, nil
+	}
 	if err := host.checkPeerDialAllowed(peerID); err != nil {
 		return nil, peerProtectionDialError(peerID, err)
 	}
@@ -147,10 +153,17 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 		if errors.Is(err, ErrDuplicateConnection) {
 			existingConnection, ok := host.Connection(peerID)
 			if ok {
+				host.recordPeerProtectionSuccess(peerID)
+				host.recordPeerConnectionSuccess(peerID)
 				return existingConnection, nil
 			}
 		}
 		dialErrors = append(dialErrors, err)
+	}
+	if existingConnection, ok := host.Connection(peerID); ok {
+		host.recordPeerProtectionSuccess(peerID)
+		host.recordPeerConnectionSuccess(peerID)
+		return existingConnection, nil
 	}
 	if len(dialErrors) == 0 {
 		return nil, fmt.Errorf("p2p: dial peer %s: no usable address", peerID)

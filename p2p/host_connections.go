@@ -584,3 +584,23 @@ func (host *Host) recordPeerError(peerID string, err error) {
 		host.savePeerBestEffort(storedPeer)
 	}
 }
+
+// recordPeerConnectionSuccess 标记连接已收敛 + 清理并发拨号失败留下的节点失败计数。
+func (host *Host) recordPeerConnectionSuccess(peerID string) {
+	var storedPeer Peer
+	shouldPersist := false
+	host.mutex.Lock()
+	if peer, ok := host.peers[peerID]; ok {
+		peer.MarkConnected()
+		host.peers[peerID] = peer
+		host.addPeerToRoutingTableLocked(peer)
+		host.routingTable.TouchPeer(peerID)
+		storedPeer = peer.Clone()
+		shouldPersist = true
+	}
+	host.mutex.Unlock()
+
+	if shouldPersist {
+		host.savePeerBestEffort(storedPeer)
+	}
+}
