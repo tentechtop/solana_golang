@@ -18,6 +18,7 @@ func TestSignedPeerRecordRoundTrip(t *testing.T) {
 	}
 	peer.Role = PeerRoleValidator
 	peer.Capabilities = PeerCapabilityDHT | PeerCapabilityValidator
+	peer.PreferredProtocols = []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
 	peer.StakeLamports = 99
 
 	record, err := NewSignedPeerRecord(peer, identity, time.Hour)
@@ -42,8 +43,42 @@ func TestSignedPeerRecordRoundTrip(t *testing.T) {
 	if decodedPeer.StakeLamports != peer.StakeLamports {
 		t.Fatalf("StakeLamports = %d, want %d", decodedPeer.StakeLamports, peer.StakeLamports)
 	}
+	if len(decodedPeer.PreferredProtocols) != 2 || decodedPeer.PreferredProtocols[0] != utils.ProtocolTCP {
+		t.Fatalf("PreferredProtocols = %+v, want tcp first", decodedPeer.PreferredProtocols)
+	}
 	if !bytes.Equal(decodedPeer.SignedRecord, encoded) {
 		t.Fatal("SignedRecord was not preserved")
+	}
+}
+
+func TestSignedPeerRecordAcceptsVersionTwoWithoutPreferredProtocols(t *testing.T) {
+	identity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
+	address := testAddress(t, utils.ProtocolTCP, 5014, identity.PeerID)
+	peer, err := NewPeer(identity.PeerID, []utils.MultiAddress{address})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+
+	record, err := NewSignedPeerRecord(peer, identity, time.Hour)
+	if err != nil {
+		t.Fatalf("NewSignedPeerRecord() error = %v", err)
+	}
+	record.Version = peerRecordVersionV2
+	record.PreferredProtocols = nil
+	record.Signature = nil
+	if err := record.Sign(identity.PrivateKey); err != nil {
+		t.Fatalf("Sign(v2) error = %v", err)
+	}
+	encoded, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(v2) error = %v", err)
+	}
+	decoded, err := UnmarshalSignedPeerRecordBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalSignedPeerRecordBinary(v2) error = %v", err)
+	}
+	if len(decoded.PreferredProtocols) != 0 {
+		t.Fatalf("PreferredProtocols = %+v, want empty for v2", decoded.PreferredProtocols)
 	}
 }
 

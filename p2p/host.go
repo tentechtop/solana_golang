@@ -11,6 +11,7 @@ import (
 
 const (
 	defaultDialTimeout       = 5 * time.Second
+	defaultRequestTimeout    = 10 * time.Second
 	defaultHeartbeatInterval = 15 * time.Second
 	defaultConnectionIdle    = 45 * time.Second
 	defaultMaxPeerFailures   = 3
@@ -28,6 +29,7 @@ type HostConfig struct {
 	Environment          string
 	PreferredProtocols   []utils.MultiAddressProtocol
 	DialTimeout          time.Duration
+	RequestTimeout       time.Duration
 	HandshakeTimeout     time.Duration
 	PeerRecordTTL        time.Duration
 	HeartbeatInterval    time.Duration
@@ -58,6 +60,7 @@ type Host struct {
 	secureIdentity       SecureSessionIdentity
 	preferredProtocols   []utils.MultiAddressProtocol
 	dialTimeout          time.Duration
+	requestTimeout       time.Duration
 	handshakeTimeout     time.Duration
 	peerRecordTTL        time.Duration
 	heartbeatInterval    time.Duration
@@ -138,6 +141,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		secureIdentity:       secureIdentity,
 		preferredProtocols:   normalizedProtocolOrder(config.PreferredProtocols),
 		dialTimeout:          normalizeDialTimeout(config.DialTimeout),
+		requestTimeout:       normalizeRequestTimeout(config.RequestTimeout),
 		handshakeTimeout:     normalizeHandshakeTimeout(config.HandshakeTimeout),
 		peerRecordTTL:        normalizePeerRecordTTL(config.PeerRecordTTL),
 		heartbeatInterval:    normalizeHeartbeatInterval(config.HeartbeatInterval),
@@ -214,6 +218,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		slog.Int("protocol_workers", host.protocolDispatcher.config.WorkerCount),
 		slog.Int("protocol_partitions", host.protocolDispatcher.config.PartitionCount),
 		slog.Duration("dial_timeout", host.dialTimeout),
+		slog.Duration("request_timeout", host.requestTimeout),
 		slog.Duration("handshake_timeout", host.handshakeTimeout),
 	)
 	return host, nil

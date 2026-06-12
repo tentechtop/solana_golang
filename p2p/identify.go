@@ -383,6 +383,7 @@ func (host *Host) localSignedPeerRecord() (SignedPeerRecord, error) {
 	peer.Capabilities = PeerCapabilityDHT
 	peer.ProtocolVersion = fmt.Sprintf("%d", MessageProtocolVersion)
 	peer.SoftwareVersion = host.secureIdentity.SoftwareVersion
+	peer.PreferredProtocols = cloneProtocols(host.preferredProtocols)
 	return NewSignedPeerRecord(peer, host.secureIdentity, host.peerRecordTTL)
 }
 

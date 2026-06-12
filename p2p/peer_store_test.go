@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"solana_golang/codec/borsh"
 	"solana_golang/utils"
 )
 
@@ -15,6 +16,7 @@ func TestPeerBinaryRoundTrip(t *testing.T) {
 	peer.Role = PeerRoleValidator
 	peer.ProtocolVersion = "1"
 	peer.SoftwareVersion = "test/0.1.0"
+	peer.PreferredProtocols = []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
 	peer.LatestSlot = 88
 	peer.BlockHeight = 77
 	peer.BestBlockHash = testPeerID(31)
@@ -52,6 +54,9 @@ func TestPeerBinaryRoundTrip(t *testing.T) {
 	if decoded.Metadata["zone"] != "local" {
 		t.Fatalf("metadata zone = %q, want local", decoded.Metadata["zone"])
 	}
+	if len(decoded.PreferredProtocols) != 2 || decoded.PreferredProtocols[0] != utils.ProtocolTCP {
+		t.Fatalf("PreferredProtocols = %+v, want tcp first", decoded.PreferredProtocols)
+	}
 }
 
 func TestPeerBinaryRoundTripPreservesSignedRecord(t *testing.T) {
@@ -73,20 +78,7 @@ func TestPeerBinaryRoundTripPreservesSignedRecord(t *testing.T) {
 
 func TestUnmarshalPeerBinaryAcceptsVersionOneWithoutSignedRecord(t *testing.T) {
 	peer := kadTestPeer(t, 0x47, 4028)
-	encoded, err := peer.MarshalBinary()
-	if err != nil {
-		t.Fatalf("MarshalBinary() error = %v", err)
-	}
-	if len(encoded) < 6 {
-		t.Fatalf("encoded length = %d, want >= 6", len(encoded))
-	}
-	if !bytes.Equal(encoded[len(encoded)-4:], []byte{0, 0, 0, 0}) {
-		t.Fatal("test fixture expected empty v2 signed record suffix")
-	}
-
-	encoded[0] = 1
-	encoded[1] = 0
-	encoded = encoded[:len(encoded)-4]
+	encoded := marshalPeerStoreVersionOne(t, peer)
 
 	decoded, err := UnmarshalPeerBinary(encoded)
 	if err != nil {
@@ -98,6 +90,56 @@ func TestUnmarshalPeerBinaryAcceptsVersionOneWithoutSignedRecord(t *testing.T) {
 	if len(decoded.SignedRecord) != 0 {
 		t.Fatalf("len(SignedRecord) = %d, want 0", len(decoded.SignedRecord))
 	}
+}
+
+func marshalPeerStoreVersionOne(t *testing.T, peer Peer) []byte {
+	t.Helper()
+	peer = normalizePeerForStorage(peer)
+	writer := borsh.NewWriter(DefaultMaxMessageSize)
+	writer.WriteUint16(1)
+	if err := writer.WriteString(peer.ID); err != nil {
+		t.Fatalf("marshal peer id: %v", err)
+	}
+	if err := writePeerAddressSlice(writer, peer.Addresses); err != nil {
+		t.Fatalf("marshal peer addresses: %v", err)
+	}
+	if err := writer.WriteString(string(peer.Status)); err != nil {
+		t.Fatalf("marshal peer status: %v", err)
+	}
+	if err := writer.WriteString(string(peer.Role)); err != nil {
+		t.Fatalf("marshal peer role: %v", err)
+	}
+	writer.WriteUint64(uint64(peer.Capabilities))
+	if err := writer.WriteString(peer.ProtocolVersion); err != nil {
+		t.Fatalf("marshal peer protocol version: %v", err)
+	}
+	if err := writer.WriteString(peer.SoftwareVersion); err != nil {
+		t.Fatalf("marshal peer software version: %v", err)
+	}
+	writer.WriteUint64(peer.LatestSlot)
+	writer.WriteUint64(peer.BlockHeight)
+	if err := writer.WriteString(peer.BestBlockHash); err != nil {
+		t.Fatalf("marshal peer best block hash: %v", err)
+	}
+	writer.WriteBool(peer.Validator)
+	writer.WriteUint64(peer.StakeLamports)
+	writer.WriteInt64(int64(peer.Score))
+	writer.WriteInt64(peer.FirstSeenUnixMilli)
+	writer.WriteInt64(peer.LastSeenUnixMilli)
+	writer.WriteInt64(peer.LastConnectedUnixMilli)
+	writer.WriteInt64(peer.LastDisconnectedUnixMilli)
+	writer.WriteInt64(peer.LastErrorUnixMilli)
+	if err := writer.WriteString(peer.LastError); err != nil {
+		t.Fatalf("marshal peer last error: %v", err)
+	}
+	writer.WriteUint32(peer.FailureCount)
+	writer.WriteUint64(peer.SentBytes)
+	writer.WriteUint64(peer.ReceivedBytes)
+	writer.WriteInt64(peer.LastRoundTripTimeMilli)
+	if err := writePeerMetadata(writer, peer.Metadata); err != nil {
+		t.Fatalf("marshal peer metadata: %v", err)
+	}
+	return writer.BytesView()
 }
 
 func TestMemoryPeerStoreSaveLoadDelete(t *testing.T) {

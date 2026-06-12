@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -148,6 +149,9 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	requestContext, cancelRequest := host.withRequestTimeout(ctx)
+	defer cancelRequest()
+
 	if connection == nil {
 		return Message{}, fmt.Errorf("%w: nil request connection", ErrConnectionClosed)
 	}
@@ -177,7 +181,7 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 	defer unregister()
 
-	if err := host.writePeerMessage(ctx, peerID, connection, outbound); err != nil {
+	if err := host.writePeerMessage(requestContext, peerID, connection, outbound); err != nil {
 		host.logger.Warn("p2p request write failed",
 			slog.String("peer_id", peerID),
 			slog.String("request_id", outbound.ID),
@@ -185,7 +189,10 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 			slog.Any("error", err),
 		)
 		host.metrics.requestsFailed.Add(1)
-		return Message{}, err
+		return Message{}, WithErrorInfo(err, ErrorInfo{
+			Operation: "request_write",
+			PeerID:    peerID,
+		})
 	}
 
 	select {
@@ -198,16 +205,37 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 			slog.Uint64("protocol_id", uint64(outbound.Type)),
 		)
 		return response, nil
-	case <-ctx.Done():
+	case <-requestContext.Done():
+		contextError := requestContext.Err()
 		host.logger.Warn("p2p request timed out",
 			slog.String("peer_id", peerID),
 			slog.String("request_id", outbound.ID),
 			slog.Uint64("protocol_id", uint64(outbound.Type)),
-			slog.Any("error", ctx.Err()),
+			slog.Any("error", contextError),
 		)
 		host.metrics.requestsFailed.Add(1)
-		return Message{}, fmt.Errorf("p2p: wait request %s response: %w", outbound.ID, ctx.Err())
+		return Message{}, WithErrorInfo(
+			fmt.Errorf("p2p: wait request %s response: %w", outbound.ID, contextError),
+			ErrorInfo{
+				Operation: "request_wait_response",
+				PeerID:    peerID,
+				Timeout:   errors.Is(contextError, context.DeadlineExceeded),
+				Temporary: errors.Is(contextError, context.DeadlineExceeded),
+				Retryable: errors.Is(contextError, context.DeadlineExceeded),
+			},
+		)
 	}
+}
+
+// withRequestTimeout 构造请求上下文 + 调用方未设置 deadline 时使用 Host 默认请求超时。
+func (host *Host) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, host.requestTimeout)
 }
 
 func expectedResponseType(requestType ProtocolID) (ProtocolID, bool) {

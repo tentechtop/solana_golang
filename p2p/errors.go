@@ -1,6 +1,13 @@
 package p2p
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"net"
+	"strings"
+
+	"solana_golang/utils"
+)
 
 var (
 	// ErrNilTransport 表示空传输实现 + 防止 Host 注册无效协议。
@@ -58,3 +65,124 @@ var (
 	// ErrWriteQueueFull 表示连接写队列已满 + 对慢连接施加背压避免内存无限堆积。
 	ErrWriteQueueFull = errors.New("p2p: write queue full")
 )
+
+// ErrorInfo 保存结构化错误标签 + 让调用方在保留 errors.Is 的同时精确分流。
+type ErrorInfo struct {
+	Operation string
+	PeerID    string
+	Protocol  utils.MultiAddressProtocol
+	Timeout   bool
+	Temporary bool
+	Retryable bool
+}
+
+// P2PError 包装底层错误 + 为上层调度提供可机器判断的错误上下文。
+type P2PError struct {
+	cause error
+	info  ErrorInfo
+}
+
+func (err *P2PError) Error() string {
+	if err == nil || err.cause == nil {
+		return "p2p: nil error"
+	}
+	labels := make([]string, 0, 3)
+	if err.info.Operation != "" {
+		labels = append(labels, "operation="+err.info.Operation)
+	}
+	if err.info.PeerID != "" {
+		labels = append(labels, "peer_id="+err.info.PeerID)
+	}
+	if err.info.Protocol != "" {
+		labels = append(labels, "protocol="+string(err.info.Protocol))
+	}
+	if len(labels) == 0 {
+		return err.cause.Error()
+	}
+	return "p2p: " + strings.Join(labels, " ") + ": " + err.cause.Error()
+}
+
+func (err *P2PError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
+// Info 返回错误分类信息 + 避免调用方解析错误字符串。
+func (err *P2PError) Info() ErrorInfo {
+	if err == nil {
+		return ErrorInfo{}
+	}
+	return err.info
+}
+
+// WithErrorInfo 添加结构化错误信息 + 保持原始错误链可被 errors.Is/As 识别。
+func WithErrorInfo(err error, info ErrorInfo) error {
+	if err == nil {
+		return nil
+	}
+	info.Timeout = info.Timeout || isTimeoutCause(err)
+	info.Temporary = info.Temporary || isTemporaryCause(err)
+	info.Retryable = info.Retryable || isRetryableCause(err)
+	return &P2PError{cause: err, info: info}
+}
+
+// ErrorInfoOf 读取结构化错误信息 + 兼容未包装错误的基础分类。
+func ErrorInfoOf(err error) (ErrorInfo, bool) {
+	if err == nil {
+		return ErrorInfo{}, false
+	}
+	var p2pError *P2PError
+	if errors.As(err, &p2pError) {
+		return p2pError.Info(), true
+	}
+	return ErrorInfo{
+		Timeout:   isTimeoutCause(err),
+		Temporary: isTemporaryCause(err),
+		Retryable: isRetryableCause(err),
+	}, false
+}
+
+// IsTimeoutError 判断超时错误 + 让调用方不依赖具体传输实现。
+func IsTimeoutError(err error) bool {
+	info, _ := ErrorInfoOf(err)
+	return info.Timeout
+}
+
+// IsTemporaryError 判断临时错误 + 支持退避后重试策略。
+func IsTemporaryError(err error) bool {
+	info, _ := ErrorInfoOf(err)
+	return info.Temporary
+}
+
+// IsRetryableError 判断可重试错误 + 统一拨号、请求和背压重试分支。
+func IsRetryableError(err error) bool {
+	info, _ := ErrorInfoOf(err)
+	return info.Retryable
+}
+
+func isTimeoutCause(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netError net.Error
+	return errors.As(err, &netError) && netError.Timeout()
+}
+
+func isTemporaryCause(err error) bool {
+	if isTimeoutCause(err) {
+		return true
+	}
+	return errors.Is(err, ErrPeerBackoff) ||
+		errors.Is(err, ErrRateLimited) ||
+		errors.Is(err, ErrWriteQueueFull) ||
+		errors.Is(err, ErrProtocolQueueFull) ||
+		errors.Is(err, ErrTransportUnavailable)
+}
+
+func isRetryableCause(err error) bool {
+	return isTemporaryCause(err) ||
+		errors.Is(err, ErrConnectionClosed) ||
+		errors.Is(err, ErrDuplicateConnection)
+}

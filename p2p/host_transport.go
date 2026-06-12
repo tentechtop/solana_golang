@@ -50,7 +50,11 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 
 	transport, err := host.transport(address.Protocol)
 	if err != nil {
-		return nil, err
+		return nil, WithErrorInfo(err, ErrorInfo{
+			Operation: "dial_transport_lookup",
+			PeerID:    address.PeerID,
+			Protocol:  address.Protocol,
+		})
 	}
 
 	dialContext, cancel := host.withDialTimeout(ctx)
@@ -58,25 +62,40 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 
 	connection, err := transport.Dial(dialContext, address)
 	if err != nil {
-		host.recordPeerError(address.PeerID, err)
-		return nil, err
+		dialError := WithErrorInfo(err, ErrorInfo{
+			Operation: "dial_transport",
+			PeerID:    address.PeerID,
+			Protocol:  address.Protocol,
+		})
+		host.recordPeerError(address.PeerID, dialError)
+		return nil, dialError
 	}
 	securedConnection, err := host.secureOutboundConnection(dialContext, connection)
 	if err != nil {
 		_ = connection.Close()
-		host.recordPeerError(address.PeerID, err)
-		return nil, err
+		secureError := WithErrorInfo(err, ErrorInfo{
+			Operation: "dial_secure_handshake",
+			PeerID:    address.PeerID,
+			Protocol:  address.Protocol,
+		})
+		host.recordPeerError(address.PeerID, secureError)
+		return nil, secureError
 	}
 	connection = securedConnection
 	connection = host.wrapConnectionWriter(connection)
 	if err := host.storeConnection(address.PeerID, connection); err != nil {
 		_ = connection.Close()
+		storeError := WithErrorInfo(err, ErrorInfo{
+			Operation: "dial_store_connection",
+			PeerID:    address.PeerID,
+			Protocol:  address.Protocol,
+		})
 		if errors.Is(err, ErrDuplicateConnection) {
 			host.recordPeerProtectionSuccess(address.PeerID)
-			return nil, err
+			return nil, storeError
 		}
-		host.recordPeerError(address.PeerID, err)
-		return nil, err
+		host.recordPeerError(address.PeerID, storeError)
+		return nil, storeError
 	}
 	host.recordPeerProtectionSuccess(address.PeerID)
 	host.logger.Info("p2p host connected",
@@ -162,8 +181,9 @@ func (host *Host) dialCandidateAddresses(peer Peer) []utils.MultiAddress {
 	if err := host.checkPeerDialAllowed(peer.ID); err != nil {
 		return nil
 	}
-	addresses := make([]utils.MultiAddress, 0, len(host.preferredProtocols))
-	for _, protocol := range host.preferredProtocols {
+	protocols := peer.dialProtocolOrder(host.preferredProtocols)
+	addresses := make([]utils.MultiAddress, 0, len(protocols))
+	for _, protocol := range protocols {
 		address, ok := peer.firstAddressByProtocol(protocol)
 		if ok {
 			addresses = append(addresses, address)

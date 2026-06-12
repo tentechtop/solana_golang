@@ -12,10 +12,11 @@ import (
 
 const (
 	// PeerStoreRecordVersion 定义 PeerStore 记录版本 + 便于后续存储格式平滑升级。
-	PeerStoreRecordVersion uint16 = 2
+	PeerStoreRecordVersion uint16 = 3
 
 	defaultPeerStoreLoadLimit = 1024
 	maxPeerStoreAddresses     = 16
+	maxPeerStoreProtocols     = 8
 	maxPeerStoreMetadata      = 64
 )
 
@@ -132,6 +133,9 @@ func (peer Peer) MarshalBinary() ([]byte, error) {
 	if err := writer.WriteString(peer.SoftwareVersion); err != nil {
 		return nil, fmt.Errorf("p2p: marshal peer software version: %w", err)
 	}
+	if err := writePeerProtocolSlice(writer, peer.PreferredProtocols); err != nil {
+		return nil, err
+	}
 	writer.WriteUint64(peer.LatestSlot)
 	writer.WriteUint64(peer.BlockHeight)
 	if err := writer.WriteString(peer.BestBlockHash); err != nil {
@@ -168,7 +172,7 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 	if err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer version: %w", err)
 	}
-	if version != 1 && version != PeerStoreRecordVersion {
+	if version != 1 && version != 2 && version != PeerStoreRecordVersion {
 		return Peer{}, fmt.Errorf("%w: unsupported peer store version", ErrInvalidMessage)
 	}
 	peerID, err := reader.ReadString()
@@ -198,6 +202,13 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 	softwareVersion, err := reader.ReadString()
 	if err != nil {
 		return Peer{}, fmt.Errorf("p2p: read peer software version: %w", err)
+	}
+	var preferredProtocols []utils.MultiAddressProtocol
+	if version >= PeerStoreRecordVersion {
+		preferredProtocols, err = readPeerProtocolSlice(reader)
+		if err != nil {
+			return Peer{}, err
+		}
 	}
 	latestSlot, err := reader.ReadUint64()
 	if err != nil {
@@ -286,6 +297,7 @@ func UnmarshalPeerBinary(data []byte) (Peer, error) {
 		Capabilities:              PeerCapability(capabilities),
 		ProtocolVersion:           protocolVersion,
 		SoftwareVersion:           softwareVersion,
+		PreferredProtocols:        preferredProtocols,
 		LatestSlot:                latestSlot,
 		BlockHeight:               blockHeight,
 		BestBlockHash:             bestBlockHash,
@@ -343,6 +355,45 @@ func readPeerAddressSlice(reader *borsh.Reader) ([]utils.MultiAddress, error) {
 		addresses = append(addresses, address)
 	}
 	return addresses, nil
+}
+
+func writePeerProtocolSlice(writer *borsh.Writer, protocols []utils.MultiAddressProtocol) error {
+	if len(protocols) > maxPeerStoreProtocols {
+		return fmt.Errorf("%w: too many peer protocols", ErrInvalidMessage)
+	}
+	if err := validatePeerPreferredProtocols(protocols); err != nil {
+		return err
+	}
+	writer.WriteUint32(uint32(len(protocols)))
+	for _, protocol := range protocols {
+		if err := writer.WriteString(string(protocol)); err != nil {
+			return fmt.Errorf("p2p: marshal peer protocol: %w", err)
+		}
+	}
+	return nil
+}
+
+func readPeerProtocolSlice(reader *borsh.Reader) ([]utils.MultiAddressProtocol, error) {
+	count, err := reader.ReadUint32()
+	if err != nil {
+		return nil, fmt.Errorf("p2p: read peer protocol count: %w", err)
+	}
+	if count > maxPeerStoreProtocols {
+		return nil, fmt.Errorf("%w: too many peer protocols", ErrInvalidMessage)
+	}
+	protocols := make([]utils.MultiAddressProtocol, 0, int(count))
+	for index := 0; index < int(count); index++ {
+		value, err := reader.ReadString()
+		if err != nil {
+			return nil, fmt.Errorf("p2p: read peer protocol: %w", err)
+		}
+		protocol, err := utils.ParseMultiAddressProtocol(value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid peer protocol: %w", ErrInvalidMessage, err)
+		}
+		protocols = append(protocols, protocol)
+	}
+	return protocols, nil
 }
 
 func writePeerMetadata(writer *borsh.Writer, metadata map[string]string) error {

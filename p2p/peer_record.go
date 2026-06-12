@@ -10,12 +10,14 @@ import (
 
 const (
 	// PeerRecordVersion 定义签名节点记录版本 + 支持后续地址记录格式升级。
-	PeerRecordVersion uint16 = 2
+	PeerRecordVersion   uint16 = 3
+	peerRecordVersionV2 uint16 = 2
 
 	defaultPeerRecordTTL   = 30 * time.Minute
 	maxPeerRecordTTL       = 24 * time.Hour
 	peerRecordMaxClockSkew = 5 * time.Minute
 	maxPeerRecordAddresses = 8
+	maxPeerRecordProtocols = 8
 	maxPeerRecordSize      = 16 * 1024
 	peerRecordDomain       = "p2p-signed-peer-record-v1"
 )
@@ -27,6 +29,7 @@ type SignedPeerRecord struct {
 	PublicKey          []byte
 	NetworkID          string
 	Addresses          []string
+	PreferredProtocols []utils.MultiAddressProtocol
 	Role               PeerRole
 	Capabilities       PeerCapability
 	ProtocolVersion    string
@@ -61,6 +64,7 @@ func NewSignedPeerRecord(peer Peer, identity SecureSessionIdentity, ttl time.Dur
 		PublicKey:          utils.CloneBytes(identity.PublicKey),
 		NetworkID:          identity.NetworkID,
 		Addresses:          peerRecordAddressStrings(peer.Addresses),
+		PreferredProtocols: normalizedPeerRecordProtocols(peer.PreferredProtocols),
 		Role:               normalizePeerRole(peer.Role),
 		Capabilities:       peer.Capabilities,
 		ProtocolVersion:    peer.ProtocolVersion,
@@ -152,6 +156,9 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 	if err != nil {
 		return SignedPeerRecord{}, fmt.Errorf("p2p: read peer record version: %w", err)
 	}
+	if version != peerRecordVersionV2 && version != PeerRecordVersion {
+		return SignedPeerRecord{}, fmt.Errorf("%w: unsupported peer record version", ErrInvalidMessage)
+	}
 	peerID, err := reader.ReadString()
 	if err != nil {
 		return SignedPeerRecord{}, fmt.Errorf("p2p: read peer record id: %w", err)
@@ -167,6 +174,13 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 	addresses, err := readPeerRecordStringSlice(reader, maxPeerRecordAddresses)
 	if err != nil {
 		return SignedPeerRecord{}, err
+	}
+	var preferredProtocols []utils.MultiAddressProtocol
+	if version == PeerRecordVersion {
+		preferredProtocols, err = readPeerRecordProtocols(reader)
+		if err != nil {
+			return SignedPeerRecord{}, err
+		}
 	}
 	role, err := reader.ReadString()
 	if err != nil {
@@ -226,6 +240,7 @@ func UnmarshalSignedPeerRecordBinary(data []byte) (SignedPeerRecord, error) {
 		PublicKey:          publicKey,
 		NetworkID:          networkID,
 		Addresses:          addresses,
+		PreferredProtocols: preferredProtocols,
 		Role:               PeerRole(role),
 		Capabilities:       PeerCapability(capabilities),
 		ProtocolVersion:    protocolVersion,
@@ -266,6 +281,7 @@ func (record SignedPeerRecord) ToPeer() (Peer, error) {
 	peer.Capabilities = record.Capabilities
 	peer.ProtocolVersion = record.ProtocolVersion
 	peer.SoftwareVersion = record.SoftwareVersion
+	peer.PreferredProtocols = cloneProtocols(record.PreferredProtocols)
 	peer.LatestSlot = record.LatestSlot
 	peer.BlockHeight = record.BlockHeight
 	peer.BestBlockHash = record.BestBlockHash
@@ -311,6 +327,11 @@ func (record SignedPeerRecord) marshalBinary(includeSignature bool) ([]byte, err
 	if err := writePeerRecordStringSlice(writer, record.Addresses); err != nil {
 		return nil, err
 	}
+	if record.Version >= PeerRecordVersion {
+		if err := writePeerRecordProtocols(writer, record.PreferredProtocols); err != nil {
+			return nil, err
+		}
+	}
 	if err := writer.WriteString(string(normalizePeerRole(record.Role))); err != nil {
 		return nil, fmt.Errorf("p2p: marshal peer record role: %w", err)
 	}
@@ -337,8 +358,11 @@ func (record SignedPeerRecord) marshalBinary(includeSignature bool) ([]byte, err
 }
 
 func (record SignedPeerRecord) validate(requireSignature bool) error {
-	if record.Version != PeerRecordVersion {
+	if record.Version != peerRecordVersionV2 && record.Version != PeerRecordVersion {
 		return fmt.Errorf("%w: unsupported peer record version", ErrInvalidMessage)
+	}
+	if record.Version == peerRecordVersionV2 && len(record.PreferredProtocols) > 0 {
+		return fmt.Errorf("%w: peer record v2 cannot include preferred protocols", ErrInvalidMessage)
 	}
 	if err := validatePeerID(record.PeerID); err != nil {
 		return fmt.Errorf("%w: invalid peer record id: %w", ErrInvalidMessage, err)
@@ -364,6 +388,9 @@ func (record SignedPeerRecord) validate(requireSignature bool) error {
 			return fmt.Errorf("%w: peer record address owner mismatch", ErrInvalidMessage)
 		}
 	}
+	if err := validatePeerRecordProtocols(record.PreferredProtocols); err != nil {
+		return err
+	}
 	if record.IssuedAtUnixMilli <= 0 || record.ExpiresAtUnixMilli <= record.IssuedAtUnixMilli {
 		return fmt.Errorf("%w: invalid peer record time range", ErrInvalidMessage)
 	}
@@ -388,6 +415,61 @@ func peerRecordAddressStrings(addresses []utils.MultiAddress) []string {
 		values = append(values, rawAddress)
 	}
 	return values
+}
+
+func normalizedPeerRecordProtocols(protocols []utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	normalized := normalizedProtocolOrder(protocols)
+	result := make([]utils.MultiAddressProtocol, 0, len(normalized))
+	for _, protocol := range normalized {
+		if containsProtocol(result, protocol) {
+			continue
+		}
+		result = append(result, protocol)
+	}
+	return result
+}
+
+func validatePeerRecordProtocols(protocols []utils.MultiAddressProtocol) error {
+	if len(protocols) > maxPeerRecordProtocols {
+		return fmt.Errorf("%w: too many peer record protocols", ErrInvalidMessage)
+	}
+	return validatePeerPreferredProtocols(protocols)
+}
+
+func writePeerRecordProtocols(writer *borsh.Writer, protocols []utils.MultiAddressProtocol) error {
+	if err := validatePeerRecordProtocols(protocols); err != nil {
+		return err
+	}
+	writer.WriteUint32(uint32(len(protocols)))
+	for _, protocol := range protocols {
+		if err := writer.WriteString(string(protocol)); err != nil {
+			return fmt.Errorf("p2p: marshal peer record protocol: %w", err)
+		}
+	}
+	return nil
+}
+
+func readPeerRecordProtocols(reader *borsh.Reader) ([]utils.MultiAddressProtocol, error) {
+	count, err := reader.ReadUint32()
+	if err != nil {
+		return nil, fmt.Errorf("p2p: read peer record protocol count: %w", err)
+	}
+	if count > maxPeerRecordProtocols {
+		return nil, fmt.Errorf("%w: too many peer record protocols", ErrInvalidMessage)
+	}
+	protocols := make([]utils.MultiAddressProtocol, 0, int(count))
+	for index := 0; index < int(count); index++ {
+		value, err := reader.ReadString()
+		if err != nil {
+			return nil, fmt.Errorf("p2p: read peer record protocol: %w", err)
+		}
+		protocol, err := utils.ParseMultiAddressProtocol(value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid peer record protocol: %w", ErrInvalidMessage, err)
+		}
+		protocols = append(protocols, protocol)
+	}
+	return protocols, nil
 }
 
 func writePeerRecordStringSlice(writer *borsh.Writer, values []string) error {

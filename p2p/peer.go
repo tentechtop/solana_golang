@@ -62,6 +62,7 @@ type Peer struct {
 	Capabilities              PeerCapability
 	ProtocolVersion           string
 	SoftwareVersion           string
+	PreferredProtocols        []utils.MultiAddressProtocol
 	LatestSlot                uint64
 	BlockHeight               uint64
 	BestBlockHash             string
@@ -91,6 +92,7 @@ type PeerSnapshot struct {
 	Capabilities              PeerCapability
 	ProtocolVersion           string
 	SoftwareVersion           string
+	PreferredProtocols        []utils.MultiAddressProtocol
 	LatestSlot                uint64
 	BlockHeight               uint64
 	BestBlockHash             string
@@ -140,12 +142,16 @@ func (peer Peer) Validate() error {
 			return fmt.Errorf("p2p: peer address id mismatch %q", address.PeerID)
 		}
 	}
+	if err := validatePeerPreferredProtocols(peer.PreferredProtocols); err != nil {
+		return err
+	}
 	return nil
 }
 
 // Clone 复制节点信息 + 防止调用方修改 Host 内部状态。
 func (peer Peer) Clone() Peer {
 	peer.Addresses = cloneAddresses(peer.Addresses)
+	peer.PreferredProtocols = cloneProtocols(peer.PreferredProtocols)
 	peer.SignedRecord = utils.CloneBytes(peer.SignedRecord)
 	peer.Metadata = cloneStringMap(peer.Metadata)
 	return peer
@@ -215,6 +221,7 @@ func (peer Peer) Snapshot() PeerSnapshot {
 		Capabilities:              peer.Capabilities,
 		ProtocolVersion:           peer.ProtocolVersion,
 		SoftwareVersion:           peer.SoftwareVersion,
+		PreferredProtocols:        cloneProtocols(peer.PreferredProtocols),
 		LatestSlot:                peer.LatestSlot,
 		BlockHeight:               peer.BlockHeight,
 		BestBlockHash:             peer.BestBlockHash,
@@ -240,7 +247,7 @@ func (peer Peer) BestAddress(protocolOrder []utils.MultiAddressProtocol) (utils.
 	if len(peer.Addresses) == 0 {
 		return utils.MultiAddress{}, false
 	}
-	for _, protocol := range normalizedProtocolOrder(protocolOrder) {
+	for _, protocol := range peer.dialProtocolOrder(protocolOrder) {
 		if address, ok := peer.firstAddressByProtocol(protocol); ok {
 			return address, true
 		}
@@ -264,6 +271,9 @@ func (peer *Peer) mergeNodeFields(next Peer) {
 	}
 	if next.SoftwareVersion != "" {
 		peer.SoftwareVersion = next.SoftwareVersion
+	}
+	if len(next.PreferredProtocols) > 0 {
+		peer.PreferredProtocols = cloneProtocols(next.PreferredProtocols)
 	}
 	if next.LatestSlot > peer.LatestSlot {
 		peer.LatestSlot = next.LatestSlot
@@ -374,4 +384,48 @@ func normalizedProtocolOrder(protocolOrder []utils.MultiAddressProtocol) []utils
 		return []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP}
 	}
 	return append([]utils.MultiAddressProtocol(nil), protocolOrder...)
+}
+func (peer Peer) dialProtocolOrder(localProtocolOrder []utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	localProtocols := normalizedProtocolOrder(localProtocolOrder)
+	if len(peer.PreferredProtocols) == 0 {
+		return localProtocols
+	}
+	ordered := make([]utils.MultiAddressProtocol, 0, len(localProtocols))
+	for _, remoteProtocol := range peer.PreferredProtocols {
+		if !containsProtocol(localProtocols, remoteProtocol) || containsProtocol(ordered, remoteProtocol) {
+			continue
+		}
+		ordered = append(ordered, remoteProtocol)
+	}
+	for _, localProtocol := range localProtocols {
+		if containsProtocol(ordered, localProtocol) {
+			continue
+		}
+		ordered = append(ordered, localProtocol)
+	}
+	return ordered
+}
+func validatePeerPreferredProtocols(protocols []utils.MultiAddressProtocol) error {
+	for _, protocol := range protocols {
+		if _, err := utils.ParseMultiAddressProtocol(string(protocol)); err != nil {
+			return fmt.Errorf("%w: invalid peer preferred protocol: %w", ErrInvalidMessage, err)
+		}
+	}
+	return nil
+}
+func cloneProtocols(protocols []utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	if protocols == nil {
+		return nil
+	}
+	cloned := make([]utils.MultiAddressProtocol, len(protocols))
+	copy(cloned, protocols)
+	return cloned
+}
+func containsProtocol(protocols []utils.MultiAddressProtocol, target utils.MultiAddressProtocol) bool {
+	for _, protocol := range protocols {
+		if protocol == target {
+			return true
+		}
+	}
+	return false
 }

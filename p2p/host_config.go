@@ -17,6 +17,14 @@ func normalizeDialTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
+// normalizeRequestTimeout 归一化请求超时 + 防止调用方未设置 deadline 时永久等待响应。
+func normalizeRequestTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultRequestTimeout
+	}
+	return timeout
+}
+
 // normalizeHeartbeatInterval 归一化心跳间隔 + 防止零值导致后台循环异常。
 func normalizeHeartbeatInterval(interval time.Duration) time.Duration {
 	if interval <= 0 {

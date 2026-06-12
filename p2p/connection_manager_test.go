@@ -322,6 +322,41 @@ func TestHostRequestIgnoresInterleavedPing(t *testing.T) {
 	}
 }
 
+func TestHostRequestUsesDefaultTimeout(t *testing.T) {
+	localPeerID := testPeerID(86)
+	remotePeerID := testPeerID(87)
+	host, err := NewHost(HostConfig{
+		PeerID:         localPeerID,
+		AllowInsecure:  true,
+		RequestTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	request, err := NewRequestMessage(localPeerID, ProtocolPingV1, nil)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+
+	_, err = host.requestOnConnection(context.Background(), connection, remotePeerID, request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("requestOnConnection() error = %v, want context deadline", err)
+	}
+	if !IsTimeoutError(err) || !IsRetryableError(err) {
+		t.Fatalf("request error classification timeout=%v retryable=%v", IsTimeoutError(err), IsRetryableError(err))
+	}
+	info, ok := ErrorInfoOf(err)
+	if !ok {
+		t.Fatal("ErrorInfoOf() ok = false, want structured error")
+	}
+	if info.Operation != "request_wait_response" || info.PeerID != remotePeerID {
+		t.Fatalf("ErrorInfo = %+v, want request wait for peer", info)
+	}
+}
+
 func TestProtocolQueueDoesNotBlockHeartbeatResponse(t *testing.T) {
 	localPeerID := testPeerID(53)
 	remotePeerID := testPeerID(54)

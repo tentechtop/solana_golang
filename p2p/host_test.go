@@ -177,3 +177,34 @@ func TestHostSendFallsBackFromQUICToTCP(t *testing.T) {
 		t.Fatalf("Listen() error = %v", err)
 	}
 }
+
+func TestHostDialCandidatesUseRemoteProtocolPreference(t *testing.T) {
+	localPeerID := testPeerID(88)
+	remotePeerID := testPeerID(89)
+	host, err := NewHost(HostConfig{
+		PeerID:             localPeerID,
+		AllowInsecure:      true,
+		PreferredProtocols: []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP},
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	peer, err := NewPeer(remotePeerID, []utils.MultiAddress{
+		testAddress(t, utils.ProtocolQUIC, 5033, remotePeerID),
+		testAddress(t, utils.ProtocolTCP, 5034, remotePeerID),
+	})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	peer.PreferredProtocols = []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
+
+	addresses := host.dialCandidateAddresses(peer)
+	if len(addresses) != 2 {
+		t.Fatalf("dialCandidateAddresses() len = %d, want 2", len(addresses))
+	}
+	if addresses[0].Protocol != utils.ProtocolTCP {
+		t.Fatalf("first protocol = %q, want tcp", addresses[0].Protocol)
+	}
+}

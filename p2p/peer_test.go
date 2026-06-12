@@ -24,6 +24,27 @@ func TestPeerBestAddressUsesProtocolOrder(t *testing.T) {
 		t.Fatalf("Protocol = %q, want %q", address.Protocol, utils.ProtocolQUIC)
 	}
 }
+
+func TestPeerBestAddressUsesRemoteProtocolPreference(t *testing.T) {
+	peerID := testPeerID(4)
+	tcpAddress := testAddress(t, utils.ProtocolTCP, 3001, peerID)
+	quicAddress := testAddress(t, utils.ProtocolQUIC, 3002, peerID)
+
+	peer, err := NewPeer(peerID, []utils.MultiAddress{tcpAddress, quicAddress})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	peer.PreferredProtocols = []utils.MultiAddressProtocol{utils.ProtocolTCP}
+
+	address, ok := peer.BestAddress([]utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP})
+	if !ok {
+		t.Fatal("BestAddress() ok = false, want true")
+	}
+	if address.Protocol != utils.ProtocolTCP {
+		t.Fatalf("Protocol = %q, want %q", address.Protocol, utils.ProtocolTCP)
+	}
+}
+
 func TestPeerRejectsAddressMismatch(t *testing.T) {
 	peerID := testPeerID(2)
 	otherPeerID := testPeerID(3)
