@@ -966,6 +966,72 @@ func TestHostDialPeerReturnsConcurrentExistingConnectionWithoutBackoff(t *testin
 	}
 }
 
+func TestHostDialPeerCoalescesConcurrentPeerDial(t *testing.T) {
+	localPeerID := testPeerID(96)
+	remotePeerID := testPeerID(97)
+	transport := newCoalescingDialTransport(utils.ProtocolTCP)
+	host, err := NewHost(HostConfig{
+		PeerID:             localPeerID,
+		AllowInsecure:      true,
+		PreferredProtocols: []utils.MultiAddressProtocol{utils.ProtocolTCP},
+		MaxPeers:           128,
+		MaxConnections:     128,
+	}, transport)
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	peer, err := NewPeer(remotePeerID, []utils.MultiAddress{
+		testAddress(t, utils.ProtocolTCP, 5097, remotePeerID),
+	})
+	if err != nil {
+		t.Fatalf("NewPeer() error = %v", err)
+	}
+	if err := host.AddPeer(peer); err != nil {
+		t.Fatalf("AddPeer() error = %v", err)
+	}
+
+	const workerCount = 64
+	start := make(chan struct{})
+	results := make(chan error, workerCount)
+	var workers sync.WaitGroup
+	for workerIndex := 0; workerIndex < workerCount; workerIndex++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			connection, err := host.DialPeer(ctx, remotePeerID)
+			if err != nil {
+				results <- err
+				return
+			}
+			if connection == nil || connection.RemotePeerID() != remotePeerID {
+				results <- fmt.Errorf("unexpected connection %v", connection)
+				return
+			}
+			results <- nil
+		}()
+	}
+	close(start)
+	transport.waitStarted(t)
+	time.Sleep(50 * time.Millisecond)
+	close(transport.release)
+	workers.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Fatalf("DialPeer() concurrent error = %v", err)
+		}
+	}
+	if got := transport.dialCount.Load(); got != 1 {
+		t.Fatalf("transport dial count = %d, want 1", got)
+	}
+}
+
 func TestShouldRecordPeerDialFailureIgnoresExpectedConnectionErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1382,6 +1448,22 @@ type callbackDialTransport struct {
 	onDial   func(utils.MultiAddress)
 }
 
+type coalescingDialTransport struct {
+	protocol  utils.MultiAddressProtocol
+	started   chan struct{}
+	release   chan struct{}
+	dialCount atomic.Int64
+	once      sync.Once
+}
+
+func newCoalescingDialTransport(protocol utils.MultiAddressProtocol) *coalescingDialTransport {
+	return &coalescingDialTransport{
+		protocol: protocol,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+}
+
 func newBlockingWriteConnection(localPeerID string, remotePeerID string) *blockingWriteConnection {
 	return &blockingWriteConnection{
 		scriptedConnection: newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil),
@@ -1415,6 +1497,44 @@ func (transport callbackDialTransport) Dial(ctx context.Context, address utils.M
 
 func (transport callbackDialTransport) Close() error {
 	return nil
+}
+
+func (transport *coalescingDialTransport) Protocol() utils.MultiAddressProtocol {
+	return transport.protocol
+}
+
+func (transport *coalescingDialTransport) Listen(
+	ctx context.Context,
+	address utils.MultiAddress,
+	handler ConnectionHandler,
+) error {
+	return nil
+}
+
+func (transport *coalescingDialTransport) Dial(ctx context.Context, address utils.MultiAddress) (Connection, error) {
+	transport.dialCount.Add(1)
+	transport.once.Do(func() {
+		close(transport.started)
+	})
+	select {
+	case <-transport.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return newScriptedConnection(address.Protocol, address.PeerID, nil), nil
+}
+
+func (transport *coalescingDialTransport) Close() error {
+	return nil
+}
+
+func (transport *coalescingDialTransport) waitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dial")
+	}
 }
 
 func (connection *blockingWriteConnection) WriteMessage(ctx context.Context, message Message) error {

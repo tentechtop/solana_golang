@@ -83,6 +83,7 @@ type Host struct {
 	transports           map[utils.MultiAddressProtocol]Transport
 	peers                map[string]Peer
 	connections          map[string]Connection
+	activeDials          map[string]*peerDialCall
 	connectionPeerIDs    map[string]string
 	connectionStates     map[string]ConnectionState
 	resumptionTickets    map[string]SecureSessionResumptionTicket
@@ -164,6 +165,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		transports:           make(map[utils.MultiAddressProtocol]Transport),
 		peers:                make(map[string]Peer),
 		connections:          make(map[string]Connection),
+		activeDials:          make(map[string]*peerDialCall),
 		connectionPeerIDs:    make(map[string]string),
 		connectionStates:     make(map[string]ConnectionState),
 		resumptionTickets:    make(map[string]SecureSessionResumptionTicket),

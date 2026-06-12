@@ -122,7 +122,13 @@ func validateHostDialAddress(address utils.MultiAddress) error {
 	return nil
 }
 
-// DialPeer 拨号节点 + 按协议优先级支持 QUIC 到 TCP 的降级。
+type peerDialCall struct {
+	done       chan struct{}
+	connection Connection
+	err        error
+}
+
+// DialPeer 拨号节点 + 合并同一 peer 的并发拨号以避免冷启动连接风暴。
 func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, error) {
 	if connection, ok := host.Connection(peerID); ok {
 		if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
@@ -132,6 +138,32 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 	}
 	if err := host.checkPeerDialAllowed(peerID); err != nil {
 		return nil, peerProtectionDialError(peerID, err)
+	}
+
+	dialCall, leader, err := host.beginPeerDial(peerID)
+	if err != nil {
+		return nil, err
+	}
+	if !leader {
+		return host.waitPeerDial(ctx, peerID, dialCall)
+	}
+
+	var connection Connection
+	var dialErr error
+	defer func() {
+		host.finishPeerDial(peerID, dialCall, connection, dialErr)
+	}()
+	connection, dialErr = host.dialPeerDirect(ctx, peerID)
+	return connection, dialErr
+}
+
+// dialPeerDirect 执行真实拨号 + 仅由 peer 级拨号合并的 leader 调用。
+func (host *Host) dialPeerDirect(ctx context.Context, peerID string) (Connection, error) {
+	if connection, ok := host.Connection(peerID); ok {
+		if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
+			return nil, peerProtectionDialError(peerID, err)
+		}
+		return connection, nil
 	}
 
 	peer, ok := host.Peer(peerID)
@@ -172,6 +204,60 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 		host.recordPeerDialFailure(peerID)
 	}
 	return nil, fmt.Errorf("p2p: dial peer %s: %w", peerID, errors.Join(dialErrors...))
+}
+
+func (host *Host) beginPeerDial(peerID string) (*peerDialCall, bool, error) {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	if host.closed {
+		return nil, false, ErrHostClosed
+	}
+	if dialCall, ok := host.activeDials[peerID]; ok {
+		return dialCall, false, nil
+	}
+	dialCall := &peerDialCall{done: make(chan struct{})}
+	host.activeDials[peerID] = dialCall
+	return dialCall, true, nil
+}
+
+func (host *Host) finishPeerDial(peerID string, dialCall *peerDialCall, connection Connection, err error) {
+	dialCall.connection = connection
+	dialCall.err = err
+
+	host.mutex.Lock()
+	if host.activeDials[peerID] == dialCall {
+		delete(host.activeDials, peerID)
+	}
+	host.mutex.Unlock()
+
+	close(dialCall.done)
+}
+
+func (host *Host) waitPeerDial(ctx context.Context, peerID string, dialCall *peerDialCall) (Connection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-dialCall.done:
+		if connection, ok := host.Connection(peerID); ok {
+			if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
+				return nil, peerProtectionDialError(peerID, err)
+			}
+			return connection, nil
+		}
+		if dialCall.connection != nil {
+			return dialCall.connection, nil
+		}
+		if dialCall.err != nil {
+			return nil, dialCall.err
+		}
+		return nil, fmt.Errorf("%w: peer dial completed without connection", ErrConnectionClosed)
+	case <-ctx.Done():
+		if connection, ok := host.Connection(peerID); ok {
+			return connection, nil
+		}
+		return nil, ctx.Err()
+	}
 }
 
 func shouldRecordPeerDialFailure(dialErrors []error) bool {
