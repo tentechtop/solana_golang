@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -354,6 +355,87 @@ func TestHostRequestUsesDefaultTimeout(t *testing.T) {
 	}
 	if info.Operation != "request_wait_response" || info.PeerID != remotePeerID {
 		t.Fatalf("ErrorInfo = %+v, want request wait for peer", info)
+	}
+}
+
+func TestHostRequestRetriesAfterReplacedConnectionWriteClose(t *testing.T) {
+	localPeerID := testPeerID(88)
+	remotePeerID := testPeerID(89)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	currentConnection := newRequestResponderConnection(remotePeerID, localPeerID)
+	staleConnection := newReplaceOnWriteConnection(remotePeerID, host, currentConnection)
+	setHostConnectionForTest(host, remotePeerID, staleConnection)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go host.HandleConnection(ctx, currentConnection)
+
+	request := testRequestMessage(t, localPeerID, remotePeerID)
+	response, err := host.Request(context.Background(), remotePeerID, request)
+	if err != nil {
+		t.Fatalf("Request() error = %v", err)
+	}
+	if response.FromPeerID != remotePeerID {
+		t.Fatalf("response.FromPeerID = %q, want %q", response.FromPeerID, remotePeerID)
+	}
+	if !staleConnection.replaceTriggered.Load() {
+		t.Fatal("stale connection did not trigger replacement")
+	}
+	if currentConnection.waitWrite(t).Type != ProtocolFindNodeRequestV1 {
+		t.Fatal("retry did not write to current connection")
+	}
+	metrics := host.Metrics()
+	if metrics.PendingRequests != 0 {
+		t.Fatalf("PendingRequests = %d, want 0", metrics.PendingRequests)
+	}
+}
+
+func TestHostRequestRetriesTimeoutOnlyWhenConnectionChanged(t *testing.T) {
+	localPeerID := testPeerID(90)
+	remotePeerID := testPeerID(91)
+	host, err := NewHost(HostConfig{
+		PeerID:         localPeerID,
+		AllowInsecure:  true,
+		RequestTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	staleConnection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	currentConnection := newRequestResponderConnection(remotePeerID, localPeerID)
+	setHostConnectionForTest(host, remotePeerID, staleConnection)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go host.HandleConnection(ctx, currentConnection)
+
+	go func() {
+		staleConnection.waitWrite(t)
+		setHostConnectionForTest(host, remotePeerID, currentConnection)
+	}()
+
+	request := testRequestMessage(t, localPeerID, remotePeerID)
+	response, err := host.Request(context.Background(), remotePeerID, request)
+	if err != nil {
+		t.Fatalf("Request() error = %v", err)
+	}
+	if response.FromPeerID != remotePeerID {
+		t.Fatalf("response.FromPeerID = %q, want %q", response.FromPeerID, remotePeerID)
+	}
+	if currentConnection.waitWrite(t).Type != ProtocolFindNodeRequestV1 {
+		t.Fatal("retry did not write to current connection")
+	}
+	metrics := host.Metrics()
+	if metrics.PendingRequests != 0 {
+		t.Fatalf("PendingRequests = %d, want 0", metrics.PendingRequests)
 	}
 }
 
@@ -1168,6 +1250,19 @@ type responsiveConnection struct {
 	localPeerID string
 }
 
+type requestResponderConnection struct {
+	*scriptedConnection
+	connectionID string
+	localPeerID  string
+}
+
+type replaceOnWriteConnection struct {
+	*scriptedConnection
+	host             *Host
+	replacement      Connection
+	replaceTriggered atomic.Bool
+}
+
 type blockingWriteConnection struct {
 	*scriptedConnection
 	mutex        sync.Mutex
@@ -1238,6 +1333,22 @@ func newResponsiveConnection(remotePeerID string, localPeerID string) *responsiv
 	}
 }
 
+func newRequestResponderConnection(remotePeerID string, localPeerID string) *requestResponderConnection {
+	return &requestResponderConnection{
+		scriptedConnection: newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil),
+		connectionID:       "request-responder-" + remotePeerID,
+		localPeerID:        localPeerID,
+	}
+}
+
+func newReplaceOnWriteConnection(remotePeerID string, host *Host, replacement Connection) *replaceOnWriteConnection {
+	return &replaceOnWriteConnection{
+		scriptedConnection: newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil),
+		host:               host,
+		replacement:        replacement,
+	}
+}
+
 func (connection *responsiveConnection) WriteMessage(ctx context.Context, message Message) error {
 	if message.Type != ProtocolFindNodeRequestV1 {
 		return connection.scriptedConnection.WriteMessage(ctx, message)
@@ -1265,6 +1376,42 @@ func (connection *responsiveConnection) WriteMessage(ctx context.Context, messag
 	response.ToPeerID = connection.localPeerID
 	connection.reads <- response
 	return nil
+}
+
+func (connection *requestResponderConnection) WriteMessage(ctx context.Context, message Message) error {
+	if err := connection.scriptedConnection.WriteMessage(ctx, message); err != nil {
+		return err
+	}
+	if message.Type != ProtocolFindNodeRequestV1 {
+		return nil
+	}
+	responsePayload, err := NewKADFindNodeResponse(connection.localPeerID, nil)
+	if err != nil {
+		return err
+	}
+	payload, err := responsePayload.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	response, err := NewResponseMessage(connection.remotePeerID, ProtocolFindNodeResponseV1, message.ID, payload)
+	if err != nil {
+		return err
+	}
+	response.ToPeerID = connection.localPeerID
+	connection.reads <- response
+	return nil
+}
+
+func (connection *requestResponderConnection) ID() string {
+	return connection.connectionID
+}
+
+func (connection *replaceOnWriteConnection) WriteMessage(ctx context.Context, message Message) error {
+	if connection.replaceTriggered.CompareAndSwap(false, true) {
+		setHostConnectionForTest(connection.host, connection.remotePeerID, connection.replacement)
+		return ErrConnectionClosed
+	}
+	return connection.scriptedConnection.WriteMessage(ctx, message)
 }
 
 func newScriptedConnection(protocol utils.MultiAddressProtocol, remotePeerID string, reads []Message) *scriptedConnection {
@@ -1300,6 +1447,31 @@ func newTestSecureConnection(localPeerID string, remotePeerID string, role Secur
 		},
 		testInner: inner,
 	}
+}
+
+func setHostConnectionForTest(host *Host, peerID string, connection Connection) {
+	host.mutex.Lock()
+	defer host.mutex.Unlock()
+	host.connections[peerID] = connection
+	host.connectionPeerIDs[connection.ID()] = peerID
+}
+
+func testRequestMessage(t *testing.T, localPeerID string, remotePeerID string) Message {
+	t.Helper()
+	requestPayload, err := NewKADFindNodeRequest(localPeerID, 1)
+	if err != nil {
+		t.Fatalf("NewKADFindNodeRequest() error = %v", err)
+	}
+	payload, err := requestPayload.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	request, err := NewRequestMessage(localPeerID, ProtocolFindNodeRequestV1, payload)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+	request.ToPeerID = remotePeerID
+	return request
 }
 
 func testSecureConnectionRoles(localPeerID string, remotePeerID string) (SecureSessionRole, SecureSessionRole) {

@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const requestManagerShardCount = 32
+const (
+	requestManagerShardCount          = 32
+	maxRequestConnectionRetryAttempts = 1
+)
 
 // requestManager 管理等待中的请求 + 用 request_id 将读循环中的响应路由回调用方。
 type requestManager struct {
@@ -127,6 +130,9 @@ func (pending pendingRequest) matches(response Message) bool {
 
 // Request 发送请求并等待响应 + 统一复用连接读循环防止多个调用方并发抢读。
 func (host *Host) Request(ctx context.Context, peerID string, request Message) (Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := validateOutboundPeerID(peerID); err != nil {
 		return Message{}, err
 	}
@@ -134,15 +140,40 @@ func (host *Host) Request(ctx context.Context, peerID string, request Message) (
 		return Message{}, peerProtectionDialError(peerID, err)
 	}
 
-	connection, ok := host.Connection(peerID)
-	if !ok {
-		var err error
-		connection, err = host.DialPeer(ctx, peerID)
-		if err != nil {
+	var lastError error
+	for attempt := 0; attempt <= maxRequestConnectionRetryAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			if lastError != nil {
+				return Message{}, lastError
+			}
 			return Message{}, err
 		}
+
+		connection, err := host.connectionForRequest(ctx, peerID)
+		if err != nil {
+			if !host.shouldRetryRequestDial(err, attempt) {
+				return Message{}, err
+			}
+			lastError = err
+			host.logRequestRetry(peerID, "", request.Type, attempt, err)
+			continue
+		}
+
+		attemptRequest := request
+		if attempt > 0 {
+			attemptRequest = resetRequestIdentity(request)
+		}
+		response, err := host.requestOnConnection(ctx, connection, peerID, attemptRequest)
+		if err == nil {
+			return response, nil
+		}
+		if !host.shouldRetryRequestAttempt(peerID, connection, err, attempt) {
+			return Message{}, err
+		}
+		lastError = err
+		host.logRequestRetry(peerID, connection.ID(), request.Type, attempt, err)
 	}
-	return host.requestOnConnection(ctx, connection, peerID, request)
+	return Message{}, lastError
 }
 
 func (host *Host) requestOnConnection(ctx context.Context, connection Connection, peerID string, request Message) (Message, error) {
@@ -162,12 +193,9 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 		return Message{}, peerProtectionDialError(peerID, err)
 	}
 
-	outbound, err := host.prepareOutboundMessage(peerID, request)
+	outbound, err := host.prepareOutboundRequestMessage(peerID, request)
 	if err != nil {
 		return Message{}, err
-	}
-	if !outbound.IsRequest() {
-		return Message{}, fmt.Errorf("%w: request flag required", ErrInvalidMessage)
 	}
 	requestStartedAt := time.Now()
 	host.metrics.requestsStarted.Add(1)
@@ -225,6 +253,97 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 			},
 		)
 	}
+}
+
+func (host *Host) connectionForRequest(ctx context.Context, peerID string) (Connection, error) {
+	connection, ok := host.Connection(peerID)
+	if ok {
+		return connection, nil
+	}
+	return host.DialPeer(ctx, peerID)
+}
+
+func (host *Host) prepareOutboundRequestMessage(peerID string, request Message) (Message, error) {
+	if request.Flag != MessageFlagRequest {
+		return Message{}, fmt.Errorf("%w: request flag required", ErrInvalidMessage)
+	}
+	outbound := request.Clone()
+	if outbound.ID == "" {
+		messageID, err := newMessageID()
+		if err != nil {
+			return Message{}, err
+		}
+		outbound.ID = messageID
+	}
+	if outbound.RequestID != "" && !strings.EqualFold(outbound.RequestID, outbound.ID) {
+		return Message{}, fmt.Errorf("%w: request id must match message id", ErrInvalidMessage)
+	}
+	if outbound.CreatedAtUnixMilli == 0 {
+		outbound.CreatedAtUnixMilli = time.Now().UnixMilli()
+	}
+	if outbound.FromPeerID == "" {
+		outbound.FromPeerID = host.peerID
+	}
+	if outbound.ToPeerID == "" {
+		outbound.ToPeerID = peerID
+	}
+	outbound.MarkAsRequest()
+	if err := outbound.Validate(host.maxMessageSize); err != nil {
+		return Message{}, err
+	}
+	return outbound, nil
+}
+
+func resetRequestIdentity(request Message) Message {
+	retryRequest := request.Clone()
+	retryRequest.ID = ""
+	retryRequest.RequestID = ""
+	retryRequest.CreatedAtUnixMilli = 0
+	return retryRequest
+}
+
+func (host *Host) shouldRetryRequestDial(err error, attempt int) bool {
+	return attempt < maxRequestConnectionRetryAttempts && requestConnectionRetryableError(err)
+}
+
+func (host *Host) shouldRetryRequestAttempt(peerID string, connection Connection, err error, attempt int) bool {
+	if attempt >= maxRequestConnectionRetryAttempts || !requestConnectionRetryableError(err) {
+		return false
+	}
+	info, _ := ErrorInfoOf(err)
+	if info.Operation == "request_write" {
+		return true
+	}
+	return info.Operation == "request_wait_response" && info.Timeout && host.requestConnectionChanged(peerID, connection)
+}
+
+func requestConnectionRetryableError(err error) bool {
+	return errors.Is(err, ErrConnectionClosed) ||
+		errors.Is(err, ErrDuplicateConnection) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+func (host *Host) requestConnectionChanged(peerID string, connection Connection) bool {
+	if peerID == "" || connection == nil {
+		return false
+	}
+	host.mutex.RLock()
+	currentConnection := host.connections[peerID]
+	host.mutex.RUnlock()
+	if currentConnection == nil {
+		return true
+	}
+	return currentConnection.ID() != connection.ID()
+}
+
+func (host *Host) logRequestRetry(peerID string, connectionID string, protocolID ProtocolID, attempt int, err error) {
+	host.logger.Warn("p2p request retrying after transient connection error",
+		slog.String("peer_id", peerID),
+		slog.String("connection_id", connectionID),
+		slog.Uint64("protocol_id", uint64(protocolID)),
+		slog.Int("next_attempt", attempt+2),
+		slog.Any("error", err),
+	)
 }
 
 // withRequestTimeout 构造请求上下文 + 调用方未设置 deadline 时使用 Host 默认请求超时。
