@@ -38,32 +38,33 @@ const (
 )
 
 type stressConfig struct {
-	protocol        utils.MultiAddressProtocol
-	listenIP        string
-	advertisedIP    string
-	port            int
-	identityFile    string
-	networkID       string
-	bootstrap       []string
-	targets         []string
-	duration        time.Duration
-	concurrency     int
-	payloadBytes    int
-	rateLimit       int
-	requestTimeout  time.Duration
-	reportInterval  time.Duration
-	startDelay      time.Duration
-	linger          time.Duration
-	warmup          bool
-	maxRequests     uint64
-	maxPeers        int
-	maxConnections  int
-	maxMessageSize  int
-	writeQueueSize  int
-	protocolWorkers int
-	serverDelay     time.Duration
-	inboundRate     int
-	profileDir      string
+	protocol           utils.MultiAddressProtocol
+	preferredProtocols []utils.MultiAddressProtocol
+	listenIP           string
+	advertisedIP       string
+	port               int
+	identityFile       string
+	networkID          string
+	bootstrap          []string
+	targets            []string
+	duration           time.Duration
+	concurrency        int
+	payloadBytes       int
+	rateLimit          int
+	requestTimeout     time.Duration
+	reportInterval     time.Duration
+	startDelay         time.Duration
+	linger             time.Duration
+	warmup             bool
+	maxRequests        uint64
+	maxPeers           int
+	maxConnections     int
+	maxMessageSize     int
+	writeQueueSize     int
+	protocolWorkers    int
+	serverDelay        time.Duration
+	inboundRate        int
+	profileDir         string
 }
 
 type identityFile struct {
@@ -151,6 +152,7 @@ func run() error {
 		slog.String("peer_id", identity.PeerID),
 		slog.String("address", address.String()),
 		slog.String("protocol", string(config.protocol)),
+		slog.Any("preferred_protocols", config.preferredProtocols),
 		slog.Int("targets", len(targetPeerIDs)),
 		slog.Int("concurrency", config.concurrency),
 		slog.Int("payload_bytes", config.payloadBytes),
@@ -190,6 +192,7 @@ func run() error {
 
 func parseConfig() (stressConfig, error) {
 	protocolValue := flag.String("protocol", "quic", "transport protocol: quic or tcp")
+	preferredProtocolsValue := flag.String("preferred-protocols", "", "comma separated dial protocol order; empty uses -protocol only")
 	listenIP := flag.String("listen-ip", "0.0.0.0", "listen ip")
 	advertisedIP := flag.String("advertised-ip", "127.0.0.1", "advertised ip")
 	port := flag.Int("port", 5002, "listen and advertised port")
@@ -221,6 +224,10 @@ func parseConfig() (stressConfig, error) {
 	if err != nil {
 		return stressConfig{}, err
 	}
+	preferredProtocols, err := parsePreferredProtocols(*preferredProtocolsValue, protocol)
+	if err != nil {
+		return stressConfig{}, err
+	}
 	if *port < 1 || *port > 65535 {
 		return stressConfig{}, fmt.Errorf("invalid port %d", *port)
 	}
@@ -237,33 +244,55 @@ func parseConfig() (stressConfig, error) {
 		return stressConfig{}, fmt.Errorf("invalid inbound rate limit %d", *inboundRate)
 	}
 	return stressConfig{
-		protocol:        protocol,
-		listenIP:        *listenIP,
-		advertisedIP:    *advertisedIP,
-		port:            *port,
-		identityFile:    *identityFile,
-		networkID:       *networkID,
-		bootstrap:       splitCSV(*bootstrap),
-		targets:         splitCSV(*targets),
-		duration:        *duration,
-		concurrency:     *concurrency,
-		payloadBytes:    *payloadBytes,
-		rateLimit:       *rateLimit,
-		requestTimeout:  *requestTimeout,
-		reportInterval:  *reportInterval,
-		startDelay:      *startDelay,
-		linger:          *linger,
-		warmup:          *warmup,
-		maxRequests:     *maxRequests,
-		maxPeers:        *maxPeers,
-		maxConnections:  *maxConnections,
-		maxMessageSize:  *maxMessageSize,
-		writeQueueSize:  *writeQueueSize,
-		protocolWorkers: *protocolWorkers,
-		serverDelay:     *serverDelay,
-		inboundRate:     *inboundRate,
-		profileDir:      strings.TrimSpace(*profileDir),
+		protocol:           protocol,
+		preferredProtocols: preferredProtocols,
+		listenIP:           *listenIP,
+		advertisedIP:       *advertisedIP,
+		port:               *port,
+		identityFile:       *identityFile,
+		networkID:          *networkID,
+		bootstrap:          splitCSV(*bootstrap),
+		targets:            splitCSV(*targets),
+		duration:           *duration,
+		concurrency:        *concurrency,
+		payloadBytes:       *payloadBytes,
+		rateLimit:          *rateLimit,
+		requestTimeout:     *requestTimeout,
+		reportInterval:     *reportInterval,
+		startDelay:         *startDelay,
+		linger:             *linger,
+		warmup:             *warmup,
+		maxRequests:        *maxRequests,
+		maxPeers:           *maxPeers,
+		maxConnections:     *maxConnections,
+		maxMessageSize:     *maxMessageSize,
+		writeQueueSize:     *writeQueueSize,
+		protocolWorkers:    *protocolWorkers,
+		serverDelay:        *serverDelay,
+		inboundRate:        *inboundRate,
+		profileDir:         strings.TrimSpace(*profileDir),
 	}, nil
+}
+
+func parsePreferredProtocols(rawValue string, fallback utils.MultiAddressProtocol) ([]utils.MultiAddressProtocol, error) {
+	values := splitCSV(rawValue)
+	if len(values) == 0 {
+		return []utils.MultiAddressProtocol{fallback}, nil
+	}
+	protocols := make([]utils.MultiAddressProtocol, 0, len(values))
+	seen := make(map[utils.MultiAddressProtocol]struct{}, len(values))
+	for _, value := range values {
+		protocol, err := utils.ParseMultiAddressProtocol(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid preferred protocol %q: %w", value, err)
+		}
+		if _, ok := seen[protocol]; ok {
+			continue
+		}
+		protocols = append(protocols, protocol)
+		seen[protocol] = struct{}{}
+	}
+	return protocols, nil
 }
 
 func loadOrCreateIdentity(path string, networkID string) (p2p.SecureSessionIdentity, error) {
@@ -337,7 +366,7 @@ func newStressHost(
 		PeerID:              identity.PeerID,
 		SecureIdentity:      identity,
 		EnableSecureSession: true,
-		PreferredProtocols:  []utils.MultiAddressProtocol{config.protocol},
+		PreferredProtocols:  config.preferredProtocols,
 		DialTimeout:         config.requestTimeout,
 		HandshakeTimeout:    config.requestTimeout,
 		HeartbeatInterval:   10 * time.Second,
