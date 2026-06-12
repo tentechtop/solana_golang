@@ -334,3 +334,271 @@ utils        通用工具方法
 4. 机密转账的审计密钥必须安全托管，支持多签和阈值恢复
 5. 所有 ZK 相关代码必须经过形式化验证或充分的模糊测试
 6. Schema Registry 必须注册所有 ZK 相关结构的版本历史
+
+
+十三、如何第一天就原生支持 ZK
+
+核心原则：ZK 不是后来"加"上去的特性，而是从第一行代码起就嵌入到
+领域模型、存储层、网络协议和共识层中，作为一等公民存在。
+
+一）依赖引入（go.mod）
+
+第一步就在 go.mod 中加入 ZK 密码学库，不等到"以后再加"：
+
+  require (
+      github.com/consensys/gnark           // Go 原生 ZK 框架，Groth16/Plonk
+      github.com/consensys/gnark-crypto    // 底层曲线库（BN254, BLS12-381, BW6-761）
+  )
+
+gnark 是纯 Go 实现，零 CGO 依赖，与项目"零外部框架"理念一致。
+
+二）领域模型（structure/）-- 第一天就定义
+
+新增文件 structure/zk_proof.go，定义 ZK 核心值对象：
+
+  // ZK 证明载体
+  type ZKProof struct {
+      System        ProofSystem    // Groth16=1, Plonk=2
+      Curve         CurveID        // BN254=1, BLS12_381=2
+      ProofBytes    []byte         // 序列化后的证明
+      PublicInputs  [][]byte       // 公开输入
+      Version       uint16
+  }
+
+  // 验证密钥（链上存储，用于验证证明）
+  type VerifyingKey struct {
+      System   ProofSystem
+      Curve    CurveID
+      KeyBytes []byte              // gnark 序列化的 VK
+      Version  uint16
+  }
+
+  // 机密余额（ElGamal 密文）
+  type ConfidentialBalance struct {
+      Ciphertext  []byte           // ElGamal 加密的余额
+      Nonce       []byte           // 加密随机数
+      Version     uint16
+  }
+
+  // 机密转账指令
+  type ConfidentialTransferInstruction struct {
+      FromBalance    ConfidentialBalance
+      ToBalance      ConfidentialBalance
+      AmountProof    ZKProof          // 金额范围证明
+      BalanceProof   ZKProof          // 余额充足证明
+      Version        uint16
+  }
+
+  // Merkle 证明（状态压缩用）
+  type MerkleProof struct {
+      Root     Hash
+      Path     []Hash               // 从叶子到根的路径
+      Index    uint64               // 叶子索引
+      Version  uint16
+  }
+
+  // ZK 程序（链上部署的证明电路）
+  type ZKProgram struct {
+      Owner         PublicKey
+      VerifyingKey  VerifyingKey
+      Name          string
+      Version       uint16
+  }
+
+所有 ZK 结构必须实现 Borsh 编解码，字段只能尾部追加。
+
+三）Schema Registry（schema/）-- 注册 ZK Schema
+
+在 schema/registry.go 的初始化中注册 ZK 相关 Schema：
+
+  func RegisterZKSchemas(registry *Registry) {
+      registry.Register(Schema{
+          Key: SchemaKey{Type: "zk.proof", Version: 1, Codec: CodecBorsh},
+          Decode:  decodeZKProof,
+          Validate: validateZKProof,
+      })
+      registry.Register(Schema{
+          Key: SchemaKey{Type: "zk.verifying_key", Version: 1, Codec: CodecBorsh},
+          Decode:  decodeVerifyingKey,
+          Validate: validateVerifyingKey,
+      })
+      registry.Register(Schema{
+          Key: SchemaKey{Type: "zk.confidential_balance", Version: 1, Codec: CodecBorsh},
+          Decode:  decodeConfidentialBalance,
+          Validate: validateConfidentialBalance,
+      })
+      registry.Register(Schema{
+          Key: SchemaKey{Type: "zk.merkle_proof", Version: 1, Codec: CodecBorsh},
+          Decode:  decodeMerkleProof,
+          Validate: validateMerkleProof,
+      })
+      registry.Register(Schema{
+          Key: SchemaKey{Type: "zk.program", Version: 1, Codec: CodecBorsh},
+          Decode:  decodeZKProgram,
+          Validate: validateZKProgram,
+      })
+  }
+
+启动时校验所有 ZK Schema 已注册，缺失直接 panic。
+
+四）数据库（database/）-- 新增 ZK 存储表
+
+在 database/interface.go 的 Table 枚举中新增：
+
+  TableZKProof             // ZK 证明存储
+  TableZKVerifyingKey      // 验证密钥存储
+  TableZKConfidentialState // 机密状态（ElGamal 密文）
+  TableZKMerkleTree        // 状态 Merkle 树节点
+  TableZKProgram           // 已部署的 ZK 程序
+
+每个 ZK 表的键设计：
+
+  TableZKProof:          proof_id (32 bytes hash)
+  TableZKVerifyingKey:   program_id (32 bytes)
+  TableZKConfidentialState: account_address (32 bytes)
+  TableZKMerkleTree:     root_hash (32 bytes) + leaf_index (8 bytes)
+  TableZKProgram:        program_address (32 bytes)
+
+五）P2P 网络（p2p/）-- 新增 ZK 协议号
+
+在 p2p/protocol.go 的 ProtocolID 枚举中新增：
+
+  ProtocolZKProofV1           ProtocolID = 30  // ZK 证明传播
+  ProtocolZKVerifyingKeyV1    ProtocolID = 31  // 验证密钥同步
+  ProtocolZKConfidentialTxV1  ProtocolID = 32  // 机密交易广播
+  ProtocolZKMerkleProofV1     ProtocolID = 33  // Merkle 证明同步
+  ProtocolZKProgramV1         ProtocolID = 34  // ZK 程序部署
+
+所有 ZK 协议号使用 Borsh 编码，不走 JSON。
+
+六）共识层（consensus/）-- ZK 证明纳入投票
+
+在 Vote 结构中扩展：
+
+  type Vote struct {
+      // ... 现有字段 ...
+      ZKProofsVerified  uint32   // 本投票中验证的 ZK 证明数量
+      ZKProofsInvalid   uint32   // 本投票中无效的 ZK 证明数量
+      ZKMerkleRoot      Hash     // 投票时的状态 Merkle 根（含压缩状态）
+  }
+
+验证器在投票时必须：
+1. 验证交易中包含的所有 ZK 证明
+2. 验证后更新 ZKMerkleRoot
+3. 将验证结果写入 Vote 结构
+4. 无效证明的交易直接丢弃，不进入区块
+
+七）指令系统（structure/）-- 新增 ZK 内置程序
+
+在 structure/builtin_program.go 中新增 ZK 程序地址：
+
+  var BuiltinProgramIDs = struct {
+      // ... 现有程序 ...
+      ZKProgram   PublicKey  // ZK 证明验证程序
+  }{
+      // ... 现有地址 ...
+      ZKProgram: MustPublicKeyFromBase58("ZkProg111111111111111111111111111111111"),
+  }
+
+在 structure/zk_instruction.go 中定义 ZK 指令：
+
+  type ZKInstructionType uint32
+  const (
+      ZKVerifyProof        ZKInstructionType = 0  // 验证单个 ZK 证明
+      ZKVerifyBatch        ZKInstructionType = 1  // 批量验证
+      ZKDeployProgram      ZKInstructionType = 2  // 部署 ZK 程序
+      ZKConfidentialTransfer ZKInstructionType = 3 // 机密转账
+      ZKUpdateMerkleRoot   ZKInstructionType = 4  // 更新压缩状态根
+  )
+
+  type ZKInstruction struct {
+      Type    ZKInstructionType
+      Data    []byte        // 指令特定数据（Borsh 编码）
+      Version uint16
+  }
+
+八）费用模型（structure/）-- ZK 证明计费
+
+在 structure/fee.go 中新增 ZK 证明的 CU 计费：
+
+  const (
+      Groth16VerifyBaseCost    uint64 = 500_000   // Groth16 基础验证成本
+      PlonkVerifyBaseCost      uint64 = 800_000   // Plonk 基础验证成本
+      PairingPerPairCost       uint64 = 100_000   // 每对配对操作成本
+      PoseidonHashCost         uint64 = 1_000     // Poseidon 哈希成本
+      ConfidentialTransferCost uint64 = 200_000   // 机密转账额外成本
+  )
+
+  func ComputeZKCost(proof ZKProof) uint64 {
+      switch proof.System {
+      case Groth16:
+          return Groth16VerifyBaseCost + uint64(len(proof.PublicInputs))*10_000
+      case Plonk:
+          return PlonkVerifyBaseCost
+      }
+      return 0
+  }
+
+九）配置系统（config/）-- ZK 配置段
+
+在 config/ 中新增 ZK 配置：
+
+  type ZKConfig struct {
+      DefaultCurve       CurveID     `yaml:"default_curve"`        // 默认曲线
+      MaxProofSize       uint32      `yaml:"max_proof_size"`       // 最大证明大小
+      MaxPublicInputs    uint32      `yaml:"max_public_inputs"`    // 最大公开输入数
+      EnableCompression  bool        `yaml:"enable_compression"`   // 启用状态压缩
+      CompressionDepth   uint32      `yaml:"compression_depth"`    // Merkle 树深度
+      EnableConfidential bool        `yaml:"enable_confidential"`  // 启用机密转账
+      AuditKeyPath       string      `yaml:"audit_key_path"`       // 审计密钥路径
+  }
+
+  func (c ZKConfig) Validate() error {
+      if c.MaxProofSize == 0 { return ErrInvalidZKConfig }
+      if c.MaxProofSize > 1_000_000 { return ErrProofTooLarge }
+      return nil
+  }
+
+十）为什么这样设计
+
+1. 领域模型先行
+   ZK 类型和普通账户、交易一样，在 structure/ 中第一天就定义，
+   不放在单独的 "zk/" 包中，避免后来"嫁接"的感觉。
+
+2. Schema 原生注册
+   所有 ZK 数据走同样的 Schema Registry -> Borsh 编解码路径，
+   享受同样的版本兼容保证，不搞特殊通道。
+
+3. 存储表提前预留
+   Table 枚举中的 ZK 表虽然初期为空，但前缀已分配，
+   后续不需要"加表迁移"，只需启用。
+
+4. 网络协议号预留
+   P2P 协议号预先分配，节点启动即可识别 ZK 协议，
+   不会出现"老节点不认识新协议"的问题。
+
+5. 共识即包含 ZK
+   Vote 结构中自带 ZK 验证计数和 Merkle 根，
+   不是"验证完区块再验 ZK"，而是 ZK 验证就是共识的一部分。
+
+6. 费用模型内置
+   ZK 证明的 CU 消耗从一开始就定义好，不等到"ZK 上线了再定价"。
+
+十一）实施优先级
+
+优先级 1（与阶段一并行）：
+  - go.mod 引入 gnark
+  - structure/zk_proof.go 定义 ZK 值对象
+  - schema/ 注册 ZK Schema
+  - database/ Table 枚举预留 ZK 表
+  - p2p/ ProtocolID 预留 ZK 协议号
+
+优先级 2（阶段二完成时）：
+  - 实现 Groth16 验证的 Borsh 编解码
+  - 实现 ZK 证明的 Schema Envelope 包装
+  - 编写 ZK 相关 golden bytes 测试
+
+优先级 3（阶段三完成后）：
+  - 实现 ZK 证明验证的共识投票集成
+  - 实现机密转账的指令处理
+  - 实现 Merkle 树的状态压缩存储

@@ -1,0 +1,2884 @@
+ZK 隐私方案设计
+
+
+核心定位：
+不是两条链，是一条链、两套账本、用户自选透明或 ZK。
+所有验证在 L1 原生完成，不引入独立隐私链或 L2。
+
+文档版本：v1.0
+最后更新：2026-06-12
+适用项目：solana_golang (Go 自研公链)
+
+
+一、账户模型（单账户双余额 + 统一身份）
+
+核心设计决策：不是「两个账户」，而是「一个账户，两种余额」。
+一个用户只有一个链上身份，一个链上账户，账户内同时持有透明余额和隐私余额。
+
+为什么不是双账户模型？
+  双账户模型的问题：
+    - 用户需要管理两个链上地址（t 地址 + z 地址），体验割裂
+    - 两个账户之间的关联关系需要额外隐藏
+    - 透明→隐私切换需要跨账户转账，增加复杂度和链上足迹
+    - DApp 需要同时兼容两种账户类型，开发负担重
+
+  单账户双余额的优势：
+    - 一个用户身份，一个主地址，DApp 无缝兼容
+    - 透明余额和隐私余额在同一个账户内，切换是内部操作
+    - 无需跨账户转账，减少链上足迹
+    - 用户体验：一个钱包，一个余额显示，透明/隐私只是展示模式
+
+1.1 统一账户结构
+
+链上每个用户只有一个 Account，内含双余额：
+
+  type Account struct {
+      // === 公开字段（始终可见）===
+      Owner           PublicKey        // 账户所有者（Ed25519 公钥，即 T-Addr）
+      Lamports        uint64           // 透明余额（明文，公开可见）
+      Data            []byte           // 合约数据（如有）
+      Executable      bool             // 是否为合约账户
+      RentEpoch       uint64           // 租金周期
+      Version         uint16
+
+      // === 隐私字段（仅 ZK 可验证，外部不可见）===
+      PrivacyBalance  PrivacyBalance   // 隐私余额（ElGamal 密文 + Pedersen 承诺）
+      AuditKey        []byte           // 审计公钥（监管可查，可选）
+  }
+
+  type PrivacyBalance struct {
+      Ciphertext      []byte           // ElGamal 加密的隐私余额密文
+      Commitment      []byte           // Pedersen 余额承诺（用于 ZK 证明）
+      Nonce           uint64           // 防重放计数器（每次隐私交易递增）
+  }
+
+关键设计点：
+  - 每个用户只有一个 Owner（Ed25519 公钥），即 T-Addr
+  - Lamports 是透明余额，PrivacyBalance 是隐私余额
+  - 透明余额和隐私余额在同一个链上 Account 内
+  - 透明交易只读写 Lamports，隐私交易只读写 PrivacyBalance
+  - 两者互不干扰，但同属一个账户
+
+1.2 透明余额（Transparent Balance）
+
+  特征：
+    - 明文 uint64，直接存储在 Lamports 字段
+    - 发送方、接收方、金额全部公开可见
+    - 无 ZK 证明，Ed25519 签名验证
+    - 成本：极低（~5,000 CU）
+    - 与现有 Solana 账户模型 100% 兼容
+
+  适用：
+    - 普通转账、DeFi 交互、公开捐赠
+    - 需要高频低成本的场景
+    - 所有现有 DApp 无需修改即可使用
+
+1.3 隐私余额（Privacy Balance）
+
+  特征：
+    - ElGamal 密文，不存明文金额
+    - 余额承诺（Pedersen Commitment）用于 ZK 证明
+    - 隐私交易只读写 PrivacyBalance，不影响 Lamports
+    - 必须携带 ZK 证明
+    - 链上只验证证明，不看金额
+
+  交易特征：
+    - 必须携带 ZK 证明
+    - 链上只验证证明，不看金额和余额
+    - 成本：中等（签名 + Groth16 验证约 15-30 万 CU）
+    - 延迟：亚秒级
+
+  适用：
+    - 大额机构转账、企业薪资发放、B2B 结算
+    - 隐私 DeFi、合规支付、身份保护
+
+1.4 双余额的独立性
+
+  透明余额和隐私余额在同一个账户内，但操作完全独立：
+
+  ┌─────────────────────────────────────────────────────────┐
+  │                    Account (同一个链上账户)               │
+  │                                                         │
+  │  ┌─────────────────────┐  ┌───────────────────────────┐ │
+  │  │  透明余额 (Lamports) │  │  隐私余额 (PrivacyBalance) │ │
+  │  │                     │  │                           │ │
+  │  │  明文 uint64        │  │  ElGamal 密文             │ │
+  │  │  公开可见           │  │  外部不可见               │ │
+  │  │  Ed25519 签名验证   │  │  Groth16 ZK 证明验证     │ │
+  │  │  ~5,000 CU          │  │  ~150,000-300,000 CU     │ │
+  │  │                     │  │                           │ │
+  │  │  用于：透明交易      │  │  用于：隐私交易           │ │
+  │  │        DApp 交互     │  │        隐私 DeFi         │ │
+  │  │        公开收款      │  │        大额转账           │ │
+  │  └─────────────────────┘  └───────────────────────────┘ │
+  │                                                         │
+  │  互转：T→Z（透明→隐私）和 Z→T（隐私→透明）带 ZK 证明    │
+  │  均在同一个 Account 内完成，不涉及跨账户转账             │
+  └─────────────────────────────────────────────────────────┘
+
+
+二、地址体系（统一身份 + 隐身元地址）
+
+2.1 透明主地址（T-Addr）
+
+  这是用户的唯一链上身份标识，对外公开使用。
+
+  格式：Base58Check 编码的 Ed25519 公钥（与 Solana 标准地址兼容）
+  示例：7xJN...aBcD（标准 Solana 地址格式）
+
+  特征：
+    - 从 Ed25519 公钥派生，与现有 Solana 地址 100% 兼容
+    - 这是用户的「唯一身份」——所有 DApp、交易所、公开收款都用这个地址
+    - 透明余额（Lamports）直接关联到 T-Addr
+    - 隐私余额（PrivacyBalance）也存储在同一个 T-Addr 的账户内
+    - 一个用户只有一个 T-Addr，终身不变
+
+  对外表现：
+    - 别人给你转账：只需知道你的 T-Addr
+    - 透明转账：直接转到 T-Addr，Lamports 增加
+    - 隐私转账：发送方用你的 T-Addr 派生出一次性隐身地址 P，资金进入你的 PrivacyBalance
+    - DApp 交互：只需连接 T-Addr，和普通 Solana 钱包完全一样
+
+2.2 隐身元地址（S-Meta，Stealth Meta-Address）
+
+  这是用户的「隐私接收标识」，从不直接暴露在链上。
+
+  格式：S-Meta = (scan_pubkey, spend_pubkey)，是两个公钥的组合
+  示例：sm1...（可编码为特殊前缀地址，方便分享）
+
+  特征：
+    - 从 spending_key 派生，永远不直接出现在链上交易中
+    - 发送方用 S-Meta 为每笔隐私交易生成「一次性隐身地址 P」
+    - 不同交易生成不同的 P，P 之间不可链接
+    - S-Meta 可以公开发布（放 Twitter 简介、ENS、支付页面），不会泄露隐私
+    - 链上看不到 S-Meta，也看不到 S-Meta 与 T-Addr 的关联
+
+  工作原理：
+    发送方：
+      1. 获取接收方的 S-Meta = (scan_pubkey, spend_pubkey)
+      2. 生成随机数 r
+      3. 计算一次性隐身地址 P = r·scan_pubkey + spend_pubkey（椭圆曲线运算）
+      4. 将资金发送到 P
+
+    接收方：
+      1. 用 scan_privkey 扫描链上所有新生成的 P
+      2. 对每个 P，计算 P' = scan_privkey·R（其中 R = r·G 是交易中的公开值）
+      3. 如果 P == P' + spend_pubkey，说明这笔交易是发给自己的
+      4. 用 spend_privkey 解密金额，归集到 PrivacyBalance
+
+  用户体验：
+    - 用户公开 T-Addr（用于透明交易和 DApp）
+    - 用户公开 S-Meta（用于隐私交易收款）
+    - 钱包自动管理两者的关联（仅本地，不上链）
+    - 发送方根据场景选择用 T-Addr 还是 S-Meta
+
+2.3 一次性隐身地址（P，Per-Transaction Stealth Address）
+
+  每笔隐私交易生成一个唯一的一次性地址 P：
+
+  特征：
+    - P = r·scan_pubkey + spend_pubkey（由发送方计算）
+    - 每笔交易使用不同的随机数 r → 不同的 P
+    - P 之间不可链接，P 与 T-Addr 之间不可关联
+    - P 与 S-Meta 之间也不可关联（除非持有 scan_privkey）
+    - 隐私交易的 commitment 关联到 P，而非 T-Addr 或 S-Meta
+
+  链上表现：
+    - 隐私交易的接收方字段显示 P（一次性地址）
+    - 攻击者看到 10 笔隐私交易有 10 个不同的 P
+    - 无法判断这 10 个 P 是否属于同一个接收方
+    - 无法将任何 P 关联到任何 T-Addr 或 S-Meta
+
+2.4 密钥体系（一套密钥，统一管理）
+
+  用户只有一个种子，派生所有密钥：
+
+  type ZKKeySet struct {
+      SpendKey        []byte    // 签名密钥（用于授权交易，永不暴露）
+      ScanKey         []byte    // 扫描密钥（用于发现发给自己的隐私交易）
+      ViewKey         []byte    // 查看密钥（可解密交易金额和参与方）
+      AuditKey        []byte    // 审计密钥（监管方可解密，需司法流程）
+  }
+
+  密钥派生（BIP-32 兼容，从同一个 master_seed 派生）：
+
+    master_seed = BIP39_MnemonicToSeed(mnemonic, password)
+
+    spend_key   = HKDF(master_seed, "zk_spend_key")    // → Ed25519 签名私钥
+    scan_key    = HKDF(master_seed, "zk_scan_key")     // → 用于发现入账交易
+    view_key    = HKDF(master_seed, "zk_view_key")     // → 用于解密金额
+    audit_key   = HKDF(master_seed, "zk_audit_key")    // → 监管审计用
+
+  密钥用途对照：
+
+  ┌─────────────────┬──────────────────────────────────────────────┐
+  │ 密钥             │ 用途                                         │
+  ├─────────────────┼──────────────────────────────────────────────┤
+  │ SpendKey         │ 签名授权隐私交易（最重要，永不暴露）         │
+  │ ScanKey          │ 扫描链上 P，发现发给自己的隐私交易           │
+  │ ViewKey          │ 解密 PrivacyBalance 密文，查看金额           │
+  │                  │ 可授权给会计/审计师（只读，无资金风险）      │
+  │ AuditKey         │ 监管审计用，需司法流程 + 多签授权            │
+  └─────────────────┴──────────────────────────────────────────────┘
+
+  密钥安全分级：
+    - SpendKey：最高安全级别，离线存储（HSM / 冷钱包）
+    - ScanKey + ViewKey：可在线使用（热钱包），泄露只损失隐私不损失资金
+    - AuditKey：托管在监管机构 HSM，需多签 + 阈值解密
+
+2.5 T-Addr 与 S-Meta 的关系
+
+  从用户视角：
+
+    一个身份（12 词助记词）
+    ├── 对外公开 T-Addr（透明主地址）
+    │   ├── 用于：透明交易、DApp 交互、公开收款、交易所充值
+    │   ├── 关联：Lamports（透明余额）
+    │   └── 链上可见：地址 + 余额 + 交易历史
+    │
+    └── 对外公开 S-Meta（隐身元地址）
+        ├── 用于：隐私交易收款（别人用你的 S-Meta 生成 P 给你转账）
+        ├── 关联：PrivacyBalance（隐私余额）
+        └── 链上不可见：S-Meta 本身不在链上，P 之间不可链接
+
+  钱包自动管理：
+    - 用户只看到 T-Addr（和普通钱包一样）
+    - 需要接收隐私资金时，钱包自动展示 S-Meta（可复制分享）
+    - 需要发送隐私资金时，钱包自动用接收方的 S-Meta 生成 P
+    - 用户不需要理解 S-Meta 和 P 的密码学细节
+
+2.6 钱包模式切换
+
+  用户只看到「透明模式」和「隐私模式」两个开关，底层由钱包自动处理：
+
+  透明模式：
+    - 使用 T-Addr 作为发送方
+    - 操作 Lamports（透明余额）
+    - 交易完全公开
+    - 与现有 Solana 钱包体验一致
+
+  隐私模式：
+    - 使用一次性隐身地址 P 作为发送方（隐私交易不暴露 T-Addr）
+    - 操作 PrivacyBalance（隐私余额）
+    - 交易金额和参与方隐藏
+    - 钱包自动生成 ZK 证明
+
+  切换是「显示模式切换」，不是「账户切换」——同一个账户，同一个 T-Addr
+
+
+1.5 账户生命周期管理
+
+
+1.5.1 账户初始化
+
+  每个用户创建链上账户时，默认只有透明余额（Lamports）。
+  隐私余额（PrivacyBalance）按需激活：
+
+  方式一：首次 T→Z 交易自动激活（推荐）
+    1. 用户已有 T-Addr 和链上 Account
+    2. 发送一笔 T→Z 交易，将部分 Lamports 转为 PrivacyBalance
+    3. 交易确认后，Account.PrivacyBalance 字段被写入
+    4. 后续可以继续使用隐私功能
+
+  方式二：空初始化激活
+    1. 发送一笔空初始化交易：
+       - PrivacyBalance.Ciphertext = Encrypt(0, random_nonce)
+       - PrivacyBalance.Commitment = PedersenCommit(0, blinding)
+       - 无需 ZK 证明（余额为 0）
+    2. 激活后，可以通过 Z→Z 交易接收隐私资金
+
+  方式三：创世配置预分配
+    1. 创世区块中预定义账户的 PrivacyBalance
+    2. 初始余额以密文形式写入
+    3. 初始承诺以 Pedersen 承诺写入 Commitment 集合
+
+1.5.2 透明 ↔ 隐私互转（一键切换）
+
+  用户在同一账户内完成透明余额和隐私余额的互转：
+
+  透明 → 隐私（T→Z）：
+    1. 用户在钱包中选择「转入隐私」
+    2. 输入金额（从 Lamports 扣除）
+    3. 钱包生成 ZK 证明（范围 + 等值 + 密文有效性）
+    4. 交易确认后：
+       - Lamports 减少（公开可见）
+       - PrivacyBalance 增加（密文，不可见）
+       - 总余额不变（Lamports + PrivacyBalance）
+    5. 无需创建新账户，无需新地址
+
+  隐私 → 透明（Z→T）：
+    1. 用户在钱包中选择「转出隐私」
+    2. 输入金额（从 PrivacyBalance 扣除）
+    3. 钱包生成 ZK 证明（所有权 + 余额 + 范围 + 等值 + nullifier）
+    4. 交易确认后：
+       - PrivacyBalance 减少（密文）
+       - Lamports 增加（公开可见）
+       - 总余额不变
+    5. nullifier 标记为已消费，防双花
+
+  部分切换：
+    1. 用户可只转移部分余额
+    2. Lamports 和 PrivacyBalance 同时保留
+    3. 钱包显示「透明余额」和「隐私余额」
+
+1.5.3 账户恢复
+
+  备份内容（永不进入链上或 P2P）：
+    - 12 词助记词（BIP-39，可派生所有密钥）
+    - 最近使用的 PrivacyBalance.Nonce
+
+  恢复流程：
+    1. 导入助记词到新钱包
+    2. 从助记词派生 SpendKey + ScanKey + ViewKey
+    3. 用 ScanKey 扫描链上所有一次性地址 P，识别发给自己的交易
+    4. 用 ViewKey 解密所有入账交易的密文
+    5. 重建当前 PrivacyBalance（金额 + Nonce）
+    6. Lamports 直接从链上读取（公开可见，无需恢复）
+
+  安全要求：
+    - SpendKey 永远不进入链上或 P2P 消息
+    - 备份文件必须加密存储（AES-256-GCM + 用户密码）
+    - 恢复过程仅需链上公开数据 + 本地密钥，无需信任任何第三方
+
+1.5.4 隐私余额销毁
+
+  销毁条件：
+    - PrivacyBalance 必须为 0（通过 ZK 证明验证）
+    - 所有历史 nullifier 已标记
+
+  销毁流程：
+    1. 发起 Z→T 交易，将 PrivacyBalance 全部转为 Lamports
+    2. 提交销毁指令，附带 ZK 证明（PrivacyBalance = 0）
+    3. 链上清空 PrivacyBalance 字段
+    4. nullifier 保留在集合中（防止历史双花）
+
+  销毁后：
+    - 账户仍然存在，Lamports 正常使用
+    - 隐私功能不可再使用（需重新激活）
+    - nullifier 集合保留，不可删除
+
+1.5.5 账户版本演进
+
+  Account 的 PrivacyBalance 字段支持版本演进：
+
+  V1（初始版本）：
+    - PrivacyBalance: {Ciphertext, Commitment, Nonce}
+    - 单审计密钥
+
+  V2（计划）：
+    - 支持多审计密钥（不同监管机构）
+    - 支持余额分片（多币种）
+
+  V3（计划）：
+    - 支持全同态加密（FHE）余额运算
+    - 支持无需解密的智能合约交互
+
+  版本迁移：
+    - 旧版本字段保留，新字段追加
+    - 升级交易包含 ZK 证明：旧余额 == 新余额
+
+
+三、交易模式（四种，全覆盖）
+
+所有交易基于同一个 T-Addr 账户，区别仅在于操作哪个余额字段。
+
+3.1 模式一：透明 → 透明（T→T）
+
+特征：
+  - 全公开，无 ZK 证明，成本最低
+  - 操作 Lamports（透明余额）
+  - 验证：Ed25519 签名 + Lamports 余额检查
+
+链上可见：
+  from: T-Addr_sender     to: T-Addr_receiver     amount: 1000
+
+适用：日常转账、公开交易
+成本：~5,000 CU
+
+
+3.2 模式二：透明 → 隐私（T→Z）
+
+特征：
+  - 发送方公开（T-Addr），接收方隐藏（一次性地址 P）
+  - 发送方 Lamports 减少（公开可见），接收方 PrivacyBalance 增加（密文）
+  - 资金在同一个链上账户内从透明余额转移到隐私余额
+  - 必须携带 ZK 证明
+
+链上可见：
+  from: T-Addr_sender           ← 公开
+  to:   P（一次性隐身地址）       ← 不暴露接收方 T-Addr
+  amount_public: 1000            ← 发送方扣除可见
+  amount_confidential: （密文）   ← 接收方增加不可见
+  proof: <ZKProof>              ← 必须验证通过
+
+ZK 证明内容（3 个证明）：
+  1. 范围证明：金额 > 0 且 ≤ Lamports（防透支）
+  2. 等值证明：Lamports 扣除额 = PrivacyBalance 密文增加额（防增发）
+  3. 密文有效性：ElGamal 密文格式正确
+
+适用：用户将透明资金转为隐私资金
+成本：~150,000 CU
+
+
+3.3 模式三：隐私 → 隐私（Z→Z）
+
+特征：
+  - sender、receiver、金额全隐藏
+  - 双方 PrivacyBalance 均为密文操作，Lamports 不变
+  - 必须携带完整 ZK 证明集
+
+链上可见：
+  from: （发送方 T-Addr 隐藏，使用 P 地址）
+  to:   （接收方 T-Addr 隐藏，使用 P 地址）
+  amount: （金额隐藏）
+  nullifier: <nullifier_bytes>     ← 防双花标识
+  commitment: <commitment_bytes>   ← 新余额承诺
+  proof: <ZKProof>                 ← 必须验证通过
+
+ZK 证明内容（6 个证明）：
+  1. 所有权证明：发送方拥有 SpendKey
+  2. 余额充足证明：PrivacyBalance 密文余额 ≥ 转账金额
+  3. 范围证明：转账金额 > 0 且 ≤ MAX_SUPPLY
+  4. 等值证明：扣除密文 = 增加密文（金额一致）
+  5. Nullifier 正确性：nullifier = PoseidonHash(SpendKey, nonce)
+  6. 新承诺正确性：new_commitment = PedersenCommit(new_balance, new_nonce)
+
+适用：完全保密的大额转账、隐私 DeFi
+成本：~300,000 CU
+
+
+3.4 模式四：隐私 → 透明（Z→T）
+
+特征：
+  - 发送方隐藏（使用 P 地址），接收方公开（T-Addr）
+  - 发送方 PrivacyBalance 密文扣除，接收方 Lamports 明文增加
+  - 必须携带 ZK 等值证明
+
+链上可见：
+  from: P（一次性隐身地址）         ← 不暴露发送方 T-Addr
+  to:   T-Addr_receiver            ← 公开
+  amount: 1000                     ← 接收方增加可见
+  nullifier: <nullifier_bytes>    ← 防双花
+  proof: <ZKProof>                ← 必须验证通过
+
+ZK 证明内容（5 个证明）：
+  1. 所有权证明
+  2. 余额充足证明
+  3. 范围证明
+  4. 等值证明：密文扣除 = 明文增加
+  5. Nullifier 正确性
+
+适用：隐私资金转为公开资金（如 DEX 卖出、提现到交易所）
+成本：~150,000 CU
+
+3.5 四种模式对比
+
+  ┌────────┬──────────────┬──────────────┬──────────────┬──────────┐
+  │ 模式   │ 操作余额     │ 发送方可见   │ 接收方可见   │ 金额可见 │
+  ├────────┼──────────────┼──────────────┼──────────────┼──────────┤
+  │ T→T    │ Lamports     │ T-Addr       │ T-Addr       │ 明文     │
+  │ T→Z    │ L→Privacy    │ T-Addr       │ P（隐藏）    │ 部分     │
+  │ Z→T    │ Privacy→L    │ P（隐藏）    │ T-Addr       │ 明文     │
+  │ Z→Z    │ Privacy      │ P（隐藏）    │ P（隐藏）    │ 隐藏     │
+  └────────┴──────────────┴──────────────┴──────────────┴──────────┘
+
+  注：T→Z 和 Z→T 都是「同一个账户内的双余额互转」，
+  不需要跨账户操作，大大简化了原子性保证。
+
+
+四、链上架构（一开始就做，不要后期补丁）
+
+4.1 VM 内置 ZK 验证预编译
+
+在 SVM 运行时中注册 ZK 系统调用，合约可直接调用：
+
+  syscall: groth16_verify(verifying_key, proof, public_inputs) -> bool
+
+设计要点：
+  - 使用 Groth16（快、验证便宜，Solana / Aztec 均用此方案）
+  - 验证成本 < 200,000 CU
+  - 证明验证异步化，不阻塞主链出块
+  - 保留亚秒级确认，速度不打折
+
+
+4.2 统一状态树
+
+链上只维护一棵状态树（而非两棵），每个叶子节点是一个 Account：
+
+  State Tree（统一状态树）
+    ├── Account_A (T-Addr)
+    │   ├── Lamports: 500（透明余额，明文）
+    │   └── PrivacyBalance: {Ciphertext, Commitment, Nonce}（隐私余额）
+    ├── Account_B (T-Addr)
+    │   ├── Lamports: 100
+    │   └── PrivacyBalance: nil（未使用隐私功能）
+    └── ...
+
+  统一状态树的好处：
+    - 不需要维护两棵树的同步
+    - 每个账户的透明和隐私数据在同一个叶子节点
+    - T→Z / Z→T 互转是同一叶子的内部字段修改，原子性天然保证
+    - Merkle 根写入区块头，只有一个根
+
+  Nullifier 集合（防双花）
+    - 全局 nullifier 集合，每个隐私交易生成唯一 nullifier
+    - nullifier = PoseidonHash(SpendKey, nonce)
+    - 链上维护 nullifier Merkle 树，根写入区块头
+    - 轻客户端仅同步 nullifier 树根即可验证双花
+
+  Commitment 集合（余额承诺）
+    - 全局 commitment 集合，每次隐私交易生成新承诺
+    - commitment = PedersenCommit(balance, blinding)
+    - 用于 ZK 证明中验证余额一致性
+    - commitment 关联到一次性地址 P，而非 T-Addr
+
+
+4.3 数据结构定义
+
+  // 区块头扩展
+  type BlockHeader struct {
+      // ... 现有字段 ...
+      StateRoot             Hash    // 统一状态树根（含透明+隐私数据）
+      NullifierSetRoot      Hash    // Nullifier 集合 Merkle 根
+      CommitmentSetRoot     Hash    // Commitment 集合 Merkle 根
+  }
+
+  // 数据库表
+  TableAccount                // T-Addr → Account（含 Lamports + PrivacyBalance）
+  TableNullifier              // nullifier → spent_at_slot
+  TableCommitment             // commitment → created_at_slot
+  TableStealthAddress         // P（一次性地址）→ commitment_list（用于接收方扫描）
+
+
+4.4 统一交易结构
+
+  type Transaction struct {
+      // 公共字段
+      Version        uint16
+      Mode           TransferMode       // T→T / T→Z / Z→T / Z→Z
+      Fee            uint64
+      RecentBlockhash Blockhash
+
+      // 透明部分（操作 Lamports）
+      FromTAddr      *PublicKey         // 发送方 T-Addr
+      ToTAddr        *PublicKey         // 接收方 T-Addr
+      AmountPublic   *uint64            // 公开金额
+      Signature      *Signature         // Ed25519 签名
+
+      // 隐私部分（操作 PrivacyBalance）
+      FromStealthAddr []byte            // 发送方一次性地址 P（Z→T / Z→Z）
+      ToStealthAddr   []byte            // 接收方一次性地址 P（T→Z / Z→Z）
+      Nullifiers      [][]byte          // 双花防护
+      Commitments     [][]byte          // 新余额 Pedersen 承诺
+      Ciphertexts     [][]byte          // ElGamal 密文
+      ZKProofs        []ZKProof         // ZK 证明列表
+  }
+
+各模式字段使用：
+
+  ┌────────┬──────────┬──────────┬──────────┬────────────┬───────────┬──────────┐
+  │ 模式   │ FromTAddr│ ToTAddr  │ AmountPub│ Nullifier  │ Commitment│ ZKProof  │
+  ├────────┼──────────┼──────────┼──────────┼────────────┼───────────┼──────────┤
+  │ T→T    │    ✓     │    ✓     │    ✓     │     ✗      │     ✗     │    ✗     │
+  │ T→Z    │    ✓     │    ✗     │    ✓     │     ✗      │     ✓     │    ✓     │
+  │ Z→T    │    ✗     │    ✓     │    ✓     │     ✓      │     ✓     │    ✓     │
+  │ Z→Z    │    ✗     │    ✗     │    ✗     │     ✓      │     ✓     │    ✓     │
+  └────────┴──────────┴──────────┴──────────┴────────────┴───────────┴──────────┘
+
+  注：
+  - T→T 模式：FromTAddr 和 ToTAddr 都是公开的 T-Addr
+  - T→Z 模式：FromTAddr 公开，ToStealthAddr 是一次性地址 P（不暴露接收方 T-Addr）
+  - Z→T 模式：FromStealthAddr 是一次性地址 P（不暴露发送方 T-Addr），ToTAddr 公开
+  - Z→Z 模式：双方都使用一次性地址 P，完全不暴露 T-Addr
+
+
+4.5 同态运算详解
+
+
+4.5.1 为什么需要同态运算
+
+隐私账户的余额是 ElGamal 密文，无法直接做加减法。
+但 ElGamal 天然支持加法同态，可以在密文状态下完成余额更新，
+链上验证器无需解密即可计算新余额。
+
+4.5.2 ElGamal 加法同态原理
+
+  ElGamal 加密定义（椭圆曲线版本）：
+    公钥：  P = sk · G
+    加密：  C = (r·G,  m·G + r·P) = (C1, C2)
+    解密：  m·G = C2 - sk·C1，然后解离散对数得到 m
+
+  加法同态性质：
+    Enc(m1) + Enc(m2) = Enc(m1 + m2)
+
+    即：(r1·G, m1·G + r1·P) + (r2·G, m2·G + r2·P)
+      = ((r1+r2)·G, (m1+m2)·G + (r1+r2)·P)
+      = Enc(m1 + m2)
+
+4.5.3 转账中的同态运算
+
+以 Z→Z 转账为例（from 转出 100，to 收到 100）：
+
+  转账前：
+    from_balance_cipher = Enc(from_balance)         // from 余额密文
+    to_balance_cipher   = Enc(to_balance)           // to 余额密文
+
+  转账后（链上直接密文运算，不解密）：
+    from_balance_cipher_new = from_balance_cipher - Enc(100)   // 扣除密文
+    to_balance_cipher_new   = to_balance_cipher + Enc(100)     // 增加密文
+
+  验证器只验 ZK 证明，不执行解密：
+    1. 验证 ZK 等值证明：扣除额 == 增加额
+    2. 验证 ZK 范围证明：from 余额 ≥ 100
+    3. 验证通过后，直接密文加减更新状态
+
+4.5.4 Pedersen 承诺的加法同态
+
+  Pedersen 承诺同样支持加法同态：
+    Commit(m1, r1) + Commit(m2, r2) = Commit(m1+m2, r1+r2)
+
+  在转账中使用：
+    old_commitment = Commit(balance, blinding)
+    new_commitment = Commit(balance - amount, blinding - delta)
+
+    ZK 证明约束：
+      old_commitment - new_commitment == Commit(amount, delta)
+
+
+4.6 隐私交易的手续费模型
+
+
+4.6.1 核心问题
+
+隐私交易中金额隐藏，但手续费必须公开扣除。
+需要在不泄露转账金额的前提下，证明"手续费已足额支付"。
+
+4.6.2 解决方案：手续费从透明余额扣除
+
+  方案 A：要求隐私账户关联一个透明"手续费子账户"（推荐）
+
+    每个隐私账户必须有一个关联的透明手续费账户：
+    - 手续费账户余额公开
+    - 每次隐私交易从手续费账户扣除 CU 费用
+    - 手续费账户余额不足 → 交易失败
+
+    优点：
+      - 手续费公开可验证，不引入额外 ZK 电路
+      - 与现有费用模型完全兼容
+      - 验证器无需特殊处理
+
+    缺点：
+      - 手续费账户余额公开（但金额通常很小，隐私影响可控）
+
+  方案 B：手续费在交易中明文指定（混合方案）
+
+    交易结构中增加公开手续费字段：
+      fee_payer: PublicKey     // 手续费支付者（公开）
+      fee_amount: uint64       // 手续费金额（公开）
+
+    验证流程：
+      1. 验签：fee_payer 签名有效
+      2. 扣费：从 fee_payer 余额扣除 fee_amount
+      3. 验 ZK：验证隐私转账证明（与手续费无关）
+
+    优点：
+      - 简单直接
+      - 可指定任意账户支付手续费（类似 Solana 的 fee payer）
+
+  方案 C：完全隐私手续费（复杂度高，暂不推荐）
+
+    将手续费纳入 ZK 电路：
+      - ZK 证明中包含"手续费 ≥ 所需 CU × lamports_per_cu"
+      - 手续费从隐私余额中密文扣除
+      - 手续费金额不公开
+
+    缺点：
+      - 电路复杂度大幅增加
+      - 需要证明 lamports_per_cu 的市场价格
+      - 批量交易手续费更难处理
+
+4.6.3 推荐方案
+
+  采用方案 A + B 混合：
+    - 默认使用关联手续费账户（方案 A）
+    - 同时支持交易级 fee_payer 覆盖（方案 B）
+    - 手续费始终公开，不进入 ZK 电路
+
+
+4.7 Mempool 隐私保护
+
+
+4.7.1 威胁模型
+
+传统 Mempool 中，未确认交易明文广播：
+  - MEV 搜索者可以抢跑大额交易
+  - 三明治攻击者可以前后夹击
+  - 交易顺序可以被操纵
+
+4.7.2 隐私 Mempool 设计
+
+  隐私交易的 Mempool 处理分为三层：
+
+  第一层：交易混淆（Transaction Obfuscation）
+    - 隐私交易的 P2P 广播消息中，金额字段为密文
+    - 发送方/接收方地址使用 z 地址（一次性隐身地址）
+    - MEV 搜索者无法解析交易金额和参与方
+
+  第二层：阈值加密（Threshold Encryption）
+    - 交易提交时，使用当前 Leader 的公钥加密交易内容
+    - 只有当前 Leader 可以解密（使用阈值解密私钥）
+    - Leader 轮换时，新 Leader 无法解密旧交易
+    - 可选：使用时间锁加密，延迟解密
+
+  第三层：公平排序（Fair Ordering）
+    - Leader 按交易到达顺序打包
+    - 禁止基于交易内容重新排序
+    - 违规 Leader 可被 Slash
+
+4.7.3 实现要点
+
+  Mempool 交易结构（隐私交易）：
+
+    type MempoolEntry struct {
+        // 公开字段（用于 Gas 竞价和排序）
+        FeePayer      PublicKey
+        FeeAmount     uint64
+        PriorityFee   uint64
+        Timestamp     int64
+
+        // 加密字段（Leader 解密）
+        EncryptedTx   []byte    // Encrypt(leader_pubkey, serialized_tx)
+
+        // 防 DoS 字段
+        TxHash        Hash
+        Signature     Signature
+    }
+
+  Mempool 规则：
+    1. 隐私交易不暴露金额和参与方
+    2. 公开字段仅用于 Gas 竞价（fee_payer + fee_amount + priority_fee）
+    3. Leader 出块时解密 EncryptedTx，验证后打包
+    4. 非 Leader 节点只转发 EncryptedTx，不解密
+
+
+4.8 零知识证明的聚合与批量化
+
+
+4.8.1 为什么需要聚合
+
+一次 Z→Z 交易需要 6 个独立 ZK 证明，每个验证 ~50,000 CU。
+如果每个证明单独验证，总成本 300,000 CU。
+
+通过证明聚合，可以将多个证明合并为一个，大幅降低验证成本。
+
+4.8.2 Groth16 证明聚合
+
+  Groth16 本身不支持原生聚合，但可以通过以下方式优化：
+
+  方案一：电路合并（推荐）
+    将 6 个独立电路合并为 1 个大型电路：
+      - 1 个证明替代 6 个证明
+      - 验证成本：~80,000 CU（而非 6×50,000 = 300,000）
+      - 证明大小：~128 bytes（而非 6×128 = 768 bytes）
+      - 代价：电路更大，证明生成时间稍长
+
+  方案二：批量配对验证
+    多个 Groth16 证明共享相同的 verifying key 时，
+    可以合并配对运算，减少计算量：
+      - N 个证明的配对运算从 3N 次减少到 N+2 次
+      - 验证成本：~50,000 + (N-1)×20,000 CU
+
+4.8.3 批量交易验证
+
+  区块中可能有多个隐私交易，可以批量处理：
+
+  批量验证流程：
+    1. 收集区块中所有隐私交易的 ZK 证明
+    2. 按电路类型分组（T→Z、Z→T、Z→Z）
+    3. 同组证明执行批量配对验证
+    4. 任意一个证明失败 → 整批失败 → 标记无效交易
+
+  性能估算：
+    - 10 笔 Z→Z 交易：300,000 → 230,000 CU（节省 23%）
+    - 100 笔 Z→Z 交易：3,000,000 → 2,030,000 CU（节省 32%）
+
+
+4.9 跨模式转账的原子性保证
+
+
+4.9.1 原子性问题
+
+跨模式转账（T→Z、Z→T）涉及两类账户的同步更新：
+  - 透明账户余额（明文）
+  - 隐私账户余额（密文 + 承诺）
+
+必须保证：要么两边都更新成功，要么都不更新。
+
+4.9.2 原子性实现
+
+  使用 DataTransaction（项目已有的批量原子写入）：
+
+    type CrossModeTransfer struct {
+        Mode TransferMode
+
+        // 透明部分
+        FromPublic     *PublicKey
+        ToPublic       *PublicKey
+        AmountPublic   uint64
+
+        // 隐私部分
+        FromZKAddress  []byte
+        ToZKAddress    []byte
+        Nullifiers     [][]byte
+        Commitments    [][]byte
+        Ciphertexts    [][]byte
+        ZKProofs       []ZKProof
+    }
+
+  执行流程（数据库层面）：
+    1. 开启 DataTransaction
+    2. 验证所有 ZK 证明（任一失败 → 回滚）
+    3. 检查 nullifier 是否已存在（已存在 → 回滚）
+    4. 更新透明账户余额（如果涉及）
+    5. 更新隐私账户密文余额（如果涉及）
+    6. 插入新 nullifier 和 commitment
+    7. 提交 DataTransaction
+    8. 更新 Public State Root 和 Confidential State Root
+
+  所有步骤在一个 DataTransaction 内，数据库保证原子性。
+
+4.9.3 失败处理
+
+  交易失败的情况：
+    - ZK 证明无效 → 不扣费（除 base fee）
+    - Nullifier 已存在 → 双花尝试，记录并惩罚
+    - 余额不足 → 透明余额公开可查，隐私余额 ZK 证明失败
+    - 数据库写入失败 → 回滚，交易丢弃
+
+  部分成功的处理：
+    - 不存在"部分成功"——DataTransaction 保证全成功或全失败
+
+
+4.10 虚拟机 / 合约层设计
+
+
+4.10.1 透明合约 vs 隐私合约
+
+  合约也分两种模式，不是一刀切：
+
+  透明合约（Public Program）：
+    - 与现有 SVM 合约完全兼容
+    - 所有状态公开可见（账户数据、指令数据）
+    - 无 ZK 相关开销
+    - 适用：DeFi、NFT、DAO、游戏等绝大多数场景
+
+  隐私合约（Confidential Program）：
+    - 合约状态部分或全部为密文
+    - 合约指令可携带 ZK 证明
+    - 链上只验证证明，不读取密文内容
+    - 适用：隐私 DeFi、暗池交易、隐私投票、合规支付
+
+4.10.2 合约内发起 ZK 交易
+
+  不是「只能从钱包发起 ZK 交易」，合约内部也能发起：
+
+  场景一：隐私 DEX 兑换
+    用户在隐私 DEX 中用 TokenA 换 TokenB，全程不暴露金额：
+
+    1. 用户调用 PrivacyDEX.swap() 指令
+    2. 指令附带 ZK 证明：
+       - 证明用户拥有 ≥ X 个 TokenA（不暴露 X）
+       - 证明兑换比例正确（X * price = Y）
+       - 证明 TokenA 扣除 == TokenB 增加（等值）
+    3. 合约验证 ZK 证明 → 密文更新双方余额 → 完成兑换
+    4. 链上可见：有人调用了 swap()，但金额和方向不可见
+
+  场景二：隐私借贷
+    用户在隐私借贷协议中抵押 TokenA，借出 TokenB：
+
+    1. 用户调用 PrivacyLending.borrow() 指令
+    2. 指令附带 ZK 证明：
+       - 证明抵押率 ≥ 150%（不暴露具体金额）
+       - 证明用户有足够抵押品
+    3. 合约验证证明 → 锁定抵押品密文 → 释放借款密文
+
+  场景三：隐私批量支付（Payroll）
+    企业用隐私合约批量发薪：
+
+    1. 企业调用 PayrollContract.pay() 指令
+    2. 指令附带 ZK 证明：
+       - 证明企业余额 ≥ 所有员工工资之和
+       - 证明每笔工资金额正确
+    3. 合约验证 → 批量密文转账 → 完成
+    4. 链上可见：企业发了工资，但员工和金额不可见
+
+4.10.3 隐私合约的编程模型
+
+  隐私合约引入新的指令类型：
+
+    type ConfidentialInstruction struct {
+        ProgramID     PublicKey        // 合约地址
+        InstructionID uint32           // 指令编号
+        PublicInputs  [][]byte         // 公开输入（账户地址等）
+        ZKProof       ZKProof          // ZK 证明（证明指令逻辑正确）
+        Ciphertexts   [][]byte         // 加密数据（密文参数）
+    }
+
+  合约开发流程：
+
+    1. 用 gnark 编写 ZK 电路（定义合约的业务逻辑约束）
+    2. 电路编译 → 生成 proving key + verifying key
+    3. 部署合约时注册 verifying key
+    4. 客户端调用时：
+       a. 本地生成 ZK 证明（证明输入满足合约逻辑）
+       b. 构造 ConfidentialInstruction
+       c. 提交交易
+    5. 链上执行：
+       a. 验证 ZK 证明（groth16_verify syscall）
+       b. 验证通过 → 更新合约状态
+       c. 验证失败 → 回滚
+
+4.10.4 隐私合约的状态模型
+
+  隐私合约的账户数据分为两部分：
+
+    type ConfidentialProgramAccount struct {
+        // 公开状态（所有节点可见）
+        ProgramID       PublicKey
+        Owner           PublicKey
+        PublicState     []byte        // 公开的状态数据
+        Version         uint16
+
+        // 隐私状态（密文，仅持有 view_key 方可解密）
+        CiphertextState []byte        // ElGamal 加密的合约状态
+        StateCommitment []byte        // Pedersen 承诺（用于 ZK 证明）
+    }
+
+  状态更新流程：
+
+    1. 用户生成 ZK 证明：
+       证明「给定旧承诺、新承诺、公开输入，状态转换合法」
+    2. 链上验证证明 → 更新 StateCommitment
+    3. 同时更新 CiphertextState（同态运算，不解密）
+    4. 持有 view_key 的参与方可以解密 CiphertextState 查看真实状态
+
+4.10.5 DeFi 生态兼容性
+
+  隐私合约与现有 DeFi 协议的互操作：
+
+  透明 → 隐私 DeFi：
+    1. 用户从透明账户转入隐私 DEX（T→Z）
+    2. 在隐私 DEX 内完成兑换（Z→Z，全隐藏）
+    3. 如需提现，转回透明账户（Z→T）
+
+  隐私 DeFi → 透明 DeFi 的组合：
+    1. 隐私 DEX 获取最优报价（从公开订单簿）
+    2. 在隐私域执行兑换
+    3. 通过 ZK 证明向公开协议证明兑换已完成
+
+  跨合约隐私调用：
+    - 隐私合约 A 调用隐私合约 B：双方均以 ZK 证明交互
+    - 隐私合约 A 调用透明合约 B：A 需解密部分数据后以明文调用 B
+    - 透明合约 A 调用隐私合约 B：A 提交 ZK 证明作为调用参数
+
+4.10.6 隐私合约的安全性
+
+  与透明合约的安全保证相同，额外增加：
+
+    1. 重入保护：
+       - 隐私合约调用也受 SVM 重入锁保护
+       - ZK 证明验证在状态更新之前完成
+
+    2. 跨合约调用的原子性：
+       - 隐私合约间的调用链在一个 DataTransaction 内
+       - 任何一步失败 → 全部回滚
+
+    3. 合约升级：
+       - 隐私合约升级需要新的 Trusted Setup
+       - 旧 verifying key 保留，兼容旧用户资产
+       - 升级路径：V1 合约 → 迁移交易 → V2 合约
+
+
+4.11 数据流全景图
+
+
+4.11.1 T→T（透明交易，无 ZK）
+
+  用户 → 钱包签名 → P2P 广播（明文） → Mempool → Leader 打包
+    → 验证器：验签 + 验余额 + 更新状态 → 确认
+
+
+4.11.2 T→Z（透明 → 隐私）
+
+  用户 → 钱包：
+    1. 生成接收方一次性隐身地址
+    2. 生成 ZK 证明（范围 + 等值 + 密文有效性）
+    3. 构造交易（FromPublic + ToZKAddress + AmountPublic + ZKProofs）
+
+  P2P 广播：
+    - 发送方公开，接收方和金额隐藏
+    - ZK 证明随交易传播
+
+  Mempool：
+    - 公开字段：fee_payer, fee_amount, priority_fee
+    - 加密字段：ToZKAddress, ZKProofs
+
+  Leader 出块：
+    1. 解密交易
+    2. 验证 ZK 证明
+    3. 扣减透明余额（明文）
+    4. 增加隐私余额（密文 + 承诺）
+    5. 更新 Public State Root + Confidential State Root
+
+  确认后：
+    - 发送方看到余额减少
+    - 接收方用 view_key 扫描链上数据，发现入账
+
+
+4.11.3 Z→Z（隐私 → 隐私，全隐藏）
+
+  用户 → 钱包：
+    1. 查找未消费的 commitment（用 view_key 扫描）
+    2. 生成接收方一次性隐身地址
+    3. 生成 ZK 证明（所有权 + 余额 + 范围 + 等值 + nullifier + commitment）
+    4. 构造交易（Nullifiers + Commitments + Ciphertexts + ZKProofs）
+
+  P2P 广播：
+    - 发送方、接收方、金额全部隐藏
+    - 仅 nullifier、commitment、密文、证明可见
+
+  Mempool：
+    - 公开字段仅 fee_payer + fee_amount
+    - 无法解析金额和参与方
+
+  Leader 出块：
+    1. 验证所有 6 个 ZK 证明
+    2. 检查 nullifier 不在已消费集合
+    3. 更新密文余额（同态加减）
+    4. 插入新 nullifier 和 commitment
+    5. 更新 Confidential State Root + Nullifier Set Root
+
+  确认后：
+    - 发送方：旧 commitment 已消费，新 commitment 为找零
+    - 接收方：新 commitment 为入账
+    - 第三方：完全不可见
+
+
+4.11.4 Z→T（隐私 → 透明）
+
+  类似 Z→Z，但：
+    - 接收方为 t 地址（公开）
+    - 接收金额公开
+    - ZK 证明包含等值证明（密文扣除 == 明文增加）
+
+
+五、密码学选型（一开始就定死，不反复）
+
+  证明系统：  Groth16            — 快、验证便宜，Solana / Aztec 标准方案
+  加密方案：  ElGamal            — 同态加密，适合余额运算
+  承诺方案：  Pedersen           — 隐藏金额，可验证，加法同态
+  哈希函数：  Poseidon           — ZK 友好哈希，电路约束极少
+  椭圆曲线：  BN254 (alt_bn128)  — 以太坊/Solana 兼容，gnark 原生支持
+  地址隐私：  一次性隐身地址      — Stealth Address，每次交易生成新地址
+  随机源：    crypto/rand        — 密码学安全随机，禁止用时间戳或区块哈希
+
+
+5.1 预编译 ZK 验证优化（关键性能措施）
+
+  目标：把 ZK 验证的链上开销压到最低，让隐私交易和透明交易的手续费
+  差价尽量小，用户不会因为手续费差而放弃隐私。
+
+5.1.1 VM 预编译设计
+
+  ZK 验证从普通合约调用提升为 VM 原生预编译：
+
+  普通合约路径（慢）：
+    合约指令 → SVM 解释器逐条执行 → 调用密码学库 → 返回结果
+    额外开销：指令解析、栈操作、上下文切换
+
+  预编译路径（快）：
+    识别 groth16_verify syscall → 直接调用原生 Go 实现 → 返回结果
+    无解释器开销，无上下文切换，直接执行
+
+  实现方式：
+
+    // 预编译注册（VM 启动时）
+    func RegisterZKPrecompiles(vm *SVM) {
+        vm.RegisterPrecompile(PrecompileConfig{
+            Address:     ZKGroth16VerifyProgram,
+            Handler:     groth16VerifyNative,
+            BaseCost:    100,           // 基础 CU
+            PerPairing:  5000,          // 每次配对的 CU
+            MaxInputs:   64,            // 最大公开输入数
+        })
+    }
+
+    // 原生实现（绕过解释器）
+    func groth16VerifyNative(vk []byte, proof []byte, inputs [][]byte) bool {
+        // 直接调用 gnark 的 Groth16 验证器
+        // 无 SVM 指令周期开销
+        return gnark_groth16.Verify(vk, proof, inputs)
+    }
+
+5.1.2 Groth16 验证的配对运算优化
+
+  Groth16 验证的核心是 3 次椭圆曲线配对运算：
+
+    e(A, B) · e(C, D) · e(G, H) == 1
+
+  优化策略：
+
+    1. 使用 BN254 的预计算表
+       - G2 生成元预计算（编译时）
+       - Verifying key 中的 G1/G2 点预计算
+       - 配对运算加速 ~30%
+
+    2. 多证明批量配对（Multi-Proof Batch Pairing）
+       - N 个证明的配对从 3N 次减少到 N+2 次
+       - 使用随机线性组合技术
+       - 10 个证明：30 → 12 次配对
+
+    3. 配对运算 GPU 加速（验证器节点可选）
+       - BN254 配对运算高度可并行
+       - GPU 加速可将配对时间降低 10-50x
+       - 适用于高负载验证器节点
+
+5.1.3 CU 定价的精确计算
+
+  不拍脑袋定价，基于实际 benchmark：
+
+  ┌──────────────────────────────┬─────────────┬─────────────────────┐
+  │ 操作                         │ 实测时间    │ 对应 CU（1 CU≈1ns） │
+  ├──────────────────────────────┼─────────────┼─────────────────────┤
+  │ 1 次 BN254 配对运算 (G1×G2)  │ ~0.5ms      │ 500,000             │
+  │ 1 次 BN254 标量乘法 (G1)     │ ~0.05ms     │ 50,000              │
+  │ 1 次 BN254 标量乘法 (G2)     │ ~0.1ms      │ 100,000             │
+  │ Groth16 验证 (3 配对)        │ ~1.5ms      │ 1,500,000 (原始)    │
+  │ 预编译优化后 Groth16 验证    │ ~0.15ms     │ 150,000 (优化后)    │
+  │ 批量验证 (10 proofs)         │ ~0.25ms     │ 250,000             │
+  └──────────────────────────────┴─────────────┴─────────────────────┘
+
+  注：预编译绕过 SVM 解释器，直接调用原生配对库，开销降低 ~10x。
+
+5.1.4 成本差价控制目标
+
+  ┌──────────────────────┬──────────────┬──────────────┬───────────┐
+  │ 交易类型             │ CU           │ 手续费 (估算)│ vs T→T    │
+  ├──────────────────────┼──────────────┼──────────────┼───────────┤
+  │ T→T 透明转账         │ ~5,000       │ ~0.0001 SOL  │ 基准      │
+  │ T→Z 透明→隐私        │ ~155,000     │ ~0.003 SOL   │ 30x       │
+  │ Z→T 隐私→透明        │ ~155,000     │ ~0.003 SOL   │ 30x       │
+  │ Z→Z 隐私转账         │ ~305,000     │ ~0.006 SOL   │ 60x       │
+  │ Z→Z 批量验证 (10笔)  │ ~230,000/笔  │ ~0.0046 SOL  │ 46x       │
+  └──────────────────────┴──────────────┴──────────────┴───────────┘
+
+  差价接受度分析：
+    - 日常小额（< $100）：建议用透明模式，手续费极低
+    - 中等金额（$100-$10,000）：可选 ZK 模式，手续费 ~$0.003-$0.006
+    - 大额（> $10,000）：强烈建议 ZK 模式，手续费占比 < 0.0001%
+    - 机构级（> $1M）：ZK 模式是必须，手续费可忽略不计
+
+5.1.5 Groth16 vs Bulletproofs 对比
+
+  ┌──────────────────────┬─────────────────┬──────────────────────┐
+  │ 维度                 │ Groth16         │ Bulletproofs         │
+  ├──────────────────────┼─────────────────┼──────────────────────┤
+  │ 证明大小             │ ~128 bytes      │ ~672 bytes (范围)    │
+  │                      │ (恒定)          │ (对数增长)           │
+  │ 验证时间             │ ~1.5ms (极快)   │ ~10ms (中等)         │
+  │ 证明生成时间         │ ~0.5s (快)      │ ~2s (慢)             │
+  │ Trusted Setup        │ 需要            │ 不需要               │
+  │ 电路灵活性           │ 固定电路        │ 无电路，通用         │
+  │ 链上验证 CU          │ ~150,000        │ ~500,000             │
+  │ 聚合友好             │ 批量配对        │ 原生聚合 (IPA)       │
+  │ 后量子安全           │ 否              │ 否 (也是 ECC)        │
+  ├──────────────────────┼─────────────────┼──────────────────────┤
+  │ 本项目选择           │ ✅ 采用         │ ❌ 不采用            │
+  └──────────────────────┴─────────────────┴──────────────────────┘
+
+  选择 Groth16 的理由：
+    1. 链上验证最快（~1.5ms 原始，~0.15ms 预编译优化后）
+    2. 证明最小（128 bytes），节省区块空间
+    3. Solana/Aztec/Zcash 均验证了该方案的生产可行性
+    4. Trusted Setup 虽然麻烦，但一次性成本可接受
+    5. Bulletproofs 验证慢 3-4 倍，不适合高频链上验证
+
+  不选 Bulletproofs 的理由：
+    1. 验证时间长（~10ms），不适合每笔交易都验证
+    2. 证明大（672+ bytes），区块空间成本高
+    3. 无 Trusted Setup 的优势在本项目场景中不关键（我们有能力做 Setup）
+
+  混合方案（远期考虑）：
+    - 范围证明：可考虑 Bulletproofs（证明更紧凑，无电路限制）
+    - 所有权/等值证明：保持 Groth16（验证快）
+    - 权衡：两种证明系统混合增加工程复杂度，初期不推荐
+
+
+六、合规与可审计（三层权限模型）
+
+可审计隐私 = 平时隐私保密，需核查时依法、按权限追溯，不是彻底黑盒。
+
+先分两层：正常使用时 = 纯隐私。
+
+普通状态下，和匿名隐私链一样：
+  - 外人查链、区块浏览器：看不到转账金额、真实收发地址
+  - 不知道这笔钱是谁转的、转给了谁、转了多少
+  - 防偷窥、防 MEV 抢跑、防对手扒商业数据
+  - 隐私完全生效
+
+"可审计"是什么？不是随便谁都能看，而是有权限的人，在合规前提下可以查。
+
+6.1 第一层：你自己查（最基础，ViewKey）
+
+你手里有 ViewKey，哪怕交易是隐私模式，你也能：
+  - 解密所有隐私转账的金额
+  - 查看完整隐私余额和流水
+  - 识别所有发给自己的入账交易（配合 ScanKey）
+
+别人看不见，你自己全权掌控。ViewKey 是用户的主权密钥。
+
+6.2 第二层：主动授权给别人查（商务/合作场景）
+
+企业对账、合作方核验账目、审计师查账：
+
+授权方式：
+  1. 用户主动开放权限
+  2. 对方只能看被授权的那几笔 / 那段时间的交易
+  3. 看不到用户的其他隐私数据
+  4. 用完权限可以收回（通过轮换 ViewKey 或撤销授权证明）
+
+技术实现：
+  - ViewKey 可派生时间/范围限定的子密钥（BIP-32 派生路径 + 时间窗口约束）
+  - 授权证明：用户签发「授权凭证」= Sign(SpendKey, delegate_pubkey || start_slot || end_slot)
+  - 被授权方凭授权凭证 + 限定 ViewKey 解密对应时间窗口内的交易
+  - 授权到期后，限定 ViewKey 自动失效（slot > end_slot 的交易不可解密）
+
+  type ViewKeyAuth struct {
+      Delegate       PublicKey    // 被授权方公钥
+      LimitedViewKey []byte       // 时间/范围限定的子 ViewKey
+      StartSlot      uint64       // 授权起始 slot
+      EndSlot        uint64       // 授权终止 slot
+      Signature      []byte       // 用户签名（SpendKey）
+  }
+
+6.3 第三层：监管/司法核查（合规兜底，AuditKey）
+
+遇到洗钱、诈骗、盗币、司法调查：
+
+核查条件：
+  - 必须按法规流程
+  - 必须获得必要授权（司法令状 / 监管指令）
+  - 不是全网乱查，是有依据、有限范围的核查
+
+技术实现：
+  - AuditKey 采用多签 + 阈值解密方案
+  - 审计私钥分片存储在多个独立机构（监管方、司法方、独立监督方）
+  - 解密需要 ≥ T 方同时授权（如 3-of-5 阈值）
+  - 任何单一机构无法独立解密
+  - 每次解密操作记录在不可篡改的审计日志中
+
+  type AuditKeyShare struct {
+      ShareIndex    uint8         // 分片序号（1~N）
+      ShareValue    []byte        // Shamir 秘密分享分片
+      Holder        PublicKey     // 分片持有方公钥
+  }
+
+  type AuditDecryptionRequest struct {
+      CaseID        string        // 案件编号
+      TargetTx      Hash          // 目标交易哈希
+      Reason        string        // 解密理由（司法令状编号等）
+      Signatures    []Signature   // ≥ T 个持有方的签名授权
+      Timestamp     uint64        // 请求时间
+  }
+
+  审计密文：
+    每笔隐私交易附带审计密文：
+    audit_ciphertext = Encrypt(audit_public_key, amount || sender || receiver)
+    只有 ≥ T 方联合才能解密，普通节点无法查看。
+
+  审计日志（不可篡改）：
+    每次监管解密操作自动上链记录：
+    - 案件编号 + 目标交易 + 解密理由 + 授权方签名
+    - 日志不可删除，永久可追溯
+    - 防止监管权力滥用
+
+6.4 三层权限对比
+
+  ┌─────────────┬──────────────┬──────────────┬──────────────────────┐
+  │ 层级         │ 谁来查       │ 查什么范围   │ 控制方式              │
+  ├─────────────┼──────────────┼──────────────┼──────────────────────┤
+  │ 第一层       │ 你自己       │ 全部隐私数据 │ ViewKey（全权）       │
+  │ 第二层       │ 你授权的人   │ 限时/限范围  │ 限定 ViewKey + 可收回 │
+  │ 第三层       │ 监管/司法    │ 定向追溯     │ AuditKey 多签 + 阈值  │
+  └─────────────┴──────────────┴──────────────┴──────────────────────┘
+
+6.5 zkKYC 身份证明（链下完成，链上验证）
+
+用户链下完成 KYC，认证机构签发身份证明：
+
+  type ZKKYCProof struct {
+      Issuer       PublicKey      // 认证机构
+      Attributes   []KYCClaim     // 身份属性声明（如：年龄 > 18、非制裁国家）
+      ExpirySlot   uint64
+      Proof        ZKProof        // ZK 证明：证明身份属性成立，不泄露具体信息
+  }
+
+链上验证：
+  - 验证 ZKKYCProof 的签名来自受信任的认证机构
+  - 验证 ZK 证明成立
+  - 不存储任何个人身份数据（身份证号、护照号等）
+
+6.6 选择性披露
+
+用户可以选择性披露交易的部分信息：
+  - 向监管方：通过 AuditKey 多签流程解密（第三层）
+  - 向交易对手/审计师：通过 ViewKey 授权（第二层）
+  - 向公众：保持完全不可见（第一层）
+
+
+七、性能估算
+
+7.1 各模式交易成本
+
+  ┌────────┬──────────────┬──────────────┬─────────────────┐
+  │ 模式   │ 签名验证 CU  │ ZK 验证 CU   │ 总 CU           │
+  ├────────┼──────────────┼──────────────┼─────────────────┤
+  │ T→T    │    ~5,000    │      0       │     ~5,000      │
+  │ T→Z    │    ~5,000    │  ~150,000    │   ~155,000      │
+  │ Z→T    │    ~5,000    │  ~150,000    │   ~155,000      │
+  │ Z→Z    │    ~5,000    │  ~300,000    │   ~305,000      │
+  └────────┴──────────────┴──────────────┴─────────────────┘
+
+  参考：默认 ComputeBudget 上限为 1,400,000 CU
+  Z→Z 交易约占上限的 22%，仍有大量空间执行复杂 DeFi 逻辑。
+
+
+7.2 证明生成时间（链下，客户端）
+
+  ┌──────────┬──────────────┬──────────────────┐
+  │ 电路类型 │ Groth16 证明 │ 推荐硬件         │
+  ├──────────┼──────────────┼──────────────────┤
+  │ T→Z      │   ~0.3s      │ 普通 CPU         │
+  │ Z→T      │   ~0.3s      │ 普通 CPU         │
+  │ Z→Z      │   ~0.5s      │ 普通 CPU         │
+  └──────────┴──────────────┴──────────────────┘
+
+
+7.3 证明大小
+
+  Groth16 证明固定大小：~128 bytes（3 个 G1 点 + 1 个 G2 点）
+  公开输入：每字段 32 bytes，Z→Z 约 160 bytes
+  交易总大小：约 500-800 bytes（含证明 + nullifier + commitment）
+
+
+八、ZK 证明电路定义
+
+8.1 T→Z 模式电路
+
+  公开输入：
+    - from_public_key, from_balance_before, from_balance_after
+    - public_amount
+    - to_commitment_new, to_commitment_old
+
+  隐私输入（witness）：
+    - to_balance_old, to_balance_new
+    - to_blinding_old, to_blinding_new
+
+  约束：
+    1. from_balance_before - public_amount == from_balance_after
+    2. to_balance_old + public_amount == to_balance_new
+    3. public_amount > 0
+    4. PedersenCommit(to_balance_old, to_blinding_old) == to_commitment_old
+    5. PedersenCommit(to_balance_new, to_blinding_new) == to_commitment_new
+
+
+8.2 Z→T 模式电路
+
+  公开输入：
+    - nullifier, from_commitment_old, from_commitment_new
+    - public_amount, to_public_key
+
+  隐私输入：
+    - spending_key, from_balance_old, from_balance_new
+    - from_blinding_old, from_blinding_new, account_nonce
+
+  约束：
+    1. nullifier == PoseidonHash(spending_key, account_nonce)
+    2. from_balance_old - public_amount == from_balance_new
+    3. from_balance_new >= 0, public_amount > 0
+    4. PedersenCommit(from_balance_old, from_blinding_old) == from_commitment_old
+    5. PedersenCommit(from_balance_new, from_blinding_new) == from_commitment_new
+
+
+8.3 Z→Z 模式电路
+
+  公开输入：
+    - nullifier_sender, from_commitment_old, from_commitment_new
+    - to_commitment_old, to_commitment_new
+
+  隐私输入：
+    - spending_key, transfer_amount, account_nonce
+    - from_balance_old/new, from_blinding_old/new
+    - to_balance_old/new, to_blinding_old/new
+
+  约束：
+    1. nullifier_sender == PoseidonHash(spending_key, account_nonce)
+    2. from_balance_old - transfer_amount == from_balance_new
+    3. to_balance_old + transfer_amount == to_balance_new
+    4. transfer_amount > 0, from_balance_new >= 0
+    5. 四个承诺正确性（from_old, from_new, to_old, to_new）
+
+
+九、第一天就原生支持 ZK 的实施路径
+
+9.1 阶段一：密码学基础（与主网阶段一并行）
+
+  - go.mod 引入 gnark + gnark-crypto
+  - 实现 Pedersen Commitment
+  - 实现 Poseidon 哈希
+  - 实现 ElGamal 加密/解密
+  - 实现一次性隐身地址（Stealth Address）生成
+  - 定义 ConfidentialAccount、ConfidentialTransaction 结构体
+  - Borsh 编解码实现 + golden bytes 测试
+
+
+9.2 阶段二：基础电路（与主网阶段二并行）
+
+  - 实现 T→Z、Z→T、Z→Z 三个 ZK 电路（gnark 编写）
+  - 电路单元测试（已知输入输出验证）
+  - Groth16 Setup（生成 proving key 和 verifying key）
+  - 可信设置（Trusted Setup）仪式支持
+
+
+9.3 阶段三：链上集成（主网阶段三完成后）
+
+  - VM 内置 groth16_verify 系统调用
+  - 双状态树（Public + Confidential）并行维护
+  - Nullifier 集合 + Commitment 集合
+  - 共识层 ZK 验证集成
+  - 四种交易模式端到端测试
+  - 数据库 Table 实现（TablePublicAccount、TableConfidentialAccount 等）
+
+
+9.4 阶段四：审计与合规
+
+  - 审计密钥机制 + 审计密文
+  - zkKYC 身份证明电路
+  - 选择性披露
+  - 监管审计 RPC 接口
+
+
+9.5 阶段五：优化与审计
+
+  - 电路优化（减少约束数）
+  - 批量验证（多证明合并验证）
+  - 第三方安全审计
+  - 形式化验证
+
+
+十、安全要求
+
+1. 可信设置
+   - 每个电路独立执行 Trusted Setup
+   - toxic waste 必须分片销毁，多机构参与
+   - 保留可验证的参与记录
+
+2. 随机性
+   - blinding factor 必须使用 crypto/rand，禁止时间戳/区块哈希
+   - 每次交易使用新的 blinding factor
+   - 一次性隐身地址的随机数不可重复使用
+
+3. 双花防护
+   - nullifier 集合持久化到共识状态
+   - 分叉切换时必须重建 nullifier 集合
+   - nullifier 集合的 Merkle 根写入区块头
+
+4. 密钥管理
+   - spending key 永远不进入链上或 P2P 消息
+   - view key 仅授权给指定方
+   - audit key 必须安全托管，支持多签和阈值恢复
+
+5. 旁路攻击
+   - ZK 证明验证时间必须恒定
+   - 禁止基于证明大小的分支逻辑
+   - 使用常量时间密码学库
+
+6. 升级兼容
+   - 所有 ZK 结构实现 Borsh 编解码，字段只能尾部追加
+   - Schema Registry 注册所有 ZK 相关结构的历史版本
+   - 电路升级必须保留旧版本验证能力
+
+
+十一、测试策略
+
+
+11.1 单元测试
+
+
+11.1.1 密码学原语测试
+
+  ElGamal 加密/解密：
+    - 正常加解密往返（0, 1, MAX_UINT64, 随机值）
+    - 错误密钥解密失败
+    - 密文篡改检测
+    - 加法同态：Enc(a)+Enc(b) 解密 == a+b
+    - 标量乘法同态：n*Enc(m) 解密 == n*m
+
+  Pedersen 承诺：
+    - 承诺打开验证（正确 blinding → 成功）
+    - 错误 blinding → 失败
+    - 加法同态：Commit(a,r1)+Commit(b,r2) == Commit(a+b, r1+r2)
+    - 相同金额不同 blinding → 不同承诺（隐藏性）
+
+  Poseidon 哈希：
+    - 与标准实现对比（参考向量）
+    - 碰撞抵抗（随机输入不重复）
+    - 固定输入固定输出（确定性）
+    - ZK 电路内 Poseidon 与 Go 原生 Poseidon 一致
+
+  Stealth Address：
+    - 从 spending_key 正确派生
+    - 接收方可正确恢复私钥
+    - 不同交易生成不同地址（不可链接性）
+
+
+11.1.2 ZK 电路测试
+
+  每个电路必须有 golden 测试：
+    - 已知 witness → 已知 proof bytes
+    - proof bytes 必须与预期完全一致（字节级）
+    - 更新电路时必须同步更新 golden
+
+  电路约束测试：
+    - 正确 witness → 证明生成成功 + 验证通过
+    - 错误 witness（金额不守恒）→ 证明生成失败
+    - 错误 witness（余额不足）→ 证明生成失败
+    - 错误 witness（nullifier 不匹配）→ 证明生成失败
+    - 篡改 public inputs → 验证失败
+    - 篡改 proof bytes → 验证失败
+
+  边界测试：
+    - 金额 = 0（应拒绝）
+    - 金额 = 1（最小有效值）
+    - 金额 = MAX_UINT64（最大有效值）
+    - 余额 = 金额（刚好够）
+    - 余额 = 金额 - 1（不足，应拒绝）
+    - nullifier nonce 溢出
+
+
+11.1.3 交易模式测试
+
+  T→T 透明交易：
+    - 正常转账
+    - 余额不足
+    - 签名无效
+    - 重复交易（相同 nonce）
+
+  T→Z 透明→隐私：
+    - 正常转换
+    - 发送方余额不足
+    - ZK 证明无效
+    - 接收方 z 地址无效
+    - 金额为 0
+
+  Z→T 隐私→透明：
+    - 正常转换
+    - Nullifier 重复（双花尝试）
+    - ZK 等值证明不成立
+    - 发送方 commitment 不存在
+
+  Z→Z 全隐私：
+    - 正常转账
+    - 双花尝试（相同 nullifier）
+    - 范围证明失败（金额 > 余额）
+    - 等值证明失败（扣除 ≠ 增加）
+    - Nullifier 正确性证明失败
+    - 新承诺正确性证明失败
+
+
+11.2 集成测试
+
+
+  - 透明账户 → 隐私账户 → 隐私账户 → 透明账户 完整链路
+  - 同一区块内多笔隐私交易（验证批量处理）
+  - 跨模式转账原子性（模拟中途崩溃）
+  - 审计密钥解密全链路
+  - Mempool 隐私保护（确认非 Leader 无法解密）
+  - 账户恢复流程（导入 spending_key → 扫描链 → 重建余额）
+
+
+11.3 模糊测试（Fuzz）
+
+
+  - Borsh 编解码：随机 bytes 输入 → 不应 panic
+  - ZK 证明验证：随机 proof bytes → 不应 panic，返回 false
+  - 密文解密：随机密文 → 不应 panic
+  - Mempool 消息解析：随机 P2P 消息 → 不应 panic
+  - Nullifier 集合：随机插入/查询 → 数据一致
+
+
+11.4 性能基准测试
+
+
+  ┌────────────────────────┬──────────────────┬──────────────┐
+  │ 操作                   │ 目标             │ 测试方法     │
+  ├────────────────────────┼──────────────────┼──────────────┤
+  │ Groth16 证明生成 (T→Z) │ < 0.5s           │ go benchmark │
+  │ Groth16 证明生成 (Z→Z) │ < 1.0s           │ go benchmark │
+  │ Groth16 证明验证       │ < 50,000 CU      │ SVM profiling│
+  │ ElGamal 加密           │ < 1ms            │ go benchmark │
+  │ ElGamal 解密           │ < 1ms            │ go benchmark │
+  │ Poseidon 哈希          │ < 0.1ms          │ go benchmark │
+  │ Pedersen 承诺          │ < 0.5ms          │ go benchmark │
+  │ 批量验证 (10 proofs)   │ < 250,000 CU     │ SVM profiling│
+  │ Mempool 加密/解密      │ < 10ms           │ go benchmark │
+  └────────────────────────┴──────────────────┴──────────────┘
+
+
+11.5 安全审计清单
+
+
+  - [ ] 所有 ZK 电路经过第三方审计
+  - [ ] Trusted Setup 仪式记录可验证
+  - [ ] 随机数生成使用 crypto/rand（验证无 math/rand）
+  - [ ] 私钥不出现在日志、错误消息、P2P 消息中
+  - [ ] Nullifier 集合在分叉切换时正确重建
+  - [ ] 密文运算无侧信道（常量时间）
+  - [ ] 证明验证无分支逻辑（基于证明大小/内容）
+  - [ ] Schema Registry 注册所有 ZK 结构
+  - [ ] Golden bytes 测试覆盖所有 ZK 类型
+
+
+十二、攻击向量与防御
+
+
+12.1 双花攻击
+
+
+  攻击方式：
+    攻击者用同一笔隐私余额发起两笔交易，试图消费同一 commitment。
+
+  防御：
+    1. 每笔交易生成唯一 nullifier = PoseidonHash(spending_key, nonce)
+    2. 全局 nullifier 集合持久化到共识状态
+    3. 验证器在验证 ZK 证明后立即检查 nullifier 是否已存在
+    4. 已存在的 nullifier → 交易丢弃
+    5. Nullifier Set Root 写入区块头，轻客户端可验证
+
+  分叉场景：
+    分叉 A：nullifier N 在 slot 100 被消费
+    分叉 B：nullifier N 在 slot 100 未被消费
+
+    如果分叉 B 胜出：
+      - 状态回滚到 slot 99
+      - Nullifier 集合重建（移除 slot 100 的 nullifier）
+      - 攻击者可以重新提交交易
+      - 这是正常行为，不是攻击（分叉回滚是共识机制的一部分）
+
+
+12.2 通货膨胀攻击
+
+
+  攻击方式：
+    攻击者构造虚假 ZK 证明，试图凭空增发 Token。
+
+  防御：
+    1. 等值证明强制约束：扣除总额 == 增加总额
+    2. 范围证明强制约束：扣除额 ≥ 0
+    3. 所有权证明强制约束：发送方拥有 spending_key
+    4. 所有证明在链上独立验证
+    5. 即使 ZK 电路有 bug，最坏情况是单笔交易增发，
+       可通过总量监控及时发现
+
+
+12.3 隐私破解攻击
+
+
+  攻击方式一：地址关联分析
+    通过交易图分析、时间关联、金额关联推断 z 地址与 t 地址的关系。
+
+    防御：
+      - 一次性隐身地址：每次交易生成新 z 地址，不同交易的接收方地址不可链接
+      - 金额隐藏：Z→Z 模式金额完全不可见，无法通过金额关联
+      - 交易分片（Transaction Fragmentation）：
+        * 大额隐私交易拆分为多笔随机金额，每笔独立生成新 z 地址
+        * 拆分后无法通过金额总和反推原始交易
+        * 分片之间无显式关联（不同 nullifier，不同 commitment）
+      - 时间混淆：随机延迟各分片的广播时间，打破时间关联
+      - 推荐钱包策略：
+        * 每笔 Z→Z 交易自动附带 1-3 笔「混淆交易」（dummy tx）
+        * 混淆交易金额随机，消费真实 UTXO 但转回自己
+        * 增加分析者区分真实交易与混淆交易的难度
+
+  攻击方式二：Mempool 时序分析
+    通过交易提交时间推断发送方。
+
+    防御：
+      - 阈值加密：非 Leader 无法解密交易
+      - 交易混淆：随机延迟广播（0-500ms 随机抖动）
+      - Dandelion 协议：先单播再扩散，打破提交时间与 IP 的关联
+
+  攻击方式三：余额穷举
+    透明→隐私 交易中发送方扣除金额公开，可推断接收方入账金额。
+
+    防御：
+      - 接收方在接收后立即发起一笔 Z→Z 交易（金额隐藏）
+      - 或将大额 T→Z 拆分为多笔小额
+      - 或先转入中间隐私地址再分发
+
+  攻击方式四：元数据泄露（Metadata Leakage）
+
+    即使金额和地址被 ZK 保护，区块中仍残留元数据：
+
+    ┌─────────────────────┬─────────────────────────────────────┐
+    │ 泄露源              │ 防御措施                            │
+    ├─────────────────────┼─────────────────────────────────────┤
+    │ 交易时间戳 (slot)   │ 随机延迟广播（钱包侧 0-500ms）      │
+    │ 交易大小 (bytes)    │ 固定 padding：所有 ZK 交易统一大小   │
+    │                     │ 不同模式不同大小是正常差异            │
+    │ fee_payer 地址      │ 使用独立手续费账户（与隐私资产分离） │
+    │ priority_fee        │ 使用固定优先费 + 随机微小扰动       │
+    │ 交易顺序 (index)    │ Leader 公平排序，禁止重排            │
+    │ 失败交易信息        │ ZK 证明失败不暴露 witness 信息       │
+    │                     │ 统一错误码，不区分具体失败原因        │
+    └─────────────────────┴─────────────────────────────────────┘
+
+    固定 padding 实现：
+      交易序列化后按模式填充到固定大小：
+        - T→Z 交易：padding 到 1024 bytes
+        - Z→T 交易：padding 到 1024 bytes
+        - Z→Z 交易：padding 到 1536 bytes
+      填充后所有同模式交易大小一致，无法通过 size 推断金额。
+
+  攻击方式五：跨模式追踪（Cross-Mode Tracking）
+
+    攻击者追踪一笔资金从透明模式进入隐私模式再出来：
+      T→Z (金额 A) → Z→Z (金额未知) → Z→T (金额 B)
+
+    通过时间窗口和金额推测 Z→Z 阶段的交易路径。
+
+    防御：
+      - 在隐私域内停留足够长时间（至少 N 个 slot）
+      - Z→Z 阶段至少做 1 次金额分拆/合并
+      - 退出时使用不同的 t 地址（不与入口地址相同）
+      - 钱包提示用户「隐私冷却期」概念
+
+12.3.1 审计兜底机制详解
+
+  可审计隐私 = 平时隐私保密，需核查时依法、按权限追溯，不是彻底黑盒。
+
+  正常使用时 = 纯隐私：
+    外人查链、区块浏览器：看不到转账金额、真实收发地址
+    不知道谁转的、转给谁、转了多少
+    防偷窥、防 MEV、防对手扒商业数据
+
+  "可审计"三层模型：
+
+  第一层：用户自主查看（ViewKey，最基础）
+    - 用户持有 ViewKey，可解密所有隐私转账、余额、流水
+    - 别人看不见，你全权掌控
+    - 适用场景：个人对账、日常管理
+
+  第二层：主动授权（商务/合作场景）
+    - 用户主动开放权限 → 对方只能看被授权的那几笔/那段时间的交易
+    - 通过时间/范围限定的子 ViewKey 实现
+    - 授权凭证 = Sign(SpendKey, delegate_pubkey || start_slot || end_slot)
+    - 授权到期自动失效，用完可收回
+    - 不涉及 SpendKey，无资金风险
+    - 适用场景：企业对账、合作方核验、审计师查账
+
+  第三层：监管/司法核查（AuditKey，合规兜底）
+    - AuditKey 多签 + 阈值解密（如 3-of-5），任何单一机构无法独立解密
+    - 核查需要法规流程 + 必要授权（司法令状 / 监管指令）
+    - 不是全网乱查，是有依据、有限范围的定向追溯
+    - 每次解密操作记录在不可篡改的审计日志中
+    - 适用场景：反洗钱调查、税务审计、司法取证
+
+  补充：选择性披露（Selective Disclosure）
+    - 用户可主动生成 ZK 证明，证明某笔交易满足合规要求
+    - 例如：「该交易金额 < $10,000」（不暴露具体金额）
+    - 例如：「接收方非制裁地址」（不暴露接收方身份）
+    - 例如：「发送方已完成 KYC」（不暴露身份信息）
+    - 适用场景：交易所入金验证、合规支付、机构间结算
+
+  审计密钥生命周期：
+
+    生成：Trusted Setup 仪式中由监管机构代表生成 audit_keypair
+    存储：私钥分片存储在多个 HSM（硬件安全模块），阈值 = 3/5
+    使用：需至少 3 方同时授权，生成解密签名
+    轮换：每 6 个月轮换 audit_key，旧 key 归档但不销毁
+    吊销：紧急情况下治理投票可立即吊销 audit_key
+
+
+12.4 DoS 攻击
+
+
+  攻击方式一：提交大量无效 ZK 证明
+    消耗验证器计算资源。
+
+    防御：
+      1. 无效证明的交易也扣除 base fee
+      2. 验证器限制单区块 ZK 验证总 CU
+      3. 超过限制的交易推迟到下一区块
+
+  攻击方式二：提交超大证明
+    占用区块空间。
+
+    防御：
+      1. 配置 MaxProofSize（默认 128KB）
+      2. 超过限制的交易直接拒绝
+      3. 证明大小在交易头中声明
+
+
+12.5 量子计算威胁
+
+
+  当前 ZK 方案基于椭圆曲线离散对数假设，量子计算机可能破解。
+
+  短期防御：
+    - 透明交易不受影响（仍可正常使用）
+    - 隐私交易在量子威胁下失去隐藏性（可解密历史数据）
+
+  长期防御（后续版本）：
+    - 迁移到后量子安全的 ZK 方案（如 STARK、Lattice-based）
+    - 或引入混合方案：Groth16 + STARK 双证明
+    - 后量子哈希签名替代 Ed25519
+
+
+十三、ZK Compression（状态压缩）
+
+
+13.1 为什么需要状态压缩
+
+当前链上存储每个账户的完整数据，随着用户增长，状态膨胀不可避免：
+  - 每个账户 ~200 bytes，1 亿账户 = ~20 GB 链上状态
+  - 验证器需要存储全量状态，硬件门槛持续上升
+  - 账户租金（rent）随状态膨胀而增长，小额账户难以存活
+
+ZK Compression 将状态从链上「完全存储」转变为「链上只存根哈希」，
+账户数据在链下维护，交易时提交 ZK 证明验证正确性。
+
+核心效果：
+  存储成本降低 99%（链上只存 32-byte Merkle 根）
+  租金降低 1000 倍（不再按字节收费，只按验证次数收费）
+  状态膨胀不再是瓶颈，百万级账户轻松承载
+
+
+13.2 压缩状态模型
+
+  传统账户模型（链上全量存储）：
+    Account State Tree:
+      root
+      ├── Account A (200 bytes)
+      ├── Account B (200 bytes)
+      └── Account C (200 bytes)
+    
+    每个账户完整数据都在链上，验证器需要存储所有叶子节点。
+
+  压缩状态模型（链上只存根）：
+    Compressed State Tree:
+      root (32 bytes) ← 唯一链上存储
+    
+    链下（RPC 节点 / 客户端）：
+      ├── Account A (200 bytes) + Merkle Proof
+      ├── Account B (200 bytes) + Merkle Proof
+      └── Account C (200 bytes) + Merkle Proof
+    
+    交易时：
+      1. 客户端携带「账户数据 + Merkle Proof」
+      2. 链上验证 ZK 证明（证明账户在树中 + 状态转换合法）
+      3. 更新 Merkle 根（用新叶子替换旧叶子）
+
+
+13.3 压缩状态树设计
+
+  使用 Sparse Merkle Tree（SMT，稀疏默克尔树）：
+    - 深度：256 层（与 Solana 地址空间一致）
+    - 哈希函数：Poseidon（ZK 友好，电路约束少）
+    - 叶子节点：PoseidonHash(address ‖ data_hash ‖ lamports ‖ owner ‖ slot)
+    - 空节点：默认零值，无需存储
+
+  数据结构：
+
+    type CompressedAccount struct {
+        Address     PublicKey        // 账户地址
+        DataHash    Hash             // 账户数据哈希（数据本身在链下）
+        Lamports    uint64           // 余额（可选项，支持压缩）
+        Owner       PublicKey        // 所有者程序
+        Slot        uint64           // 最后修改 slot
+    }
+
+    type CompressedStateProof struct {
+        Root        Hash             // 当前 Merkle 根
+        Account     CompressedAccount // 压缩账户数据
+        MerklePath  []Hash           // 从叶子到根的路径（256 层）
+        Index       uint256          // 叶子索引
+    }
+
+
+13.4 压缩状态转换的 ZK 证明
+
+  每次修改压缩账户时，客户端生成 ZK 证明：
+
+  公开输入：
+    - old_root: 当前 Merkle 根
+    - new_root: 更新后的 Merkle 根
+    - program_id: 修改账户的程序
+
+  隐私输入（witness）：
+    - old_account: 旧账户数据
+    - new_account: 新账户数据
+    - merkle_path: 旧账户的 Merkle 证明
+    - new_merkle_path: 新账户的 Merkle 证明
+
+  ZK 约束：
+    1. Merkle 验证：old_account 在 old_root 的树中（通过 merkle_path 验证）
+    2. 状态转换合法：new_account = f(old_account)（由 program 定义）
+    3. 新 Merkle 根正确：new_root 是插入 new_account 后的正确根
+    4. 仅修改目标账户，其他账户不变
+
+  链上验证：
+    - 验证 ZK 证明（groth16_verify）
+    - 验证通过后更新链上的 Merkle 根
+    - 不需要存储账户数据，不需要执行 program 逻辑
+
+
+13.5 与传统账户的互操作
+
+  压缩账户 ↔ 普通账户 可以双向转换：
+
+  普通 → 压缩（Archive）：
+    1. 用户在链上发起 Archive 交易
+    2. 链上删除普通账户数据（释放租金）
+    3. 账户数据 + Merkle 证明转移到链下
+    4. 链上仅记录「该地址已压缩」
+
+  压缩 → 普通（Decompress）：
+    1. 用户提交 Decompress 交易
+    2. 附带 ZK 证明（证明账户状态正确）
+    3. 链上重建普通账户（重新分配存储空间）
+    4. 开始收取租金
+
+
+13.6 压缩状态的一致性保证
+
+  问题：压缩状态在链下，如何保证多个交易不冲突？
+
+  解决：链上维护「压缩状态变更队列」
+
+    type CompressedStateQueue struct {
+        PendingUpdates  map[PublicKey]CompressedAccount  // 待确认的更新
+        ConfirmedRoot   Hash                              // 已确认的 Merkle 根
+    }
+
+  流程：
+    1. 交易提交时，附带「当前 Merkle 根」作为版本标识
+    2. 验证器检查该根是否仍为最新（防止并发冲突）
+    3. 如果根已变更 → 交易冲突 → 客户端重新生成证明
+    4. 如果根未变 → 验证 ZK 证明 → 更新根
+
+  这是乐观并发控制（Optimistic Concurrency Control），
+  类似 Solana 的 account locking，但用于压缩状态。
+
+
+13.7 压缩状态的存储架构
+
+  链上（验证器）：
+    - Compressed State Merkle Root（32 bytes，写入区块头）
+    - Nullifier 集合（已消费的压缩账户，防双花）
+    - 最近 N 个 epoch 的 Merkle Root 历史
+
+  链下（RPC 节点 / 索引器）：
+    - 完整压缩账户数据（按地址索引）
+    - Merkle 树的完整结构（256 层 SMT）
+    - 历史状态快照（用于回滚）
+
+  客户端：
+    - 本地缓存最近使用的压缩账户 + Merkle Proof
+    - 交易前从 RPC 节点获取最新 Merkle Root
+
+
+13.8 压缩状态的费用模型
+
+  压缩交易的手续费结构：
+
+  ┌─────────────────────┬──────────────┬──────────────────────────────┐
+  │ 费用项              │ CU           │ 说明                         │
+  ├─────────────────────┼──────────────┼──────────────────────────────┤
+  │ ZK 证明验证         │ ~150,000     │ Groth16 验证（状态转换证明） │
+  │ Merkle Root 更新    │ ~5,000       │ 更新链上 32-byte 根          │
+  │ Nullifier 检查      │ ~1,000       │ 防双花检查                   │
+  │ 压缩交易总计        │ ~156,000     │ 与 T→Z 交易相当              │
+  └─────────────────────┴──────────────┴──────────────────────────────┘
+
+  对比：传统账户修改 ~5,000 CU（无租金），压缩账户修改 ~156,000 CU。
+  虽然 CU 成本更高，但免除了账户租金（rent），对于长期持有的资产，
+  压缩模式更经济。
+
+
+十四、ZK Rollup / zkSVM（可验证链下计算）
+
+
+14.1 目标定位
+
+  ZK Compression 解决「状态存储」问题，ZK Rollup / zkSVM 解决「计算吞吐」问题：
+  
+  当前：
+    - 所有交易在 L1 验证器上串行执行
+    - SVM 解释器逐条执行合约指令
+    - 单链 TPS 受限于验证器算力
+
+  目标：
+    - 大量交易在链下批量处理（zkSVM 链下执行引擎）
+    - 链上只验证一个聚合 ZK 证明
+    - TPS 再提升一个量级（10x-100x）
+
+
+14.2 zkSVM 链下执行引擎
+
+  核心思想：SVM 的执行逻辑搬到链下，执行结果用 ZK 证明在链上验证。
+
+  架构：
+
+    ┌─────────────────────────────────────────────────────────┐
+    │                      L1 验证器                           │
+    │  ┌───────────────────────────────────────────────────┐  │
+    │  │  接收 Rollup Batch Proof                         │  │
+    │  │  ├─ 验证 groth16_verify(batch_proof)              │  │
+    │  │  ├─ 验证通过 → 更新状态根                          │  │
+    │  │  └─ 验证失败 → 拒绝整批                            │  │
+    │  └───────────────────────────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────┘
+                              ↑
+                    batch_proof (ZK proof)
+                              ↑
+    ┌─────────────────────────────────────────────────────────┐
+    │                    zkSVM Prover（链下）                  │
+    │  ┌───────────────────────────────────────────────────┐  │
+    │  │  收集交易 → 排序 → 执行 SVM → 生成状态转换证明     │  │
+    │  │  ├─ 交易 1: transfer(A→B, 100)                    │  │
+    │  │  ├─ 交易 2: swap(DEX, TokenA→TokenB)              │  │
+    │  │  ├─ 交易 3: stake(validator, 1000)                │  │
+    │  │  └─ ... 最多 N 笔交易                             │  │
+    │  └───────────────────────────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────┘
+
+
+14.3 zkSVM 的 ZK 电路设计
+
+  最大的挑战：SVM 执行逻辑非常复杂（数百条指令），直接做 ZK 电路太大。
+
+  分层电路设计（三层）：
+
+  第一层：指令级电路（Instruction-Level Circuit）
+    - 每个 SVM 指令对应一个 ZK 子电路
+    - 例如：add_circuit, mul_circuit, sha256_circuit, ed25519_verify_circuit
+    - 每个子电路验证「给定输入，执行该指令后输出正确」
+
+  第二层：交易级电路（Transaction-Level Circuit）
+    - 将一笔交易的多条指令子电路串联
+    - 验证「给定初始账户状态，执行所有指令后，最终账户状态正确」
+    - 包含费用扣除、签名验证等
+
+  第三层：批处理级电路（Batch-Level Circuit）
+    - 将 N 笔交易的交易级电路聚合
+    - 使用递归证明（Recursive Proof）或 Halo2 风格的累积
+    - 验证「给定初始全局状态，执行 N 笔交易后，全局状态正确」
+
+
+14.4 递归证明聚合
+
+  使用递归 SNARK 将 N 笔交易的证明聚合为 1 个证明：
+
+    proof_1 = prove(tx_1 执行正确)
+    proof_2 = prove(tx_2 执行正确)
+    proof_3 = prove(tx_3 执行正确)
+    
+    aggregated_proof = prove(
+        proof_1.verify() == true AND
+        proof_2.verify() == true AND
+        proof_3.verify() == true AND
+        state_root_3 == apply(state_root_0, [tx_1, tx_2, tx_3])
+    )
+
+  链上验证：只需验证 1 个 aggregated_proof，约 150,000 CU。
+  
+  效果：1000 笔交易 → 链上验证成本不变（~150,000 CU），
+  均摊到每笔交易 ~150 CU，比 L1 直接执行便宜 30x+。
+
+
+14.5 zkSVM 的 Prover 网络
+
+  谁负责生成 zkSVM 证明？这是经济模型的关键：
+
+  方案一：独立 Prover 网络（推荐）
+    - 专门的 Prover 节点运行 zkSVM 执行引擎
+    - 收集交易 → 批量执行 → 生成聚合证明 → 提交到 L1
+    - Prover 节点获得批量交易手续费的一部分
+    - 类似 ETH L2 的 Sequencer + Prover 分离模型
+
+  方案二：验证器兼任 Prover
+    - 当前 Leader 负责生成 zkSVM 证明
+    - 其他验证器只需验证证明
+    - 简单但不公平（Leader 负担过重）
+
+  方案三：用户自证
+    - 每个用户自行生成自己交易的证明
+    - 提交到链上时附带证明
+    - 对用户设备要求高
+
+  推荐方案一，Prover 节点要求：
+    - 高性能 GPU（用于 ZK 证明生成）
+    - 至少 32 GB RAM
+    - 质押一定数量的 Token 作为诚信保证金
+    - 提交无效证明 → 罚没质押
+
+
+14.6 zkSVM 与 L1 的交互
+
+  交易流：
+
+    1. 用户提交交易到 zkSVM Prover 网络（而非 L1 Mempool）
+    2. Prover 收集交易，排序，批量执行
+    3. Prover 生成聚合 ZK 证明
+    4. Prover 提交 batch_proof + state_diff 到 L1
+    5. L1 验证器验证 batch_proof
+    6. 验证通过 → 更新 L1 状态根
+    7. 验证失败 → 拒绝整批，Prover 被罚没
+
+  延迟：
+    - 交易提交到 Prover：即时
+    - Prover 生成证明：~1-5 秒（取决于批量大小和 GPU）
+    - L1 确认：亚秒级（仅验证 1 个 proof）
+    - 总延迟：~2-6 秒（软确认），~1 slot（硬确认）
+
+  与 ETH L2 的区别：
+    - ETH L2 需要等 L1 最终确认（~12 分钟），zkSVM 只需 L1 1 个 slot
+    - ETH L2 有跨链桥延迟，zkSVM 与 L1 共享状态，无桥
+
+
+14.7 zkSVM 的安全性
+
+  安全假设：
+    1. 至少 1 个诚实的 Prover 在运行（活性）
+    2. ZK 电路正确实现了 SVM 语义（安全性）
+    3. L1 验证器正确验证 Groth16 证明
+
+  对抗场景：
+    - 恶意 Prover 提交虚假证明 → Groth16 验证必然失败
+    - Prover 审查交易 → 用户可回退到 L1 直接提交
+    - Prover 离线 → 超时后其他 Prover 接管
+    - ZK 电路有 bug → 紧急冻结 zkSVM，资金不受影响（L1 状态安全）
+
+  逃生舱（Escape Hatch）：
+    如果 zkSVM Prover 网络全部离线或作恶：
+      1. 用户可发起「强制退出」交易到 L1
+      2. L1 验证用户所有权（Ed25519 签名）
+      3. L1 将用户资产从 Rollup 状态转回 L1 普通账户
+      4. 无需 Prover 配合，完全由 L1 保证安全
+
+
+十五、ZK 轻客户端协议（ZK Light Client）
+
+
+15.1 目标
+
+  传统轻客户端需要同步所有区块头，验证 PoS 共识，仍需下载大量数据。
+
+  ZK 轻客户端只需：
+    1. 同步最新的「共识状态证明」（一个 ZK 证明，~128 bytes）
+    2. 验证该证明 → 确信当前链状态正确
+    3. 无需下载任何区块头或交易数据
+
+  效果：
+    - 同步时间：从小时级降低到毫秒级
+    - 数据量：从 GB 级降低到 KB 级
+    - 可在浏览器、手机、嵌入式设备上运行
+
+
+15.2 共识状态证明
+
+  验证链状态的核心是验证「某区块被 ≥ 2/3 质押权重投票通过」。
+
+  传统方式：
+    1. 下载该区块 + 所有投票
+    2. 验证每个投票的签名
+    3. 累加投票权重
+    4. 验证 ≥ 2/3
+
+  ZK 方式：
+    1. 链下生成 ZK 证明：
+       证明「给定验证者集合（已知 Merkle 根）和区块哈希，
+       存在 ≥ 2/3 权重的有效签名投票给了该区块」
+    2. 轻客户端验证该 ZK 证明（~150,000 CU，可在浏览器执行）
+    3. 证明大小 ~128 bytes
+
+
+15.3 轻客户端的 ZK 电路
+
+  公开输入：
+    - validator_set_root: 当前验证者集合的 Merkle 根
+    - block_hash: 目标区块哈希
+    - slot: 目标 slot 号
+
+  隐私输入（witness）：
+    - validators: 验证者列表（公钥 + 质押权重）
+    - merkle_proofs: 每个验证者在 validator_set_root 中的 Merkle 证明
+    - votes: 投票签名列表
+    - total_stake: 总质押权重
+
+  ZK 约束：
+    1. 每个验证者确实在 validator_set_root 的树中（Merkle 验证）
+    2. 每个投票签名有效（Ed25519 验证，签名内容 = block_hash）
+    3. 投票权重之和 ≥ 2/3 * total_stake
+    4. 无重复投票（每个验证者最多 1 票）
+
+
+15.4 轻客户端验证流程
+
+  1. 获取最新验证者集合根（从已知可信源，如硬编码的 checkpoint）
+  2. 获取目标区块的共识状态证明（从 RPC 节点）
+  3. 本地验证 ZK 证明
+  4. 验证通过 → 确信该区块已被共识确认
+  5. 根据区块头中的状态根，验证特定账户/交易
+
+  账户验证：
+    1. 获取区块的状态根
+    2. 获取目标账户的 Merkle 证明（从 RPC 节点）
+    3. 本地验证 Merkle 证明 → 确信账户状态正确
+    4. 无需信任 RPC 节点（Merkle 证明自身保证正确性）
+
+
+15.5 轻客户端的应用场景
+
+  ┌─────────────────────┬──────────────────────────────────────┐
+  │ 场景                │ 说明                                 │
+  ├─────────────────────┼──────────────────────────────────────┤
+  │ 浏览器钱包          │ 无需全节点，直接验证链状态           │
+  │ 手机钱包            │ 轻量同步，流量消耗极小               │
+  │ IoT / 嵌入式设备    │ 仅需验证 ZK 证明即可确认交易         │
+  │ 跨链桥              │ 目标链轻客户端验证源链共识，无需信任  │
+  │ 去中心化预言机      │ 轻客户端验证链上数据，无需信任 RPC   │
+  │ 治理投票            │ 移动端参与治理，无需全节点           │
+  └─────────────────────┴──────────────────────────────────────┘
+
+
+15.6 轻客户端安全模型
+
+  安全假设：
+    1. ZK 电路正确实现了共识验证逻辑
+    2. 初始验证者集合根来自可信 checkpoint
+    3. Groth16 证明系统安全
+
+  不需要信任：
+    - RPC 节点（Merkle 证明自验证）
+    - 验证者（ZK 证明验证 ≥ 2/3 签名）
+    - 区块生产者（ZK 证明验证共识规则）
+
+  抗攻击：
+    - 长程攻击：需要从 checkpoint 开始验证，checkpoint 定期更新
+    - 虚假区块：ZK 证明无法伪造，因为需要 ≥ 2/3 签名
+    - 旧状态：轻客户端检查 slot 号，拒绝旧区块
+
+
+十六、钱包 SDK 与用户体验设计
+
+
+16.1 钱包模式切换设计
+
+  用户视角：一个账户，一个 T-Addr，一个总余额，两种展示模式。
+
+  ┌───────────────────────────────────────────────────────────┐
+  │                      钱包主界面                            │
+  │  ┌─────────────────────────────────────────────────────┐  │
+  │  │  账户：7xJN...aBcD  （你的唯一 T-Addr）              │  │
+  │  │  总余额：1,000 SOL                                  │  │
+  │  │  ├─ 透明余额：500 SOL  （公开可见）                 │  │
+  │  │  └─ 隐私余额：500 SOL  （ZK 保护，不可见）           │  │
+  │  └─────────────────────────────────────────────────────┘  │
+  │                                                           │
+  │  当前模式：[ 透明 ○────● 隐私 ]                          │
+  │                                                           │
+  │  ┌─────────────────────────────────────────────────────┐  │
+  │  │  发送                                                │  │
+  │  │  金额：[________] SOL                                │  │
+  │  │  接收方：[________] T-Addr 或 S-Meta                │  │
+  │  │                                                     │  │
+  │  │  □ 接收方也是隐私模式（使用 S-Meta → Z→Z 模式）     │  │
+  │  │  □ 使用交易分片（大额拆分多笔）                      │  │
+  │  │  □ 附带混淆交易（增强隐私）                          │  │
+  │  │                                                     │  │
+  │  │  预估手续费：0.006 SOL（ZK 验证费）                  │  │
+  │  │  预估确认时间：< 1 秒                                │  │
+  │  │                                                     │  │
+  │  │  [ 发送（隐私模式）]                                 │  │
+  │  └─────────────────────────────────────────────────────┘  │
+  │                                                           │
+  │  ┌─────────────────────────────────────────────────────┐  │
+  │  │  收款                                                │  │
+  │  │  你的 T-Addr：7xJN...aBcD  （公开收款用）            │  │
+  │  │  你的 S-Meta：sm1...xyz   （隐私收款用，可分享）     │  │
+  │  │  [ 复制 T-Addr ]  [ 复制 S-Meta ]                  │  │
+  │  └─────────────────────────────────────────────────────┘  │
+  └───────────────────────────────────────────────────────────┘
+
+
+16.2 密钥管理 UI
+
+  用户不需要理解 spending_key / view_key 的密码学细节，
+  钱包在后台自动管理，但提供高级选项：
+
+  基础模式（默认）：
+    - 用户只看到 12 词助记词（BIP-39）
+    - 钱包自动派生所有 ZK 密钥
+    - 透明地址和隐私地址自动关联
+
+  高级模式（可选展开）：
+    - 查看密钥导出（用于授权会计师/审计师）
+    - 审计密钥查看（用于监管合规）
+    - 一次性隐身地址列表（高级用户审计用）
+
+  密钥备份提示：
+    ┌─────────────────────────────────────────────────────┐
+    │  ⚠️ 安全提醒                                        │
+    │                                                     │
+    │  请安全备份您的 12 词助记词。                        │
+    │  丢失助记词 = 永久丢失所有资产（包括隐私资产）。     │
+    │                                                     │
+    │  隐私资产的恢复需要助记词 + 链上扫描，               │
+    │  恢复过程可能需要几分钟。                            │
+    │                                                     │
+    │  [ 导出助记词 ]  [ 稍后再说 ]                       │
+    └─────────────────────────────────────────────────────┘
+
+
+16.3 交易构建流程（隐私模式）
+
+  用户点击「发送」后，钱包自动执行：
+
+    1. 扫描链上未消费的 commitment（找到可用余额）
+    2. 生成接收方一次性隐身地址
+    3. 本地生成 ZK 证明（~0.5s，CPU）
+       ┌─────────────────────────────────────────────┐
+       │  正在生成隐私证明...                        │
+       │  ████████████████████░░░░  80%              │
+       │  这可能需要几秒钟，请耐心等待               │
+       └─────────────────────────────────────────────┘
+    4. 构造 ConfidentialTransaction
+    5. 广播到网络
+
+  如果金额较大，自动建议：
+    ┌─────────────────────────────────────────────┐
+    │  💡 隐私增强建议                             │
+    │                                             │
+    │  您即将发送 10,000 SOL（大额交易）。         │
+    │                                             │
+    │  建议启用：                                  │
+    │  ☑ 交易分片（拆分为 10 笔随机金额）          │
+    │  ☑ 混淆交易（附带 2 笔 dummy 交易）          │
+    │  ☑ 随机延迟（每笔间隔 1-10 秒）             │
+    │                                             │
+    │  这将增强隐私，但总手续费会增加 ~20%。       │
+    │                                             │
+    │  [ 使用建议 ]  [ 直接发送 ]                 │
+    └─────────────────────────────────────────────┘
+
+
+16.4 接收隐私资金
+
+  接收方无需做任何操作，钱包自动扫描：
+
+    1. 钱包后台线程定期扫描链上新的 commitment
+    2. 使用 incoming_view_key 识别发给自己的交易
+    3. 解密金额 → 更新余额显示
+    4. 通知用户
+
+  通知示例：
+    ┌─────────────────────────────────────────────┐
+    │  📥 收到隐私转账                             │
+    │                                             │
+    │  金额：*** SOL（隐私保护）                   │
+    │  来自：***（隐私保护）                       │
+    │  时间：2026-06-12 15:03:00                   │
+    │                                             │
+    │  [ 查看详情（需要 view_key）]               │
+    └─────────────────────────────────────────────┘
+
+
+16.5 隐私冷却期提示
+
+  当用户从透明模式进入隐私模式再退出时，钱包提示冷却期：
+
+    ┌─────────────────────────────────────────────┐
+    │  🕐 隐私冷却期                               │
+    │                                             │
+    │  您的资金刚进入隐私域（2 个 slot 前）。      │
+    │                                             │
+    │  立即退出可能暴露关联关系。                  │
+    │  建议在隐私域停留至少 10 个 slot（约 4 秒）  │
+    │  并在隐私域内至少完成 1 次 Z→Z 转账。       │
+    │                                             │
+    │  [ 等待 ]  [ 仍要退出 ]                     │
+    └─────────────────────────────────────────────┘
+
+
+16.6 钱包 SDK API 设计
+
+  为第三方钱包和 DApp 提供统一的 ZK 操作接口：
+
+  // === 密钥管理 ===
+  func GenerateKeySetFromMnemonic(mnemonic string, password string) (*KeySet, error)
+  func DeriveTAddr(spendKey []byte) (*PublicKey, error)           // 透明主地址
+  func DeriveSMeta(scanKey, spendKey []byte) (*SMetaAddress, error) // 隐身元地址
+
+  // === 隐身地址（Stealth Address）===
+  func GenerateStealthAddress(receiverSMeta *SMetaAddress) (*PublicKey, []byte, error)
+      // 发送方调用：生成一次性地址 P 和随机数 r
+  func ScanStealthAddresses(scanKey []byte, fromSlot uint64) ([]StealthTx, error)
+      // 接收方调用：扫描链上 P，发现发给自己的交易
+  func RecoverStealthPrivateKey(scanKey, spendKey []byte, r []byte) ([]byte, error)
+      // 接收方调用：恢复 P 对应的私钥
+
+  // === 交易构建 ===
+  func BuildTtoTTransaction(from, to *PublicKey, amount uint64) (*Transaction, error)
+  func BuildTtoZTransaction(from *PublicKey, toSMeta *SMetaAddress, amount uint64) (*Transaction, error)
+  func BuildZtoTTransaction(fromStealthPrivKey []byte, to *PublicKey, amount uint64) (*Transaction, error)
+  func BuildZtoZTransaction(fromStealthPrivKey []byte, toSMeta *SMetaAddress, amount uint64) (*Transaction, error)
+
+  // === 证明生成（链下）===
+  func GenerateTtoZProof(params TtoZWitness) (*ZKProof, error)
+  func GenerateZtoTProof(params ZtoTWitness) (*ZKProof, error)
+  func GenerateZtoZProof(params ZtoZWitness) (*ZKProof, error)
+
+  // === 余额查询 ===
+  func GetTransparentBalance(tAddr *PublicKey) (uint64, error)
+  func GetPrivacyBalance(tAddr *PublicKey, viewKey []byte) (uint64, error)
+  func GetTotalBalance(tAddr *PublicKey, viewKey []byte) (uint64, error)
+
+  // === 合规接口 ===
+  func ExportViewKey(keySet *KeySet, password string) ([]byte, error)
+  func GenerateAuditProof(tx Transaction, auditKey []byte) (*AuditProof, error)
+
+
+16.7 测试网与主网上线流程
+
+
+16.7.1 测试网阶段
+
+  阶段一：内部 Devnet（开发网）
+    - 单节点或少量节点运行
+    - ZK 电路未经正式审计
+    - 使用测试用 Trusted Setup（非正式仪式）
+    - 允许频繁重置状态
+    - 目标：验证基本功能正确性
+
+  阶段二：公共 Testnet（测试网）
+    - 多节点运行，模拟主网环境
+    - ZK 电路已完成内部审计
+    - 正式 Trusted Setup 仪式（多机构参与）
+    - 公开邀请社区测试
+    - Bug Bounty 计划启动
+    - 目标：压力测试 + 安全测试 + 社区反馈
+
+  阶段三：Canary Network（金丝雀网络）
+    - 小规模真实资产（有经济价值）
+    - 全部功能启用
+    - 第三方安全审计完成
+    - 运行 ≥ 3 个月无重大事故
+    - 目标：真实环境验证
+
+
+16.7.2 主网上线条件
+
+  硬性条件（必须全部满足）：
+    - [ ] ZK 电路第三方安全审计通过（无 Critical/High 漏洞）
+    - [ ] Trusted Setup 仪式完成，toxic waste 销毁记录可验证
+    - [ ] Testnet 运行 ≥ 3 个月，无状态损坏事故
+    - [ ] Bug Bounty 运行 ≥ 2 个月，无未修复的 Critical 漏洞
+    - [ ] 性能基准测试达标（ZK 验证 < 200,000 CU）
+    - [ ] 跨模式转账原子性测试通过（含崩溃恢复）
+    - [ ] 形式化验证覆盖核心电路（所有权、等值、范围）
+    - [ ] 审计密钥体系完整测试通过
+    - [ ] 钱包 SDK 完成，至少 2 个独立钱包集成
+
+  软性条件（建议满足）：
+    - [ ] 至少 5 个独立机构参与 Trusted Setup
+    - [ ] 社区治理投票通过 ZK 功能激活
+    - [ ] 至少 3 个交易所完成 ZK 地址集成测试
+
+
+16.7.3 主网上线流程
+
+  第一步：治理提案
+    - 提交「ZK 功能激活」治理提案
+    - 包含：电路审计报告、Trusted Setup 记录、测试报告
+    - 投票周期：1 个 epoch（约 2 天）
+
+  第二步：验证者升级
+    - 提案通过后，验证者有 1 个 epoch 的宽限期升级节点
+    - 新版本包含 ZK 验证预编译 + 双状态树
+    - 未升级的验证者将被 slash（无法验证新区块）
+
+  第三步：功能激活
+    - 在指定 slot 高度激活 ZK 功能
+    - 激活前：所有交易必须是透明模式
+    - 激活后：用户可创建隐私账户，发起 ZK 交易
+
+  第四步：监控期
+    - 激活后 7 天内为「紧急冻结期」
+    - 如发现严重问题，治理可紧急投票冻结 ZK 功能
+    - 7 天后，ZK 功能进入正常运营状态
+
+
+16.7.4 回滚预案
+
+  如果主网上线后发现严重漏洞：
+
+  方案 A：冻结 ZK 功能（首选）
+    - 治理紧急投票 → 冻结 ZK 验证
+    - 透明交易不受影响
+    - 隐私账户余额保留在链上
+    - 开放「紧急提现通道」：隐私 → 透明（需治理批准）
+
+  方案 B：状态回滚（最后手段）
+    - 回滚到 ZK 激活前的状态
+    - 所有隐私交易被撤销
+    - 对用户体验影响极大，仅在状态损坏时使用
+
+
+十七、经济模型
+
+
+17.1 ZK 证明的定价机制
+
+  ZK 证明的 CU 消耗由链上治理动态调整：
+
+  定价原则：
+    1. 覆盖验证者的实际计算成本
+    2. 防止垃圾交易（无效证明攻击）
+    3. 保持与透明交易的竞争力
+
+  动态调整机制：
+    - 每 epoch 统计 ZK 验证的平均时间
+    - 如果实际验证时间偏离定价假设 ±20%，触发调整提案
+    - 治理投票通过后，下一 epoch 生效
+
+
+17.2 验证者激励
+
+  验证者从 ZK 交易中获得额外手续费：
+
+  ┌──────────────────────┬──────────────┬────────────────────────┐
+  │ 收入来源             │ 分配比例     │ 说明                   │
+  ├──────────────────────┼──────────────┼────────────────────────┤
+  │ ZK 交易 base fee     │ 50% 烧毁     │ 类似 EIP-1559          │
+  │                      │ 50% 验证者   │ 补偿 ZK 验证计算成本   │
+  │ Priority fee         │ 100% 验证者  │ 用户竞价优先打包       │
+  │ 批量证明聚合收益     │ 100% 验证者  │ 节省的 CU 差价归验证者 │
+  └──────────────────────┴──────────────┴────────────────────────┘
+
+  批量证明聚合收益说明：
+    - 单独验证 10 个 Z→Z 证明：10 × 150,000 = 1,500,000 CU 收入
+    - 批量验证 10 个 Z→Z 证明：250,000 CU 实际消耗
+    - 差价 1,250,000 CU 归验证者（激励批量处理）
+
+
+17.3 zkSVM Prover 经济模型
+
+  Prover 节点的激励：
+
+  收入：
+    - Rollup 批量交易手续费（用户支付的 L2 费用）
+    - Prover 奖励（通胀奖励的一部分）
+
+  成本：
+    - GPU 硬件成本
+    - ZK 证明生成的电费
+    - L1 提交 batch_proof 的 gas 费
+
+  质押：
+    - Prover 必须质押 Token 作为诚信保证金
+    - 提交无效证明 → 罚没质押金
+    - 长期离线 → 部分罚没
+
+  收益估算（10,000 TPS 场景）：
+    - 每笔交易 L2 费用：~0.00001 SOL
+    - 每天交易量：864,000,000 笔
+    - 每天总费用：~8,640 SOL
+    - 假设 10 个 Prover 竞争 → 每个 ~864 SOL/天
+
+
+17.4 隐私交易的 Token 经济学
+
+  不发行新的隐私 Token，使用原生 Token 支付所有费用：
+
+    1. 手续费始终用原生 Token 支付（公开扣除）
+    2. 不引入「隐私 Gas Token」避免复杂性
+    3. 隐私余额也可以支付手续费（通过手续费子账户）
+    4. 不增加额外的通胀来补贴 ZK 验证
+
+  长期可持续性：
+    - ZK 验证的硬件成本随技术进步而降低
+    - CU 定价随成本降低而调低
+    - 目标：ZK 交易费用始终是透明交易的 30-60x，不随时间增长
+
+
+十八、与现有 Go 代码库的具体对接契约
+
+
+18.1 需要修改的现有文件
+
+  structure/ 层（修改现有文件）：
+    ├── account.go          ← Account 新增 PrivacyBalance 字段（非新增类型）
+    ├── transaction.go      ← 新增 TransferMode 枚举 + FromStealthAddr/ToStealthAddr
+    ├── block.go            ← BlockHeader 新增 3 个 ZK 相关根哈希（StateRoot 已有）
+    ├── builtin_program.go  ← 新增 ZKProgram 内置地址
+    ├── instruction.go      ← 新增 ZKInstructionType
+    └── fee.go              ← 新增 ZK 相关 CU 常量
+
+  database/ 层（修改现有文件）：
+    ├── interface.go        ← Table 枚举新增 3 个 ZK 表
+    └── key_codec.go        ← 新增 ZK 表的键前缀编码
+
+  p2p/ 层（修改现有文件）：
+    ├── protocol.go         ← ProtocolID 枚举新增 5 个 ZK 协议号
+    └── protocol_registry.go← 注册 ZK 协议处理器
+
+  schema/ 层（修改现有文件）：
+    └── registry.go         ← 注册 ZK Schema（PrivacyBalance, ZKProof 等）
+
+  consensus/ 层（修改现有文件）：
+    ├── slot.go             ← Vote 结构新增 ZK 字段
+    └── errors.go           ← 新增 ZK 相关错误类型
+
+  config/ 层（修改现有文件）：
+    ├── config.go           ← AppConfig 新增 ZKConfig 字段
+    └── 各环境 yaml          ← 新增 ZK 配置段
+
+  cmd/ 层（修改现有文件）：
+    └── main.go             ← 启动时初始化 ZK 预编译
+
+
+18.2 接口契约（Go interface）
+
+  新增的 ZK 相关接口，确保模块间松耦合：
+
+  // database/interface.go
+  type ZKStore interface {
+      // 隐私余额（存储在 Account 内，不是独立表）
+      GetPrivacyBalance(tAddr []byte) (*PrivacyBalance, error)
+      PutPrivacyBalance(tAddr []byte, balance *PrivacyBalance) error
+      
+      // Nullifier 防双花
+      HasNullifier(nullifier []byte) (bool, error)
+      PutNullifier(nullifier []byte, slot uint64) error
+      
+      // Commitment 集合
+      HasCommitment(commitment []byte) (bool, error)
+      PutCommitment(commitment []byte, slot uint64) error
+      
+      // 隐身地址索引（用于接收方扫描）
+      GetStealthAddressTxList(stealthAddr []byte) ([]Commitment, error)
+      PutStealthAddressCommitment(stealthAddr, commitment []byte, slot uint64) error
+      
+      // Merkle 树（ZK Compression）
+      GetMerkleRoot() (Hash, error)
+      UpdateMerkleRoot(newRoot Hash) error
+      GetMerkleProof(leafIndex uint64) ([]Hash, error)
+  }
+
+  // 验证器接口
+  type ZKVerifier interface {
+      VerifyProof(proof *ZKProof, vk *VerifyingKey, inputs [][]byte) (bool, error)
+      VerifyBatch(proofs []*ZKProof, vks []*VerifyingKey, inputs [][]byte) (bool, error)
+  }
+
+  // 加密接口
+  type ConfidentialCrypto interface {
+      Encrypt(publicKey, plaintext []byte) (ciphertext []byte, err error)
+      Decrypt(privateKey, ciphertext []byte) (plaintext []byte, err error)
+      AddCiphertexts(a, b []byte) ([]byte, error)  // 同态加法
+  }
+
+  // 隐身地址接口
+  type StealthAddress interface {
+      Generate(receiverSMeta *SMetaAddress) (stealthAddr PublicKey, r []byte, err error)
+      Scan(scanKey []byte, fromSlot uint64) ([]StealthTx, error)
+      RecoverPrivateKey(scanKey, spendKey []byte, r []byte) ([]byte, error)
+  }
+
+
+18.3 配置契约
+
+  # config/xxx.yaml 中新增的 ZK 配置段
+  zk:
+    enable: true                          # 是否启用 ZK 功能
+    default_curve: "BN254"                # 默认椭圆曲线
+    proof_system: "Groth16"               # 默认证明系统
+    max_proof_size: 131072                # 最大证明大小 (128KB)
+    max_public_inputs: 64                 # 最大公开输入数
+    max_zk_tx_per_block: 100              # 每区块最大 ZK 交易数
+    
+    # 预编译配置
+    precompile:
+      groth16_verify:
+        base_cost: 100                    # 基础 CU
+        per_pairing_cost: 5000            # 每次配对 CU
+    
+    # 状态压缩
+    compression:
+      enable: false                       # 初期关闭
+      merkle_depth: 256                   # SMT 深度
+      hash_function: "Poseidon"           # ZK 友好哈希
+    
+    # 审计密钥
+    audit:
+      key_path: "/secure/audit_key.pem"   # 审计密钥路径
+      rotation_interval_epochs: 180       # 轮换间隔
+    
+    # 电路文件
+    circuits_dir: "/data/zk_circuits/"    # ZK 电路文件目录
+
+
+18.4 错误码定义
+
+  // consensus/errors.go 或新建 structure/zk_errors.go
+  var (
+      ErrZKProofInvalid          = errors.New("ZK proof verification failed")
+      ErrZKProofTooLarge         = errors.New("ZK proof exceeds max size")
+      ErrZKNullifierDuplicate    = errors.New("nullifier already spent (double spend attempt)")
+      ErrZKCommitmentNotFound    = errors.New("commitment not found in set")
+      ErrZKInsufficientBalance   = errors.New("confidential balance insufficient")
+      ErrZKInvalidWitness        = errors.New("ZK witness does not satisfy constraints")
+      ErrZKCircuitNotRegistered  = errors.New("ZK circuit not registered")
+      ErrZKMerkleProofInvalid    = errors.New("Merkle proof verification failed")
+      ErrZKCompressedStateConflict = errors.New("compressed state conflict (concurrent update)")
+      ErrZKAuditKeyExpired       = errors.New("audit key expired")
+      ErrZKFeatureFrozen         = errors.New("ZK feature is currently frozen")
+  )
+
+
+18.5 编码 / 解码契约
+
+  所有 ZK 类型必须实现以下接口：
+
+  // Borsh 编解码
+  type BorshCodec interface {
+      MarshalBorsh() ([]byte, error)
+      UnmarshalBorsh(data []byte) error
+  }
+
+  // 业务校验
+  type Validator interface {
+      Validate() error
+  }
+
+  // Schema 注册
+  type SchemaRegistrar interface {
+      SchemaKey() SchemaKey  // {Type, Version, Codec}
+  }
+
+  // 示例：ZKProof 实现
+  func (p *ZKProof) MarshalBorsh() ([]byte, error) { ... }
+  func (p *ZKProof) UnmarshalBorsh(data []byte) error { ... }
+  func (p *ZKProof) Validate() error { ... }
+  func (p *ZKProof) SchemaKey() SchemaKey {
+      return SchemaKey{Type: "zk.proof", Version: p.Version, Codec: CodecBorsh}
+  }
+
+
+18.6 文档版本更新
+
+  文档版本：v3.0
+  最后更新：2026-06-12
+  变更内容：
+    - v1.0: 初始版本（账户模型 + 地址体系 + 交易模式 + 密码学 + 合规 + 性能 + 电路 + 实施 + 安全 + 测试 + 攻击防御 + 治理）
+    - v2.0: 新增 ZK Compression / zkSVM / 轻客户端 / 钱包 SDK / 上线流程 / 经济模型 / Go 对接契约
+    - v3.0: 重大重构——从双账户模型改为单账户双余额模型
+      * 账户：一个 Account = Lamports（透明）+ PrivacyBalance（隐私）
+      * 地址：T-Addr（唯一身份）+ S-Meta（隐身元地址）+ P（一次性隐身地址）
+      * 密钥：SpendKey + ScanKey + ViewKey + AuditKey，一套种子派生
+      * 状态树：从双树合并为统一状态树
+      * 钱包：一个账户一个 T-Addr，透明/隐私只是展示模式切换
+
+
+十九、总结
+
+
+本项目 ZK 方案的完整版图：
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        ZK 完整版图                               │
+  │                                                                 │
+  │  账户模型：单账户双余额                                          │
+  │    ├─ 一个用户 = 一个 T-Addr（唯一身份）                         │
+  │    ├─ 一个 Account = Lamports（透明余额）+ PrivacyBalance（隐私） │
+  │    └─ 透明↔隐私一键互转（同一账户内，原子性天然保证）            │
+  │                                                                 │
+  │  地址体系：三层地址                                              │
+  │    ├─ T-Addr（透明主地址）：唯一身份，DApp/交易所兼容            │
+  │    ├─ S-Meta（隐身元地址）：可公开发布，用于隐私收款             │
+  │    └─ P（一次性隐身地址）：每笔交易生成，不可链接                 │
+  │                                                                 │
+  │  密钥体系：一套密钥，统一派生                                    │
+  │    ├─ SpendKey（签名授权）→ ScanKey（扫描入账）                  │
+  │    ├─ ViewKey（解密金额）→ 可授权会计/审计师                    │
+  │    └─ AuditKey（监管审计）→ 多签 + 司法流程                      │
+  │                                                                 │
+  │  交易模式：四种全覆盖                                            │
+  │    ├─ T→T：透明转账，~5,000 CU，最快                             │
+  │    ├─ T→Z：透明→隐私，~150,000 CU，Lamports→PrivacyBalance      │
+  │    ├─ Z→T：隐私→透明，~150,000 CU，PrivacyBalance→Lamports      │
+  │    └─ Z→Z：全隐私，~300,000 CU，全隐藏                           │
+  │                                                                 │
+  │  第一层：隐私交易（Confidential Transfer）                       │
+  │    ├─ ElGamal 同态加密 + Pedersen 承诺                          │
+  │    └─ Groth16 ZK 证明（所有权 + 范围 + 等值 + nullifier）       │
+  │                                                                 │
+  │  第二层：隐私合约（Confidential Program）                        │
+  │    ├─ 合约内发起 ZK 交易 + 隐私 DeFi                            │
+  │    └─ 隐私 DEX、借贷、批量支付                                   │
+  │                                                                 │
+  │  第三层：状态压缩（ZK Compression）                              │
+  │    ├─ 链上只存 Merkle 根，存储降 99%                             │
+  │    └─ 租金降 1000x                                               │
+  │                                                                 │
+  │  第四层：可验证链下计算（zkSVM）                                 │
+  │    ├─ SVM 链下执行 + ZK 证明 + 递归聚合                         │
+  │    └─ TPS 提升 10-100x                                           │
+  │                                                                 │
+  │  第五层：轻客户端（ZK Light Client）                             │
+  │    ├─ 共识状态证明（毫秒级同步）                                 │
+  │    └─ 浏览器/手机/嵌入式可用                                     │
+  │                                                                 │
+  │  配套基础设施：                                                  │
+  │    ├─ 钱包 SDK + 用户体验（一个账户，两种模式）                  │
+  │    ├─ 审计兜底（View Key + Audit Key + 选择性披露）             │
+  │    ├─ 防攻击体系（双花 + 通胀 + 隐私破解 + DoS + 量子）        │
+  │    ├─ 治理与升级（电路升级 + 参数调整 + 紧急冻结）              │
+  │    ├─ 经济模型（ZK 定价 + 验证者激励 + Prover 激励）            │
+  │    └─ 测试网/主网上线流程                                       │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+
+为什么这是最优？
+
+  ✅ 地址隐私：隐私交易无固定地址（每次生成 P），链上无法关联
+  ✅ 金额隐私：PrivacyBalance 加密 + ZK 证明，金额隐藏
+  ✅ 透明可用：T-Addr 兼容所有 DApp，与普通 Solana 钱包完全一样
+  ✅ 身份统一：一套密钥管理，一个 T-Addr，可互转、可审计
+  ✅ 高性能：透明交易无 ZK 开销（~5,000 CU），隐私交易链下证明、链上轻验
+
+一句话总结：
+
+  不是两条链，不是两个账户，是一个账户、两种余额、用户自选透明或隐私。
+  透明交易和普通链一样快，隐私交易链上只验证明不看金额。
+  一个 T-Addr 走天下，S-Meta 保护隐私收款，P 地址保证不可追踪。
+  状态压缩解决存储膨胀，zkSVM 解决计算吞吐，
+  轻客户端解决接入门槛，审计密钥解决合规监管。
+
+  所有 ZK 能力作为 L1 原语从第一天就嵌入，
+  不留后路，不打补丁，不外包给 L2。
+
+
+
