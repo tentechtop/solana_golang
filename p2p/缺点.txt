@@ -1,0 +1,12 @@
+错误处理可更精细：部分地方用 fmt.Errorf 包装错误，但没有定义结构化的错误类型（如 type TimeoutError struct{}），调用方难以做精确的错误分支判断。
+
+Context 传播：虽然有 ctx context.Context 参数，但部分关键路径上超时控制不够明确，可能存在 goroutine 泄漏风险。
+
+缺少 circuit breaker 和 backpressure 机制：当对端变慢或不可达时，缺少熔断和背压控制。
+
+缺少单元测试：P2P 目录 57 个 Go 文件，但没有看到对应的 _test.go 文件。对于网络框架这种核心基础设施，测试覆盖率很重要。
+
+
+需要既支持QUIC也支持TCP
+
+需要从获取的节点知道对方的默认协议
