@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -37,7 +38,10 @@ func (host *Host) handleHeartbeatMessage(ctx context.Context, connection Connect
 		return true
 	}
 	if err := host.writeConnectionMessage(ctx, connection, message.FromPeerID, response); err != nil {
-		host.recordConnectionError(connection, err)
+		host.logger.Warn("p2p heartbeat response failed",
+			slog.String("peer_id", message.FromPeerID),
+			slog.Any("error", err),
+		)
 	}
 	return true
 }
@@ -58,9 +62,13 @@ func (host *Host) heartbeatOnce(ctx context.Context) {
 		}
 		message.ToPeerID = peerID
 		writeContext, cancel := context.WithTimeout(ctx, host.dialTimeout)
-		err = host.writeConnectionMessage(writeContext, connection, peerID, message)
+		err = host.writePeerMessage(writeContext, peerID, connection, message)
 		cancel()
 		if err != nil {
+			if errors.Is(err, ErrWriteQueueFull) {
+				host.logger.Warn("p2p heartbeat skipped by write backpressure", slog.String("peer_id", peerID), slog.Any("error", err))
+				continue
+			}
 			host.logger.Warn("p2p heartbeat failed", slog.String("peer_id", peerID), slog.Any("error", err))
 			host.closePeerConnection(peerID)
 			continue

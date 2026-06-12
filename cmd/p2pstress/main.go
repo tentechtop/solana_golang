@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -52,10 +53,12 @@ type stressConfig struct {
 	requestTimeout  time.Duration
 	reportInterval  time.Duration
 	startDelay      time.Duration
+	linger          time.Duration
 	warmup          bool
 	maxRequests     uint64
 	maxPeers        int
 	maxConnections  int
+	maxMessageSize  int
 	writeQueueSize  int
 	protocolWorkers int
 	serverDelay     time.Duration
@@ -113,7 +116,7 @@ func run() error {
 	rootContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := registerStressHandler(host, identity.PeerID, config.serverDelay); err != nil {
+	if err := registerStressHandler(host, identity.PeerID, config.serverDelay, config.maxMessageSize); err != nil {
 		return err
 	}
 	go func() {
@@ -151,6 +154,7 @@ func run() error {
 		slog.Int("targets", len(targetPeerIDs)),
 		slog.Int("concurrency", config.concurrency),
 		slog.Int("payload_bytes", config.payloadBytes),
+		slog.Int("max_message_size", config.maxMessageSize),
 		slog.Int("rate_limit", config.rateLimit),
 		slog.Int("inbound_rate_limit", config.inboundRate),
 		slog.Bool("warmup", config.warmup),
@@ -174,7 +178,14 @@ func run() error {
 		)
 	}
 
-	return runLoad(rootContext, host, identity.PeerID, targetPeerIDs, config, logger)
+	loadErr := runLoad(rootContext, host, identity.PeerID, targetPeerIDs, config, logger)
+	if config.linger > 0 {
+		select {
+		case <-time.After(config.linger):
+		case <-rootContext.Done():
+		}
+	}
+	return loadErr
 }
 
 func parseConfig() (stressConfig, error) {
@@ -193,11 +204,13 @@ func parseConfig() (stressConfig, error) {
 	requestTimeout := flag.Duration("request-timeout", defaultRequestTimeout, "request timeout")
 	reportInterval := flag.Duration("report-interval", defaultReportInterval, "report interval")
 	startDelay := flag.Duration("start-delay", 0, "delay before load starts")
+	linger := flag.Duration("linger", 0, "keep serving after load finishes")
 	warmup := flag.Bool("warmup", false, "dial targets before load starts")
 	maxRequests := flag.Uint64("max-requests", 0, "stop after total requests; 0 disables limit")
 	maxPeers := flag.Int("max-peers", 512, "max peer count")
 	maxConnections := flag.Int("max-connections", 512, "max connection count")
 	writeQueueSize := flag.Int("write-queue", 4096, "async write queue size")
+	maxMessageSize := flag.Int("max-message-size", p2p.DefaultMaxMessageSize, "max p2p message size")
 	protocolWorkers := flag.Int("protocol-workers", 0, "protocol worker count; 0 uses default")
 	serverDelay := flag.Duration("server-delay", 0, "server handler artificial delay")
 	inboundRate := flag.Int("inbound-rate-limit", 0, "max inbound messages per second; 0 uses p2p default")
@@ -211,7 +224,10 @@ func parseConfig() (stressConfig, error) {
 	if *port < 1 || *port > 65535 {
 		return stressConfig{}, fmt.Errorf("invalid port %d", *port)
 	}
-	if *payloadBytes < stressPayloadHeaderSize || *payloadBytes > p2p.DefaultMaxMessageSize/2 {
+	if *maxMessageSize <= 0 || *maxMessageSize > p2p.MaxConfigurableMessageSize {
+		return stressConfig{}, fmt.Errorf("invalid max message size %d", *maxMessageSize)
+	}
+	if *payloadBytes < stressPayloadHeaderSize || *payloadBytes > maxStressPayloadBytes(*maxMessageSize) {
 		return stressConfig{}, fmt.Errorf("invalid payload size %d", *payloadBytes)
 	}
 	if *rateLimit < 0 {
@@ -236,10 +252,12 @@ func parseConfig() (stressConfig, error) {
 		requestTimeout:  *requestTimeout,
 		reportInterval:  *reportInterval,
 		startDelay:      *startDelay,
+		linger:          *linger,
 		warmup:          *warmup,
 		maxRequests:     *maxRequests,
 		maxPeers:        *maxPeers,
 		maxConnections:  *maxConnections,
+		maxMessageSize:  *maxMessageSize,
 		writeQueueSize:  *writeQueueSize,
 		protocolWorkers: *protocolWorkers,
 		serverDelay:     *serverDelay,
@@ -328,6 +346,7 @@ func newStressHost(
 		MaxConnections:      config.maxConnections,
 		MaxPendingInbound:   config.maxConnections,
 		MaxConnectionsPerIP: config.maxConnections,
+		MaxMessageSize:      config.maxMessageSize,
 		AsyncWrite: p2p.AsyncWriteConfig{
 			QueueSize:    config.writeQueueSize,
 			WriteTimeout: config.requestTimeout,
@@ -352,7 +371,7 @@ func newStressHost(
 	return host, listenAddress, nil
 }
 
-func registerStressHandler(host *p2p.Host, peerID string, delay time.Duration) error {
+func registerStressHandler(host *p2p.Host, peerID string, delay time.Duration, maxMessageSize int) error {
 	spec := p2p.ProtocolSpec{
 		ID:          stressProtocolID,
 		Name:        "/p2p/stress/request/1.0.0",
@@ -367,7 +386,7 @@ func registerStressHandler(host *p2p.Host, peerID string, delay time.Duration) e
 				return p2p.Message{}, ctx.Err()
 			}
 		}
-		response, err := p2p.NewResponseMessage(peerID, stressProtocolID, message.ID, message.Payload)
+		response, err := p2p.NewResponseMessageWithMaxSize(peerID, stressProtocolID, message.ID, message.Payload, maxMessageSize)
 		if err != nil {
 			return p2p.Message{}, err
 		}
@@ -555,7 +574,7 @@ func stressWorker(
 		targetPeerID := targetPeerIDs[int(requestNumber)%len(targetPeerIDs)]
 		startedAt := time.Now()
 		fillPayload(payload, uint64(workerID), requestNumber, startedAt)
-		request, err := p2p.NewRequestMessage(localPeerID, stressProtocolID, payload)
+		request, err := p2p.NewRequestMessageWithMaxSize(localPeerID, stressProtocolID, payload, config.maxMessageSize)
 		if err != nil {
 			stats.recordError(err)
 			continue
@@ -590,12 +609,20 @@ func samePayload(expected []byte, actual []byte) bool {
 	if len(expected) != len(actual) {
 		return false
 	}
-	for index := range expected {
-		if expected[index] != actual[index] {
-			return false
-		}
+	return bytes.Equal(expected, actual)
+}
+
+func maxStressPayloadBytes(maxMessageSize int) int {
+	const protocolOverheadReserve = 64 * 1024
+	normalizedMaxMessageSize := maxMessageSize
+	if normalizedMaxMessageSize > p2p.MaxConfigurableMessageSize {
+		normalizedMaxMessageSize = p2p.MaxConfigurableMessageSize
 	}
-	return true
+	limit := normalizedMaxMessageSize - protocolOverheadReserve
+	if limit < stressPayloadHeaderSize {
+		return 0
+	}
+	return limit
 }
 
 func reportLoop(
@@ -639,6 +666,7 @@ func printSummary(stats *stressStats, config stressConfig, logger *slog.Logger) 
 		slog.Duration("duration", time.Since(stats.startedAt)),
 		slog.Int("concurrency", config.concurrency),
 		slog.Int("payload_bytes", config.payloadBytes),
+		slog.Int("max_message_size", config.maxMessageSize),
 		slog.Int("rate_limit", config.rateLimit),
 		slog.Int("inbound_rate_limit", config.inboundRate),
 		slog.Bool("warmup", config.warmup),

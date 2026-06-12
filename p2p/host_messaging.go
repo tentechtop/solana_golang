@@ -30,7 +30,7 @@ func (host *Host) Send(ctx context.Context, peerID string, message Message) erro
 	if err != nil {
 		return err
 	}
-	return host.writeConnectionMessage(ctx, connection, peerID, outbound)
+	return host.writePeerMessage(ctx, peerID, connection, outbound)
 }
 
 // Broadcast 广播消息 + 对多个节点逐个发送并聚合错误。
@@ -81,7 +81,7 @@ enqueueLoop:
 	return errors.Join(sendErrors...)
 }
 
-// writeConnectionMessage 写入连接消息 + 同步更新连接活跃时间和错误计数。
+// writeConnectionMessage 写入指定连接 + 入站响应必须回到原连接以避免跨连接错路由。
 func (host *Host) writeConnectionMessage(ctx context.Context, connection Connection, peerID string, message Message) error {
 	if connection == nil {
 		return fmt.Errorf("%w: nil write connection", ErrConnectionClosed)
@@ -95,6 +95,24 @@ func (host *Host) writeConnectionMessage(ctx context.Context, connection Connect
 		host.markConnectionWrite(connection, peerID)
 	}
 	return nil
+}
+
+// writePeerMessage 写入当前节点连接 + 出站业务在连接仲裁后自动避开被替换的旧连接。
+func (host *Host) writePeerMessage(ctx context.Context, peerID string, connection Connection, message Message) error {
+	return host.writeConnectionMessage(ctx, host.currentConnectionForPeerWrite(peerID, connection), peerID, message)
+}
+
+func (host *Host) currentConnectionForPeerWrite(peerID string, connection Connection) Connection {
+	if peerID == "" || connection == nil {
+		return connection
+	}
+	host.mutex.RLock()
+	storedConnection := host.connections[peerID]
+	host.mutex.RUnlock()
+	if storedConnection == nil {
+		return connection
+	}
+	return storedConnection
 }
 
 // prepareOutboundMessage 补齐出站消息路由字段 + 发送前统一做协议边界校验。
@@ -130,7 +148,7 @@ func (host *Host) prepareOutboundMessageFields(peerID string, outbound Message, 
 	} else if outbound.ToPeerID == "" {
 		outbound.ToPeerID = peerID
 	}
-	if err := outbound.Validate(DefaultMaxMessageSize); err != nil {
+	if err := outbound.Validate(host.maxMessageSize); err != nil {
 		return Message{}, err
 	}
 	return outbound, nil
@@ -160,10 +178,10 @@ func (host *Host) broadcastToPeer(ctx context.Context, peerID string, baseMessag
 	}
 	outbound := baseMessage
 	outbound.ToPeerID = peerID
-	if err := outbound.Validate(DefaultMaxMessageSize); err != nil {
+	if err := outbound.Validate(host.maxMessageSize); err != nil {
 		return fmt.Errorf("%s: %w", peerID, err)
 	}
-	if err := host.writeConnectionMessage(ctx, connection, peerID, outbound); err != nil {
+	if err := host.writePeerMessage(ctx, peerID, connection, outbound); err != nil {
 		return fmt.Errorf("%s: %w", peerID, err)
 	}
 	return nil

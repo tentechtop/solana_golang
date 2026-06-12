@@ -37,6 +37,7 @@ type HostConfig struct {
 	MaxConnections       int
 	MaxPendingInbound    int
 	MaxConnectionsPerIP  int
+	MaxMessageSize       int
 	PeerProtection       PeerProtectionConfig
 	ProtocolScheduler    ProtocolSchedulerConfig
 	AsyncWrite           AsyncWriteConfig
@@ -65,6 +66,7 @@ type Host struct {
 	maxPeers             int
 	maxConnections       int
 	maxConnectionsPerIP  int
+	maxMessageSize       int
 	writeQueueSize       int
 	writeTimeout         time.Duration
 	broadcastConcurrency int
@@ -127,6 +129,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	maxPeers := normalizeMaxPeers(config.MaxPeers)
 	maxConnections := normalizeMaxConnections(config.MaxConnections, maxPeers)
 	maxPendingInbound := normalizeMaxPendingInbound(config.MaxPendingInbound, maxConnections)
+	maxMessageSize := normalizeMaxMessageSize(config.MaxMessageSize)
 	hostContext, hostCancel := context.WithCancel(context.Background())
 
 	host := &Host{
@@ -143,6 +146,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		maxPeers:             maxPeers,
 		maxConnections:       maxConnections,
 		maxConnectionsPerIP:  normalizeMaxConnectionsPerIP(config.MaxConnectionsPerIP, maxConnections),
+		maxMessageSize:       maxMessageSize,
 		writeQueueSize:       normalizeWriteQueueSize(config.AsyncWrite.QueueSize),
 		writeTimeout:         normalizeWriteTimeout(config.AsyncWrite.WriteTimeout),
 		broadcastConcurrency: normalizeBroadcastConcurrency(config.BroadcastConcurrency),
@@ -171,6 +175,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		quicTransport, err := NewQUICTransportWithConfig(QUICTransportConfig{
 			MaxPendingInbound:   maxPendingInbound,
 			MaxConnectionsPerIP: host.maxConnectionsPerIP,
+			MaxMessageSize:      maxMessageSize,
 			Logger:              host.logger,
 		})
 		if err != nil {
@@ -182,6 +187,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 			NewTCPTransportWithConfig(TCPTransportConfig{
 				MaxPendingInbound:   maxPendingInbound,
 				MaxConnectionsPerIP: host.maxConnectionsPerIP,
+				MaxMessageSize:      maxMessageSize,
 				Logger:              host.logger,
 			}),
 		}
@@ -199,6 +205,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		slog.Bool("secure_session", host.secureSession),
 		slog.Int("max_peers", host.maxPeers),
 		slog.Int("max_connections", host.maxConnections),
+		slog.Int("max_message_size", host.maxMessageSize),
 		slog.Int("control_rate_limit", host.peerProtection.config.MaxControlMessagesPerSecond),
 		slog.Int("data_rate_limit", host.peerProtection.config.MaxDataMessagesPerSecond),
 		slog.Int("write_queue_size", host.writeQueueSize),
@@ -244,8 +251,8 @@ func (host *Host) RegisterResultHandler(spec ProtocolSpec, handler ResultProtoco
 
 // HandleMessage 处理入站消息 + 按消息协议 ID 分发到注册表处理器。
 func (host *Host) HandleMessage(ctx context.Context, message Message) (ProtocolHandleResult, error) {
-	if err := message.Validate(DefaultMaxMessageSize); err != nil {
+	if err := message.Validate(host.maxMessageSize); err != nil {
 		return ProtocolHandleResult{}, err
 	}
-	return host.registry.Handle(ctx, message)
+	return host.registry.HandleWithMaxMessageSize(ctx, message, host.maxMessageSize)
 }

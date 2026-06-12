@@ -177,7 +177,7 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 	defer unregister()
 
-	if err := host.writeConnectionMessage(ctx, connection, peerID, outbound); err != nil {
+	if err := host.writePeerMessage(ctx, peerID, connection, outbound); err != nil {
 		host.logger.Warn("p2p request write failed",
 			slog.String("peer_id", peerID),
 			slog.String("request_id", outbound.ID),

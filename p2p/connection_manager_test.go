@@ -745,6 +745,37 @@ func TestHostDialPeerBacksOffAfterAllAttemptsFail(t *testing.T) {
 	}
 }
 
+func TestShouldRecordPeerDialFailureIgnoresExpectedConnectionErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		dialErrors []error
+		wantRecord bool
+	}{
+		{
+			name:       "duplicate connection is arbitration result",
+			dialErrors: []error{fmt.Errorf("wrapped: %w", ErrDuplicateConnection)},
+			wantRecord: false,
+		},
+		{
+			name:       "closed and canceled connections are expected races",
+			dialErrors: []error{fmt.Errorf("wrapped: %w", ErrConnectionClosed), context.Canceled},
+			wantRecord: false,
+		},
+		{
+			name:       "unexpected dial error is recorded",
+			dialErrors: []error{ErrDuplicateConnection, errors.New("connection refused")},
+			wantRecord: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldRecordPeerDialFailure(test.dialErrors); got != test.wantRecord {
+				t.Fatalf("shouldRecordPeerDialFailure() = %v, want %v", got, test.wantRecord)
+			}
+		})
+	}
+}
+
 func TestHostConnectionWriterForReusesStoredConnection(t *testing.T) {
 	localPeerID := testPeerID(57)
 	remotePeerID := testPeerID(58)
@@ -769,6 +800,173 @@ func TestHostConnectionWriterForReusesStoredConnection(t *testing.T) {
 	if resolvedConnection != storedConnection {
 		t.Fatal("connectionWriterFor() did not reuse stored writer")
 	}
+}
+
+func TestHostStoreConnectionReplacesNonCanonicalSecureConnection(t *testing.T) {
+	localPeerID := testPeerID(76)
+	remotePeerID := testPeerID(77)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+		AsyncWrite: AsyncWriteConfig{
+			WriteTimeout: 10 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	preferredRole, nonPreferredRole := testSecureConnectionRoles(localPeerID, remotePeerID)
+	oldConnection := newTestSecureConnection(localPeerID, remotePeerID, nonPreferredRole, "old-secure")
+	newConnection := newTestSecureConnection(localPeerID, remotePeerID, preferredRole, "new-secure")
+	if err := host.storeConnection(remotePeerID, oldConnection.SecureConnection); err != nil {
+		t.Fatalf("storeConnection(old) error = %v", err)
+	}
+	if err := host.storeConnection(remotePeerID, newConnection.SecureConnection); err != nil {
+		t.Fatalf("storeConnection(new) error = %v", err)
+	}
+
+	storedConnection, ok := host.Connection(remotePeerID)
+	if !ok {
+		t.Fatal("Connection() ok = false, want true")
+	}
+	if storedConnection.ID() != "new-secure" {
+		t.Fatalf("stored connection id = %q, want new-secure", storedConnection.ID())
+	}
+	waitForScriptedConnectionClosed(t, oldConnection.testInner)
+}
+
+func TestHostStoreConnectionRejectsNonCanonicalSecureDuplicate(t *testing.T) {
+	localPeerID := testPeerID(78)
+	remotePeerID := testPeerID(79)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	preferredRole, nonPreferredRole := testSecureConnectionRoles(localPeerID, remotePeerID)
+	preferredConnection := newTestSecureConnection(localPeerID, remotePeerID, preferredRole, "preferred-secure")
+	duplicateConnection := newTestSecureConnection(localPeerID, remotePeerID, nonPreferredRole, "duplicate-secure")
+	if err := host.storeConnection(remotePeerID, preferredConnection.SecureConnection); err != nil {
+		t.Fatalf("storeConnection(preferred) error = %v", err)
+	}
+	if err := host.storeConnection(remotePeerID, duplicateConnection.SecureConnection); !errors.Is(err, ErrDuplicateConnection) {
+		t.Fatalf("storeConnection(duplicate) error = %v, want ErrDuplicateConnection", err)
+	}
+
+	storedConnection, ok := host.Connection(remotePeerID)
+	if !ok {
+		t.Fatal("Connection() ok = false, want true")
+	}
+	if storedConnection.ID() != "preferred-secure" {
+		t.Fatalf("stored connection id = %q, want preferred-secure", storedConnection.ID())
+	}
+	if duplicateConnection.testInner.closed {
+		t.Fatal("duplicate connection should be closed by caller, not storeConnection")
+	}
+}
+
+func TestHostDoesNotPenalizePeerOnWriteQueueBackpressure(t *testing.T) {
+	localPeerID := testPeerID(80)
+	remotePeerID := testPeerID(81)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	if err := host.storeConnection(remotePeerID, connection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
+	storedConnection, ok := host.Connection(remotePeerID)
+	if !ok {
+		t.Fatal("Connection() ok = false, want true")
+	}
+	host.recordConnectionError(storedConnection, fmt.Errorf("%w: test", ErrWriteQueueFull))
+
+	state, ok := host.ConnectionState(remotePeerID)
+	if !ok {
+		t.Fatal("ConnectionState() ok = false, want true")
+	}
+	if state.FailureCount != 0 {
+		t.Fatalf("FailureCount = %d, want 0", state.FailureCount)
+	}
+	peer, ok := host.Peer(remotePeerID)
+	if !ok {
+		t.Fatal("Peer() ok = false, want true")
+	}
+	if peer.Score != 0 {
+		t.Fatalf("peer.Score = %d, want 0", peer.Score)
+	}
+}
+
+func TestHostWriteConnectionMessageUsesProvidedConnection(t *testing.T) {
+	localPeerID := testPeerID(82)
+	remotePeerID := testPeerID(83)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	storedBase := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	storedConnection := &testIdentifiedConnection{scriptedConnection: storedBase, connectionID: "stored-write"}
+	providedBase := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	providedConnection := &testIdentifiedConnection{scriptedConnection: providedBase, connectionID: "provided-write"}
+	if err := host.storeConnection(remotePeerID, storedConnection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
+
+	message := testNetworkMessage(t, ProtocolReceiveTransactionV1, localPeerID, remotePeerID)
+	if err := host.writeConnectionMessage(context.Background(), providedConnection, remotePeerID, message); err != nil {
+		t.Fatalf("writeConnectionMessage() error = %v", err)
+	}
+	if providedBase.waitWrite(t).ID != message.ID {
+		t.Fatal("provided connection did not receive message")
+	}
+	assertNoConnectionWrite(t, storedBase)
+}
+
+func TestHostWritePeerMessageUsesCurrentStoredConnection(t *testing.T) {
+	localPeerID := testPeerID(84)
+	remotePeerID := testPeerID(85)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	storedBase := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	storedConnection := &testIdentifiedConnection{scriptedConnection: storedBase, connectionID: "stored-peer-write"}
+	providedBase := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	providedConnection := &testIdentifiedConnection{scriptedConnection: providedBase, connectionID: "provided-peer-write"}
+	if err := host.storeConnection(remotePeerID, storedConnection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
+
+	message := testNetworkMessage(t, ProtocolReceiveTransactionV1, localPeerID, remotePeerID)
+	if err := host.writePeerMessage(context.Background(), remotePeerID, providedConnection, message); err != nil {
+		t.Fatalf("writePeerMessage() error = %v", err)
+	}
+	if storedBase.waitWrite(t).ID != message.ID {
+		t.Fatal("stored connection did not receive message")
+	}
+	assertNoConnectionWrite(t, providedBase)
 }
 
 func TestQueuedConnectionRejectsWriteAfterClose(t *testing.T) {
@@ -916,7 +1114,18 @@ type scriptedConnection struct {
 	remotePeerID string
 	reads        chan Message
 	writes       chan Message
+	mutex        sync.Mutex
 	closed       bool
+}
+
+type testIdentifiedConnection struct {
+	*scriptedConnection
+	connectionID string
+}
+
+type testSecureConnection struct {
+	*SecureConnection
+	testInner *scriptedConnection
 }
 
 type responsiveConnection struct {
@@ -1036,6 +1245,39 @@ func newScriptedConnection(protocol utils.MultiAddressProtocol, remotePeerID str
 	return connection
 }
 
+func newTestSecureConnection(localPeerID string, remotePeerID string, role SecureSessionRole, connectionID string) *testSecureConnection {
+	inner := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	identified := &testIdentifiedConnection{
+		scriptedConnection: inner,
+		connectionID:       connectionID,
+	}
+	return &testSecureConnection{
+		SecureConnection: &SecureConnection{
+			connection: identified,
+			session: &SecureSession{
+				localPeerID:     localPeerID,
+				remotePeerID:    remotePeerID,
+				role:            role,
+				networkID:       "testnet",
+				remoteSoftware:  "test",
+				protocolVersion: MessageProtocolVersion,
+			},
+		},
+		testInner: inner,
+	}
+}
+
+func testSecureConnectionRoles(localPeerID string, remotePeerID string) (SecureSessionRole, SecureSessionRole) {
+	if localPeerID < remotePeerID {
+		return SecureSessionRoleInitiator, SecureSessionRoleResponder
+	}
+	return SecureSessionRoleResponder, SecureSessionRoleInitiator
+}
+
+func (connection *testIdentifiedConnection) ID() string {
+	return connection.connectionID
+}
+
 func (connection *scriptedConnection) ID() string {
 	return "scripted-" + connection.remotePeerID
 }
@@ -1077,8 +1319,16 @@ func (connection *scriptedConnection) WriteMessage(ctx context.Context, message 
 }
 
 func (connection *scriptedConnection) Close() error {
+	connection.mutex.Lock()
+	defer connection.mutex.Unlock()
 	connection.closed = true
 	return nil
+}
+
+func (connection *scriptedConnection) isClosed() bool {
+	connection.mutex.Lock()
+	defer connection.mutex.Unlock()
+	return connection.closed
 }
 
 func (connection *scriptedConnection) waitWrite(t *testing.T) Message {
@@ -1146,6 +1396,18 @@ func waitForMessagesWritten(t *testing.T, host *Host, expected uint64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("MessagesWritten = %d, want at least %d", host.Metrics().MessagesWritten, expected)
+}
+
+func waitForScriptedConnectionClosed(t *testing.T, connection *scriptedConnection) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if connection.isClosed() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for scripted connection close")
 }
 
 func waitProtocolOrder(t *testing.T, order <-chan string) string {

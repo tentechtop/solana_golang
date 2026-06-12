@@ -250,7 +250,13 @@ func (dispatcher *protocolDispatcher) handleJob(parent context.Context, workerID
 	if result.HasResponse {
 		if err := host.writeConnectionMessage(jobContext, job.connection, job.message.FromPeerID, result.Message); err != nil {
 			host.metrics.protocolJobsFailed.Add(1)
-			host.recordConnectionError(job.connection, err)
+			host.logger.Warn("p2p protocol response write failed",
+				slog.String("peer_id", job.message.FromPeerID),
+				slog.String("message_id", job.message.ID),
+				slog.Uint64("protocol_id", uint64(job.message.Type)),
+				slog.Uint64("worker_id", uint64(workerID)),
+				slog.Any("error", err),
+			)
 			return
 		}
 	}

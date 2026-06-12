@@ -24,6 +24,7 @@ import (
 const (
 	quicApplicationProtocol                   = "solana-golang-p2p/1"
 	quicCloseCode                             = quic.ApplicationErrorCode(0)
+	quicStreamCancelCode                      = quic.StreamErrorCode(0)
 	defaultQUICStreamAccept                   = 5 * time.Second
 	defaultQUICInitialStreamReceiveWindow     = 1024 * 1024
 	defaultQUICInitialConnectionReceiveWindow = 4 * 1024 * 1024
@@ -325,6 +326,8 @@ func (connection *QUICConnection) WriteMessage(ctx context.Context, message Mess
 // Close 关闭 QUIC 连接 + 保证流和连接只释放一次。
 func (connection *QUICConnection) Close() error {
 	connection.closeOnce.Do(func() {
+		connection.stream.CancelRead(quicStreamCancelCode)
+		connection.stream.CancelWrite(quicStreamCancelCode)
 		streamErr := connection.stream.Close()
 		connectionErr := connection.connection.CloseWithError(quicCloseCode, "closed")
 		connection.closeErr = errors.Join(streamErr, connectionErr)

@@ -17,6 +17,8 @@ import (
 const (
 	// DefaultMaxMessageSize 定义默认消息上限 + 防止单连接通过大包耗尽内存。
 	DefaultMaxMessageSize = 4 * 1024 * 1024
+	// MaxConfigurableMessageSize 定义可配置消息上限 + 防止误配置把单帧内存放大到不可控。
+	MaxConfigurableMessageSize = 64 * 1024 * 1024
 	// MessageProtocolVersion 定义当前消息版本 + 用于协议升级时显式拒绝未知版本。
 	MessageProtocolVersion uint16 = 1
 
@@ -55,28 +57,43 @@ type Message struct {
 
 // NewMessage 创建单向消息 + 自动生成 ID 和创建时间避免上层重复处理。
 func NewMessage(protocolID ProtocolID, payload []byte) (Message, error) {
-	message, err := newBaseMessage(protocolID, payload)
+	return NewMessageWithMaxSize(protocolID, payload, DefaultMaxMessageSize)
+}
+
+// NewMessageWithMaxSize 创建单向消息 + 显式大包上限用于受控压测和大对象同步。
+func NewMessageWithMaxSize(protocolID ProtocolID, payload []byte, maxMessageSize int) (Message, error) {
+	message, err := newBaseMessageWithMaxSize(protocolID, payload, maxMessageSize)
 	if err != nil {
 		return Message{}, err
 	}
 	message.MarkAsNormal()
-	return message, message.Validate(DefaultMaxMessageSize)
+	return message, message.Validate(maxMessageSize)
 }
 
 // NewRequestMessage 创建请求消息 + 让响应可以通过 request_id 回到原请求。
 func NewRequestMessage(senderPeerID string, protocolID ProtocolID, payload []byte) (Message, error) {
-	message, err := newBaseMessage(protocolID, payload)
+	return NewRequestMessageWithMaxSize(senderPeerID, protocolID, payload, DefaultMaxMessageSize)
+}
+
+// NewRequestMessageWithMaxSize 创建请求消息 + 让大包请求使用调用方显式声明的安全上限。
+func NewRequestMessageWithMaxSize(senderPeerID string, protocolID ProtocolID, payload []byte, maxMessageSize int) (Message, error) {
+	message, err := newBaseMessageWithMaxSize(protocolID, payload, maxMessageSize)
 	if err != nil {
 		return Message{}, err
 	}
 	message.FromPeerID = senderPeerID
 	message.MarkAsRequest()
-	return message, message.Validate(DefaultMaxMessageSize)
+	return message, message.Validate(maxMessageSize)
 }
 
 // NewResponseMessage 创建响应消息 + 将 request_id 绑定到原请求消息 ID。
 func NewResponseMessage(senderPeerID string, protocolID ProtocolID, requestID string, payload []byte) (Message, error) {
-	message, err := newBaseMessage(protocolID, payload)
+	return NewResponseMessageWithMaxSize(senderPeerID, protocolID, requestID, payload, DefaultMaxMessageSize)
+}
+
+// NewResponseMessageWithMaxSize 创建响应消息 + 保持响应载荷与请求侧配置的消息上限一致。
+func NewResponseMessageWithMaxSize(senderPeerID string, protocolID ProtocolID, requestID string, payload []byte, maxMessageSize int) (Message, error) {
+	message, err := newBaseMessageWithMaxSize(protocolID, payload, maxMessageSize)
 	if err != nil {
 		return Message{}, err
 	}
@@ -84,7 +101,7 @@ func NewResponseMessage(senderPeerID string, protocolID ProtocolID, requestID st
 	if err := message.MarkAsResponse(requestID); err != nil {
 		return Message{}, err
 	}
-	return message, message.Validate(DefaultMaxMessageSize)
+	return message, message.Validate(maxMessageSize)
 }
 
 // Validate 校验消息字段 + 防止畸形网络载荷进入上层业务。
@@ -324,6 +341,10 @@ func readMessageFrame(reader io.Reader, maxMessageSize int) (Message, error) {
 
 // newBaseMessage 创建基础消息 + 生成唯一 ID、复制载荷并设置协议版本。
 func newBaseMessage(protocolID ProtocolID, payload []byte) (Message, error) {
+	return newBaseMessageWithMaxSize(protocolID, payload, DefaultMaxMessageSize)
+}
+
+func newBaseMessageWithMaxSize(protocolID ProtocolID, payload []byte, maxMessageSize int) (Message, error) {
 	messageID, err := newMessageID()
 	if err != nil {
 		return Message{}, err
@@ -336,7 +357,7 @@ func newBaseMessage(protocolID ProtocolID, payload []byte) (Message, error) {
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 		Version:            MessageProtocolVersion,
 	}
-	if err := message.Validate(DefaultMaxMessageSize); err != nil {
+	if err := message.Validate(maxMessageSize); err != nil {
 		return Message{}, err
 	}
 	return message, nil
@@ -445,6 +466,9 @@ func maxPayloadSize(maxMessageSize int) int {
 func normalizeMaxMessageSize(maxMessageSize int) int {
 	if maxMessageSize <= 0 {
 		return DefaultMaxMessageSize
+	}
+	if maxMessageSize > MaxConfigurableMessageSize {
+		return MaxConfigurableMessageSize
 	}
 	return maxMessageSize
 }

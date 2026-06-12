@@ -27,6 +27,8 @@ var (
 	ErrInvalidMessage = errors.New("p2p: invalid message")
 	// ErrConnectionClosed 表示连接已关闭 + 统一连接关闭后的错误语义。
 	ErrConnectionClosed = errors.New("p2p: connection closed")
+	// ErrDuplicateConnection 表示重复连接已被仲裁拒绝 + 防止同一节点对保留多条读写竞争连接。
+	ErrDuplicateConnection = errors.New("p2p: duplicate connection")
 	// ErrInvalidProtocol 表示协议定义无效 + 防止错误协议进入注册表。
 	ErrInvalidProtocol = errors.New("p2p: invalid protocol")
 	// ErrProtocolNotFound 表示协议未注册 + 防止消息进入空处理路径。

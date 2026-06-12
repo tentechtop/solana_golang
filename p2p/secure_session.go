@@ -456,6 +456,7 @@ func UnmarshalSecurePayloadBinary(data []byte, maxMessageSize int) (SecurePayloa
 type SecureSession struct {
 	localPeerID        string
 	remotePeerID       string
+	role               SecureSessionRole
 	networkID          string
 	remoteSoftware     string
 	protocolVersion    uint16
@@ -467,6 +468,7 @@ type SecureSession struct {
 	sendNoncePrefix    [secureSessionNoncePrefixSize]byte
 	receiveNoncePrefix [secureSessionNoncePrefixSize]byte
 	expiresAtUnixMilli int64
+	maxMessageSize     int
 	sendSequence       uint64
 	receiveSequence    uint64
 	sendMutex          sync.Mutex
@@ -487,6 +489,14 @@ func (session *SecureSession) RemotePeerID() string {
 		return ""
 	}
 	return session.remotePeerID
+}
+
+// Role 返回安全会话角色 + 供连接池在双向同时拨号时做确定性仲裁。
+func (session *SecureSession) Role() SecureSessionRole {
+	if session == nil {
+		return SecureSessionRoleUnknown
+	}
+	return session.role
 }
 
 // SessionID 返回会话 ID 副本 + 防止外部修改重放校验依据。
@@ -529,6 +539,13 @@ func (session *SecureSession) IsExpired(now time.Time) bool {
 	return now.UnixMilli() >= session.expiresAtUnixMilli
 }
 
+func (session *SecureSession) messageSizeLimit() int {
+	if session == nil {
+		return DefaultMaxMessageSize
+	}
+	return normalizeMaxMessageSize(session.maxMessageSize)
+}
+
 // Seal 加密业务载荷 + 使用发送方向密钥和单调序号生成唯一 GCM nonce。
 func (session *SecureSession) Seal(plaintext []byte, associatedData []byte) (SecurePayload, error) {
 	if err := session.validate(); err != nil {
@@ -537,7 +554,8 @@ func (session *SecureSession) Seal(plaintext []byte, associatedData []byte) (Sec
 	if session.IsExpired(time.Now()) {
 		return SecurePayload{}, fmt.Errorf("%w: secure session expired", ErrSecureSession)
 	}
-	if len(plaintext) > secureSessionPlaintextMaxSize(secureSessionPayloadMaxSize) {
+	maxMessageSize := session.messageSizeLimit()
+	if len(plaintext) > secureSessionPlaintextMaxSize(maxMessageSize) {
 		return SecurePayload{}, fmt.Errorf("%w: plaintext too large", ErrSecureSession)
 	}
 
@@ -568,7 +586,7 @@ func (session *SecureSession) Open(payload SecurePayload, associatedData []byte)
 	if session.IsExpired(time.Now()) {
 		return nil, fmt.Errorf("%w: secure session expired", ErrSecureSession)
 	}
-	if err := payload.Validate(secureSessionPayloadMaxSize); err != nil {
+	if err := payload.Validate(session.messageSizeLimit()); err != nil {
 		return nil, err
 	}
 	if !utils.SecureEqual(payload.SessionID, session.sessionID) {
@@ -618,6 +636,9 @@ func (session *SecureSession) validate() error {
 	}
 	if err := validatePeerID(session.remotePeerID); err != nil {
 		return fmt.Errorf("%w: invalid remote peer id: %w", ErrSecureSession, err)
+	}
+	if !isValidSecureSessionRole(session.role) {
+		return fmt.Errorf("%w: invalid session role", ErrSecureSession)
 	}
 	if len(session.sessionID) != secureSessionIDSize {
 		return fmt.Errorf("%w: invalid session id", ErrSecureSession)
@@ -698,6 +719,11 @@ type SecureConnection struct {
 
 // SecureDialConnection 主动建立安全连接 + 先完成握手再返回加密连接包装器。
 func SecureDialConnection(ctx context.Context, connection Connection, identity SecureSessionIdentity) (*SecureConnection, error) {
+	return SecureDialConnectionWithMaxMessageSize(ctx, connection, identity, DefaultMaxMessageSize)
+}
+
+// SecureDialConnectionWithMaxMessageSize 主动建立安全连接 + 让大包上限随 Host 配置传入会话。
+func SecureDialConnectionWithMaxMessageSize(ctx context.Context, connection Connection, identity SecureSessionIdentity, maxMessageSize int) (*SecureConnection, error) {
 	state, err := NewSecureSessionState(identity, SecureSessionRoleInitiator)
 	if err != nil {
 		return nil, err
@@ -722,11 +748,16 @@ func SecureDialConnection(ctx context.Context, connection Connection, identity S
 	if err != nil {
 		return nil, err
 	}
-	return NewSecureConnection(connection, session)
+	return NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
 }
 
 // SecureAcceptConnection 接收入站安全连接 + 读取握手请求后返回加密连接包装器。
 func SecureAcceptConnection(ctx context.Context, connection Connection, identity SecureSessionIdentity) (*SecureConnection, error) {
+	return SecureAcceptConnectionWithMaxMessageSize(ctx, connection, identity, DefaultMaxMessageSize)
+}
+
+// SecureAcceptConnectionWithMaxMessageSize 接收入站安全连接 + 保持安全载荷上限与传输层一致。
+func SecureAcceptConnectionWithMaxMessageSize(ctx context.Context, connection Connection, identity SecureSessionIdentity, maxMessageSize int) (*SecureConnection, error) {
 	request, err := connection.ReadMessage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read secure session request: %w", ErrSecureSession, err)
@@ -751,17 +782,23 @@ func SecureAcceptConnection(ctx context.Context, connection Connection, identity
 	if err := connection.WriteMessage(ctx, response); err != nil {
 		return nil, fmt.Errorf("%w: write secure session response: %w", ErrSecureSession, err)
 	}
-	return NewSecureConnection(connection, session)
+	return NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
 }
 
 // NewSecureConnection 创建安全连接包装器 + 显式接收已完成握手的会话对象。
 func NewSecureConnection(connection Connection, session *SecureSession) (*SecureConnection, error) {
+	return NewSecureConnectionWithMaxMessageSize(connection, session, DefaultMaxMessageSize)
+}
+
+// NewSecureConnectionWithMaxMessageSize 创建安全连接包装器 + 固定会话级消息上限避免读写边界不一致。
+func NewSecureConnectionWithMaxMessageSize(connection Connection, session *SecureSession, maxMessageSize int) (*SecureConnection, error) {
 	if connection == nil {
 		return nil, fmt.Errorf("%w: nil raw connection", ErrSecureSession)
 	}
 	if err := session.validate(); err != nil {
 		return nil, err
 	}
+	session.maxMessageSize = normalizeMaxMessageSize(maxMessageSize)
 	return &SecureConnection{connection: connection, session: session}, nil
 }
 
@@ -795,7 +832,7 @@ func (connection *SecureConnection) ReadMessage(ctx context.Context) (Message, e
 	if err != nil {
 		return Message{}, err
 	}
-	payload, err := UnmarshalSecurePayloadBinary(message.Payload, secureSessionPayloadMaxSize)
+	payload, err := UnmarshalSecurePayloadBinary(message.Payload, connection.session.messageSizeLimit())
 	if err != nil {
 		return Message{}, err
 	}
@@ -804,13 +841,17 @@ func (connection *SecureConnection) ReadMessage(ctx context.Context) (Message, e
 		return Message{}, err
 	}
 	message.Payload = plaintext
+	if err := message.Validate(connection.session.messageSizeLimit()); err != nil {
+		return Message{}, err
+	}
 	return message, nil
 }
 
 // WriteMessage 加密并写入消息 + 只加密业务 payload，外层路由字段用于连接内分发和认证数据。
 func (connection *SecureConnection) WriteMessage(ctx context.Context, message Message) error {
 	outbound := message
-	if err := outbound.Validate(DefaultMaxMessageSize); err != nil {
+	maxMessageSize := connection.session.messageSizeLimit()
+	if err := outbound.Validate(maxMessageSize); err != nil {
 		return err
 	}
 	associatedData, err := secureMessageAssociatedData(outbound)
@@ -821,12 +862,12 @@ func (connection *SecureConnection) WriteMessage(ctx context.Context, message Me
 	if err != nil {
 		return err
 	}
-	encodedPayload, err := payload.MarshalBinary(secureSessionPayloadMaxSize)
+	encodedPayload, err := payload.MarshalBinary(maxMessageSize)
 	if err != nil {
 		return err
 	}
 	outbound.Payload = encodedPayload
-	if err := outbound.Validate(DefaultMaxMessageSize); err != nil {
+	if err := outbound.Validate(maxMessageSize); err != nil {
 		return err
 	}
 	return connection.connection.WriteMessage(ctx, outbound)
@@ -1048,6 +1089,7 @@ func (material secureSessionMaterial) newSession(
 	session := &SecureSession{
 		localPeerID:        localPeerID,
 		remotePeerID:       remotePeerID,
+		role:               role,
 		networkID:          material.networkID,
 		remoteSoftware:     remoteSoftwareVersion,
 		protocolVersion:    protocolVersion,

@@ -90,6 +90,11 @@ func (registry *ProtocolRegistry) SpecByName(name string) (ProtocolSpec, bool) {
 
 // Handle 执行协议处理器 + 按协议声明强制校验响应消息。
 func (registry *ProtocolRegistry) Handle(ctx context.Context, message Message) (ProtocolHandleResult, error) {
+	return registry.HandleWithMaxMessageSize(ctx, message, DefaultMaxMessageSize)
+}
+
+// HandleWithMaxMessageSize 执行协议处理器 + 使用 Host 配置的大包上限校验响应边界。
+func (registry *ProtocolRegistry) HandleWithMaxMessageSize(ctx context.Context, message Message, maxMessageSize int) (ProtocolHandleResult, error) {
 	registered, err := registry.lookup(message.Type)
 	if err != nil {
 		return ProtocolHandleResult{}, err
@@ -102,7 +107,7 @@ func (registry *ProtocolRegistry) Handle(ctx context.Context, message Message) (
 	if !registered.spec.HasResponse {
 		return ProtocolHandleResult{}, nil
 	}
-	if err := response.Validate(DefaultMaxMessageSize); err != nil {
+	if err := response.Validate(maxMessageSize); err != nil {
 		return ProtocolHandleResult{}, fmt.Errorf("%w: invalid response: %v", ErrProtocolResponseMismatch, err)
 	}
 	if !response.IsResponse() || !strings.EqualFold(response.RequestID, message.ID) {

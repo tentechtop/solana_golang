@@ -71,6 +71,10 @@ func (host *Host) DialAddress(ctx context.Context, address utils.MultiAddress) (
 	connection = host.wrapConnectionWriter(connection)
 	if err := host.storeConnection(address.PeerID, connection); err != nil {
 		_ = connection.Close()
+		if errors.Is(err, ErrDuplicateConnection) {
+			host.recordPeerProtectionSuccess(address.PeerID)
+			return nil, err
+		}
 		host.recordPeerError(address.PeerID, err)
 		return nil, err
 	}
@@ -120,13 +124,34 @@ func (host *Host) DialPeer(ctx context.Context, peerID string) (Connection, erro
 			host.identifyPeerAsync(connection, peerID)
 			return connection, nil
 		}
+		if errors.Is(err, ErrDuplicateConnection) {
+			existingConnection, ok := host.Connection(peerID)
+			if ok {
+				return existingConnection, nil
+			}
+		}
 		dialErrors = append(dialErrors, err)
 	}
 	if len(dialErrors) == 0 {
 		return nil, fmt.Errorf("p2p: dial peer %s: no usable address", peerID)
 	}
-	host.recordPeerDialFailure(peerID)
+	if shouldRecordPeerDialFailure(dialErrors) {
+		host.recordPeerDialFailure(peerID)
+	}
 	return nil, fmt.Errorf("p2p: dial peer %s: %w", peerID, errors.Join(dialErrors...))
+}
+
+func shouldRecordPeerDialFailure(dialErrors []error) bool {
+	for _, err := range dialErrors {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, ErrDuplicateConnection) || errors.Is(err, ErrConnectionClosed) || errors.Is(err, context.Canceled) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // dialCandidateAddresses 生成拨号候选地址 + 按协议优先级支持 QUIC 到 TCP 降级。

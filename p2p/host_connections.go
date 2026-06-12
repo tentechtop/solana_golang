@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const replacedConnectionCloseGraceMax = 10 * time.Second
+
 // Connection 查询已建立连接 + 只暴露连接接口不暴露内部连接池。
 func (host *Host) Connection(peerID string) (Connection, bool) {
 	host.mutex.RLock()
@@ -130,11 +132,15 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	}
 	if existing != nil && existing.ID() == connection.ID() {
 		connection = existing
-	} else {
-		if existing != nil {
-			replacedConnection = existing
-			delete(host.connectionPeerIDs, existing.ID())
+	} else if existing != nil {
+		if keepExistingConnection(host.peerID, peerID, existing, connection) {
+			host.mutex.Unlock()
+			return fmt.Errorf("%w: %s", ErrDuplicateConnection, peerID)
 		}
+		replacedConnection = existing
+		delete(host.connectionPeerIDs, existing.ID())
+	}
+	if replacedConnection != nil || existing == nil {
 		connection = host.wrapConnectionWriter(connection)
 	}
 	host.connections[peerID] = connection
@@ -174,12 +180,78 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	host.mutex.Unlock()
 
 	if replacedConnection != nil {
-		_ = replacedConnection.Close()
+		host.closeReplacedConnection(replacedConnection)
 	}
 	if shouldPersist {
 		host.savePeerBestEffort(storedPeer)
 	}
 	return nil
+}
+
+// closeReplacedConnection 延迟关闭被替换连接 + 给已进入旧连接 writer 的请求留出完成窗口。
+func (host *Host) closeReplacedConnection(connection Connection) {
+	if connection == nil {
+		return
+	}
+	grace := host.writeTimeout
+	if grace <= 0 || grace > replacedConnectionCloseGraceMax {
+		grace = replacedConnectionCloseGraceMax
+	}
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-host.lifecycleContext.Done():
+		}
+		_ = connection.Close()
+	}()
+}
+
+func keepExistingConnection(localPeerID string, remotePeerID string, existing Connection, candidate Connection) bool {
+	if existing == nil || candidate == nil {
+		return false
+	}
+	if existing.ID() == candidate.ID() {
+		return true
+	}
+
+	existingRole, existingSecure := secureConnectionRole(existing)
+	candidateRole, candidateSecure := secureConnectionRole(candidate)
+	if existingSecure && !candidateSecure {
+		return true
+	}
+	if candidateSecure && !existingSecure {
+		return false
+	}
+	if !existingSecure || !candidateSecure {
+		return true
+	}
+
+	existingPreferred := preferredSecureConnectionRole(localPeerID, remotePeerID, existingRole)
+	candidatePreferred := preferredSecureConnectionRole(localPeerID, remotePeerID, candidateRole)
+	if candidatePreferred && !existingPreferred {
+		return false
+	}
+	return true
+}
+
+func secureConnectionRole(connection Connection) (SecureSessionRole, bool) {
+	secureConnection, ok := unwrapSecureConnection(connection)
+	if !ok {
+		return SecureSessionRoleUnknown, false
+	}
+	return secureConnection.Session().Role(), true
+}
+
+func preferredSecureConnectionRole(localPeerID string, remotePeerID string, role SecureSessionRole) bool {
+	if localPeerID == "" || remotePeerID == "" || localPeerID == remotePeerID {
+		return false
+	}
+	if localPeerID < remotePeerID {
+		return role == SecureSessionRoleInitiator
+	}
+	return role == SecureSessionRoleResponder
 }
 
 func (host *Host) wrapConnectionWriter(connection Connection) Connection {
@@ -383,6 +455,9 @@ func remoteIPFromConnectionAddress(remoteAddress string) string {
 // recordConnectionError 记录连接错误 + 达到阈值后由心跳清理异常连接。
 func (host *Host) recordConnectionError(connection Connection, err error) {
 	if err == nil || connection == nil {
+		return
+	}
+	if errors.Is(err, ErrWriteQueueFull) {
 		return
 	}
 	var storedPeer Peer

@@ -86,7 +86,7 @@ func (host *Host) secureConnectionHandler(handler ConnectionHandler) ConnectionH
 
 func (host *Host) acceptSecureConnection(ctx context.Context, connection Connection) (*SecureConnection, bool) {
 	handshakeContext, cancel := host.withHandshakeTimeout(ctx)
-	secureConnection, err := SecureAcceptConnection(handshakeContext, connection, host.secureIdentity)
+	secureConnection, err := SecureAcceptConnectionWithMaxMessageSize(handshakeContext, connection, host.secureIdentity, host.maxMessageSize)
 	cancel()
 	if err != nil {
 		host.metrics.secureHandshakeFailed.Add(1)
@@ -100,6 +100,14 @@ func (host *Host) acceptSecureConnection(ctx context.Context, connection Connect
 	host.metrics.secureHandshakeOK.Add(1)
 	handledConnection := host.wrapConnectionWriter(secureConnection)
 	if err := host.storeConnection(secureConnection.RemotePeerID(), handledConnection); err != nil {
+		if errors.Is(err, ErrDuplicateConnection) {
+			host.logger.Debug("p2p duplicate secure connection ignored",
+				slog.String("connection_id", secureConnection.ID()),
+				slog.String("peer_id", secureConnection.RemotePeerID()),
+			)
+			_ = handledConnection.Close()
+			return nil, false
+		}
 		host.logger.Warn("p2p secure connection rejected",
 			slog.String("connection_id", secureConnection.ID()),
 			slog.String("peer_id", secureConnection.RemotePeerID()),
@@ -124,7 +132,7 @@ func (host *Host) secureOutboundConnection(ctx context.Context, connection Conne
 	if !host.secureSession {
 		return connection, nil
 	}
-	secureConnection, err := SecureDialConnection(ctx, connection, host.secureIdentity)
+	secureConnection, err := SecureDialConnectionWithMaxMessageSize(ctx, connection, host.secureIdentity, host.maxMessageSize)
 	if err != nil {
 		host.metrics.secureHandshakeFailed.Add(1)
 		return nil, err
