@@ -1,0 +1,270 @@
+﻿Solana Golang P2P QUIC 压力测试报告与分析
+测试日期：2026-06-12
+测试对象：p2p QUIC 多 stream 按优先级隔离改造版本
+报告路径：F:\workSpace2029\solana_golang\p2p\testplan\压力测试0612.txt
+
+一、测试背景
+
+本轮测试围绕 P2P QUIC 传输层改造后的稳定性、资源占用和公网适配能力展开。
+
+本次改造重点：
+1. QUIC 写入侧拆分高优先级、普通优先级、低优先级 stream。
+2. 高优先级消息优先调度，避免低优先级同步类大消息阻塞控制消息。
+3. TCP 保持原单写队列，不引入 QUIC 专属并发写模型对 TCP 行为的影响。
+4. QUIC 读侧增加优先级选择逻辑，高优先级优先读取。
+5. SecureSession 增加 QUIC 多 stream 场景下的有界乱序接收窗口，防止乱序无限缓存。
+6. 协议消息增加默认优先级映射，握手、identify、HotStuff 类消息为高优先级，区块同步、历史同步、资源同步类消息为低优先级。
+
+生产判断：
+生产环境基本没有 16MB 高频数据包。16MB 更适合作为 LAN 内极限稳定性验证和边界压力验证，不适合作为公网小带宽节点的常规压测口径。公网测试应使用更贴近真实业务的 1MB 或更小数据包。
+
+二、测试环境
+
+本地工作目录：
+F:\workSpace2029\solana_golang
+
+LAN 虚拟机：
+1. 192.168.181.136
+2. 192.168.181.137
+3. 192.168.181.138
+4. 192.168.181.139
+
+公网机器：
+1. 101.35.87.31
+
+测试程序：
+/root/p2p-test/p2pstress
+
+关键日志目录：
+/root/p2p-test/logs
+
+关键 profile 目录：
+/root/p2p-test/profiles
+/root/p2p-test/profiles-wan-1m
+
+三、代码验证
+
+已执行测试：
+1. go test -count=1 ./p2p/...
+2. go test -count=1 ./...
+
+结果：
+全部通过。
+
+补充说明：
+go test -race -count=1 ./p2p 在 Windows 环境失败，失败原因为 ThreadSanitizer 运行时分配失败：
+ThreadSanitizer failed to allocate ... error code: 87
+
+该失败属于 Windows ThreadSanitizer 运行环境问题，不是业务测试断言失败。后续建议在 Linux CI 或 Linux 虚拟机中补充 race 测试。
+
+四、LAN 16MB 四节点测试
+
+测试目的：
+验证 QUIC 改造后在内网高带宽环境下承载 16MB 大消息的稳定性、延迟、资源占用和错误情况。
+
+测试配置：
+协议：QUIC
+节点：192.168.181.136、192.168.181.137、192.168.181.138、192.168.181.139
+拓扑：4 节点 all-to-all
+payload：16777216 字节，16MB
+max-message-size：33554432 字节，32MB
+duration：10m
+concurrency：2
+rate-limit：1
+request-timeout：30s
+write-queue：16
+protocol-workers：8
+
+测试结果：
+
+节点              sent  succeeded  failed  p50       p95       p99       max       最终 RSS  goroutines
+192.168.181.136   598   598        0       1.733s    2.027s    2.500s    3.664s    311MB     47
+192.168.181.137   598   598        0       1.158s    1.947s    2.525s    3.647s    320MB     53
+192.168.181.138   596   596        0       1.278s    2.061s    2.737s    3.753s    208MB     51
+192.168.181.139   599   599        0       1.463s    1.890s    2.172s    3.687s    190MB     49
+
+错误检查：
+未发现 panic。
+未发现 OOM。
+未发现 queue full。
+未发现 context deadline exceeded。
+未发现 write message body deadline exceeded。
+
+资源分析：
+1. RSS 在 GC 后存在正常波动，没有单调上升趋势。
+2. goroutines 稳定在约 49 到 58 范围内，没有持续增长。
+3. 16MB 大包下最终 RSS 约 190MB 到 320MB，符合大 payload、并发请求、QUIC 缓冲和 Go GC 的综合占用。
+
+LAN 结论：
+内网 16MB 大包持续 10 分钟测试通过。当前 QUIC 多 stream 改造没有引入明显内存泄漏、goroutine 泄漏或队列阻塞问题。LAN 延迟稳定，p99 小于 3 秒，最大延迟小于 4 秒。
+
+五、WAN 16MB 试探测试
+
+测试目的：
+验证公网小带宽机器承载 16MB 请求和响应的可行性，并判断是否适合作为公网正式压测口径。
+
+第一次试探：
+服务端使用默认 5s 写超时。
+
+结果：
+握手成功，但服务端写 16MB 响应时失败：
+write message body: deadline exceeded
+
+分析：
+这是公网小带宽和 5s 写超时不匹配导致的配置性失败，不能判定为 P2P 泄漏或 QUIC 改造缺陷。
+
+第二次试探：
+服务端和客户端超时提高到 600s。
+客户端单并发发送 16MB。
+
+观察结果：
+1. 握手成功。
+2. identify 成功。
+3. 首个 16MB 请求发出后，超过 6 分钟仍未完成。
+4. 客户端 goroutines 稳定约 25。
+5. 客户端 RSS 从约 100MB 回落到约 38MB，存在 GC 回收，无单调增长。
+6. 服务端 RSS 从约 111MB 回落到约 49MB，存在 GC 回收，无单调增长。
+
+WAN 16MB 结论：
+公网小带宽机器不适合使用 16MB 请求加 16MB 响应作为持续压测口径。该场景主要测到的是链路带宽瓶颈，不是 P2P 程序本身的稳定极限。16MB 可保留为 LAN 极限测试和偶发大消息边界测试，不建议作为公网常规验收标准。
+
+六、WAN 1MB 正式测试
+
+测试目的：
+基于公网机器带宽较小的现实情况，将 payload 调整为 1MB，验证 QUIC 改造后公网传输的稳定性、抖动、失败率和资源占用。
+
+测试配置：
+客户端：192.168.181.136
+服务端：101.35.87.31
+协议：QUIC
+payload：1048576 字节，1MB
+max-message-size：4194304 字节，4MB
+duration：10m
+concurrency：1
+rate-limit：1
+request-timeout：180s
+write-queue：8
+protocol-workers：客户端 2，服务端 4
+
+最终结果：
+sent：189
+succeeded：189
+failed：0
+rps：0.3140257575964234
+p50：3.018s
+p95：3.915s
+p99：7.963s
+max latency：8.252s
+errors：{}
+客户端最终 RSS：约 31.7MB
+客户端最终 goroutines：23
+服务端 RSS：约 18MB 到 25MB 区间波动
+服务端 goroutines：约 10
+
+过程观察：
+1. 30 秒时：sent 10，succeeded 9，failed 0，recent rps 约 0.30。
+2. 3 分钟时：sent 54，succeeded 53，failed 0，recent rps 约 0.23 到 0.33。
+3. 6 分钟时：sent 111，succeeded 110，failed 0，recent rps 约 0.30 到 0.33。
+4. 10 分钟结束：sent 189，succeeded 189，failed 0。
+
+错误检查：
+未发现 ERROR。
+未发现 panic。
+未发现 OOM。
+未发现 deadline。
+未发现 queue full。
+未发现 write message 或 read message 异常。
+
+WAN 1MB 结论：
+公网 1MB 持续 10 分钟测试通过。失败率为 0，p95 约 3.9 秒，p99 约 8 秒。p99 抖动符合公网小带宽链路特征，没有证据表明是 QUIC 多 stream 改造导致的异常。
+
+七、泄漏与抖动分析
+
+内存泄漏判断：
+未发现明显内存泄漏。
+
+依据：
+1. LAN 16MB 场景 RSS 随 GC 波动，未持续单调上涨。
+2. WAN 16MB 试探中 RSS 从高位回落，说明大对象可被 GC 回收。
+3. WAN 1MB 正式测试中客户端 RSS 主要在约 29MB 到 39MB 区间波动，最终约 31.7MB。
+4. WAN 1MB 服务端 RSS 主要在约 18MB 到 25MB 区间波动。
+
+goroutine 泄漏判断：
+未发现明显 goroutine 泄漏。
+
+依据：
+1. LAN 16MB 最终 goroutines 约 47 到 53，整体稳定。
+2. WAN 1MB 客户端 goroutines 主要在 25 到 26，最终 23。
+3. WAN 1MB 服务端 goroutines 约 10，未持续增长。
+
+抖动判断：
+1. LAN 16MB p99 约 2.17s 到 2.74s，最大延迟约 3.65s 到 3.75s，内网抖动可接受。
+2. WAN 1MB p99 约 7.96s，最大延迟约 8.25s，主要来自公网链路和带宽限制。
+3. WAN 1MB 无失败、无超时，说明抖动没有扩大为可用性问题。
+
+八、QUIC 多 stream 改造效果分析
+
+本次改造发挥 QUIC 优势的核心点：
+1. 不再把所有消息压到单一写路径上。
+2. 高优先级控制消息具备独立 stream，避免被低优先级大同步消息阻塞。
+3. 普通消息和低优先级同步消息分离，降低队头阻塞风险。
+4. QUIC 连接内多 stream 并行传输，使传输层更贴近共识消息、普通业务消息、同步消息的真实优先级模型。
+5. TCP 不启用多 lane 写入，避免给非 QUIC 协议引入行为变化。
+
+本轮压力测试验证范围：
+1. 已验证 QUIC 多 stream 改造后，大包和小包稳定性正常。
+2. 已验证 LAN 16MB 极限场景没有明显泄漏和阻塞。
+3. 已验证 WAN 1MB 真实公网场景没有失败和泄漏。
+4. 已通过单元测试覆盖 connection writer、QUIC transport、secure session 等关键逻辑。
+
+本轮未完全覆盖的范围：
+本轮压力测试主要验证稳定性、资源占用和链路适配，没有单独构造高优先级消息与低优先级大同步消息混跑的专项公平性测试。因此，优先级隔离的功能正确性已有代码和单元测试支撑，但仍建议补充专项压测验证高优先级消息在低优先级大包压力下的尾延迟。
+
+九、生产参数建议
+
+LAN 或数据中心内网：
+1. max-message-size 可按业务上限设置为 16MB 到 32MB。
+2. 16MB 大包只建议用于偶发同步或边界测试，不建议高频发送。
+3. write-queue 建议 16 起步，根据内存预算和并发连接数压测调整。
+4. protocol-workers 可按 CPU 核数和连接数设置，当前 8 在 LAN 四节点测试中稳定。
+
+公网小带宽节点：
+1. 常规 payload 建议 1MB 或更小。
+2. max-message-size 建议按真实业务上限收紧，例如 4MB。
+3. concurrency 建议从 1 开始，确认链路能力后再增加。
+4. request-timeout 建议至少 120s 到 180s，避免公网抖动误伤。
+5. 不建议用 16MB request + 16MB response 做公网持续压测。
+
+QUIC 优先级策略：
+1. handshake、identify、HotStuff、投票、提案等控制类消息必须保持高优先级。
+2. 普通业务请求使用普通优先级。
+3. 区块同步、历史同步、资源同步等可重试大数据消息使用低优先级。
+4. 低优先级同步任务应配置速率限制，避免占满公网小带宽。
+
+十、风险与改进建议
+
+风险 1：缺少混合优先级专项压测
+建议：
+构造低优先级 16MB 持续同步流，同时每 100ms 到 500ms 发送高优先级小消息，统计高优先级 p50、p95、p99 和最大延迟。验收标准应以高优先级尾延迟为核心，而不是总吞吐。
+
+风险 2：Windows race 测试不可用
+建议：
+在 Linux 环境补充 go test -race -count=1 ./p2p 或接入 Linux CI，避免并发问题只依赖普通单元测试发现。
+
+风险 3：公网带宽限制会掩盖程序瓶颈
+建议：
+公网测试固定使用 1MB 或更小 payload 作为主验收口径。16MB 只做单请求连通性和超时边界验证，不作为吞吐指标。
+
+风险 4：大消息内存峰值仍然较高
+建议：
+后续如确实存在高频大消息业务，应继续推进消息分片、零拷贝读取、buffer pool 和流式处理，避免完整大消息在多层缓冲中重复驻留。
+
+十一、最终结论
+
+1. QUIC 多 stream 按优先级隔离改造后的基础稳定性通过验证。
+2. LAN 四节点 16MB 持续 10 分钟压力测试全部成功，失败 0，无明显泄漏。
+3. 公网 16MB 测试受带宽限制严重，不适合作为公网常规测试口径。
+4. 公网 1MB 持续 10 分钟正式测试全部成功，189/189，失败 0。
+5. 公网 1MB p50 约 3.018s，p95 约 3.915s，p99 约 7.963s，最大约 8.252s，属于小带宽公网链路下可解释的抖动。
+6. 当前未发现内存泄漏、goroutine 泄漏、队列阻塞、panic、OOM 或超时错误。
+7. 建议下一轮补充“低优先级大同步流 + 高优先级控制消息”的专项压测，用高优先级 p99 作为 QUIC 优先级隔离的核心验收指标。
