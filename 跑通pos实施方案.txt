@@ -17,7 +17,7 @@
 
 二、总体架构
 
-整体分三层：
+整体分四层：
 
 1. 共识层 consensus
    负责 epoch、leader schedule、block proposal、vote、QC、fork choice、skip、slashing。
@@ -25,8 +25,11 @@
 2. 网络层 p2p
    KAD 只负责节点发现和地址查询，不决定验证者列表、不决定 leader、不承载交易快速路径；交易和共识消息通过直接连接快速转发。
 
-3. 执行层 structure / runtime
-   当前使用固定指令执行器执行透明交易和隐私交易；对外暴露统一 ExecuteTransaction 接口，未来 VM 只替换执行器，不影响共识层和网络层。
+3. 结构层 structure
+   只放账户、交易、指令、区块、签名、状态根等纯数据结构和编解码，不放业务执行逻辑，不持有状态副作用。
+
+4. 执行层 runtime
+   当前使用固定指令执行器执行透明交易和隐私交易；对外暴露统一 TransactionExecutor 接口，未来 VM 只替换 runtime 的执行器实现，不影响 structure、共识层和网络层。
 
 建议链路：
 
@@ -54,8 +57,11 @@
 4. p2p/host_messaging.go
    已有 Host.Send 和 Host.Broadcast，可直接承载点对点转发和广播。
 
-5. structure 固定指令执行器
-   已能执行透明交易和隐私交易，短期作为链上交易执行入口。
+5. structure 结构模型
+   只承载交易、账户、区块、指令载荷等结构定义；现有执行逻辑应逐步迁移到 runtime 或 programs，不继续在 structure 中扩展业务执行代码。
+
+6. runtime 固定指令执行器
+   短期作为链上交易执行入口，负责调用透明交易、隐私交易、质押等固定指令处理器。
 
 四、目录与模块落地设计
 
@@ -105,11 +111,25 @@
 12. p2p/consensus_protocol.go
     注册区块提案、投票、QC、证据传播协议。
 
-13. structure/stake_instruction.go
-    固定指令版本的质押业务。
+13. runtime/executor.go
+    定义统一交易执行接口，隔离共识层和具体执行器。
+    核心类型：TransactionExecutor、ExecutionRequest、ExecutionResult。
+
+14. runtime/program.go
+    定义 Program 接口和 ProgramRegistry，runtime 只依赖接口，不 import 具体 programs。
+    核心类型：Program、ProgramRegistry、ProgramID。
+
+15. runtime/instruction/dispatcher.go
+    固定指令分发器，根据指令类型调用对应业务处理器。
+
+16. programs/stake/program.go
+    固定指令版本的质押业务，不放入 structure。
     指令：RegisterValidator、Stake、Unstake、WithdrawUnstaked、ExitValidator。
 
-14. cmd/posnode
+17. cmd/posnode/wire.go
+    组合层，负责创建 runtime executor，并显式注册 stake、privacy、token 等具体 programs。
+
+18. cmd/posnode
     启动一个可配置验证者节点，跑本地多节点集成测试。
 
 五、核心数据结构设计
@@ -551,6 +571,35 @@ MVP 不做复杂投票选举，使用 active stake 排名：
 
 当前不执行 VM，但必须保留未来接入 VM 的接口。
 
+包边界：
+ - structure：只定义数据结构和编解码，例如 Transaction、Instruction、Account、BlockHeader。
+ - runtime：定义执行接口、执行上下文、执行结果、固定指令调度器、Program 接口、未来 VM 适配器。
+ - programs：放具体业务程序，例如 stake、privacy、token；这些程序实现 runtime.Program 接口。
+ - consensus：只调用 runtime.TransactionExecutor，不直接调用 programs，也不修改 structure 内部状态。
+
+依赖方向铁律：
+ - 只能上层 import 下层，禁止下层反向 import 上层。
+ - structure 是基础结构层，只能依赖标准库和极少量无业务 utils，不允许 import runtime、programs、consensus、p2p、storage。
+ - runtime 可以 import structure、state、storage 接口、utils，但不允许 import programs/stake、programs/privacy、programs/token 等具体业务包。
+ - programs 可以 import runtime、structure、state、zk、utils，但不允许 import consensus、p2p、cmd。
+ - consensus 可以依赖 structure 和 runtime.TransactionExecutor 接口，但不直接 import 具体 programs。
+ - p2p 只提供网络能力和消息传输，不 import consensus、runtime、programs；共识层需要网络时使用接口，由上层注入 p2p 适配器。
+ - cmd/posnode 或 app/node 是唯一组合层，可以 import consensus、p2p、runtime、programs、storage，并负责显式组装依赖。
+ - utils 不允许 import 项目业务包，避免工具包变成隐藏的反向依赖入口。
+
+禁止项：
+ - 禁止 runtime 为了默认功能直接 import programs/stake。
+ - 禁止 programs 通过 init 自动注册到 runtime。
+ - 禁止 consensus 为了广播区块直接 import p2p.Host。
+ - 禁止 structure 上出现 Execute、Apply、Handle、Process 等带业务副作用的方法。
+ - 禁止为了解决循环引用把公共类型随意搬到 utils；公共类型应放到更低层的专用包。
+
+推荐装配方式：
+ - runtime 定义 Program 接口和 RegisterProgram 方法。
+ - programs/stake 暴露 NewProgram()。
+ - cmd/posnode/wire.go 创建 executor，并调用 executor.RegisterProgram(stake.NewProgram())。
+ - 测试代码也通过显式注册组合依赖，不依赖 init 副作用。
+
 建议接口：
 
 type TransactionExecutor interface {
@@ -581,6 +630,8 @@ ExecutionMode 建议值：
  - svm_compat_v1：未来兼容 SVM。
 
 共识层只依赖 TransactionExecutor，不直接依赖具体业务代码。
+固定指令执行器属于 runtime，不属于 structure；structure 中不得新增带状态副作用的 Execute、Apply、Handle、Process 类方法。
+每新增一个包都必须先检查依赖方向，确保不会形成 structure -> runtime -> programs -> consensus -> p2p -> runtime 这类环。
 
 十四、存储设计
 
@@ -844,7 +895,8 @@ P6：状态同步与重启恢复
  - 写单元测试证明 leader schedule 确定性。
 
 第二步：
- - structure 中补齐质押固定指令。
+ - programs/stake 中补齐质押固定指令。
+ - runtime/instruction 中接入质押指令分发。
  - 写账户真实质押测试。
 
 第三步：
@@ -898,7 +950,7 @@ P6：状态同步与重启恢复
 
 当前阶段不要追求完整 Solana 运行时，也不要让 KAD 承担交易快速路径。最稳妥的路线是：
 
-1. 固定指令执行器先承载真实业务。
+1. runtime 固定指令执行器先承载真实业务，structure 只保留纯结构。
 2. 共识层先实现确定性 PoS + QC + SkipQC。
 3. 网络层用 KAD 做发现，用 leader-aware direct forwarding 做交易高速传递。
 4. 证据和惩罚必须从第一版进入模型，否则后续补安全会很痛。
