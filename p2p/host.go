@@ -40,6 +40,7 @@ type HostConfig struct {
 	MaxPendingInbound    int
 	MaxConnectionsPerIP  int
 	MaxMessageSize       int
+	QUICStreamPoolSize   int
 	PeerProtection       PeerProtectionConfig
 	ProtocolScheduler    ProtocolSchedulerConfig
 	AsyncWrite           AsyncWriteConfig
@@ -70,6 +71,7 @@ type Host struct {
 	maxConnections       int
 	maxConnectionsPerIP  int
 	maxMessageSize       int
+	quicStreamPoolSize   int
 	writeQueueSize       int
 	writeTimeout         time.Duration
 	broadcastConcurrency int
@@ -135,6 +137,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 	maxConnections := normalizeMaxConnections(config.MaxConnections, maxPeers)
 	maxPendingInbound := normalizeMaxPendingInbound(config.MaxPendingInbound, maxConnections)
 	maxMessageSize := normalizeMaxMessageSize(config.MaxMessageSize)
+	quicStreamPoolSize := normalizeQUICStreamPoolSize(config.QUICStreamPoolSize)
 	hostContext, hostCancel := context.WithCancel(context.Background())
 
 	host := &Host{
@@ -153,6 +156,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		maxConnections:       maxConnections,
 		maxConnectionsPerIP:  normalizeMaxConnectionsPerIP(config.MaxConnectionsPerIP, maxConnections),
 		maxMessageSize:       maxMessageSize,
+		quicStreamPoolSize:   quicStreamPoolSize,
 		writeQueueSize:       normalizeWriteQueueSize(config.AsyncWrite.QueueSize),
 		writeTimeout:         normalizeWriteTimeout(config.AsyncWrite.WriteTimeout),
 		broadcastConcurrency: normalizeBroadcastConcurrency(config.BroadcastConcurrency),
@@ -183,7 +187,10 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 			MaxPendingInbound:   maxPendingInbound,
 			MaxConnectionsPerIP: host.maxConnectionsPerIP,
 			MaxMessageSize:      maxMessageSize,
+			StreamPoolSize:      quicStreamPoolSize,
 			MessagePriority:     host.messagePriority,
+			MessageConcurrency:  host.messageConcurrency,
+			MessagePartitionKey: host.messagePartitionKey,
 			Logger:              host.logger,
 		})
 		if err != nil {
@@ -214,6 +221,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		slog.Int("max_peers", host.maxPeers),
 		slog.Int("max_connections", host.maxConnections),
 		slog.Int("max_message_size", host.maxMessageSize),
+		slog.Int("quic_stream_pool_size", host.quicStreamPoolSize),
 		slog.Int("control_rate_limit", host.peerProtection.config.MaxControlMessagesPerSecond),
 		slog.Int("data_rate_limit", host.peerProtection.config.MaxDataMessagesPerSecond),
 		slog.Int("write_queue_size", host.writeQueueSize),

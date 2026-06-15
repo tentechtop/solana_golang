@@ -55,6 +55,71 @@ func TestQueuedConnectionUsesIndependentPriorityWriters(t *testing.T) {
 	}
 }
 
+func TestQueuedConnectionUsesSamePriorityParallelWriters(t *testing.T) {
+	base := newParallelPriorityBlockingConnection(4)
+	connection := newQueuedConnection(base, queuedConnectionConfig{
+		queueSize:    12,
+		writeTimeout: time.Second,
+		priority: func(message Message) MessagePriority {
+			return MessagePriorityNormal
+		},
+		concurrency: func(message Message) ProtocolConcurrencyMode {
+			return ProtocolConcurrencyStateless
+		},
+	})
+	defer connection.Close()
+	defer base.release()
+
+	for index := 0; index < 4; index++ {
+		message := Message{Type: ProtocolReceiveTransactionV1}
+		if err := connection.WriteMessage(context.Background(), message); err != nil {
+			t.Fatalf("WriteMessage(%d) error = %v", index, err)
+		}
+	}
+
+	for index := 0; index < 2; index++ {
+		select {
+		case <-base.started:
+		case <-time.After(time.Second):
+			t.Fatal("same-priority write did not start in parallel")
+		}
+	}
+}
+
+func TestQueuedConnectionKeepsOrderedSamePriorityWritesSerial(t *testing.T) {
+	base := newParallelPriorityBlockingConnection(4)
+	connection := newQueuedConnection(base, queuedConnectionConfig{
+		queueSize:    12,
+		writeTimeout: time.Second,
+		priority: func(message Message) MessagePriority {
+			return MessagePriorityNormal
+		},
+		concurrency: func(message Message) ProtocolConcurrencyMode {
+			return ProtocolConcurrencyOrdered
+		},
+	})
+	defer connection.Close()
+	defer base.release()
+
+	for index := 0; index < 2; index++ {
+		message := Message{Type: ProtocolReceiveTransactionV1}
+		if err := connection.WriteMessage(context.Background(), message); err != nil {
+			t.Fatalf("WriteMessage(%d) error = %v", index, err)
+		}
+	}
+
+	select {
+	case <-base.started:
+	case <-time.After(time.Second):
+		t.Fatal("first ordered write did not start")
+	}
+	select {
+	case <-base.started:
+		t.Fatal("second ordered write started before first completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 type priorityIsolatedBlockingConnection struct {
 	lowStartedOnce sync.Once
 	releaseOnce    sync.Once
@@ -136,5 +201,87 @@ func (connection *priorityIsolatedBlockingConnection) Close() error {
 func (connection *priorityIsolatedBlockingConnection) releaseLow() {
 	connection.releaseOnce.Do(func() {
 		close(connection.releaseLowC)
+	})
+}
+
+type parallelPriorityBlockingConnection struct {
+	parallelism int
+	started     chan struct{}
+	releaseC    chan struct{}
+	closed      chan struct{}
+	releaseOnce sync.Once
+}
+
+func newParallelPriorityBlockingConnection(parallelism int) *parallelPriorityBlockingConnection {
+	return &parallelPriorityBlockingConnection{
+		parallelism: parallelism,
+		started:     make(chan struct{}, parallelism),
+		releaseC:    make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (connection *parallelPriorityBlockingConnection) ID() string {
+	return "parallel-priority-blocking"
+}
+
+func (connection *parallelPriorityBlockingConnection) Protocol() utils.MultiAddressProtocol {
+	return utils.ProtocolQUIC
+}
+
+func (connection *parallelPriorityBlockingConnection) RemotePeerID() string {
+	return ""
+}
+
+func (connection *parallelPriorityBlockingConnection) LocalAddress() string {
+	return "127.0.0.1:2000"
+}
+
+func (connection *parallelPriorityBlockingConnection) RemoteAddress() string {
+	return "127.0.0.1:2001"
+}
+
+func (connection *parallelPriorityBlockingConnection) ReadMessage(ctx context.Context) (Message, error) {
+	return Message{}, ErrConnectionClosed
+}
+
+func (connection *parallelPriorityBlockingConnection) WriteMessage(ctx context.Context, message Message) error {
+	select {
+	case connection.started <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-connection.closed:
+		return ErrConnectionClosed
+	}
+	select {
+	case <-connection.releaseC:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-connection.closed:
+		return ErrConnectionClosed
+	}
+}
+
+func (connection *parallelPriorityBlockingConnection) PriorityIsolatedWrites() bool {
+	return true
+}
+
+func (connection *parallelPriorityBlockingConnection) PriorityWriteParallelism() int {
+	return connection.parallelism
+}
+
+func (connection *parallelPriorityBlockingConnection) Close() error {
+	select {
+	case <-connection.closed:
+	default:
+		close(connection.closed)
+	}
+	return nil
+}
+
+func (connection *parallelPriorityBlockingConnection) release() {
+	connection.releaseOnce.Do(func() {
+		close(connection.releaseC)
 	})
 }

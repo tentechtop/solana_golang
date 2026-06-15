@@ -49,6 +49,7 @@ type stressConfig struct {
 	targets            []string
 	duration           time.Duration
 	concurrency        int
+	stressConcurrency  p2p.ProtocolConcurrencyMode
 	payloadBytes       int
 	rateLimit          int
 	requestTimeout     time.Duration
@@ -61,6 +62,7 @@ type stressConfig struct {
 	maxConnections     int
 	maxMessageSize     int
 	writeQueueSize     int
+	quicStreamPoolSize int
 	protocolWorkers    int
 	serverDelay        time.Duration
 	inboundRate        int
@@ -117,7 +119,7 @@ func run() error {
 	rootContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := registerStressHandler(host, identity.PeerID, config.serverDelay, config.maxMessageSize); err != nil {
+	if err := registerStressHandler(host, identity.PeerID, config.serverDelay, config.maxMessageSize, config.stressConcurrency); err != nil {
 		return err
 	}
 	go func() {
@@ -155,8 +157,10 @@ func run() error {
 		slog.Any("preferred_protocols", config.preferredProtocols),
 		slog.Int("targets", len(targetPeerIDs)),
 		slog.Int("concurrency", config.concurrency),
+		slog.String("stress_concurrency", formatStressConcurrencyMode(config.stressConcurrency)),
 		slog.Int("payload_bytes", config.payloadBytes),
 		slog.Int("max_message_size", config.maxMessageSize),
+		slog.Int("quic_stream_pool_size", config.quicStreamPoolSize),
 		slog.Int("rate_limit", config.rateLimit),
 		slog.Int("inbound_rate_limit", config.inboundRate),
 		slog.Bool("warmup", config.warmup),
@@ -202,6 +206,7 @@ func parseConfig() (stressConfig, error) {
 	targets := flag.String("targets", "", "comma separated target multi-addresses")
 	duration := flag.Duration("duration", 0, "load duration; 0 means server only")
 	concurrency := flag.Int("concurrency", 0, "request worker count")
+	stressConcurrency := flag.String("stress-concurrency", "stateless", "stress protocol concurrency: stateless, ordered or state-key")
 	payloadBytes := flag.Int("payload", 1024, "request payload bytes")
 	rateLimit := flag.Int("rate-limit", 0, "global request rate limit per second; 0 means unlimited")
 	requestTimeout := flag.Duration("request-timeout", defaultRequestTimeout, "request timeout")
@@ -213,6 +218,7 @@ func parseConfig() (stressConfig, error) {
 	maxPeers := flag.Int("max-peers", 512, "max peer count")
 	maxConnections := flag.Int("max-connections", 512, "max connection count")
 	writeQueueSize := flag.Int("write-queue", 4096, "async write queue size")
+	quicStreamPoolSize := flag.Int("quic-stream-pool", 0, "QUIC same-priority stream pool size; 0 uses p2p default")
 	maxMessageSize := flag.Int("max-message-size", p2p.DefaultMaxMessageSize, "max p2p message size")
 	protocolWorkers := flag.Int("protocol-workers", 0, "protocol worker count; 0 uses default")
 	serverDelay := flag.Duration("server-delay", 0, "server handler artificial delay")
@@ -225,6 +231,10 @@ func parseConfig() (stressConfig, error) {
 		return stressConfig{}, err
 	}
 	preferredProtocols, err := parsePreferredProtocols(*preferredProtocolsValue, protocol)
+	if err != nil {
+		return stressConfig{}, err
+	}
+	stressConcurrencyMode, err := parseStressConcurrencyMode(*stressConcurrency)
 	if err != nil {
 		return stressConfig{}, err
 	}
@@ -243,6 +253,9 @@ func parseConfig() (stressConfig, error) {
 	if *inboundRate < 0 {
 		return stressConfig{}, fmt.Errorf("invalid inbound rate limit %d", *inboundRate)
 	}
+	if *quicStreamPoolSize < 0 {
+		return stressConfig{}, fmt.Errorf("invalid quic stream pool size %d", *quicStreamPoolSize)
+	}
 	return stressConfig{
 		protocol:           protocol,
 		preferredProtocols: preferredProtocols,
@@ -255,6 +268,7 @@ func parseConfig() (stressConfig, error) {
 		targets:            splitCSV(*targets),
 		duration:           *duration,
 		concurrency:        *concurrency,
+		stressConcurrency:  stressConcurrencyMode,
 		payloadBytes:       *payloadBytes,
 		rateLimit:          *rateLimit,
 		requestTimeout:     *requestTimeout,
@@ -267,11 +281,38 @@ func parseConfig() (stressConfig, error) {
 		maxConnections:     *maxConnections,
 		maxMessageSize:     *maxMessageSize,
 		writeQueueSize:     *writeQueueSize,
+		quicStreamPoolSize: *quicStreamPoolSize,
 		protocolWorkers:    *protocolWorkers,
 		serverDelay:        *serverDelay,
 		inboundRate:        *inboundRate,
 		profileDir:         strings.TrimSpace(*profileDir),
 	}, nil
+}
+
+func parseStressConcurrencyMode(rawValue string) (p2p.ProtocolConcurrencyMode, error) {
+	switch strings.TrimSpace(strings.ToLower(rawValue)) {
+	case "", "stateless", "unordered", "parallel":
+		return p2p.ProtocolConcurrencyStateless, nil
+	case "ordered", "serial":
+		return p2p.ProtocolConcurrencyOrdered, nil
+	case "state-key", "statekey", "partitioned":
+		return p2p.ProtocolConcurrencyStateKey, nil
+	default:
+		return p2p.ProtocolConcurrencyOrdered, fmt.Errorf("invalid stress concurrency %q", rawValue)
+	}
+}
+
+func formatStressConcurrencyMode(mode p2p.ProtocolConcurrencyMode) string {
+	switch mode {
+	case p2p.ProtocolConcurrencyStateless:
+		return "stateless"
+	case p2p.ProtocolConcurrencyOrdered:
+		return "ordered"
+	case p2p.ProtocolConcurrencyStateKey:
+		return "state-key"
+	default:
+		return "unknown"
+	}
 }
 
 func parsePreferredProtocols(rawValue string, fallback utils.MultiAddressProtocol) ([]utils.MultiAddressProtocol, error) {
@@ -376,6 +417,7 @@ func newStressHost(
 		MaxPendingInbound:   config.maxConnections,
 		MaxConnectionsPerIP: config.maxConnections,
 		MaxMessageSize:      config.maxMessageSize,
+		QUICStreamPoolSize:  config.quicStreamPoolSize,
 		AsyncWrite: p2p.AsyncWriteConfig{
 			QueueSize:    config.writeQueueSize,
 			WriteTimeout: config.requestTimeout,
@@ -400,12 +442,22 @@ func newStressHost(
 	return host, listenAddress, nil
 }
 
-func registerStressHandler(host *p2p.Host, peerID string, delay time.Duration, maxMessageSize int) error {
+func registerStressHandler(
+	host *p2p.Host,
+	peerID string,
+	delay time.Duration,
+	maxMessageSize int,
+	concurrency p2p.ProtocolConcurrencyMode,
+) error {
 	spec := p2p.ProtocolSpec{
 		ID:          stressProtocolID,
 		Name:        "/p2p/stress/request/1.0.0",
 		HasResponse: true,
 		Priority:    p2p.MessagePriorityNormal,
+		Concurrency: concurrency,
+	}
+	if concurrency == p2p.ProtocolConcurrencyStateKey {
+		spec.PartitionKey = stressPartitionKey
 	}
 	return host.RegisterResultHandler(spec, func(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 		if delay > 0 {
@@ -422,6 +474,13 @@ func registerStressHandler(host *p2p.Host, peerID string, delay time.Duration, m
 		response.ToPeerID = message.FromPeerID
 		return response, nil
 	})
+}
+
+func stressPartitionKey(message p2p.Message) string {
+	if len(message.Payload) < 8 {
+		return message.ID
+	}
+	return strconv.FormatUint(binary.LittleEndian.Uint64(message.Payload[0:8]), 10)
 }
 
 func addBootstrapPeers(host *p2p.Host, rawAddresses []string) error {
@@ -694,8 +753,10 @@ func printSummary(stats *stressStats, config stressConfig, logger *slog.Logger) 
 		slog.String("protocol", string(config.protocol)),
 		slog.Duration("duration", time.Since(stats.startedAt)),
 		slog.Int("concurrency", config.concurrency),
+		slog.String("stress_concurrency", formatStressConcurrencyMode(config.stressConcurrency)),
 		slog.Int("payload_bytes", config.payloadBytes),
 		slog.Int("max_message_size", config.maxMessageSize),
+		slog.Int("quic_stream_pool_size", config.quicStreamPoolSize),
 		slog.Int("rate_limit", config.rateLimit),
 		slog.Int("inbound_rate_limit", config.inboundRate),
 		slog.Bool("warmup", config.warmup),

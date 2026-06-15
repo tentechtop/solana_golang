@@ -11,6 +11,7 @@ func (host *Host) registerDefaultProtocolHandlers() error {
 		Name:        "/p2p/find-node/request/1.0.0",
 		HasResponse: true,
 		Priority:    MessagePriorityNormal,
+		Concurrency: defaultProtocolConcurrency(ProtocolFindNodeRequestV1),
 	}
 	if err := host.RegisterResultHandler(spec, host.handleFindNodeRequest); err != nil {
 		return err
@@ -25,6 +26,7 @@ func (host *Host) registerDefaultDiscoveryHandlers() error {
 			Name:        "/p2p/identify/request/1.0.0",
 			HasResponse: true,
 			Priority:    MessagePriorityHigh,
+			Concurrency: defaultProtocolConcurrency(ProtocolIdentifyRequestV1),
 		}
 		if err := host.RegisterResultHandler(spec, host.handleIdentifyRequest); err != nil {
 			return err
@@ -36,6 +38,7 @@ func (host *Host) registerDefaultDiscoveryHandlers() error {
 			Name:        "/p2p/peer-hints/1.0.0",
 			HasResponse: false,
 			Priority:    MessagePriorityNormal,
+			Concurrency: defaultProtocolConcurrency(ProtocolPeerHintsV1),
 		}
 		if err := host.RegisterVoidHandler(spec, host.handlePeerHints); err != nil {
 			return err

@@ -199,7 +199,9 @@ func (host *Host) requestOnConnection(ctx context.Context, connection Connection
 	}
 	requestStartedAt := time.Now()
 	host.metrics.requestsStarted.Add(1)
-	defer host.metrics.recordRequestLatency(time.Since(requestStartedAt))
+	defer func() {
+		host.metrics.recordRequestLatency(time.Since(requestStartedAt))
+	}()
 
 	responseType, requireResponseType := expectedResponseType(outbound.Type)
 	waiter, unregister, err := host.requests.register(outbound.ID, peerID, responseType, requireResponseType)

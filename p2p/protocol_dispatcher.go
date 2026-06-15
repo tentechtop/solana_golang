@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -152,8 +153,16 @@ func (dispatcher *protocolDispatcher) priority(message Message) MessagePriority 
 }
 
 func (dispatcher *protocolDispatcher) partition(message Message) *protocolPartition {
-	index := protocolPartitionIndex(message, len(dispatcher.partitions))
+	index := dispatcher.partitionIndex(message)
 	return dispatcher.partitions[index]
+}
+
+func (dispatcher *protocolDispatcher) partitionIndex(message Message) int {
+	spec, ok := dispatcher.host.registry.Spec(message.Type)
+	if !ok {
+		return protocolPartitionIndex(message, len(dispatcher.partitions))
+	}
+	return protocolPartitionIndexForSpec(message, len(dispatcher.partitions), spec)
 }
 
 func (partition *protocolPartition) queue(priority MessagePriority) chan protocolJob {
@@ -279,6 +288,18 @@ func (dispatcher *protocolDispatcher) queueDepths() (uint64, uint64, uint64) {
 }
 
 func protocolPartitionIndex(message Message, partitionCount int) int {
+	return protocolPartitionIndexWithShard(message, partitionCount, "")
+}
+
+func protocolPartitionIndexForSpec(message Message, partitionCount int, spec ProtocolSpec) int {
+	shardKey, ok := protocolParallelShardKey(message, spec)
+	if !ok {
+		return protocolPartitionIndex(message, partitionCount)
+	}
+	return protocolPartitionIndexWithShard(message, partitionCount, shardKey)
+}
+
+func protocolPartitionIndexWithShard(message Message, partitionCount int, shardKey string) int {
 	if partitionCount <= 1 {
 		return 0
 	}
@@ -287,5 +308,44 @@ func protocolPartitionIndex(message Message, partitionCount int) int {
 	var protocolBytes [4]byte
 	binary.LittleEndian.PutUint32(protocolBytes[:], uint32(message.Type))
 	_, _ = hash.Write(protocolBytes[:])
+	if shardKey != "" {
+		_, _ = hash.Write([]byte(shardKey))
+	}
 	return int(hash.Sum32() % uint32(partitionCount))
+}
+
+// protocolParallelShardKey 返回并行协议分片键 + 无状态按消息打散，有状态按业务键保序。
+func protocolParallelShardKey(message Message, spec ProtocolSpec) (string, bool) {
+	switch spec.Concurrency {
+	case ProtocolConcurrencyStateless:
+		return protocolStatelessShardKey(message), true
+	case ProtocolConcurrencyStateKey:
+		return protocolStateShardKey(message, spec)
+	default:
+		return "", false
+	}
+}
+
+func protocolStatelessShardKey(message Message) string {
+	if message.IsRequestResponse() && message.RequestID != "" {
+		return strings.ToLower(message.RequestID)
+	}
+	return strings.ToLower(message.ID)
+}
+
+func protocolStateShardKey(message Message, spec ProtocolSpec) (shardKey string, ok bool) {
+	if spec.PartitionKey == nil {
+		return "", false
+	}
+	defer func() {
+		if recover() != nil {
+			shardKey = ""
+			ok = false
+		}
+	}()
+	shardKey = strings.TrimSpace(spec.PartitionKey(message))
+	if shardKey == "" {
+		return "", false
+	}
+	return strings.ToLower(shardKey), true
 }

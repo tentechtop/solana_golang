@@ -262,6 +262,8 @@ func (host *Host) wrapConnectionWriter(connection Connection) Connection {
 		metrics:      &host.metrics,
 		logger:       host.logger,
 		priority:     host.messagePriority,
+		concurrency:  host.messageConcurrency,
+		partitionKey: host.messagePartitionKey,
 		onWrite:      host.recordConnectionWrite,
 		onError:      host.recordConnectionError,
 	})
@@ -293,6 +295,26 @@ func (host *Host) messagePriority(message Message) MessagePriority {
 		return defaultProtocolPriority(message.Type)
 	}
 	return spec.Priority
+}
+
+func (host *Host) messageConcurrency(message Message) ProtocolConcurrencyMode {
+	spec, ok := host.registry.Spec(message.Type)
+	if !ok {
+		return defaultProtocolConcurrency(message.Type)
+	}
+	return normalizeProtocolConcurrency(spec.Concurrency)
+}
+
+func (host *Host) messagePartitionKey(message Message) string {
+	spec, ok := host.registry.Spec(message.Type)
+	if !ok {
+		return ""
+	}
+	shardKey, ok := protocolParallelShardKey(message, spec)
+	if !ok {
+		return ""
+	}
+	return shardKey
 }
 
 func (host *Host) messageTrafficClass(message Message) ProtocolClass {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +111,41 @@ func TestSecureSessionAcceptsOutOfOrderWithinReplayWindow(t *testing.T) {
 	}
 	if _, err := responderSession.Open(secondPayload, []byte("aad-2")); !errors.Is(err, ErrSecureSession) {
 		t.Fatalf("Open(second replay) error = %v, want ErrSecureSession", err)
+	}
+}
+
+func TestSecureSessionOpenAllowsConcurrentSequences(t *testing.T) {
+	initiatorSession, responderSession := testSecureSessionPair(t, "localnet")
+	const payloadCount = 64
+	payloads := make([]SecurePayload, 0, payloadCount)
+	for index := 0; index < payloadCount; index++ {
+		payload, err := initiatorSession.Seal([]byte{byte(index)}, []byte("aad"))
+		if err != nil {
+			t.Fatalf("Seal(%d) error = %v", index, err)
+		}
+		payloads = append(payloads, payload)
+	}
+
+	var workers sync.WaitGroup
+	errs := make(chan error, payloadCount)
+	for index := payloadCount - 1; index >= 0; index-- {
+		payload := payloads[index]
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			_, err := responderSession.Open(payload, []byte("aad"))
+			errs <- err
+		}()
+	}
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Open(concurrent) error = %v", err)
+		}
+	}
+	if _, err := responderSession.Open(payloads[0], []byte("aad")); !errors.Is(err, ErrSecureSession) {
+		t.Fatalf("Open(replay after concurrent) error = %v, want ErrSecureSession", err)
 	}
 }
 

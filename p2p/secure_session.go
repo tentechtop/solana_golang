@@ -473,6 +473,7 @@ type SecureSession struct {
 	sendSequence       uint64
 	receiveSequence    uint64
 	receiveSequences   map[uint64]struct{}
+	receivePending     map[uint64]struct{}
 	sendMutex          sync.Mutex
 	receiveMutex       sync.Mutex
 }
@@ -595,19 +596,32 @@ func (session *SecureSession) Open(payload SecurePayload, associatedData []byte)
 		return nil, fmt.Errorf("%w: session id mismatch", ErrSecureSession)
 	}
 
-	session.receiveMutex.Lock()
-	defer session.receiveMutex.Unlock()
-	if err := session.validateReceiveSequence(payload.Sequence); err != nil {
+	if err := session.reserveReceiveSequence(payload.Sequence); err != nil {
 		return nil, err
 	}
 
 	nonce := secureSessionNonce(session.receiveNoncePrefix, payload.Sequence)
 	plaintext, err := session.receiveAEAD.Open(nil, nonce[:], payload.Ciphertext, associatedData)
 	if err != nil {
+		session.releaseReceiveSequence(payload.Sequence)
 		return nil, fmt.Errorf("%w: decrypt payload: %w", ErrSecureSession, err)
 	}
-	session.markReceiveSequence(payload.Sequence)
+	session.commitReceiveSequence(payload.Sequence)
 	return plaintext, nil
+}
+
+// reserveReceiveSequence 预占接收序号 + 允许锁外并行解密且拒绝重复包同时进入。
+func (session *SecureSession) reserveReceiveSequence(sequence uint64) error {
+	session.receiveMutex.Lock()
+	defer session.receiveMutex.Unlock()
+	if err := session.validateReceiveSequence(sequence); err != nil {
+		return err
+	}
+	if session.receivePending == nil {
+		session.receivePending = make(map[uint64]struct{})
+	}
+	session.receivePending[sequence] = struct{}{}
+	return nil
 }
 
 func (session *SecureSession) validateReceiveSequence(sequence uint64) error {
@@ -620,7 +634,23 @@ func (session *SecureSession) validateReceiveSequence(sequence uint64) error {
 	if _, ok := session.receiveSequences[sequence]; ok {
 		return fmt.Errorf("%w: duplicate sequence", ErrSecureSession)
 	}
+	if _, ok := session.receivePending[sequence]; ok {
+		return fmt.Errorf("%w: pending sequence", ErrSecureSession)
+	}
 	return nil
+}
+
+func (session *SecureSession) commitReceiveSequence(sequence uint64) {
+	session.receiveMutex.Lock()
+	defer session.receiveMutex.Unlock()
+	delete(session.receivePending, sequence)
+	session.markReceiveSequence(sequence)
+}
+
+func (session *SecureSession) releaseReceiveSequence(sequence uint64) {
+	session.receiveMutex.Lock()
+	delete(session.receivePending, sequence)
+	session.receiveMutex.Unlock()
 }
 
 func (session *SecureSession) markReceiveSequence(sequence uint64) {
@@ -865,6 +895,16 @@ func (connection *SecureConnection) ReadMessage(ctx context.Context) (Message, e
 	if err != nil {
 		return Message{}, err
 	}
+	return connection.OpenMessage(message)
+}
+
+// ReadEncryptedMessage 读取外层安全消息 + 供并行解析层在线程池中解密业务载荷。
+func (connection *SecureConnection) ReadEncryptedMessage(ctx context.Context) (Message, error) {
+	return connection.connection.ReadMessage(ctx)
+}
+
+// OpenMessage 解密外层安全消息 + 将 AES-GCM 解密从网络读循环移入并行解析层。
+func (connection *SecureConnection) OpenMessage(message Message) (Message, error) {
 	associatedData, err := secureMessageAssociatedData(message)
 	if err != nil {
 		return Message{}, err
@@ -906,9 +946,31 @@ func (connection *SecureConnection) WriteMessageWithPriority(ctx context.Context
 	return connection.connection.WriteMessage(ctx, outbound)
 }
 
+// WriteMessageWithSchedule 加密后按协议调度写入底层连接 + 保留 QUIC 串行和并行 stream 语义。
+func (connection *SecureConnection) WriteMessageWithSchedule(ctx context.Context, message Message, schedule messageWriteSchedule) error {
+	outbound, err := connection.secureOutboundMessage(message)
+	if err != nil {
+		return err
+	}
+	scheduledWriter, ok := connection.connection.(scheduledMessageWriter)
+	if ok {
+		return scheduledWriter.WriteMessageWithSchedule(ctx, outbound, schedule)
+	}
+	priorityWriter, ok := connection.connection.(priorityMessageWriter)
+	if ok {
+		return priorityWriter.WriteMessageWithPriority(ctx, outbound, schedule.priority)
+	}
+	return connection.connection.WriteMessage(ctx, outbound)
+}
+
 // PriorityIsolatedWrites 透传底层隔离能力 + 让异步写队列为 QUIC 启用并行 lane。
 func (connection *SecureConnection) PriorityIsolatedWrites() bool {
 	return supportsPriorityIsolatedWrites(connection.connection)
+}
+
+// PriorityWriteParallelism 透传同优先级写并行度 + 让安全会话不削弱底层 QUIC stream 池。
+func (connection *SecureConnection) PriorityWriteParallelism() int {
+	return priorityWriteParallelism(connection.connection)
 }
 
 func (connection *SecureConnection) secureOutboundMessage(message Message) (Message, error) {

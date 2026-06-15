@@ -109,3 +109,69 @@ func TestProtocolRegistryDefaultsProtocolClass(t *testing.T) {
 		t.Fatalf("custom class = %d ok=%v, want data", storedCustomSpec.Class, ok)
 	}
 }
+
+func TestDefaultProtocolSpecsDeclareSafeConcurrency(t *testing.T) {
+	specs := DefaultProtocolSpecs()
+	byID := make(map[ProtocolID]ProtocolSpec, len(specs))
+	for _, spec := range specs {
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("default spec %d Validate() error = %v", spec.ID, err)
+		}
+		byID[spec.ID] = spec
+	}
+
+	statelessProtocols := []ProtocolID{
+		ProtocolPingV1,
+		ProtocolPongV1,
+		ProtocolFindNodeRequestV1,
+		ProtocolFindNodeResponseV1,
+		ProtocolQueryBlockByHashV1,
+		ProtocolQueryBlockByHeightV1,
+		ProtocolQueryCommonAncestorV1,
+		ProtocolQueryBlockHeadersV1,
+		ProtocolIdentifyRequestV1,
+		ProtocolIdentifyResponseV1,
+	}
+	for _, protocolID := range statelessProtocols {
+		if byID[protocolID].Concurrency != ProtocolConcurrencyStateless {
+			t.Fatalf("protocol %d concurrency = %d, want stateless", protocolID, byID[protocolID].Concurrency)
+		}
+	}
+
+	orderedProtocols := []ProtocolID{
+		ProtocolHandshakeV1,
+		ProtocolBlockV1,
+		ProtocolBroadcastResourceV1,
+		ProtocolGetResourceRequestV1,
+		ProtocolReceiveBlockV1,
+		ProtocolReceiveTransactionV1,
+		ProtocolHandshakeSuccessV1,
+		ProtocolPeerHintsV1,
+		ProtocolNodeStatusV1,
+		ProtocolHotStuffVoteV1,
+		ProtocolHotStuffQCV1,
+		ProtocolSecureSessionV1,
+	}
+	for _, protocolID := range orderedProtocols {
+		if byID[protocolID].Concurrency != ProtocolConcurrencyOrdered {
+			t.Fatalf("protocol %d concurrency = %d, want ordered", protocolID, byID[protocolID].Concurrency)
+		}
+	}
+}
+
+func TestProtocolRegistryRejectsStateKeyConcurrencyWithoutPartitionKey(t *testing.T) {
+	registry := NewProtocolRegistry()
+	spec := ProtocolSpec{
+		ID:          ProtocolID(9300),
+		Name:        "/p2p/test/state-key/1.0.0",
+		HasResponse: false,
+		Priority:    MessagePriorityNormal,
+		Concurrency: ProtocolConcurrencyStateKey,
+	}
+	err := registry.RegisterVoidHandler(spec, func(ctx context.Context, message Message) error {
+		return nil
+	})
+	if !errors.Is(err, ErrInvalidProtocol) {
+		t.Fatalf("RegisterVoidHandler() error = %v, want ErrInvalidProtocol", err)
+	}
+}

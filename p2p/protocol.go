@@ -79,13 +79,30 @@ const (
 	ProtocolClassData ProtocolClass = 2
 )
 
+// ProtocolConcurrencyMode 表示协议并发模型 + 显式区分保序状态流和可并行流量。
+type ProtocolConcurrencyMode uint8
+
+const (
+	// ProtocolConcurrencyOrdered 表示有状态保序 + 默认保护同 peer 同协议的处理顺序。
+	ProtocolConcurrencyOrdered ProtocolConcurrencyMode = 0
+	// ProtocolConcurrencyStateless 表示无状态并行 + 每条消息可独立分区处理。
+	ProtocolConcurrencyStateless ProtocolConcurrencyMode = 1
+	// ProtocolConcurrencyStateKey 表示按状态键并行 + 同一状态键保序且不同状态键并发。
+	ProtocolConcurrencyStateKey ProtocolConcurrencyMode = 2
+)
+
+// ProtocolPartitionKey 提取协议状态分片键 + 让有状态协议按业务对象隔离并行。
+type ProtocolPartitionKey func(Message) string
+
 // ProtocolSpec 保存协议元数据 + 供注册表校验路由和响应语义。
 type ProtocolSpec struct {
-	ID          ProtocolID
-	Name        string
-	HasResponse bool
-	Priority    MessagePriority
-	Class       ProtocolClass
+	ID           ProtocolID
+	Name         string
+	HasResponse  bool
+	Priority     MessagePriority
+	Class        ProtocolClass
+	Concurrency  ProtocolConcurrencyMode
+	PartitionKey ProtocolPartitionKey
 }
 
 // Validate 校验协议定义 + 防止空名称和非法优先级进入注册表。
@@ -99,6 +116,12 @@ func (spec ProtocolSpec) Validate() error {
 	if spec.Class > ProtocolClassData {
 		return fmt.Errorf("%w: invalid protocol class", ErrInvalidProtocol)
 	}
+	if spec.Concurrency > ProtocolConcurrencyStateKey {
+		return fmt.Errorf("%w: invalid protocol concurrency", ErrInvalidProtocol)
+	}
+	if spec.Concurrency == ProtocolConcurrencyStateKey && spec.PartitionKey == nil {
+		return fmt.Errorf("%w: missing protocol partition key", ErrInvalidProtocol)
+	}
 	return nil
 }
 
@@ -108,6 +131,18 @@ func (spec ProtocolSpec) EffectiveClass() ProtocolClass {
 		return spec.Class
 	}
 	return defaultProtocolClass(spec.ID)
+}
+
+// AllowsParallelHandling 返回协议并行处理能力 + 仅无状态或按状态键隔离的协议允许跨分区执行。
+func (spec ProtocolSpec) AllowsParallelHandling() bool {
+	return spec.Concurrency == ProtocolConcurrencyStateless || spec.Concurrency == ProtocolConcurrencyStateKey
+}
+
+func normalizeProtocolConcurrency(concurrency ProtocolConcurrencyMode) ProtocolConcurrencyMode {
+	if concurrency > ProtocolConcurrencyStateKey {
+		return ProtocolConcurrencyOrdered
+	}
+	return concurrency
 }
 
 // defaultProtocolClass 返回内置协议默认分类 + 防止高频业务协议被控制面限速误判。
@@ -155,6 +190,25 @@ func defaultProtocolPriority(protocolID ProtocolID) MessagePriority {
 	}
 }
 
+// defaultProtocolConcurrency 返回内置协议并发模型 + 默认业务写入和共识流量保持串行。
+func defaultProtocolConcurrency(protocolID ProtocolID) ProtocolConcurrencyMode {
+	switch protocolID {
+	case ProtocolPingV1,
+		ProtocolPongV1,
+		ProtocolFindNodeRequestV1,
+		ProtocolFindNodeResponseV1,
+		ProtocolQueryBlockByHashV1,
+		ProtocolQueryBlockByHeightV1,
+		ProtocolQueryCommonAncestorV1,
+		ProtocolQueryBlockHeadersV1,
+		ProtocolIdentifyRequestV1,
+		ProtocolIdentifyResponseV1:
+		return ProtocolConcurrencyStateless
+	default:
+		return ProtocolConcurrencyOrdered
+	}
+}
+
 // NormalizedName 返回规范协议名 + 消除大小写和多余分隔符差异。
 func (spec ProtocolSpec) NormalizedName() string {
 	return NormalizeProtocolName(spec.Name)
@@ -172,27 +226,37 @@ func NormalizeProtocolName(name string) string {
 // DefaultProtocolSpecs 返回内置协议定义 + 覆盖发现、同步、交易和共识消息。
 func DefaultProtocolSpecs() []ProtocolSpec {
 	return []ProtocolSpec{
-		{ID: ProtocolPingV1, Name: "/p2p/ping/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolPingV1)},
-		{ID: ProtocolPongV1, Name: "/p2p/pong/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolPongV1)},
-		{ID: ProtocolHandshakeV1, Name: "/p2p/handshake/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolHandshakeV1)},
-		{ID: ProtocolBlockV1, Name: "/p2p/block/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolBlockV1)},
-		{ID: ProtocolFindNodeRequestV1, Name: "/p2p/find-node/request/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolFindNodeRequestV1)},
-		{ID: ProtocolBroadcastResourceV1, Name: "/p2p/resource/broadcast/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolBroadcastResourceV1)},
-		{ID: ProtocolGetResourceRequestV1, Name: "/p2p/resource/get/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolGetResourceRequestV1)},
-		{ID: ProtocolReceiveBlockV1, Name: "/p2p/block/receive/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolReceiveBlockV1)},
-		{ID: ProtocolReceiveTransactionV1, Name: "/p2p/transaction/receive/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolReceiveTransactionV1)},
-		{ID: ProtocolQueryBlockByHashV1, Name: "/p2p/block/query-by-hash/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockByHashV1)},
-		{ID: ProtocolQueryBlockByHeightV1, Name: "/p2p/block/query-by-height/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockByHeightV1)},
-		{ID: ProtocolQueryCommonAncestorV1, Name: "/p2p/common-ancestor/query/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryCommonAncestorV1)},
-		{ID: ProtocolHandshakeSuccessV1, Name: "/p2p/handshake-success/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHandshakeSuccessV1)},
-		{ID: ProtocolQueryBlockHeadersV1, Name: "/p2p/block-headers/query/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolQueryBlockHeadersV1)},
-		{ID: ProtocolPeerHintsV1, Name: "/p2p/peer-hints/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolPeerHintsV1)},
-		{ID: ProtocolNodeStatusV1, Name: "/p2p/node-status/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolNodeStatusV1)},
-		{ID: ProtocolFindNodeResponseV1, Name: "/p2p/find-node/response/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolFindNodeResponseV1)},
-		{ID: ProtocolHotStuffVoteV1, Name: "/p2p/hotstuff/vote/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHotStuffVoteV1)},
-		{ID: ProtocolHotStuffQCV1, Name: "/p2p/hotstuff/qc/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolHotStuffQCV1)},
-		{ID: ProtocolSecureSessionV1, Name: "/p2p/secure-session/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolSecureSessionV1)},
-		{ID: ProtocolIdentifyRequestV1, Name: "/p2p/identify/request/1.0.0", HasResponse: true, Priority: defaultProtocolPriority(ProtocolIdentifyRequestV1)},
-		{ID: ProtocolIdentifyResponseV1, Name: "/p2p/identify/response/1.0.0", HasResponse: false, Priority: defaultProtocolPriority(ProtocolIdentifyResponseV1)},
+		defaultProtocolSpec(ProtocolPingV1, "/p2p/ping/1.0.0", true),
+		defaultProtocolSpec(ProtocolPongV1, "/p2p/pong/1.0.0", false),
+		defaultProtocolSpec(ProtocolHandshakeV1, "/p2p/handshake/1.0.0", true),
+		defaultProtocolSpec(ProtocolBlockV1, "/p2p/block/1.0.0", false),
+		defaultProtocolSpec(ProtocolFindNodeRequestV1, "/p2p/find-node/request/1.0.0", true),
+		defaultProtocolSpec(ProtocolBroadcastResourceV1, "/p2p/resource/broadcast/1.0.0", false),
+		defaultProtocolSpec(ProtocolGetResourceRequestV1, "/p2p/resource/get/1.0.0", true),
+		defaultProtocolSpec(ProtocolReceiveBlockV1, "/p2p/block/receive/1.0.0", false),
+		defaultProtocolSpec(ProtocolReceiveTransactionV1, "/p2p/transaction/receive/1.0.0", false),
+		defaultProtocolSpec(ProtocolQueryBlockByHashV1, "/p2p/block/query-by-hash/1.0.0", true),
+		defaultProtocolSpec(ProtocolQueryBlockByHeightV1, "/p2p/block/query-by-height/1.0.0", true),
+		defaultProtocolSpec(ProtocolQueryCommonAncestorV1, "/p2p/common-ancestor/query/1.0.0", true),
+		defaultProtocolSpec(ProtocolHandshakeSuccessV1, "/p2p/handshake-success/1.0.0", false),
+		defaultProtocolSpec(ProtocolQueryBlockHeadersV1, "/p2p/block-headers/query/1.0.0", true),
+		defaultProtocolSpec(ProtocolPeerHintsV1, "/p2p/peer-hints/1.0.0", false),
+		defaultProtocolSpec(ProtocolNodeStatusV1, "/p2p/node-status/1.0.0", false),
+		defaultProtocolSpec(ProtocolFindNodeResponseV1, "/p2p/find-node/response/1.0.0", false),
+		defaultProtocolSpec(ProtocolHotStuffVoteV1, "/p2p/hotstuff/vote/1.0.0", false),
+		defaultProtocolSpec(ProtocolHotStuffQCV1, "/p2p/hotstuff/qc/1.0.0", false),
+		defaultProtocolSpec(ProtocolSecureSessionV1, "/p2p/secure-session/1.0.0", true),
+		defaultProtocolSpec(ProtocolIdentifyRequestV1, "/p2p/identify/request/1.0.0", true),
+		defaultProtocolSpec(ProtocolIdentifyResponseV1, "/p2p/identify/response/1.0.0", false),
+	}
+}
+
+func defaultProtocolSpec(protocolID ProtocolID, name string, hasResponse bool) ProtocolSpec {
+	return ProtocolSpec{
+		ID:          protocolID,
+		Name:        name,
+		HasResponse: hasResponse,
+		Priority:    defaultProtocolPriority(protocolID),
+		Concurrency: defaultProtocolConcurrency(protocolID),
 	}
 }

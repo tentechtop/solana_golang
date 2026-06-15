@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -30,6 +31,8 @@ const (
 	maxQUICReadBufferSize                     = 64
 	defaultQUICInitialStreamReceiveWindow     = 1024 * 1024
 	defaultQUICInitialConnectionReceiveWindow = 4 * 1024 * 1024
+	defaultQUICPriorityStreamPoolSize         = 8
+	maxQUICPriorityStreamPoolSize             = 32
 )
 
 // QUICTransportConfig 保存 QUIC 配置 + 支持注入 TLS、quic-go 配置和日志。
@@ -37,11 +40,14 @@ type QUICTransportConfig struct {
 	MaxMessageSize                 int
 	MaxPendingInbound              int
 	MaxConnectionsPerIP            int
+	StreamPoolSize                 int
 	InitialStreamReceiveWindow     uint64
 	InitialConnectionReceiveWindow uint64
 	MaxStreamReceiveWindow         uint64
 	MaxConnectionReceiveWindow     uint64
 	MessagePriority                func(Message) MessagePriority
+	MessageConcurrency             func(Message) ProtocolConcurrencyMode
+	MessagePartitionKey            func(Message) string
 	TLSConfig                      *tls.Config
 	QUICConfig                     *quic.Config
 	Logger                         *slog.Logger
@@ -49,15 +55,18 @@ type QUICTransportConfig struct {
 
 // QUICTransport 实现 QUIC 传输 + 基于 quic-go 提供低延迟多路复用连接。
 type QUICTransport struct {
-	mutex           sync.Mutex
-	listeners       map[string]*quic.Listener
-	closed          bool
-	maxMessageSize  int
-	inboundLimiter  *transportInboundLimiter
-	tlsConfig       *tls.Config
-	quicConfig      *quic.Config
-	messagePriority func(Message) MessagePriority
-	logger          *slog.Logger
+	mutex               sync.Mutex
+	listeners           map[string]*quic.Listener
+	closed              bool
+	maxMessageSize      int
+	streamPoolSize      int
+	inboundLimiter      *transportInboundLimiter
+	tlsConfig           *tls.Config
+	quicConfig          *quic.Config
+	messagePriority     func(Message) MessagePriority
+	messageConcurrency  func(Message) ProtocolConcurrencyMode
+	messagePartitionKey func(Message) string
+	logger              *slog.Logger
 }
 
 // NewQUICTransport 创建默认 QUIC 传输 + 使用临时自签证书满足 QUIC 握手要求。
@@ -73,13 +82,16 @@ func NewQUICTransportWithConfig(config QUICTransportConfig) (*QUICTransport, err
 	}
 	maxMessageSize := normalizeMaxMessageSize(config.MaxMessageSize)
 	return &QUICTransport{
-		listeners:       make(map[string]*quic.Listener),
-		maxMessageSize:  maxMessageSize,
-		inboundLimiter:  newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
-		tlsConfig:       tlsConfig,
-		quicConfig:      normalizeQUICConfig(config.QUICConfig, config, maxMessageSize),
-		messagePriority: normalizeQUICMessagePriority(config.MessagePriority),
-		logger:          utils.EnsureLogger(config.Logger),
+		listeners:           make(map[string]*quic.Listener),
+		maxMessageSize:      maxMessageSize,
+		streamPoolSize:      normalizeQUICStreamPoolSize(config.StreamPoolSize),
+		inboundLimiter:      newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
+		tlsConfig:           tlsConfig,
+		quicConfig:          normalizeQUICConfig(config.QUICConfig, config, maxMessageSize),
+		messagePriority:     normalizeQUICMessagePriority(config.MessagePriority),
+		messageConcurrency:  normalizeQUICMessageConcurrency(config.MessageConcurrency),
+		messagePartitionKey: normalizeQUICMessagePartitionKey(config.MessagePartitionKey),
+		logger:              utils.EnsureLogger(config.Logger),
 	}, nil
 }
 
@@ -138,7 +150,17 @@ func (transport *QUICTransport) Dial(ctx context.Context, address utils.MultiAdd
 		slog.String("address", address.String()),
 		slog.String("peer_id", address.PeerID),
 	)
-	return newQUICConnection(connection, stream, address.PeerID, transport.maxMessageSize, transport.messagePriority, transport.logger), nil
+	return newQUICConnection(
+		connection,
+		stream,
+		address.PeerID,
+		transport.maxMessageSize,
+		transport.streamPoolSize,
+		transport.messagePriority,
+		transport.messageConcurrency,
+		transport.messagePartitionKey,
+		transport.logger,
+	), nil
 }
 
 // Close 关闭 QUIC 传输 + 释放所有监听 UDP 端口。
@@ -204,7 +226,17 @@ func (transport *QUICTransport) acceptStream(ctx context.Context, connection *qu
 		transport.logger.Warn("p2p quic accept stream failed", slog.String("error", err.Error()))
 		return
 	}
-	handler(ctx, newQUICConnection(connection, stream, "", transport.maxMessageSize, transport.messagePriority, transport.logger))
+	handler(ctx, newQUICConnection(
+		connection,
+		stream,
+		"",
+		transport.maxMessageSize,
+		transport.streamPoolSize,
+		transport.messagePriority,
+		transport.messageConcurrency,
+		transport.messagePartitionKey,
+		transport.logger,
+	))
 }
 
 // streamAcceptTimeout 限制首个业务流等待时间 + 防止 QUIC 空连接长期占用 goroutine。
@@ -261,26 +293,34 @@ type quicPriorityStream struct {
 	mutex  sync.Mutex
 }
 
+type quicPriorityStreamPool struct {
+	streams []*quicPriorityStream
+	next    uint64
+}
+
 // QUICConnection 封装 QUIC 多 stream 连接 + 按消息优先级隔离共识、业务和同步流量。
 type QUICConnection struct {
-	id              string
-	connection      *quic.Conn
-	remotePeerID    string
-	maxMessageSize  int
-	highReads       chan quicReadResult
-	normalReads     chan quicReadResult
-	lowReads        chan quicReadResult
-	readNotify      chan struct{}
-	done            chan struct{}
-	streamMutex     sync.Mutex
-	writeStreams    map[MessagePriority]*quicPriorityStream
-	allStreams      map[*quic.Stream]struct{}
-	closed          bool
-	fatalErr        error
-	closeOnce       sync.Once
-	closeErr        error
-	messagePriority func(Message) MessagePriority
-	logger          *slog.Logger
+	id                  string
+	connection          *quic.Conn
+	remotePeerID        string
+	maxMessageSize      int
+	streamPoolSize      int
+	highReads           chan quicReadResult
+	normalReads         chan quicReadResult
+	lowReads            chan quicReadResult
+	readNotify          chan struct{}
+	done                chan struct{}
+	streamMutex         sync.Mutex
+	writeStreams        map[MessagePriority]*quicPriorityStreamPool
+	allStreams          map[*quic.Stream]struct{}
+	closed              bool
+	fatalErr            error
+	closeOnce           sync.Once
+	closeErr            error
+	messagePriority     func(Message) MessagePriority
+	messageConcurrency  func(Message) ProtocolConcurrencyMode
+	messagePartitionKey func(Message) string
+	logger              *slog.Logger
 }
 
 // newQUICConnection 创建 QUIC 连接包装 + 首个 stream 作为高优先级控制通道完成握手。
@@ -289,7 +329,10 @@ func newQUICConnection(
 	stream *quic.Stream,
 	remotePeerID string,
 	maxMessageSize int,
+	streamPoolSize int,
 	messagePriority func(Message) MessagePriority,
+	messageConcurrency func(Message) ProtocolConcurrencyMode,
+	messagePartitionKey func(Message) string,
 	logger *slog.Logger,
 ) *QUICConnection {
 	connectionID, err := newMessageID()
@@ -298,19 +341,22 @@ func newQUICConnection(
 	}
 	readBufferSize := quicReadBufferSize(maxMessageSize)
 	quicConnection := &QUICConnection{
-		id:              connectionID,
-		connection:      connection,
-		remotePeerID:    remotePeerID,
-		maxMessageSize:  normalizeMaxMessageSize(maxMessageSize),
-		highReads:       make(chan quicReadResult, readBufferSize),
-		normalReads:     make(chan quicReadResult, readBufferSize),
-		lowReads:        make(chan quicReadResult, readBufferSize),
-		readNotify:      make(chan struct{}, 1),
-		done:            make(chan struct{}),
-		writeStreams:    make(map[MessagePriority]*quicPriorityStream),
-		allStreams:      make(map[*quic.Stream]struct{}),
-		messagePriority: normalizeQUICMessagePriority(messagePriority),
-		logger:          utils.EnsureLogger(logger),
+		id:                  connectionID,
+		connection:          connection,
+		remotePeerID:        remotePeerID,
+		maxMessageSize:      normalizeMaxMessageSize(maxMessageSize),
+		streamPoolSize:      normalizeQUICStreamPoolSize(streamPoolSize),
+		highReads:           make(chan quicReadResult, readBufferSize),
+		normalReads:         make(chan quicReadResult, readBufferSize),
+		lowReads:            make(chan quicReadResult, readBufferSize),
+		readNotify:          make(chan struct{}, 1),
+		done:                make(chan struct{}),
+		writeStreams:        make(map[MessagePriority]*quicPriorityStreamPool),
+		allStreams:          make(map[*quic.Stream]struct{}),
+		messagePriority:     normalizeQUICMessagePriority(messagePriority),
+		messageConcurrency:  normalizeQUICMessageConcurrency(messageConcurrency),
+		messagePartitionKey: normalizeQUICMessagePartitionKey(messagePartitionKey),
+		logger:              utils.EnsureLogger(logger),
 	}
 	quicConnection.registerInitialStream(stream)
 	go quicConnection.acceptStreamLoop()
@@ -358,15 +404,23 @@ func (connection *QUICConnection) ReadMessage(ctx context.Context) (Message, err
 
 // WriteMessage 写入 QUIC 消息 + 默认按协议内置优先级选择独立 stream。
 func (connection *QUICConnection) WriteMessage(ctx context.Context, message Message) error {
-	return connection.WriteMessageWithPriority(ctx, message, connection.messagePriority(message))
+	return connection.WriteMessageWithSchedule(ctx, message, connection.messageWriteSchedule(message))
 }
 
 // WriteMessageWithPriority 写入指定优先级 stream + 让上层注册协议的优先级直接控制 QUIC lane。
 func (connection *QUICConnection) WriteMessageWithPriority(ctx context.Context, message Message, priority MessagePriority) error {
+	schedule := connection.messageWriteSchedule(message)
+	schedule.priority = priority
+	return connection.WriteMessageWithSchedule(ctx, message, schedule)
+}
+
+// WriteMessageWithSchedule 按协议调度策略写入 QUIC stream + 串行业务固定 stream，无状态流量使用 stream 池。
+func (connection *QUICConnection) WriteMessageWithSchedule(ctx context.Context, message Message, schedule messageWriteSchedule) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	priorityStream, err := connection.writerStream(ctx, normalizeMessagePriority(priority))
+	schedule = connection.normalizeWriteSchedule(message, schedule)
+	priorityStream, err := connection.writerStream(ctx, schedule)
 	if err != nil {
 		return err
 	}
@@ -382,9 +436,31 @@ func (connection *QUICConnection) WriteMessageWithPriority(ctx context.Context, 
 	return nil
 }
 
+func (connection *QUICConnection) messageWriteSchedule(message Message) messageWriteSchedule {
+	return messageWriteSchedule{
+		priority:     connection.messagePriority(message),
+		concurrency:  connection.messageConcurrency(message),
+		partitionKey: connection.messagePartitionKey(message),
+	}
+}
+
+func (connection *QUICConnection) normalizeWriteSchedule(message Message, schedule messageWriteSchedule) messageWriteSchedule {
+	schedule.priority = normalizeMessagePriority(schedule.priority)
+	schedule.concurrency = normalizeProtocolConcurrency(schedule.concurrency)
+	if schedule.partitionKey == "" {
+		schedule.partitionKey = connection.messagePartitionKey(message)
+	}
+	return schedule
+}
+
 // PriorityIsolatedWrites 声明 QUIC 写入支持优先级隔离 + 允许上层队列按 lane 并发 flush。
 func (connection *QUICConnection) PriorityIsolatedWrites() bool {
 	return true
+}
+
+// PriorityWriteParallelism 返回同优先级写并行度 + 让异步写队列匹配 QUIC stream 池容量。
+func (connection *QUICConnection) PriorityWriteParallelism() int {
+	return connection.streamPoolSize
 }
 
 // Close 关闭 QUIC 连接 + 保证流和连接只释放一次。
@@ -415,22 +491,32 @@ func (connection *QUICConnection) registerInitialStream(stream *quic.Stream) {
 	}
 	priorityStream := &quicPriorityStream{stream: stream}
 	connection.streamMutex.Lock()
-	connection.writeStreams[MessagePriorityHigh] = priorityStream
+	connection.writeStreams[MessagePriorityHigh] = &quicPriorityStreamPool{
+		streams: []*quicPriorityStream{priorityStream},
+	}
 	connection.allStreams[stream] = struct{}{}
 	connection.streamMutex.Unlock()
 	connection.startStreamReader(stream)
 }
 
-func (connection *QUICConnection) writerStream(ctx context.Context, priority MessagePriority) (*quicPriorityStream, error) {
-	if stream := connection.existingWriterStream(priority); stream != nil {
-		return stream, nil
+func (connection *QUICConnection) writerStream(ctx context.Context, schedule messageWriteSchedule) (*quicPriorityStream, error) {
+	allowPool := schedule.concurrency == ProtocolConcurrencyStateless
+	existing, shouldOpen, ok := connection.writerStreamDecision(schedule.priority, allowPool)
+	if !ok {
+		return nil, ErrConnectionClosed
+	}
+	if !shouldOpen {
+		return existing, nil
 	}
 	stream, err := connection.connection.OpenStreamSync(ctx)
 	if err != nil {
+		if existing != nil && ctx.Err() == nil {
+			return existing, nil
+		}
 		return nil, normalizeConnectionError("open quic stream", err)
 	}
 	priorityStream := &quicPriorityStream{stream: stream}
-	registered, ok := connection.registerWriterStream(priority, priorityStream)
+	registered, ok := connection.registerWriterStream(schedule.priority, priorityStream, allowPool)
 	if !ok {
 		closeUnusedQUICStream(stream)
 		return nil, ErrConnectionClosed
@@ -443,24 +529,51 @@ func (connection *QUICConnection) writerStream(ctx context.Context, priority Mes
 	return priorityStream, nil
 }
 
-func (connection *QUICConnection) existingWriterStream(priority MessagePriority) *quicPriorityStream {
+func (connection *QUICConnection) writerStreamDecision(priority MessagePriority, allowPool bool) (*quicPriorityStream, bool, bool) {
 	connection.streamMutex.Lock()
 	defer connection.streamMutex.Unlock()
-	return connection.writeStreams[priority]
+	if connection.closed {
+		return nil, false, false
+	}
+	pool := connection.writeStreams[priority]
+	if pool == nil || len(pool.streams) == 0 {
+		return nil, true, true
+	}
+	if !allowPool {
+		return pool.streams[0], false, true
+	}
+	return pool.nextStream(), len(pool.streams) < connection.streamPoolSize, true
 }
 
-func (connection *QUICConnection) registerWriterStream(priority MessagePriority, priorityStream *quicPriorityStream) (*quicPriorityStream, bool) {
+func (connection *QUICConnection) registerWriterStream(priority MessagePriority, priorityStream *quicPriorityStream, allowPool bool) (*quicPriorityStream, bool) {
 	connection.streamMutex.Lock()
 	defer connection.streamMutex.Unlock()
 	if connection.closed {
 		return nil, false
 	}
-	if existing := connection.writeStreams[priority]; existing != nil {
-		return existing, true
+	pool := connection.writeStreams[priority]
+	if pool == nil {
+		pool = &quicPriorityStreamPool{}
+		connection.writeStreams[priority] = pool
 	}
-	connection.writeStreams[priority] = priorityStream
+	if len(pool.streams) > 0 && !allowPool {
+		return pool.streams[0], true
+	}
+	if len(pool.streams) >= connection.streamPoolSize {
+		return pool.nextStream(), true
+	}
+	pool.streams = append(pool.streams, priorityStream)
 	connection.allStreams[priorityStream.stream] = struct{}{}
 	return priorityStream, true
+}
+
+func (pool *quicPriorityStreamPool) nextStream() *quicPriorityStream {
+	if pool == nil || len(pool.streams) == 0 {
+		return nil
+	}
+	index := int(pool.next % uint64(len(pool.streams)))
+	pool.next++
+	return pool.streams[index]
 }
 
 func (connection *QUICConnection) trackAcceptedStream(stream *quic.Stream) bool {
@@ -493,14 +606,60 @@ func (connection *QUICConnection) acceptStreamLoop() {
 }
 
 func (connection *QUICConnection) readStreamLoop(stream *quic.Stream) {
+	defer connection.unregisterStream(stream)
 	for {
 		message, err := readMessageFrame(stream, connection.maxMessageSize)
 		if err != nil {
+			if connection.isClosed() || isIgnorableQUICStreamReadError(err) {
+				return
+			}
 			connection.fail(normalizeConnectionError("read", err))
 			return
 		}
 		connection.deliverReadResult(quicReadResult{message: message})
 	}
+}
+
+func (connection *QUICConnection) unregisterStream(stream *quic.Stream) {
+	if stream == nil {
+		return
+	}
+	connection.streamMutex.Lock()
+	defer connection.streamMutex.Unlock()
+	delete(connection.allStreams, stream)
+	for priority, pool := range connection.writeStreams {
+		if pool == nil {
+			continue
+		}
+		pool.removeStream(stream)
+		if len(pool.streams) == 0 {
+			delete(connection.writeStreams, priority)
+		}
+	}
+}
+
+func (pool *quicPriorityStreamPool) removeStream(stream *quic.Stream) {
+	if pool == nil || stream == nil {
+		return
+	}
+	for index, priorityStream := range pool.streams {
+		if priorityStream == nil || priorityStream.stream != stream {
+			continue
+		}
+		pool.streams = append(pool.streams[:index], pool.streams[index+1:]...)
+		if len(pool.streams) > 0 && pool.next >= uint64(len(pool.streams)) {
+			pool.next = pool.next % uint64(len(pool.streams))
+		}
+		return
+	}
+}
+
+func isIgnorableQUICStreamReadError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var streamError *quic.StreamError
+	return errors.As(err, &streamError)
 }
 
 func (connection *QUICConnection) deliverReadResult(result quicReadResult) {
@@ -591,7 +750,7 @@ func (connection *QUICConnection) closeTrackedStreams() []*quic.Stream {
 	for stream := range connection.allStreams {
 		streams = append(streams, stream)
 	}
-	connection.writeStreams = make(map[MessagePriority]*quicPriorityStream)
+	connection.writeStreams = make(map[MessagePriority]*quicPriorityStreamPool)
 	connection.allStreams = make(map[*quic.Stream]struct{})
 	return streams
 }
@@ -667,11 +826,54 @@ func normalizeQUICMessagePriority(priority func(Message) MessagePriority) func(M
 	}
 }
 
+func normalizeQUICMessageConcurrency(concurrency func(Message) ProtocolConcurrencyMode) func(Message) ProtocolConcurrencyMode {
+	if concurrency != nil {
+		return func(message Message) (concurrencyValue ProtocolConcurrencyMode) {
+			concurrencyValue = ProtocolConcurrencyOrdered
+			defer func() {
+				if recover() != nil {
+					concurrencyValue = ProtocolConcurrencyOrdered
+				}
+			}()
+			return normalizeProtocolConcurrency(concurrency(message))
+		}
+	}
+	return func(message Message) ProtocolConcurrencyMode {
+		return defaultProtocolConcurrency(message.Type)
+	}
+}
+
+func normalizeQUICMessagePartitionKey(partitionKey func(Message) string) func(Message) string {
+	if partitionKey != nil {
+		return func(message Message) (key string) {
+			defer func() {
+				if recover() != nil {
+					key = ""
+				}
+			}()
+			return partitionKey(message)
+		}
+	}
+	return func(Message) string {
+		return ""
+	}
+}
+
 func normalizeMessagePriority(priority MessagePriority) MessagePriority {
 	if priority > MessagePriorityHigh {
 		return MessagePriorityNormal
 	}
 	return priority
+}
+
+func normalizeQUICStreamPoolSize(size int) int {
+	if size <= 0 {
+		return defaultQUICPriorityStreamPoolSize
+	}
+	if size > maxQUICPriorityStreamPoolSize {
+		return maxQUICPriorityStreamPoolSize
+	}
+	return size
 }
 
 // normalizeQUICConfig 归一化 quic-go 配置 + 设置保守窗口避免异常内存占用。

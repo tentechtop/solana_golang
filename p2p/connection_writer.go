@@ -15,6 +15,7 @@ const (
 	defaultWriteQueueSize = 1024
 	maxWriteQueueSize     = 16384
 	defaultWriteTimeout   = 5 * time.Second
+	maxPriorityWriteLoops = 32
 )
 
 // AsyncWriteConfig 保存异步写配置 + 通过有界队列隔离业务 worker 和网络写阻塞。
@@ -29,6 +30,8 @@ type queuedConnectionConfig struct {
 	metrics      *p2pMetrics
 	logger       *slog.Logger
 	priority     func(Message) MessagePriority
+	concurrency  func(Message) ProtocolConcurrencyMode
+	partitionKey func(Message) string
 	onWrite      func(Connection, Message)
 	onError      func(Connection, error)
 }
@@ -41,21 +44,40 @@ type priorityMessageWriter interface {
 	WriteMessageWithPriority(context.Context, Message, MessagePriority) error
 }
 
+type scheduledMessageWriter interface {
+	WriteMessageWithSchedule(context.Context, Message, messageWriteSchedule) error
+}
+
+type priorityWriteParallelConnection interface {
+	PriorityWriteParallelism() int
+}
+
+type messageWriteSchedule struct {
+	priority     MessagePriority
+	concurrency  ProtocolConcurrencyMode
+	partitionKey string
+}
+
 type queuedConnection struct {
-	inner        Connection
-	highWrites   chan queuedWrite
-	normalWrites chan queuedWrite
-	lowWrites    chan queuedWrite
-	done         chan struct{}
-	closeOnce    sync.Once
-	closed       atomic.Bool
-	closeErr     error
-	writeTimeout time.Duration
-	metrics      *p2pMetrics
-	logger       *slog.Logger
-	priority     func(Message) MessagePriority
-	onWrite      func(Connection, Message)
-	onError      func(Connection, error)
+	inner                Connection
+	highWrites           chan queuedWrite
+	highParallelWrites   chan queuedWrite
+	normalWrites         chan queuedWrite
+	normalParallelWrites chan queuedWrite
+	lowWrites            chan queuedWrite
+	lowParallelWrites    chan queuedWrite
+	done                 chan struct{}
+	closeOnce            sync.Once
+	closed               atomic.Bool
+	closeErr             error
+	writeTimeout         time.Duration
+	metrics              *p2pMetrics
+	logger               *slog.Logger
+	priority             func(Message) MessagePriority
+	concurrency          func(Message) ProtocolConcurrencyMode
+	partitionKey         func(Message) string
+	onWrite              func(Connection, Message)
+	onError              func(Connection, error)
 }
 
 type queuedWrite struct {
@@ -72,18 +94,26 @@ func newQueuedConnection(inner Connection, config queuedConnectionConfig) Connec
 	}
 	queueSize := normalizeWriteQueueSize(config.queueSize)
 	highQueueSize, normalQueueSize, lowQueueSize := splitWriteQueueSize(queueSize)
+	highSerialSize, highParallelSize := splitPriorityWriteQueueSize(highQueueSize)
+	normalSerialSize, normalParallelSize := splitPriorityWriteQueueSize(normalQueueSize)
+	lowSerialSize, lowParallelSize := splitPriorityWriteQueueSize(lowQueueSize)
 	connection := &queuedConnection{
-		inner:        inner,
-		highWrites:   make(chan queuedWrite, highQueueSize),
-		normalWrites: make(chan queuedWrite, normalQueueSize),
-		lowWrites:    make(chan queuedWrite, lowQueueSize),
-		done:         make(chan struct{}),
-		writeTimeout: normalizeWriteTimeout(config.writeTimeout),
-		metrics:      config.metrics,
-		logger:       normalizeLogger(config.logger),
-		priority:     config.priority,
-		onWrite:      config.onWrite,
-		onError:      config.onError,
+		inner:                inner,
+		highWrites:           make(chan queuedWrite, highSerialSize),
+		highParallelWrites:   make(chan queuedWrite, highParallelSize),
+		normalWrites:         make(chan queuedWrite, normalSerialSize),
+		normalParallelWrites: make(chan queuedWrite, normalParallelSize),
+		lowWrites:            make(chan queuedWrite, lowSerialSize),
+		lowParallelWrites:    make(chan queuedWrite, lowParallelSize),
+		done:                 make(chan struct{}),
+		writeTimeout:         normalizeWriteTimeout(config.writeTimeout),
+		metrics:              config.metrics,
+		logger:               normalizeLogger(config.logger),
+		priority:             config.priority,
+		concurrency:          config.concurrency,
+		partitionKey:         config.partitionKey,
+		onWrite:              config.onWrite,
+		onError:              config.onError,
 	}
 	connection.startWriteLoops()
 	return connection
@@ -150,7 +180,7 @@ func (connection *queuedConnection) WriteMessage(ctx context.Context, message Me
 		message:    message,
 		enqueuedAt: time.Now(),
 	}
-	queue := connection.queue(connection.messagePriority(message))
+	queue := connection.queue(connection.messagePriority(message), connection.messageConcurrency(message))
 	if connection.closed.Load() {
 		return ErrConnectionClosed
 	}
@@ -191,6 +221,13 @@ func splitWriteQueueSize(totalSize int) (int, int, int) {
 	return highQueueSize, normalQueueSize, lowQueueSize
 }
 
+func splitPriorityWriteQueueSize(priorityQueueSize int) (int, int) {
+	if priorityQueueSize <= 0 {
+		return 0, 0
+	}
+	return priorityQueueSize, priorityQueueSize
+}
+
 func (connection *queuedConnection) Close() error {
 	connection.closeOnce.Do(func() {
 		connection.closed.Store(true)
@@ -201,7 +238,14 @@ func (connection *queuedConnection) Close() error {
 }
 
 func (connection *queuedConnection) queueDepth() uint64 {
-	return uint64(len(connection.highWrites) + len(connection.normalWrites) + len(connection.lowWrites))
+	return uint64(
+		len(connection.highWrites) +
+			len(connection.highParallelWrites) +
+			len(connection.normalWrites) +
+			len(connection.normalParallelWrites) +
+			len(connection.lowWrites) +
+			len(connection.lowParallelWrites),
+	)
 }
 
 func (connection *queuedConnection) writeLoop() {
@@ -217,9 +261,13 @@ func (connection *queuedConnection) writeLoop() {
 // startWriteLoops 启动写循环 + QUIC 多 stream 连接按优先级并行写入避免大包阻塞共识消息。
 func (connection *queuedConnection) startWriteLoops() {
 	if supportsPriorityIsolatedWrites(connection.inner) {
+		workerCount := priorityWriteParallelism(connection.inner)
 		go connection.writeQueueLoop(connection.highWrites)
 		go connection.writeQueueLoop(connection.normalWrites)
 		go connection.writeQueueLoop(connection.lowWrites)
+		connection.startPriorityWriteLoops(connection.highParallelWrites, workerCount)
+		connection.startPriorityWriteLoops(connection.normalParallelWrites, workerCount)
+		connection.startPriorityWriteLoops(connection.lowParallelWrites, workerCount)
 		return
 	}
 	go connection.writeLoop()
@@ -228,6 +276,27 @@ func (connection *queuedConnection) startWriteLoops() {
 func supportsPriorityIsolatedWrites(connection Connection) bool {
 	isolated, ok := connection.(priorityIsolatedConnection)
 	return ok && isolated.PriorityIsolatedWrites()
+}
+
+func priorityWriteParallelism(connection Connection) int {
+	parallelConnection, ok := connection.(priorityWriteParallelConnection)
+	if !ok {
+		return 1
+	}
+	workerCount := parallelConnection.PriorityWriteParallelism()
+	if workerCount <= 0 {
+		return 1
+	}
+	if workerCount > maxPriorityWriteLoops {
+		return maxPriorityWriteLoops
+	}
+	return workerCount
+}
+
+func (connection *queuedConnection) startPriorityWriteLoops(queue chan queuedWrite, workerCount int) {
+	for workerID := 0; workerID < workerCount; workerID++ {
+		go connection.writeQueueLoop(queue)
+	}
 }
 
 func (connection *queuedConnection) writeQueueLoop(queue chan queuedWrite) {
@@ -251,10 +320,19 @@ func (connection *queuedConnection) nextWrite() (queuedWrite, bool) {
 		if write, ok := tryReadQueuedWrite(connection.highWrites); ok {
 			return write, true
 		}
+		if write, ok := tryReadQueuedWrite(connection.highParallelWrites); ok {
+			return write, true
+		}
 		if write, ok := tryReadQueuedWrite(connection.normalWrites); ok {
 			return write, true
 		}
+		if write, ok := tryReadQueuedWrite(connection.normalParallelWrites); ok {
+			return write, true
+		}
 		if write, ok := tryReadQueuedWrite(connection.lowWrites); ok {
+			return write, true
+		}
+		if write, ok := tryReadQueuedWrite(connection.lowParallelWrites); ok {
 			return write, true
 		}
 		select {
@@ -262,9 +340,15 @@ func (connection *queuedConnection) nextWrite() (queuedWrite, bool) {
 			return queuedWrite{}, false
 		case write := <-connection.highWrites:
 			return write, true
+		case write := <-connection.highParallelWrites:
+			return write, true
 		case write := <-connection.normalWrites:
 			return write, true
+		case write := <-connection.normalParallelWrites:
+			return write, true
 		case write := <-connection.lowWrites:
+			return write, true
+		case write := <-connection.lowParallelWrites:
 			return write, true
 		}
 	}
@@ -279,7 +363,14 @@ func tryReadQueuedWrite(queue chan queuedWrite) (queuedWrite, bool) {
 	}
 }
 
-func (connection *queuedConnection) queue(priority MessagePriority) chan queuedWrite {
+func (connection *queuedConnection) queue(priority MessagePriority, concurrency ProtocolConcurrencyMode) chan queuedWrite {
+	if concurrency == ProtocolConcurrencyStateless {
+		return connection.parallelQueue(priority)
+	}
+	return connection.serialQueue(priority)
+}
+
+func (connection *queuedConnection) serialQueue(priority MessagePriority) chan queuedWrite {
 	switch priority {
 	case MessagePriorityHigh:
 		return connection.highWrites
@@ -290,11 +381,36 @@ func (connection *queuedConnection) queue(priority MessagePriority) chan queuedW
 	}
 }
 
+func (connection *queuedConnection) parallelQueue(priority MessagePriority) chan queuedWrite {
+	switch priority {
+	case MessagePriorityHigh:
+		return connection.highParallelWrites
+	case MessagePriorityLow:
+		return connection.lowParallelWrites
+	default:
+		return connection.normalParallelWrites
+	}
+}
+
 func (connection *queuedConnection) messagePriority(message Message) MessagePriority {
 	if connection.priority == nil {
 		return MessagePriorityNormal
 	}
 	return connection.priority(message)
+}
+
+func (connection *queuedConnection) messageConcurrency(message Message) ProtocolConcurrencyMode {
+	if connection.concurrency == nil {
+		return ProtocolConcurrencyOrdered
+	}
+	return normalizeProtocolConcurrency(connection.concurrency(message))
+}
+
+func (connection *queuedConnection) messagePartitionKey(message Message) string {
+	if connection.partitionKey == nil {
+		return ""
+	}
+	return connection.partitionKey(message)
 }
 
 func (connection *queuedConnection) flush(write queuedWrite) {
@@ -322,9 +438,18 @@ func (connection *queuedConnection) flush(write queuedWrite) {
 }
 
 func (connection *queuedConnection) writeMessage(ctx context.Context, message Message) error {
+	schedule := messageWriteSchedule{
+		priority:     connection.messagePriority(message),
+		concurrency:  connection.messageConcurrency(message),
+		partitionKey: connection.messagePartitionKey(message),
+	}
+	scheduledWriter, ok := connection.inner.(scheduledMessageWriter)
+	if ok {
+		return scheduledWriter.WriteMessageWithSchedule(ctx, message, schedule)
+	}
 	priorityWriter, ok := connection.inner.(priorityMessageWriter)
 	if ok {
-		return priorityWriter.WriteMessageWithPriority(ctx, message, connection.messagePriority(message))
+		return priorityWriter.WriteMessageWithPriority(ctx, message, schedule.priority)
 	}
 	return connection.inner.WriteMessage(ctx, message)
 }
