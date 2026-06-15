@@ -53,6 +53,14 @@ const (
 	ProtocolIdentifyRequestV1 ProtocolID = 24
 	// ProtocolIdentifyResponseV1 表示节点身份响应 + 返回对端签名的地址记录。
 	ProtocolIdentifyResponseV1 ProtocolID = 25
+	// ProtocolPoSTransactionV1 表示 PoS 交易传播 + 用于注册、质押和普通转账进入 leader mempool。
+	ProtocolPoSTransactionV1 ProtocolID = 40
+	// ProtocolPoSProposalV1 表示 PoS 区块提案 + leader 按 slot 广播候选区块。
+	ProtocolPoSProposalV1 ProtocolID = 41
+	// ProtocolPoSVoteV1 表示 PoS 投票 + 验证者对区块或 skip 进行签名投票。
+	ProtocolPoSVoteV1 ProtocolID = 42
+	// ProtocolPoSQCV1 表示 PoS QC + 超过 2/3 权重后广播确认凭证。
+	ProtocolPoSQCV1 ProtocolID = 43
 )
 
 // MessagePriority 表示消息优先级 + 用于后续队列和 QUIC stream 调度。
@@ -248,6 +256,10 @@ func DefaultProtocolSpecs() []ProtocolSpec {
 		defaultProtocolSpec(ProtocolSecureSessionV1, "/p2p/secure-session/1.0.0", true),
 		defaultProtocolSpec(ProtocolIdentifyRequestV1, "/p2p/identify/request/1.0.0", true),
 		defaultProtocolSpec(ProtocolIdentifyResponseV1, "/p2p/identify/response/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSTransactionV1, "/pos/transaction/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSProposalV1, "/pos/proposal/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSVoteV1, "/pos/vote/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSQCV1, "/pos/qc/1.0.0", false),
 	}
 }
 
