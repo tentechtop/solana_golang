@@ -7,15 +7,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"sort"
 	"sync"
 	"syscall"
 	"time"
 
+	"solana_golang/blockchain"
 	"solana_golang/consensus"
+	"solana_golang/database"
 	"solana_golang/p2p"
 	"solana_golang/programs/stake"
 	"solana_golang/programs/system"
+	"solana_golang/rpc"
 	"solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
@@ -31,21 +33,22 @@ type posNode struct {
 	config           nodeConfig
 	logger           *slog.Logger
 	host             *p2p.Host
+	rpcServer        *rpc.Server
+	db               database.Database
+	ledger           *blockchain.Ledger
 	executor         runtime.FixedExecutor
 	peerKeyPair      rawKeyPair
 	stakerKeyPair    structure.SolanaKeyPair
 	validatorKeyPair structure.SolanaKeyPair
 	consensusKeyPair structure.SolanaKeyPair
-	state            consensus.ChainState
 	blockhashQueue   structure.BlockhashQueue
 	mempool          []structure.Transaction
 	seenTransactions map[string]struct{}
+	orphanProposals  map[structure.Hash][]consensus.BlockProposal
 	epochSnapshot    consensus.EpochSnapshot
 	leaderSchedule   consensus.LeaderSchedule
 	voteCollector    *consensus.VoteCollector
-	latestBlockHash  structure.Hash
-	latestQCHash     structure.Hash
-	height           uint64
+	metrics          nodeMetrics
 	lastProducedSlot uint64
 	lastVotedSlot    uint64
 	registeredSelf   bool
@@ -93,8 +96,16 @@ func run(configPath string) error {
 		return err
 	}
 	defer func() {
+		if node.rpcServer != nil {
+			shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = node.rpcServer.Shutdown(shutdownContext)
+			shutdownCancel()
+		}
 		if node.host != nil {
 			_ = node.host.Close()
+		}
+		if node.db != nil {
+			_ = node.db.Close()
 		}
 	}()
 
@@ -123,11 +134,14 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		validatorKeyPair: mustStructureKeyPair(config.ValidatorSeed),
 		consensusKeyPair: mustStructureKeyPair(config.ConsensusSeed),
 		seenTransactions: make(map[string]struct{}),
+		orphanProposals:  make(map[structure.Hash][]consensus.BlockProposal),
 	}
-	if err := node.initGenesis(); err != nil {
+	if err := node.openLedger(); err != nil {
 		return nil, err
 	}
-	if err := node.rebuildEpoch(0, 1, mustHash("genesis-seed")); err != nil {
+	head := node.ledger.Head()
+	epochID, startSlot := node.epochForSlot(head.Slot + 1)
+	if err := node.rebuildEpoch(epochID, startSlot, node.epochSeed(epochID)); err != nil {
 		return nil, err
 	}
 	return node, nil
@@ -144,12 +158,101 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
 		slog.String("consensus", node.consensusKeyPair.PublicKey.String()),
 		slog.Uint64("genesis_supply", node.config.Genesis.InitialSupplyLamports),
+		slog.Int64("genesis_start_unix_millis", node.config.GenesisStartMs),
+		slog.String("data_path", node.config.DataPath),
 	)
 	if node.config.AutoRegister {
 		go node.autoRegisterLoop(ctx)
 	}
+	if err := node.startRPC(); err != nil {
+		return err
+	}
+	go node.blockSyncLoop(ctx)
 	go node.slotLoop(ctx)
 	return nil
+}
+
+func (node *posNode) startRPC() error {
+	if !node.config.RPCEnabled {
+		return nil
+	}
+	address := fmt.Sprintf("%s:%d", node.config.RPCListenIP, node.config.RPCPort)
+	server := rpc.NewServer(rpc.ServerConfig{Address: address, Logger: node.logger}, rpc.NewDefaultRouter(node))
+	node.rpcServer = server
+	go func() {
+		if err := server.ListenAndServe(); err != nil {
+			node.logger.Error("posnode rpc server failed", slog.Any("error", err))
+		}
+	}()
+	return nil
+}
+
+func (node *posNode) openLedger() error {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   node.config.DataPath,
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		return fmt.Errorf("posnode: open blockchain database: %w", err)
+	}
+	node.db = db
+	ledger, err := blockchain.LoadOrCreateLedger(db, node.blockchainGenesisConfig())
+	if err != nil {
+		_ = db.Close()
+		return fmt.Errorf("posnode: load blockchain ledger: %w", err)
+	}
+	node.ledger = ledger
+	head := ledger.Head()
+	node.blockhashQueue = structure.NewBlockhashQueue(150)
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     head.BlockHash,
+		Slot:          head.Slot + 1,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+		TimestampUnix: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("posnode: init blockhash queue: %w", err)
+	}
+	if err := node.loadMempool(); err != nil {
+		return err
+	}
+	node.logger.Info("posnode ledger ready",
+		slog.Uint64("height", head.Height),
+		slog.Uint64("slot", head.Slot),
+		slog.String("block_hash", head.BlockHash.String()),
+		slog.String("state_root", head.StateRoot.String()),
+		slog.Int("mempool", len(node.mempool)),
+	)
+	return nil
+}
+
+func (node *posNode) blockchainGenesisConfig() blockchain.GenesisConfig {
+	genesis := blockchain.GenesisConfig{
+		ChainID:               node.config.ChainID,
+		InitialSupplyLamports: node.config.Genesis.InitialSupplyLamports,
+		FundedAccounts:        make([]blockchain.GenesisAccount, 0, len(node.config.Genesis.FundedAccounts)),
+		InitialValidators:     make([]blockchain.GenesisValidator, 0, len(node.config.Genesis.InitialValidators)),
+	}
+	for _, account := range node.config.Genesis.FundedAccounts {
+		keyPair := mustStructureKeyPair(account.Seed)
+		genesis.FundedAccounts = append(genesis.FundedAccounts, blockchain.GenesisAccount{
+			Address:  keyPair.PublicKey,
+			Lamports: account.Lamports,
+		})
+	}
+	for _, validator := range node.config.Genesis.InitialValidators {
+		staker := mustStructureKeyPair(validator.StakerSeed)
+		validatorAccount := mustStructureKeyPair(validator.ValidatorSeed)
+		consensusKey := mustStructureKeyPair(validator.ConsensusSeed)
+		genesis.InitialValidators = append(genesis.InitialValidators, blockchain.GenesisValidator{
+			StakerAddress:      staker.PublicKey,
+			ValidatorAddress:   validatorAccount.PublicKey,
+			ConsensusPublicKey: consensusKey.PublicKey,
+			P2PPeerID:          validator.PeerID,
+			StakeLamports:      validator.StakeLamports,
+		})
+	}
+	return genesis
 }
 
 func (node *posNode) startP2P(ctx context.Context) error {
@@ -159,7 +262,9 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	}
 	host, err := p2p.NewHost(p2p.HostConfig{
 		PeerID:        node.peerKeyPair.peerID,
-		AllowInsecure: true,
+		AllowInsecure: node.config.allowInsecureP2P(),
+		Production:    node.config.Production,
+		Environment:   node.config.Environment,
 		PreferredProtocols: []utils.MultiAddressProtocol{
 			utils.ProtocolTCP,
 		},
@@ -171,6 +276,9 @@ func (node *posNode) startP2P(ctx context.Context) error {
 		return fmt.Errorf("posnode: create host: %w", err)
 	}
 	node.host = host
+	if node.config.allowInsecureP2P() {
+		node.logger.Warn("posnode p2p insecure mode enabled", slog.String("node", node.config.NodeName))
+	}
 	if err := node.registerProtocols(); err != nil {
 		_ = host.Close()
 		return err
@@ -212,15 +320,34 @@ func (node *posNode) registerProtocols() error {
 		{ID: p2p.ProtocolPoSProposalV1, Name: "/pos/proposal/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 		{ID: p2p.ProtocolPoSVoteV1, Name: "/pos/vote/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 		{ID: p2p.ProtocolPoSQCV1, Name: "/pos/qc/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
+		{ID: p2p.ProtocolPoSEvidenceV1, Name: "/pos/evidence/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 	}
 	handlers := []p2p.VoidProtocolHandler{
 		node.handleTransactionMessage,
 		node.handleProposalMessage,
 		node.handleVoteMessage,
 		node.handleQCMessage,
+		node.handleEvidenceMessage,
 	}
 	for index, spec := range specs {
 		if err := node.host.RegisterVoidHandler(spec, handlers[index]); err != nil {
+			return fmt.Errorf("posnode: register protocol %s: %w", spec.Name, err)
+		}
+	}
+	resultSpecs := []p2p.ProtocolSpec{
+		{ID: p2p.ProtocolPoSBlockByHashV1, Name: "/pos/sync/block-by-hash/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockByHeightV1, Name: "/pos/sync/block-by-height/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSStateSnapshotV1, Name: "/pos/sync/state-snapshot/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+	}
+	resultHandlers := []p2p.ResultProtocolHandler{
+		node.handleBlockByHashRequest,
+		node.handleBlockByHeightRequest,
+		node.handleStateSnapshotRequest,
+		node.handleStatusRequest,
+	}
+	for index, spec := range resultSpecs {
+		if err := node.host.RegisterResultHandler(spec, resultHandlers[index]); err != nil {
 			return fmt.Errorf("posnode: register protocol %s: %w", spec.Name, err)
 		}
 	}
@@ -270,7 +397,7 @@ func (node *posNode) autoRegisterLoop(ctx context.Context) {
 }
 
 func (node *posNode) slotLoop(ctx context.Context) {
-	startedAt := time.Now()
+	startedAt := node.config.genesisStartTime()
 	clock, err := consensus.NewSlotClock(startedAt, 1, node.config.slotDuration(), node.config.slotDuration()*7/10)
 	if err != nil {
 		node.logger.Error("posnode slot clock failed", slog.Any("error", err))
@@ -294,13 +421,11 @@ func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
 		node.mutex.Unlock()
 		return
 	}
-	if tick.Slot > node.epochSnapshot.EndSlot {
-		seed := node.latestBlockHash
-		if seed.IsZero() {
-			seed = mustHash("empty-epoch-seed")
-		}
-		if err := node.rebuildEpochLocked(node.epochSnapshot.EpochID+1, tick.Slot, seed); err != nil {
+	if tick.Slot > node.epochSnapshot.EndSlot || tick.Slot < node.epochSnapshot.StartSlot {
+		if err := node.ensureEpochForSlotLocked(tick.Slot); err != nil {
 			node.logger.Error("posnode rebuild epoch failed", slog.Uint64("slot", tick.Slot), slog.Any("error", err))
+			node.mutex.Unlock()
+			return
 		}
 	}
 	leaderID, err := node.leaderSchedule.LeaderForSlot(tick.Slot)
@@ -321,21 +446,22 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.mutex.Unlock()
 		return
 	}
-	transactions := append([]structure.Transaction(nil), node.mempool...)
-	node.mempool = nil
+	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli())
+	head := node.ledger.Head()
 	request := consensus.ProduceBlockRequest{
 		Slot:           slot,
-		Height:         node.height + 1,
+		Height:         head.Height + 1,
 		EpochSnapshot:  node.epochSnapshot,
 		Schedule:       node.leaderSchedule,
-		ParentHash:     node.latestBlockHash,
-		PreviousQCHash: node.latestQCHash,
-		ParentState:    node.state,
+		ParentHash:     head.BlockHash,
+		PreviousQCHash: head.QCHash,
+		ParentState:    node.ledger.State(),
 		Transactions:   transactions,
 		BlockhashQueue: node.blockhashQueue,
 		LeaderKeyPair:  node.consensusKeyPair,
 	}
 	node.mutex.Unlock()
+	node.deleteMempoolTransactions(removeTransactionIDs)
 
 	producer := consensus.BlockProducer{ChainID: node.config.ChainID, Executor: node.executor}
 	proposal, nextState, err := producer.ProduceBlock(ctx, request)
@@ -348,20 +474,24 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode hash proposal failed", slog.Any("error", err))
 		return
 	}
+	nextHead, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		node.logger.Error("posnode commit produced block failed", slog.Uint64("slot", slot), slog.Any("error", err))
+		return
+	}
 	node.mutex.Lock()
-	node.state = nextState
-	node.latestBlockHash = proposalHash
-	node.height = proposal.Header.Height
 	node.lastProducedSlot = slot
 	node.mutex.Unlock()
+	node.metrics.blocksProduced.Add(1)
 	node.logger.Info("posnode block proposed",
 		slog.Uint64("slot", slot),
-		slog.Uint64("height", proposal.Header.Height),
+		slog.Uint64("height", nextHead.Height),
 		slog.Int("transactions", len(proposal.Transactions)),
 		slog.String("hash", proposalHash.String()),
 	)
 	node.broadcastProposal(ctx, proposal)
 	node.voteForKnownProposal(ctx, proposal.Header.Slot, proposalHash)
+	node.retryOrphanChildren(ctx, proposalHash)
 }
 
 func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.Message) error {
@@ -395,6 +525,10 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		return err
 	}
 	if formed {
+		if _, err := node.ledger.SaveQC(qc); err != nil {
+			return err
+		}
+		node.metrics.qcFormed.Add(1)
 		node.logger.Info("posnode qc formed", slog.Uint64("slot", qc.Slot), slog.Uint64("stake", qc.ConfirmedStake))
 		node.broadcastQC(ctx, qc)
 	}
@@ -409,14 +543,26 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	if err := envelope.QC.Validate(); err != nil {
 		return err
 	}
-	qcHash, err := hashQC(envelope.QC)
+	head, err := node.ledger.SaveQC(envelope.QC)
 	if err != nil {
 		return err
 	}
-	node.mutex.Lock()
-	node.latestQCHash = qcHash
-	node.mutex.Unlock()
+	qcHash := head.QCHash
+	node.metrics.qcReceived.Add(1)
 	node.logger.Info("posnode qc received", slog.Uint64("slot", envelope.QC.Slot), slog.String("qc_hash", qcHash.String()))
+	return nil
+}
+
+func (node *posNode) handleEvidenceMessage(ctx context.Context, message p2p.Message) error {
+	_ = ctx
+	if len(message.Payload) == 0 {
+		return fmt.Errorf("posnode: empty evidence payload")
+	}
+	node.metrics.evidenceReceived.Add(1)
+	node.logger.Warn("posnode evidence received",
+		slog.String("from_peer", message.FromPeerID),
+		slog.Int("payload_bytes", len(message.Payload)),
+	)
 	return nil
 }
 
@@ -426,21 +572,34 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		node.mutex.Unlock()
 		return nil
 	}
+	if err := node.ensureEpochForSlotLocked(proposal.Header.Slot); err != nil {
+		node.mutex.Unlock()
+		return err
+	}
 	leader, exists := node.epochSnapshot.ValidatorByID(proposal.Header.LeaderID)
 	if !exists {
 		node.mutex.Unlock()
 		return fmt.Errorf("posnode: proposal leader not in snapshot")
 	}
+	epochSnapshot := node.epochSnapshot
+	leaderSchedule := node.leaderSchedule
+	blockhashQueue := node.blockhashQueue
+	node.mutex.Unlock()
+
+	parentState, parentReady := node.ensureParentAvailable(ctx, proposal.Header.ParentHash)
+	if !parentReady {
+		node.storeOrphanProposal(proposal)
+		return nil
+	}
 	request := consensus.VerifyProposalRequest{
 		Proposal:       proposal,
-		EpochSnapshot:  node.epochSnapshot,
-		Schedule:       node.leaderSchedule,
-		ParentHash:     node.latestBlockHash,
-		ParentState:    node.state,
-		BlockhashQueue: node.blockhashQueue,
+		EpochSnapshot:  epochSnapshot,
+		Schedule:       leaderSchedule,
+		ParentHash:     proposal.Header.ParentHash,
+		ParentState:    parentState,
+		BlockhashQueue: blockhashQueue,
 		Leader:         leader,
 	}
-	node.mutex.Unlock()
 
 	verifier := consensus.ProposalVerifier{ChainID: node.config.ChainID, Executor: node.executor}
 	nextState, err := verifier.VerifyProposal(ctx, request)
@@ -451,10 +610,39 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	if err != nil {
 		return err
 	}
+	commitRequest := blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}
+	head := node.ledger.Head()
+	acceptedProposal := true
+	if proposal.Header.ParentHash == head.BlockHash && proposal.Header.Height == head.Height+1 {
+		if _, err := node.ledger.CommitBlock(commitRequest); err != nil {
+			return err
+		}
+	} else {
+		if _, err := node.ledger.SaveBlockCandidate(commitRequest); err != nil {
+			return err
+		}
+		decision, err := node.ledger.ReorganizeTo(proposalHash)
+		if err != nil {
+			return err
+		}
+		node.metrics.forkDecisions.Add(1)
+		if decision.Reorganized {
+			node.metrics.reorgs.Add(1)
+		}
+		acceptedProposal = decision.Accepted
+		node.logger.Info("posnode fork decision",
+			slog.Bool("accepted", decision.Accepted),
+			slog.Bool("reorganized", decision.Reorganized),
+			slog.String("reason", decision.Reason),
+			slog.String("hash", proposalHash.String()),
+		)
+	}
+	if !acceptedProposal {
+		return nil
+	}
+	node.metrics.proposalsAccepted.Add(1)
+	node.retryOrphanChildren(ctx, proposalHash)
 	node.mutex.Lock()
-	node.state = nextState
-	node.latestBlockHash = proposalHash
-	node.height = proposal.Header.Height
 	node.lastVotedSlot = proposal.Header.Slot
 	stakeValue := uint64(0)
 	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
@@ -477,6 +665,7 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
 	node.logger.Info("posnode vote sent", slog.Uint64("slot", vote.Slot), slog.String("voter", vote.VoterID))
+	node.metrics.votesSent.Add(1)
 	node.broadcastVote(ctx, vote)
 	return node.handleLocalVote(ctx, vote)
 }
@@ -509,6 +698,7 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
 	node.logger.Info("posnode leader self vote sent", slog.Uint64("slot", vote.Slot), slog.String("voter", vote.VoterID))
+	node.metrics.votesSent.Add(1)
 	node.broadcastVote(ctx, vote)
 	if err := node.handleLocalVote(ctx, vote); err != nil {
 		node.logger.Warn("posnode local vote failed", slog.Any("error", err))
@@ -537,8 +727,24 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 	if _, exists := node.seenTransactions[transactionID]; exists {
 		return nil
 	}
+	if len(node.mempool) >= node.config.MempoolMaxTransactions {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: mempool is full")
+	}
+	if transaction.SubmitTime == 0 {
+		transaction.SubmitTime = time.Now().UnixMilli()
+	}
+	if transaction.IsExpiredWithTTL(time.Now().UnixMilli(), node.config.MempoolTransactionTTLMillis) {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: transaction expired")
+	}
+	if err := node.persistMempoolTransaction(transactionID, transaction); err != nil {
+		return err
+	}
 	node.seenTransactions[transactionID] = struct{}{}
 	node.mempool = append(node.mempool, transaction)
+	node.sortMempoolLocked()
+	node.metrics.transactionsIn.Add(1)
 	node.logger.Info("posnode transaction accepted", slog.String("tx", transactionID), slog.Int("mempool", len(node.mempool)))
 	return nil
 }
@@ -615,7 +821,7 @@ func (node *posNode) rebuildEpoch(epochID uint64, startSlot uint64, seed structu
 }
 
 func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed structure.Hash) error {
-	validatorSet, err := node.validatorSetFromStateLocked()
+	validatorSet, err := node.ledger.ValidatorSetFromState()
 	if err != nil {
 		return err
 	}
@@ -644,72 +850,6 @@ func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed s
 	return nil
 }
 
-func (node *posNode) validatorSetFromStateLocked() (consensus.ValidatorSet, error) {
-	validators := make([]consensus.ValidatorState, 0)
-	for _, account := range node.state.Accounts {
-		if account.Account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Account.Data) == 0 {
-			continue
-		}
-		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
-		if err != nil {
-			continue
-		}
-		if stakeState.Status != stake.ValidatorStatusActive {
-			continue
-		}
-		validators = append(validators, consensus.ValidatorState{
-			AccountAddress:     account.Address,
-			ConsensusPublicKey: stakeState.ConsensusPublicKey,
-			P2PPeerID:          stakeState.P2PPeerID,
-			StakeLamports:      stakeState.ActiveStake + stakeState.PendingStake,
-			Status:             consensus.ValidatorStatusActive,
-			CommissionBps:      stakeState.CommissionBps,
-		})
-	}
-	return consensus.NewValidatorSet(validators)
-}
-
-func (node *posNode) initGenesis() error {
-	accounts := make([]structure.AddressedAccount, 0, len(node.config.Genesis.FundedAccounts)+len(node.config.Genesis.InitialValidators)+2)
-	for _, funded := range node.config.Genesis.FundedAccounts {
-		keyPair := mustStructureKeyPair(funded.Seed)
-		accounts = append(accounts, newAccount(keyPair.PublicKey, funded.Lamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
-	}
-	for _, validatorConfig := range node.config.Genesis.InitialValidators {
-		staker := mustStructureKeyPair(validatorConfig.StakerSeed)
-		validator := mustStructureKeyPair(validatorConfig.ValidatorSeed)
-		consensusKey := mustStructureKeyPair(validatorConfig.ConsensusSeed)
-		stakeState := stake.ValidatorState{
-			ConsensusPublicKey: consensusKey.PublicKey,
-			StakerAccount:      staker.PublicKey,
-			P2PPeerID:          validatorConfig.PeerID,
-			CommissionBps:      0,
-			ActiveStake:        validatorConfig.StakeLamports,
-			Status:             stake.ValidatorStatusActive,
-		}
-		data, err := stakeState.MarshalBinary()
-		if err != nil {
-			return fmt.Errorf("posnode: marshal genesis validator: %w", err)
-		}
-		accounts = append(accounts, newAccount(validator.PublicKey, validatorConfig.StakeLamports+10_000_000, structure.DefaultBuiltinProgramIDs.Stake, false, data))
-	}
-	accounts = append(accounts, newAccount(structure.DefaultBuiltinProgramIDs.System, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
-	accounts = append(accounts, newAccount(structure.DefaultBuiltinProgramIDs.Stake, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
-	sort.Slice(accounts, func(leftIndex int, rightIndex int) bool {
-		return accounts[leftIndex].Address.String() < accounts[rightIndex].Address.String()
-	})
-	node.state = consensus.ChainState{Accounts: accounts}
-	node.latestBlockHash = mustHash("genesis")
-	node.latestQCHash = mustHash("genesis-qc")
-	node.blockhashQueue = structure.NewBlockhashQueue(150)
-	return node.blockhashQueue.Add(structure.RecentBlockhashEntry{
-		Blockhash:     node.latestBlockHash,
-		Slot:          1,
-		FeeCalculator: structure.DefaultFeeCalculator(),
-		TimestampUnix: time.Now().Unix(),
-	})
-}
-
 func (node *posNode) buildRegisterTransaction() (structure.Transaction, error) {
 	instruction, err := stake.NewRegisterValidatorInstruction(node.consensusKeyPair.PublicKey, node.peerKeyPair.peerID, 0, node.config.StakeLamports)
 	if err != nil {
@@ -730,7 +870,7 @@ func (node *posNode) buildRegisterTransaction() (structure.Transaction, error) {
 			AccountIndexes: []uint8{0, 1},
 			Data:           data,
 		}},
-		RecentBlockhash: node.latestBlockHash,
+		RecentBlockhash: node.ledger.Head().BlockHash,
 		SubmitTime:      time.Now().UnixMilli(),
 	}
 	return transaction.Sign(map[structure.PublicKey][]byte{node.stakerKeyPair.PublicKey: node.stakerKeyPair.PrivateKey})

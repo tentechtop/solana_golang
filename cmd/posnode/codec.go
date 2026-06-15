@@ -28,6 +28,61 @@ type qcEnvelope struct {
 	QC consensus.QuorumCertificate `json:"qc"`
 }
 
+type blockHashRequestEnvelope struct {
+	Hash string `json:"hash"`
+}
+
+type blockHeightRequestEnvelope struct {
+	Height uint64 `json:"height"`
+}
+
+type blockResponseEnvelope struct {
+	Found    bool            `json:"found"`
+	Hash     string          `json:"hash,omitempty"`
+	Proposal posProposalJSON `json:"proposal"`
+	Error    string          `json:"error,omitempty"`
+}
+
+type stateSnapshotRequestEnvelope struct {
+	BlockHash string `json:"block_hash"`
+}
+
+type stateSnapshotResponseEnvelope struct {
+	Found     bool                  `json:"found"`
+	BlockHash string                `json:"block_hash,omitempty"`
+	StateRoot string                `json:"state_root,omitempty"`
+	Accounts  []accountSnapshotJSON `json:"accounts,omitempty"`
+	Error     string                `json:"error,omitempty"`
+}
+
+type accountSnapshotJSON struct {
+	Address string `json:"address"`
+	Account string `json:"account"`
+}
+
+type statusResponseEnvelope struct {
+	NodeName        string              `json:"node_name"`
+	PeerID          string              `json:"peer_id"`
+	HeadHeight      uint64              `json:"head_height"`
+	HeadSlot        uint64              `json:"head_slot"`
+	HeadHash        string              `json:"head_hash"`
+	FinalizedHeight uint64              `json:"finalized_height"`
+	FinalizedHash   string              `json:"finalized_hash"`
+	EpochID         uint64              `json:"epoch_id"`
+	MempoolSize     int                 `json:"mempool_size"`
+	ValidatorCount  int                 `json:"validator_count"`
+	KnownPeerCount  int                 `json:"known_peer_count"`
+	CurrentLeader   string              `json:"current_leader,omitempty"`
+	UpcomingLeaders []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
+	Metrics         nodeMetricsSnapshot `json:"metrics"`
+}
+
+type leaderSlotJSON struct {
+	Slot        uint64 `json:"slot"`
+	ValidatorID string `json:"validator_id"`
+	PeerID      string `json:"peer_id"`
+}
+
 type posProposalJSON struct {
 	Header          consensus.BlockHeader `json:"header"`
 	Transactions    []string              `json:"transactions"`
@@ -59,19 +114,11 @@ func decodeTransactionMessage(message p2p.Message) (structure.Transaction, error
 }
 
 func encodeProposalMessage(proposal consensus.BlockProposal) (p2p.Message, error) {
-	transactions := make([]string, len(proposal.Transactions))
-	for index, transaction := range proposal.Transactions {
-		transactionBytes, err := transaction.MarshalBinary()
-		if err != nil {
-			return p2p.Message{}, fmt.Errorf("posnode: marshal proposal transaction %d: %w", index, err)
-		}
-		transactions[index] = base64.StdEncoding.EncodeToString(transactionBytes)
+	proposalJSON, err := proposalToJSON(proposal)
+	if err != nil {
+		return p2p.Message{}, err
 	}
-	payload, err := json.Marshal(proposalEnvelope{Proposal: posProposalJSON{
-		Header:          proposal.Header,
-		Transactions:    transactions,
-		LeaderSignature: proposal.LeaderSignature,
-	}})
+	payload, err := json.Marshal(proposalEnvelope{Proposal: proposalJSON})
 	if err != nil {
 		return p2p.Message{}, fmt.Errorf("posnode: marshal proposal envelope: %w", err)
 	}
@@ -83,23 +130,7 @@ func decodeProposalMessage(message p2p.Message) (consensus.BlockProposal, error)
 	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
 		return consensus.BlockProposal{}, fmt.Errorf("posnode: decode proposal envelope: %w", err)
 	}
-	transactions := make([]structure.Transaction, len(envelope.Proposal.Transactions))
-	for index, encodedTransaction := range envelope.Proposal.Transactions {
-		transactionBytes, err := base64.StdEncoding.DecodeString(encodedTransaction)
-		if err != nil {
-			return consensus.BlockProposal{}, fmt.Errorf("posnode: decode proposal transaction %d: %w", index, err)
-		}
-		transaction, err := structure.UnmarshalTransactionBinary(transactionBytes)
-		if err != nil {
-			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal transaction %d: %w", index, err)
-		}
-		transactions[index] = transaction
-	}
-	return consensus.BlockProposal{
-		Header:          envelope.Proposal.Header,
-		Transactions:    transactions,
-		LeaderSignature: envelope.Proposal.LeaderSignature,
-	}, nil
+	return proposalFromJSON(envelope.Proposal)
 }
 
 func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair) (p2p.Message, error) {
@@ -132,4 +163,96 @@ func encodeQCMessage(qc consensus.QuorumCertificate) (p2p.Message, error) {
 		return p2p.Message{}, fmt.Errorf("posnode: marshal qc envelope: %w", err)
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSQCV1, payload)
+}
+
+func proposalToJSON(proposal consensus.BlockProposal) (posProposalJSON, error) {
+	transactions := make([]string, len(proposal.Transactions))
+	for index, transaction := range proposal.Transactions {
+		transactionBytes, err := transaction.MarshalBinary()
+		if err != nil {
+			return posProposalJSON{}, fmt.Errorf("posnode: marshal proposal transaction %d: %w", index, err)
+		}
+		transactions[index] = base64.StdEncoding.EncodeToString(transactionBytes)
+	}
+	return posProposalJSON{
+		Header:          proposal.Header,
+		Transactions:    transactions,
+		LeaderSignature: proposal.LeaderSignature,
+	}, nil
+}
+
+func proposalFromJSON(proposal posProposalJSON) (consensus.BlockProposal, error) {
+	transactions := make([]structure.Transaction, len(proposal.Transactions))
+	for index, encodedTransaction := range proposal.Transactions {
+		transactionBytes, err := base64.StdEncoding.DecodeString(encodedTransaction)
+		if err != nil {
+			return consensus.BlockProposal{}, fmt.Errorf("posnode: decode proposal transaction %d: %w", index, err)
+		}
+		transaction, err := structure.UnmarshalTransactionBinary(transactionBytes)
+		if err != nil {
+			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal transaction %d: %w", index, err)
+		}
+		transactions[index] = transaction
+	}
+	return consensus.BlockProposal{
+		Header:          proposal.Header,
+		Transactions:    transactions,
+		LeaderSignature: proposal.LeaderSignature,
+	}, nil
+}
+
+func encodeStateSnapshotResponse(blockHash structure.Hash, state consensus.ChainState) (stateSnapshotResponseEnvelope, error) {
+	stateRoot, err := state.RootHash()
+	if err != nil {
+		return stateSnapshotResponseEnvelope{}, err
+	}
+	accounts := make([]accountSnapshotJSON, len(state.Accounts))
+	for index, addressedAccount := range state.Accounts {
+		accountBytes, err := addressedAccount.Account.MarshalBinary()
+		if err != nil {
+			return stateSnapshotResponseEnvelope{}, fmt.Errorf("posnode: marshal snapshot account %d: %w", index, err)
+		}
+		accounts[index] = accountSnapshotJSON{
+			Address: addressedAccount.Address.String(),
+			Account: base64.StdEncoding.EncodeToString(accountBytes),
+		}
+	}
+	return stateSnapshotResponseEnvelope{
+		Found:     true,
+		BlockHash: blockHash.String(),
+		StateRoot: stateRoot.String(),
+		Accounts:  accounts,
+	}, nil
+}
+
+func decodeStateSnapshotResponse(response stateSnapshotResponseEnvelope) (structure.Hash, consensus.ChainState, error) {
+	blockHash, err := structure.HashFromBase58(response.BlockHash)
+	if err != nil {
+		return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot block hash: %w", err)
+	}
+	accounts := make([]structure.AddressedAccount, len(response.Accounts))
+	for index, accountJSON := range response.Accounts {
+		address, err := structure.PublicKeyFromBase58(accountJSON.Address)
+		if err != nil {
+			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot account address %d: %w", index, err)
+		}
+		accountBytes, err := base64.StdEncoding.DecodeString(accountJSON.Account)
+		if err != nil {
+			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot account bytes %d: %w", index, err)
+		}
+		account, err := structure.UnmarshalAccountBinary(accountBytes)
+		if err != nil {
+			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: unmarshal snapshot account %d: %w", index, err)
+		}
+		accounts[index] = structure.AddressedAccount{Address: address, Account: account}
+	}
+	state := consensus.ChainState{Accounts: accounts}
+	stateRoot, err := state.RootHash()
+	if err != nil {
+		return structure.Hash{}, consensus.ChainState{}, err
+	}
+	if stateRoot.String() != response.StateRoot {
+		return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: snapshot state root mismatch")
+	}
+	return blockHash, state, nil
 }

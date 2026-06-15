@@ -19,21 +19,33 @@ const (
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
 type nodeConfig struct {
-	ChainID        string              `json:"chain_id"`
-	NodeName       string              `json:"node_name"`
-	ListenIP       string              `json:"listen_ip"`
-	ListenPort     int                 `json:"listen_port"`
-	PeerSeed       string              `json:"peer_seed"`
-	StakerSeed     string              `json:"staker_seed"`
-	ValidatorSeed  string              `json:"validator_seed"`
-	ConsensusSeed  string              `json:"consensus_seed"`
-	StakeLamports  uint64              `json:"stake_lamports"`
-	BootstrapPeers []peerConfig        `json:"bootstrap_peers"`
-	Genesis        genesisConfig       `json:"genesis"`
-	SlotMillis     int                 `json:"slot_millis"`
-	EpochSlots     uint64              `json:"epoch_slots"`
-	AutoRegister   bool                `json:"auto_register"`
-	AutoTransfer   *autoTransferConfig `json:"auto_transfer,omitempty"`
+	ChainID                     string              `json:"chain_id"`
+	Environment                 string              `json:"environment"`
+	Production                  bool                `json:"production"`
+	NodeName                    string              `json:"node_name"`
+	DataPath                    string              `json:"data_path"`
+	ListenIP                    string              `json:"listen_ip"`
+	ListenPort                  int                 `json:"listen_port"`
+	RPCEnabled                  bool                `json:"rpc_enabled"`
+	RPCListenIP                 string              `json:"rpc_listen_ip"`
+	RPCPort                     int                 `json:"rpc_port"`
+	AllowInsecureP2P            *bool               `json:"allow_insecure_p2p,omitempty"`
+	PeerSeed                    string              `json:"peer_seed"`
+	StakerSeed                  string              `json:"staker_seed"`
+	ValidatorSeed               string              `json:"validator_seed"`
+	ConsensusSeed               string              `json:"consensus_seed"`
+	StakeLamports               uint64              `json:"stake_lamports"`
+	BootstrapPeers              []peerConfig        `json:"bootstrap_peers"`
+	Genesis                     genesisConfig       `json:"genesis"`
+	SlotMillis                  int                 `json:"slot_millis"`
+	GenesisStartMs              int64               `json:"genesis_start_unix_millis"`
+	EpochSlots                  uint64              `json:"epoch_slots"`
+	AutoRegister                bool                `json:"auto_register"`
+	MempoolMaxTransactions      int                 `json:"mempool_max_transactions"`
+	MempoolTransactionTTLMillis int64               `json:"mempool_transaction_ttl_millis"`
+	TransactionLeaderForwardSlots int               `json:"transaction_leader_forward_slots"`
+	TransactionForwardValidators  *bool             `json:"transaction_forward_validators,omitempty"`
+	AutoTransfer                *autoTransferConfig `json:"auto_transfer,omitempty"`
 }
 
 type peerConfig struct {
@@ -83,17 +95,35 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if strings.TrimSpace(config.ChainID) == "" {
 		config.ChainID = defaultChainID
 	}
+	if strings.TrimSpace(config.NodeName) == "" {
+		return nodeConfig{}, fmt.Errorf("posnode: node name is empty")
+	}
+	if strings.TrimSpace(config.DataPath) == "" {
+		config.DataPath = "data/posnode-" + strings.TrimSpace(config.NodeName)
+	}
 	if config.ListenPort < 1 || config.ListenPort > 65535 {
 		return nodeConfig{}, fmt.Errorf("posnode: invalid listen port")
 	}
 	if strings.TrimSpace(config.ListenIP) == "" {
 		return nodeConfig{}, fmt.Errorf("posnode: listen ip is empty")
 	}
+	if config.RPCPort != 0 || config.RPCEnabled {
+		config.RPCEnabled = true
+		if config.RPCPort < 1 || config.RPCPort > 65535 {
+			return nodeConfig{}, fmt.Errorf("posnode: invalid rpc port")
+		}
+		if strings.TrimSpace(config.RPCListenIP) == "" {
+			config.RPCListenIP = config.ListenIP
+		}
+	}
 	if config.SlotMillis == 0 {
 		config.SlotMillis = defaultSlotMillis
 	}
 	if config.SlotMillis < 200 {
 		return nodeConfig{}, fmt.Errorf("posnode: slot millis must be >= 200")
+	}
+	if config.GenesisStartMs == 0 {
+		config.GenesisStartMs = time.Now().UnixMilli()
 	}
 	if config.EpochSlots == 0 {
 		config.EpochSlots = defaultEpochSlots
@@ -103,6 +133,24 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	}
 	if config.StakeLamports < stake.MinimumStakeLamports {
 		return nodeConfig{}, fmt.Errorf("posnode: stake lamports below minimum")
+	}
+	if config.MempoolMaxTransactions == 0 {
+		config.MempoolMaxTransactions = 5000
+	}
+	if config.MempoolMaxTransactions < 1 {
+		return nodeConfig{}, fmt.Errorf("posnode: mempool max transactions must be positive")
+	}
+	if config.MempoolTransactionTTLMillis == 0 {
+		config.MempoolTransactionTTLMillis = 60000
+	}
+	if config.MempoolTransactionTTLMillis < int64(config.SlotMillis) {
+		return nodeConfig{}, fmt.Errorf("posnode: mempool ttl must be >= slot millis")
+	}
+	if config.TransactionLeaderForwardSlots == 0 {
+		config.TransactionLeaderForwardSlots = 4
+	}
+	if config.TransactionLeaderForwardSlots < 0 || config.TransactionLeaderForwardSlots > 64 {
+		return nodeConfig{}, fmt.Errorf("posnode: transaction leader forward slots must be 0..64")
 	}
 	if config.Genesis.InitialSupplyLamports == 0 {
 		config.Genesis.InitialSupplyLamports = defaultInitialSupply
@@ -118,4 +166,22 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 
 func (config nodeConfig) slotDuration() time.Duration {
 	return time.Duration(config.SlotMillis) * time.Millisecond
+}
+
+func (config nodeConfig) genesisStartTime() time.Time {
+	return time.UnixMilli(config.GenesisStartMs)
+}
+
+func (config nodeConfig) allowInsecureP2P() bool {
+	if config.AllowInsecureP2P == nil {
+		return true
+	}
+	return *config.AllowInsecureP2P
+}
+
+func (config nodeConfig) forwardTransactionsToValidators() bool {
+	if config.TransactionForwardValidators == nil {
+		return true
+	}
+	return *config.TransactionForwardValidators
 }

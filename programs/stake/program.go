@@ -23,6 +23,8 @@ const (
 	InstructionUnstake
 	InstructionWithdrawUnstaked
 	InstructionExitValidator
+	InstructionSlashValidator
+	InstructionJailValidator
 )
 
 type ValidatorStatus uint8
@@ -30,6 +32,7 @@ type ValidatorStatus uint8
 const (
 	ValidatorStatusActive ValidatorStatus = iota + 1
 	ValidatorStatusExiting
+	ValidatorStatusJailed
 )
 
 // Program 执行质押固定指令 + 通过账户数据生成下个 epoch 的验证者快照。
@@ -87,6 +90,10 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 		return executeWithdrawUnstaked(instruction, context)
 	case InstructionExitValidator:
 		return executeExitValidator(context)
+	case InstructionSlashValidator:
+		return executeSlashValidator(instruction, context)
+	case InstructionJailValidator:
+		return executeJailValidator(instruction, context)
 	default:
 		return fmt.Errorf("stake: unsupported instruction type %d", instruction.Type)
 	}
@@ -128,6 +135,18 @@ func NewExitValidatorInstruction() Instruction {
 }
 
 // Validate 校验质押指令 + 在程序执行前拦截非法金额和元数据。
+// NewSlashValidatorInstruction 创建罚没指令 + 作恶证据裁决后需要把惩罚写入 stake account。
+func NewSlashValidatorInstruction(amount uint64) (Instruction, error) {
+	instruction := Instruction{Type: InstructionSlashValidator, Amount: amount}
+	return instruction, instruction.Validate()
+}
+
+// NewJailValidatorInstruction 创建 jail 指令 + jailed validator 在指定 epoch 前不能参与 leader 选举。
+func NewJailValidatorInstruction(jailUntilEpoch uint64) (Instruction, error) {
+	instruction := Instruction{Type: InstructionJailValidator, UnlockEpoch: jailUntilEpoch}
+	return instruction, instruction.Validate()
+}
+
 func (instruction Instruction) Validate() error {
 	if instruction.P2PPeerID != "" && len(instruction.P2PPeerID) > MaxPeerIDLength {
 		return fmt.Errorf("stake: p2p peer id too long")
@@ -140,7 +159,12 @@ func (instruction Instruction) Validate() error {
 		return validateRegisterInstruction(instruction)
 	case InstructionStake, InstructionUnstake:
 		return validateStakeAmount(instruction.Amount)
-	case InstructionWithdrawUnstaked, InstructionExitValidator:
+	case InstructionSlashValidator:
+		if instruction.Amount == 0 {
+			return fmt.Errorf("stake: slash amount is zero")
+		}
+		return nil
+	case InstructionWithdrawUnstaked, InstructionExitValidator, InstructionJailValidator:
 		return nil
 	default:
 		return fmt.Errorf("stake: invalid instruction type %d", instruction.Type)
@@ -301,7 +325,7 @@ func (state ValidatorState) Validate() error {
 	if state.ActiveStake+state.PendingStake < MinimumStakeLamports && state.Status == ValidatorStatusActive {
 		return fmt.Errorf("stake: active validator stake below minimum")
 	}
-	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting {
+	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting && state.Status != ValidatorStatusJailed {
 		return fmt.Errorf("stake: invalid validator status %d", state.Status)
 	}
 	return nil
@@ -392,6 +416,60 @@ func executeExitValidator(context runtime.InstructionContext) error {
 	}
 	state.Status = ValidatorStatusExiting
 	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+}
+
+func executeSlashValidator(instruction Instruction, context runtime.InstructionContext) error {
+	_, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
+	if err != nil {
+		return err
+	}
+	totalStake, err := validatorTotalStake(state)
+	if err != nil {
+		return err
+	}
+	if instruction.Amount > totalStake {
+		return fmt.Errorf("stake: slash exceeds total stake")
+	}
+	remainingSlash := instruction.Amount
+	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
+	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
+	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
+	if state.ActiveStake+state.PendingStake < MinimumStakeLamports {
+		state.Status = ValidatorStatusJailed
+	}
+	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+}
+
+func executeJailValidator(instruction Instruction, context runtime.InstructionContext) error {
+	_, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
+	if err != nil {
+		return err
+	}
+	state.Status = ValidatorStatusJailed
+	state.UnlockEpoch = instruction.UnlockEpoch
+	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+}
+
+func subtractStakeBucket(value uint64, remaining uint64) (uint64, uint64) {
+	if remaining == 0 {
+		return value, 0
+	}
+	if value >= remaining {
+		return value - remaining, 0
+	}
+	return 0, remaining - value
+}
+
+func validatorTotalStake(state ValidatorState) (uint64, error) {
+	total := state.ActiveStake
+	if ^uint64(0)-total < state.PendingStake {
+		return 0, fmt.Errorf("stake: total stake overflow")
+	}
+	total += state.PendingStake
+	if ^uint64(0)-total < state.UnlockingStake {
+		return 0, fmt.Errorf("stake: total stake overflow")
+	}
+	return total + state.UnlockingStake, nil
 }
 
 func loadWritableValidator(context runtime.InstructionContext) (structure.PublicKey, structure.PublicKey, ValidatorState, structure.Account, error) {

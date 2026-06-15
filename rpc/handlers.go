@@ -7,9 +7,19 @@ import (
 )
 
 const (
-	MethodGetBalance      = "getBalance"
-	MethodSendTransaction = "sendTransaction"
-	MethodGetBlock        = "getBlock"
+	MethodGetBalance        = "getBalance"
+	MethodSendTransaction   = "sendTransaction"
+	MethodGetBlock          = "getBlock"
+	MethodTreasuryTransfer  = "treasuryTransfer"
+	MethodTransfer          = "transfer"
+	MethodRegisterValidator = "registerValidator"
+	MethodStake             = "stake"
+	MethodUnstake           = "unstake"
+	MethodSlashValidator    = "slashValidator"
+	MethodJailValidator     = "jailValidator"
+	MethodGetValidatorSet   = "getValidatorSet"
+	MethodGetNodeStatus     = "getNodeStatus"
+	MethodGetHealth         = "getHealth"
 )
 
 // LedgerBackend 定义链业务后端 + 让 RPC 层只负责协议转换和参数校验。
@@ -17,6 +27,34 @@ type LedgerBackend interface {
 	GetBalance(ctx context.Context, address string) (BalanceResult, error)
 	SendTransaction(ctx context.Context, encodedTransaction string) (string, error)
 	GetBlock(ctx context.Context, slot uint64) (BlockResult, error)
+}
+
+type TreasuryTransferBackend interface {
+	TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error)
+}
+
+type TransferBackend interface {
+	Transfer(ctx context.Context, sourceSeed string, destination string, lamports uint64) (string, error)
+}
+
+type ValidatorJoinBackend interface {
+	RegisterValidator(ctx context.Context, stakerSeed string, validatorSeed string, consensusSeed string, peerID string, stakeLamports uint64) (string, error)
+	Stake(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64) (string, error)
+	Unstake(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64, unlockEpoch uint64) (string, error)
+}
+
+type PunishmentBackend interface {
+	SlashValidator(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64) (string, error)
+	JailValidator(ctx context.Context, stakerSeed string, validatorAddress string, jailUntilEpoch uint64) (string, error)
+}
+
+type ValidatorSetBackend interface {
+	GetValidatorSet(ctx context.Context) (ValidatorSetResult, error)
+}
+
+type NodeStatusBackend interface {
+	GetNodeStatus(ctx context.Context) (any, error)
+	GetHealth(ctx context.Context) (HealthResult, error)
 }
 
 type BalanceResult struct {
@@ -30,10 +68,46 @@ type BlockResult struct {
 	Transactions []any  `json:"transactions,omitempty"`
 }
 
+type TransactionSubmitResult struct {
+	Signature string `json:"signature"`
+}
+
+type ValidatorInfo struct {
+	ValidatorID        string `json:"validator_id"`
+	AccountAddress     string `json:"account_address"`
+	ConsensusPublicKey string `json:"consensus_public_key"`
+	P2PPeerID          string `json:"p2p_peer_id"`
+	StakeLamports      uint64 `json:"stake_lamports"`
+	Status             string `json:"status"`
+	CommissionBps      uint16 `json:"commission_bps"`
+}
+
+type ValidatorSetResult struct {
+	Validators []ValidatorInfo `json:"validators"`
+}
+
+type HealthResult struct {
+	OK              bool   `json:"ok"`
+	HeadHeight      uint64 `json:"head_height"`
+	HeadSlot        uint64 `json:"head_slot"`
+	FinalizedHeight uint64 `json:"finalized_height"`
+	MempoolSize     int    `json:"mempool_size"`
+}
+
 func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
+	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
+	_ = router.Register(MethodTransfer, transferHandler(backend))
+	_ = router.Register(MethodRegisterValidator, registerValidatorHandler(backend))
+	_ = router.Register(MethodStake, stakeHandler(backend))
+	_ = router.Register(MethodUnstake, unstakeHandler(backend))
+	_ = router.Register(MethodSlashValidator, slashValidatorHandler(backend))
+	_ = router.Register(MethodJailValidator, jailValidatorHandler(backend))
+	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
+	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
 }
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
@@ -79,6 +153,259 @@ func getBlockHandler(backend LedgerBackend) HandlerFunc {
 		result, err := backend.GetBlock(ctx, requestParams.Slot)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get block: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func treasuryTransferHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		transferBackend, ok := backend.(TreasuryTransferBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		destination, lamports, rpcError := parseAddressAmount(values, "treasuryTransfer")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := transferBackend.TreasuryTransfer(ctx, destination, lamports)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("treasury transfer: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func transferHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		transferBackend, ok := backend.(TransferBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 3 {
+			return nil, invalidParamsError("transfer requires source seed, destination, lamports")
+		}
+		sourceSeed, rpcError := parseStringParam(values[0], "transfer source seed")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		destination, rpcError := parseStringParam(values[1], "transfer destination")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		lamports, rpcError := parseUint64Param(values[2], "transfer lamports")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := transferBackend.Transfer(ctx, sourceSeed, destination, lamports)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("transfer: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func registerValidatorHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		joinBackend, ok := backend.(ValidatorJoinBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 5 {
+			return nil, invalidParamsError("registerValidator requires staker seed, validator seed, consensus seed, peer id, stake lamports")
+		}
+		stakerSeed, rpcError := parseStringParam(values[0], "registerValidator staker seed")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		validatorSeed, rpcError := parseStringParam(values[1], "registerValidator validator seed")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		consensusSeed, rpcError := parseStringParam(values[2], "registerValidator consensus seed")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		peerID, rpcError := parseStringParam(values[3], "registerValidator peer id")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		stakeLamports, rpcError := parseUint64Param(values[4], "registerValidator stake lamports")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := joinBackend.RegisterValidator(ctx, stakerSeed, validatorSeed, consensusSeed, peerID, stakeLamports)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("register validator: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func stakeHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		joinBackend, ok := backend.(ValidatorJoinBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		stakerSeed, validatorAddress, lamports, rpcError := parseSeedValidatorAmount(values, "stake")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := joinBackend.Stake(ctx, stakerSeed, validatorAddress, lamports)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("stake: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func unstakeHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		joinBackend, ok := backend.(ValidatorJoinBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 4 {
+			return nil, invalidParamsError("unstake requires staker seed, validator address, lamports, unlock epoch")
+		}
+		stakerSeed, validatorAddress, lamports, rpcError := parseSeedValidatorAmount(values[:3], "unstake")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		unlockEpoch, rpcError := parseUint64Param(values[3], "unstake unlock epoch")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := joinBackend.Unstake(ctx, stakerSeed, validatorAddress, lamports, unlockEpoch)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("unstake: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func slashValidatorHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		punishmentBackend, ok := backend.(PunishmentBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		stakerSeed, validatorAddress, lamports, rpcError := parseSeedValidatorAmount(values, "slashValidator")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := punishmentBackend.SlashValidator(ctx, stakerSeed, validatorAddress, lamports)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("slash validator: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func jailValidatorHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		punishmentBackend, ok := backend.(PunishmentBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 3 {
+			return nil, invalidParamsError("jailValidator requires staker seed, validator address, jail until epoch")
+		}
+		stakerSeed, rpcError := parseStringParam(values[0], "jailValidator staker seed")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		validatorAddress, rpcError := parseStringParam(values[1], "jailValidator validator address")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		jailUntilEpoch, rpcError := parseUint64Param(values[2], "jailValidator jail until epoch")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		signature, err := punishmentBackend.JailValidator(ctx, stakerSeed, validatorAddress, jailUntilEpoch)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("jail validator: %v", err))
+		}
+		return TransactionSubmitResult{Signature: signature}, nil
+	}
+}
+
+func getValidatorSetHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		validatorBackend, ok := backend.(ValidatorSetBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := validatorBackend.GetValidatorSet(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get validator set: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getNodeStatusHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		statusBackend, ok := backend.(NodeStatusBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := statusBackend.GetNodeStatus(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get node status: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getHealthHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		statusBackend, ok := backend.(NodeStatusBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := statusBackend.GetHealth(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get health: %v", err))
 		}
 		return result, nil
 	}
@@ -138,6 +465,71 @@ func parseGetBlockParams(params json.RawMessage) (getBlockParams, *Error) {
 	}
 	return getBlockParams{Slot: slot}, nil
 }
+
+func parseNoParams(params json.RawMessage) *Error {
+	if len(params) == 0 || string(params) == "null" {
+		return nil
+	}
+	values, rpcError := parseParamsArray(params)
+	if rpcError != nil {
+		return rpcError
+	}
+	if len(values) != 0 {
+		return invalidParamsError("method does not accept params")
+	}
+	return nil
+}
+
+func parseAddressAmount(values []json.RawMessage, method string) (string, uint64, *Error) {
+	if len(values) < 2 {
+		return "", 0, invalidParamsError(method + " requires address and lamports")
+	}
+	address, rpcError := parseStringParam(values[0], method+" address")
+	if rpcError != nil {
+		return "", 0, rpcError
+	}
+	lamports, rpcError := parseUint64Param(values[1], method+" lamports")
+	if rpcError != nil {
+		return "", 0, rpcError
+	}
+	return address, lamports, nil
+}
+
+func parseSeedValidatorAmount(values []json.RawMessage, method string) (string, string, uint64, *Error) {
+	if len(values) < 3 {
+		return "", "", 0, invalidParamsError(method + " requires staker seed, validator address, lamports")
+	}
+	stakerSeed, rpcError := parseStringParam(values[0], method+" staker seed")
+	if rpcError != nil {
+		return "", "", 0, rpcError
+	}
+	validatorAddress, rpcError := parseStringParam(values[1], method+" validator address")
+	if rpcError != nil {
+		return "", "", 0, rpcError
+	}
+	lamports, rpcError := parseUint64Param(values[2], method+" lamports")
+	if rpcError != nil {
+		return "", "", 0, rpcError
+	}
+	return stakerSeed, validatorAddress, lamports, nil
+}
+
+func parseStringParam(value json.RawMessage, field string) (string, *Error) {
+	var text string
+	if err := json.Unmarshal(value, &text); err != nil || text == "" {
+		return "", invalidParamsError(field + " must be a non-empty string")
+	}
+	return text, nil
+}
+
+func parseUint64Param(value json.RawMessage, field string) (uint64, *Error) {
+	var number uint64
+	if err := json.Unmarshal(value, &number); err != nil || number == 0 {
+		return 0, invalidParamsError(field + " must be a positive unsigned integer")
+	}
+	return number, nil
+}
+
 func parseParamsArray(params json.RawMessage) ([]json.RawMessage, *Error) {
 	if len(params) == 0 || string(params) == "null" {
 		return nil, invalidParamsError("params must be an array")

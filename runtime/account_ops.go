@@ -41,7 +41,11 @@ func TransferLamports(
 	}
 	destinationAccount, exists := accounts[destinationAddress]
 	if !exists {
-		return fmt.Errorf("%w: destination account not found", structure.ErrInvalidLoadedTransaction)
+		var err error
+		destinationAccount, err = structure.NewAccount(0, nil, structure.DefaultBuiltinProgramIDs.System, false, 0)
+		if err != nil {
+			return fmt.Errorf("runtime: create destination account: %w", err)
+		}
 	}
 	if err := sourceAccount.DebitLamports(lamports, rentConfig); err != nil {
 		return err
