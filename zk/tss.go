@@ -64,7 +64,7 @@ func SplitScalarWithPublicKeySet(secret []byte, threshold int, total int) (Thres
 	return publicKeySet, evaluateThresholdShares(coefficients, total), nil
 }
 
-// RecoverScalar 恢复私钥标量 + 至少 threshold 个合法份额才能插值出监管私钥。
+// RecoverScalar 恢复私钥标量 + 仅保留兼容用途，生产审计使用门限解密份额。
 func RecoverScalar(shares []ThresholdShare, threshold int) ([]byte, error) {
 	if err := validateSharesForRecovery(shares, threshold); err != nil {
 		return nil, err
@@ -87,6 +87,9 @@ func RecoverScalar(shares []ThresholdShare, threshold int) ([]byte, error) {
 
 // NewThresholdDecryptionShare 创建门限解密份额 + 单个监管节点只输出 share_i * R 和正确性证明。
 func NewThresholdDecryptionShare(share ThresholdShare, ciphertext ElGamalCiphertext) (ThresholdDecryptionShare, error) {
+	if share.Index == 0 {
+		return ThresholdDecryptionShare{}, fmt.Errorf("%w: zero share index", ErrInvalidPublicInput)
+	}
 	shareValue, err := scalarFromBytes(share.Value, false)
 	if err != nil {
 		return ThresholdDecryptionShare{}, err
@@ -154,11 +157,13 @@ func DecryptAmountWithThresholdPrivateShares(publicKeySet ThresholdPublicKeySet,
 	if err := validateSharesForRecovery(shares, publicKeySet.Threshold); err != nil {
 		return 0, err
 	}
-	decryptionShares := make([]ThresholdDecryptionShare, 0, publicKeySet.Threshold)
-	for _, share := range shares[:publicKeySet.Threshold] {
+	for _, share := range shares {
 		if err := VerifyThresholdShare(publicKeySet, share); err != nil {
 			return 0, err
 		}
+	}
+	decryptionShares := make([]ThresholdDecryptionShare, 0, publicKeySet.Threshold)
+	for _, share := range shares[:publicKeySet.Threshold] {
 		decryptionShare, err := NewThresholdDecryptionShare(share, ciphertext)
 		if err != nil {
 			return 0, err

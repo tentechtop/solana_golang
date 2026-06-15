@@ -249,19 +249,18 @@ func (executor FixedConfidentialInstructionExecutor) ExecutePrivateToTransparent
 	return nil
 }
 
-// AuditConfidentialNote 解密授权审计记录 + 使用 TSS 份额恢复监管私钥后解密 ElGamal 金额。
-func AuditConfidentialNote(note ConfidentialNote, auditor PublicKey, scope PrivacyAuditScope, currentSlot uint64, shares []zk.ThresholdShare, threshold int, maxAmount uint64) ([]ConfidentialAuditPayload, error) {
+// AuditConfidentialNote 解密授权审计记录 + 使用 TSS 解密份额聚合金额且不重构监管私钥。
+func AuditConfidentialNote(note ConfidentialNote, auditor PublicKey, scope PrivacyAuditScope, currentSlot uint64, publicKeySet zk.ThresholdPublicKeySet, shares []zk.ThresholdShare, maxAmount uint64) ([]ConfidentialAuditPayload, error) {
 	if auditor.IsZero() {
 		return nil, fmt.Errorf("%w: audit auditor is zero", ErrInvalidPrivacyInstruction)
 	}
 	if !scope.IsValid() {
 		return nil, fmt.Errorf("%w: invalid audit scope %d", ErrInvalidPrivacyInstruction, scope)
 	}
-	privateScalar, err := zk.RecoverScalar(shares, threshold)
-	if err != nil {
-		return nil, fmt.Errorf("%w: recover audit threshold key: %w", ErrInvalidPrivacyInstruction, err)
+	if err := publicKeySet.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: invalid audit threshold public key set: %w", ErrInvalidPrivacyInstruction, err)
 	}
-	return decryptConfidentialAuditRecords(note.AuditRecords, auditor, scope, currentSlot, privateScalar, maxAmount)
+	return decryptConfidentialAuditRecords(note.AuditRecords, auditor, scope, currentSlot, publicKeySet, shares, maxAmount)
 }
 
 // BuildConfidentialPrivateTransferSpendMessage 构造隐私转隐私花费消息 + 将 proof 绑定到输出承诺和 nullifier。
@@ -544,7 +543,7 @@ func confidentialNoteFromOutput(output ConfidentialOutputNote) ConfidentialNote 
 	}
 }
 
-func decryptConfidentialAuditRecords(records []ConfidentialAuditRecord, auditor PublicKey, scope PrivacyAuditScope, currentSlot uint64, privateScalar []byte, maxAmount uint64) ([]ConfidentialAuditPayload, error) {
+func decryptConfidentialAuditRecords(records []ConfidentialAuditRecord, auditor PublicKey, scope PrivacyAuditScope, currentSlot uint64, publicKeySet zk.ThresholdPublicKeySet, shares []zk.ThresholdShare, maxAmount uint64) ([]ConfidentialAuditPayload, error) {
 	payloads := make([]ConfidentialAuditPayload, 0, len(records))
 	for _, record := range records {
 		if !recordMatchesAudit(record, auditor, scope, currentSlot) {
@@ -553,9 +552,12 @@ func decryptConfidentialAuditRecords(records []ConfidentialAuditRecord, auditor 
 		if err := zk.VerifyAmountCiphertextProof(record.AuditPublicKey, record.Commitment, record.AmountCiphertext, record.AmountProof); err != nil {
 			return nil, fmt.Errorf("%w: verify confidential audit amount proof: %w", ErrInvalidPrivacyInstruction, err)
 		}
-		amount, err := zk.DecryptAmount(privateScalar, record.AmountCiphertext, maxAmount)
+		if !bytes.Equal(record.AuditPublicKey, publicKeySet.PublicKey) {
+			return nil, fmt.Errorf("%w: audit public key does not match threshold key set", ErrInvalidPrivacyInstruction)
+		}
+		amount, err := zk.DecryptAmountWithThresholdPrivateShares(publicKeySet, record.AmountCiphertext, shares, maxAmount)
 		if err != nil {
-			return nil, fmt.Errorf("%w: decrypt confidential audit amount: %w", ErrInvalidPrivacyInstruction, err)
+			return nil, fmt.Errorf("%w: threshold decrypt confidential audit amount: %w", ErrInvalidPrivacyInstruction, err)
 		}
 		payloads = append(payloads, confidentialAuditPayload(record, amount))
 	}

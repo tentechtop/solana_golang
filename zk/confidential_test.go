@@ -1,7 +1,6 @@
 package zk
 
 import (
-	"bytes"
 	"crypto/elliptic"
 	"math/big"
 	"testing"
@@ -9,7 +8,7 @@ import (
 
 func TestConfidentialAmountRangeConservationElGamalAndTSS(t *testing.T) {
 	regulatorKeyPair := mustElGamalKeyPair(t)
-	recoveredPrivateScalar := mustRecoverRegulatorScalar(t, regulatorKeyPair.PrivateScalar)
+	thresholdKeySet, thresholdShares := mustThresholdKeySetAndShares(t, regulatorKeyPair.PrivateScalar)
 	inputOpening := mustAmountOpening(t, 700)
 	inputCommitment := mustAmountCommitment(t, inputOpening)
 	inputCiphertext := mustEncryptAmount(t, regulatorKeyPair.PublicKey, inputOpening.Amount)
@@ -17,14 +16,14 @@ func TestConfidentialAmountRangeConservationElGamalAndTSS(t *testing.T) {
 	inputRangeProof := mustRangeProof(t, inputOpening)
 	mustVerifyRangeProof(t, inputRangeProof)
 	mustVerifyCommitmentAmount(t, inputCommitment, inputOpening)
-	assertDecryptedAmount(t, recoveredPrivateScalar, inputCiphertext, 700)
+	assertThresholdDecryptedAmount(t, thresholdKeySet, thresholdShares, inputCiphertext, 700)
 
 	outputOpening := mustAmountOpening(t, inputOpening.Amount)
 	outputCommitment := mustAmountCommitment(t, outputOpening)
 	outputCiphertext := mustEncryptAmount(t, regulatorKeyPair.PublicKey, outputOpening.Amount)
 	outputRangeProof := mustRangeProof(t, outputOpening)
 	mustVerifyRangeProof(t, outputRangeProof)
-	assertDecryptedAmount(t, recoveredPrivateScalar, outputCiphertext, 700)
+	assertThresholdDecryptedAmount(t, thresholdKeySet, thresholdShares, outputCiphertext, 700)
 
 	privateTransferDelta := mustScalarDelta(t, inputOpening.Blinding, outputOpening.Blinding)
 	privateTransferProof, err := NewBalanceProof([][]byte{inputCommitment}, [][]byte{outputCommitment}, 0, privateTransferDelta)
@@ -42,6 +41,15 @@ func TestConfidentialAmountRangeConservationElGamalAndTSS(t *testing.T) {
 	if err := VerifyBalanceProof([][]byte{outputCommitment}, nil, outputOpening.Amount, withdrawProof); err != nil {
 		t.Fatalf("VerifyBalanceProof(withdraw) error = %v", err)
 	}
+}
+
+func TestRangeProofSupportsLargeUint64Amount(t *testing.T) {
+	opening := mustAmountOpening(t, uint64(1)<<40+123)
+	proof := mustRangeProof(t, opening)
+	if proof.Bits != 64 {
+		t.Fatalf("range proof bits = %d, want 64", proof.Bits)
+	}
+	mustVerifyRangeProof(t, proof)
 }
 
 func TestConfidentialProofRejectsTampering(t *testing.T) {
@@ -96,6 +104,29 @@ func TestAmountCiphertextProofBindsAuditCiphertextToCommitment(t *testing.T) {
 	}
 }
 
+func TestThresholdDecryptionRejectsInvalidShares(t *testing.T) {
+	regulatorKeyPair := mustElGamalKeyPair(t)
+	thresholdKeySet, thresholdShares := mustThresholdKeySetAndShares(t, regulatorKeyPair.PrivateScalar)
+	ciphertext := mustEncryptAmount(t, regulatorKeyPair.PublicKey, 700)
+	decryptionShares := mustThresholdDecryptionShares(t, thresholdShares, ciphertext)
+	got, err := DecryptAmountWithThresholdShares(thresholdKeySet, ciphertext, decryptionShares, 2048)
+	if err != nil {
+		t.Fatalf("DecryptAmountWithThresholdShares() error = %v", err)
+	}
+	if got != 700 {
+		t.Fatalf("threshold decrypted amount = %d, want 700", got)
+	}
+
+	if _, err := DecryptAmountWithThresholdShares(thresholdKeySet, ciphertext, decryptionShares[:2], 2048); err == nil {
+		t.Fatal("DecryptAmountWithThresholdShares() accepted insufficient decryption shares")
+	}
+	tamperedShares := cloneThresholdDecryptionSharesForTest(decryptionShares)
+	tamperedShares[0].Proof.Response[0] ^= 0x01
+	if _, err := DecryptAmountWithThresholdShares(thresholdKeySet, ciphertext, tamperedShares, 2048); err == nil {
+		t.Fatal("DecryptAmountWithThresholdShares() accepted tampered decryption proof")
+	}
+}
+
 func TestThresholdScalarRecoveryRejectsInvalidShares(t *testing.T) {
 	regulatorKeyPair := mustElGamalKeyPair(t)
 	shares, err := SplitScalar(regulatorKeyPair.PrivateScalar, 3, 5)
@@ -121,21 +152,14 @@ func mustElGamalKeyPair(t *testing.T) ElGamalKeyPair {
 	return keyPair
 }
 
-func mustRecoverRegulatorScalar(t *testing.T, privateScalar []byte) []byte {
+func mustThresholdKeySetAndShares(t *testing.T, privateScalar []byte) (ThresholdPublicKeySet, []ThresholdShare) {
 	t.Helper()
 
-	shares, err := SplitScalar(privateScalar, 3, 5)
+	publicKeySet, shares, err := SplitScalarWithPublicKeySet(privateScalar, 3, 5)
 	if err != nil {
-		t.Fatalf("SplitScalar() error = %v", err)
+		t.Fatalf("SplitScalarWithPublicKeySet() error = %v", err)
 	}
-	recoveredPrivateScalar, err := RecoverScalar([]ThresholdShare{shares[0], shares[2], shares[4]}, 3)
-	if err != nil {
-		t.Fatalf("RecoverScalar() error = %v", err)
-	}
-	if !bytes.Equal(recoveredPrivateScalar, privateScalar) {
-		t.Fatal("recovered regulator scalar does not match original")
-	}
-	return recoveredPrivateScalar
+	return publicKeySet, []ThresholdShare{shares[0], shares[2], shares[4]}
 }
 
 func mustAmountOpening(t *testing.T, amount uint64) AmountOpening {
@@ -221,16 +245,30 @@ func mustVerifyCommitmentAmount(t *testing.T, commitment []byte, opening AmountO
 	}
 }
 
-func assertDecryptedAmount(t *testing.T, privateScalar []byte, ciphertext ElGamalCiphertext, want uint64) {
+func assertThresholdDecryptedAmount(t *testing.T, publicKeySet ThresholdPublicKeySet, shares []ThresholdShare, ciphertext ElGamalCiphertext, want uint64) {
 	t.Helper()
 
-	got, err := DecryptAmount(privateScalar, ciphertext, 2048)
+	got, err := DecryptAmountWithThresholdPrivateShares(publicKeySet, ciphertext, shares, 2048)
 	if err != nil {
-		t.Fatalf("DecryptAmount() error = %v", err)
+		t.Fatalf("DecryptAmountWithThresholdPrivateShares() error = %v", err)
 	}
 	if got != want {
-		t.Fatalf("DecryptAmount() = %d, want %d", got, want)
+		t.Fatalf("threshold decrypted amount = %d, want %d", got, want)
 	}
+}
+
+func mustThresholdDecryptionShares(t *testing.T, shares []ThresholdShare, ciphertext ElGamalCiphertext) []ThresholdDecryptionShare {
+	t.Helper()
+
+	decryptionShares := make([]ThresholdDecryptionShare, len(shares))
+	for index, share := range shares {
+		decryptionShare, err := NewThresholdDecryptionShare(share, ciphertext)
+		if err != nil {
+			t.Fatalf("NewThresholdDecryptionShare() error = %v", err)
+		}
+		decryptionShares[index] = decryptionShare
+	}
+	return decryptionShares
 }
 
 func mustScalarDelta(t *testing.T, inputBlinding []byte, outputBlinding []byte) []byte {
@@ -263,6 +301,22 @@ func cloneRangeProofForTest(proof RangeProof) RangeProof {
 			Challenge1: cloneBytes(bitProof.Challenge1),
 			Response0:  cloneBytes(bitProof.Response0),
 			Response1:  cloneBytes(bitProof.Response1),
+		}
+	}
+	return cloned
+}
+
+func cloneThresholdDecryptionSharesForTest(shares []ThresholdDecryptionShare) []ThresholdDecryptionShare {
+	cloned := make([]ThresholdDecryptionShare, len(shares))
+	for index, share := range shares {
+		cloned[index] = ThresholdDecryptionShare{
+			Index:           share.Index,
+			DecryptionPoint: cloneBytes(share.DecryptionPoint),
+			Proof: ThresholdDecryptionShareProof{
+				BaseNonce:       cloneBytes(share.Proof.BaseNonce),
+				CiphertextNonce: cloneBytes(share.Proof.CiphertextNonce),
+				Response:        cloneBytes(share.Proof.Response),
+			},
 		}
 	}
 	return cloned

@@ -11,9 +11,9 @@
 1. 金额隐藏。
 2. Pedersen 金额承诺。
 3. 余额守恒证明。
-4. 16-bit 范围证明。
+4. 64-bit 范围证明。
 5. P-256 ElGamal 金额密文。
-6. Shamir TSS 监管门限恢复。
+6. Shamir TSS 监管门限解密。
 7. ElGamal-Pedersen 同金额一致性证明。
 8. 一个账户完成四类交易：
    - 透明到透明。
@@ -33,22 +33,29 @@ go test ./zk -run "TestConfidential|TestAmountCiphertextProof|TestThreshold" -v
    结果：PASS
    验证内容：
    - 创建金额开口和 Pedersen 承诺。
-   - 生成并验证范围证明。
+   - 生成并验证 64-bit 范围证明。
    - 生成并验证公开金额绑定证明。
    - 生成并验证隐私转隐私余额守恒证明。
    - 生成并验证隐私转透明余额守恒证明。
    - 生成 P-256 ElGamal 金额密文。
-   - 使用 3-of-5 TSS 份额恢复监管私钥。
-   - 使用恢复后的监管私钥解密金额，结果为 700。
+   - 使用 3-of-5 TSS 解密份额聚合监管共享点。
+   - 不恢复完整监管私钥即可解密金额，结果为 700。
 
-2. TestConfidentialProofRejectsTampering
+2. TestRangeProofSupportsLargeUint64Amount
+   结果：PASS
+   验证内容：
+   - 证明金额可以超过 16-bit 上限。
+   - 当前范围证明使用 64-bit，覆盖 uint64 金额域。
+   - 大金额范围证明可以序列化、反序列化并验证通过。
+
+3. TestConfidentialProofRejectsTampering
    结果：PASS
    验证内容：
    - 篡改范围证明会被拒绝。
    - 金额不守恒的隐私转隐私证明无法创建成功。
    - 错误公开金额无法通过承诺金额绑定证明。
 
-3. TestAmountCiphertextProofBindsAuditCiphertextToCommitment
+4. TestAmountCiphertextProofBindsAuditCiphertextToCommitment
    结果：PASS
    验证内容：
    - 生成 ElGamal-Pedersen 同金额一致性证明。
@@ -57,11 +64,21 @@ go test ./zk -run "TestConfidential|TestAmountCiphertextProof|TestThreshold" -v
    - 替换为不同金额的审计密文会被拒绝。
    - 使用不匹配的密文和开口无法创建证明。
 
-4. TestThresholdScalarRecoveryRejectsInvalidShares
+5. TestThresholdDecryptionRejectsInvalidShares
+   结果：PASS
+   验证内容：
+   - 监管节点生成解密份额 share_i * R。
+   - 每个解密份额带 DLEQ 证明，证明同一 share_i 同时作用于 G 和密文 R。
+   - 聚合 threshold 个解密份额后可以解密金额。
+   - 少于 threshold 个解密份额会被拒绝。
+   - 篡改解密份额证明会被拒绝。
+
+6. TestThresholdScalarRecoveryRejectsInvalidShares
    结果：PASS
    验证内容：
    - 少于门限数量的份额无法恢复私钥。
    - 重复份额无法恢复私钥。
+   - 该函数仅保留兼容用途，当前审计路径不再依赖恢复完整私钥。
 
 三、固定指令业务闭环测试成果
 
@@ -81,7 +98,8 @@ go test ./structure -run "TestFixedConfidentialInstructionExecutor" -v
    - 隐私资金池余额随入金和提现正确变化。
    - 隐私 note 被消费后写入 nullifier，防止重复花费。
    - 每笔涉及隐私的交易都写入监管审计记录。
-   - 审计方使用 TSS 份额恢复监管私钥后，可以解密审计金额。
+   - 审计方使用 TSS 解密份额聚合后，可以解密审计金额。
+   - 审计过程不重构完整监管私钥。
    - 审计金额均验证为测试预期金额。
 
 2. TestFixedConfidentialInstructionExecutorRejectsBadSpendProof
@@ -117,11 +135,13 @@ go test ./...
 2. 链上隐私 note 使用 Pedersen commitment 表达隐藏金额。
 3. 交易审计金额使用 ElGamal 密文表达。
 4. 监管方可以使用 TSS 份额恢复监管私钥并解密审计金额。
-5. 范围证明可以证明金额处于 16-bit 合法范围。
+5. 范围证明可以证明金额处于 64-bit 合法范围。
 6. 余额守恒证明可以证明隐私输入、隐私输出、公开提现金额之间守恒。
 7. Spend proof 可以证明花费者拥有 note 对应花费权限。
 8. ElGamal-Pedersen 同金额一致性证明可以强制审计密文金额等于 note commitment 的隐藏金额。
-9. 固定指令接口已经支持未来替换为 VM 后端。
+9. TSS 审计已经从“恢复完整监管私钥”升级为“生成并聚合解密份额”。
+10. 每个 TSS 解密份额都有 DLEQ 正确性证明。
+11. 固定指令接口已经支持未来替换为 VM 后端。
 
 六、严格审查结论
 
@@ -133,15 +153,17 @@ go test ./...
 2. 每条监管审计记录的 ElGamal 金额密文必须和记录引用的 commitment 同金额。
 3. 审计读取侧在解密前会再次校验同金额一致性证明，防止坏状态污染审计结果。
 4. 一旦审计密文金额与 commitment 金额不一致，固定指令拒绝执行，状态不改变。
+5. 审计解密阶段不再恢复完整监管私钥，而是聚合 threshold 个解密份额。
+6. 每个解密份额会校验 Shamir 公钥承诺和 DLEQ 证明，防止错误份额污染审计结果。
 
-但当前还不能称为最终生产级隐私协议，原因如下：
+剩余生产化注意事项：
 
-1. 范围证明当前是 16-bit OR-bit 证明，适合最小闭环和快速验证，不是 Bulletproof 或 Plonk 级大范围生产方案。
-2. TSS 当前测试路径会恢复监管私钥后再解密，生产级应升级为真正的门限解密协议，避免重构完整私钥。
+1. 当前 64-bit 范围证明仍是 OR-bit 证明，安全语义可验证，但证明体积比 Bulletproof/IPA 大。
+2. 如果未来要直接上链，需要进一步压缩范围证明或改用 Bulletproof/IPA。
 3. 当前执行路径是固定指令接口，不执行 VM；这是按当前阶段要求保留未来扩展点。
 
 七、下一阶段建议
 
-1. 将 16-bit 范围证明升级为更适合生产金额范围的证明系统。
-2. 将 TSS 恢复私钥模式升级为分布式门限解密模式。
-3. 给证明字节定义稳定交易编码，便于未来 VM syscall 或链上程序直接验证。
+1. 将 64-bit OR-bit 范围证明替换为更小体积的 Bulletproof/IPA。
+2. 给证明字节定义稳定交易编码，便于未来 VM syscall 或链上程序直接验证。
+3. 将监管节点通信、份额签名、份额轮换和惩罚机制补成完整运维协议。

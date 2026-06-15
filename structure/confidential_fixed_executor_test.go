@@ -18,7 +18,7 @@ func TestFixedConfidentialInstructionExecutorCompletesFourTransactionTypes(t *te
 	recipientAddress := newTestPublicKey(172)
 	auditorAddress := newTestPublicKey(173)
 	regulatorKeyPair := mustConfidentialRegulatorKeyPair(t)
-	auditShares := mustConfidentialAuditShares(t, regulatorKeyPair.PrivateScalar)
+	auditPublicKeySet, auditShares := mustConfidentialAuditShares(t, regulatorKeyPair.PrivateScalar)
 	spendKeyPair := mustConfidentialSpendKeyPair(t)
 	spendAuthority := mustConfidentialSpendAuthority(t, spendKeyPair.PublicKey)
 	ledger := NewConfidentialLedger(map[PublicKey]uint64{
@@ -53,7 +53,7 @@ func TestFixedConfidentialInstructionExecutorCompletesFourTransactionTypes(t *te
 	assertConfidentialBalance(t, ledger, sourceAddress, 4189)
 	assertConfidentialPool(t, ledger, 700)
 	notes := mustConfidentialNotes(t, ledger)
-	assertConfidentialAuditPayload(t, notes[0], auditorAddress, auditShares, PrivacyInstructionDeposit, 700, deposit.Output.Commitment, Hash{}, nil)
+	assertConfidentialAuditPayload(t, notes[0], auditorAddress, auditPublicKeySet, auditShares, PrivacyInstructionDeposit, 700, deposit.Output.Commitment, Hash{}, nil)
 
 	transferNullifier := newTestHash(174)
 	transferOutput := newConfidentialOutputFixture(t, 700, spendAuthority, regulatorKeyPair.PublicKey)
@@ -78,7 +78,7 @@ func TestFixedConfidentialInstructionExecutorCompletesFourTransactionTypes(t *te
 	if !notes[0].Spent || notes[0].SpendNullifier != transferNullifier {
 		t.Fatalf("deposit note spend state = %+v, want private transfer spent", notes[0])
 	}
-	assertConfidentialAuditPayload(t, notes[1], auditorAddress, auditShares, PrivacyInstructionTransfer, 700, deposit.Output.Commitment, transferNullifier, transferOutput.Output.Commitment)
+	assertConfidentialAuditPayload(t, notes[1], auditorAddress, auditPublicKeySet, auditShares, PrivacyInstructionTransfer, 700, deposit.Output.Commitment, transferNullifier, transferOutput.Output.Commitment)
 
 	withdrawNullifier := newTestHash(175)
 	withdrawBalanceProof := mustBalanceProof(t, [][]byte{transferOutput.Output.Commitment}, nil, 700, transferOutput.Opening.Blinding)
@@ -103,7 +103,7 @@ func TestFixedConfidentialInstructionExecutorCompletesFourTransactionTypes(t *te
 	if !notes[1].Spent || notes[1].SpendNullifier != withdrawNullifier {
 		t.Fatalf("transfer note spend state = %+v, want withdraw spent", notes[1])
 	}
-	assertConfidentialAuditPayload(t, notes[1], auditorAddress, auditShares, PrivacyInstructionWithdraw, 700, transferOutput.Output.Commitment, withdrawNullifier, nil)
+	assertConfidentialAuditPayload(t, notes[1], auditorAddress, auditPublicKeySet, auditShares, PrivacyInstructionWithdraw, 700, transferOutput.Output.Commitment, withdrawNullifier, nil)
 }
 
 func TestFixedConfidentialInstructionExecutorRejectsBadSpendProof(t *testing.T) {
@@ -238,14 +238,14 @@ func mustConfidentialRegulatorKeyPair(t *testing.T) zk.ElGamalKeyPair {
 	return keyPair
 }
 
-func mustConfidentialAuditShares(t *testing.T, privateScalar []byte) []zk.ThresholdShare {
+func mustConfidentialAuditShares(t *testing.T, privateScalar []byte) (zk.ThresholdPublicKeySet, []zk.ThresholdShare) {
 	t.Helper()
 
-	shares, err := zk.SplitScalar(privateScalar, 3, 5)
+	publicKeySet, shares, err := zk.SplitScalarWithPublicKeySet(privateScalar, 3, 5)
 	if err != nil {
-		t.Fatalf("SplitScalar() error = %v", err)
+		t.Fatalf("SplitScalarWithPublicKeySet() error = %v", err)
 	}
-	return []zk.ThresholdShare{shares[0], shares[2], shares[4]}
+	return publicKeySet, []zk.ThresholdShare{shares[0], shares[2], shares[4]}
 }
 
 func mustConfidentialSpendKeyPair(t *testing.T) zk.SchnorrKeyPair {
@@ -373,10 +373,10 @@ func mustConfidentialNotes(t *testing.T, ledger *ConfidentialLedger) []Confident
 	return notes
 }
 
-func assertConfidentialAuditPayload(t *testing.T, note ConfidentialNote, auditor PublicKey, shares []zk.ThresholdShare, transactionType PrivacyInstructionType, amount uint64, commitment []byte, nullifier Hash, outputCommitment []byte) {
+func assertConfidentialAuditPayload(t *testing.T, note ConfidentialNote, auditor PublicKey, publicKeySet zk.ThresholdPublicKeySet, shares []zk.ThresholdShare, transactionType PrivacyInstructionType, amount uint64, commitment []byte, nullifier Hash, outputCommitment []byte) {
 	t.Helper()
 
-	payloads, err := AuditConfidentialNote(note, auditor, PrivacyAuditScopeRegulatory, 900, shares, 3, 2048)
+	payloads, err := AuditConfidentialNote(note, auditor, PrivacyAuditScopeRegulatory, 900, publicKeySet, shares, 2048)
 	if err != nil {
 		t.Fatalf("AuditConfidentialNote() error = %v", err)
 	}

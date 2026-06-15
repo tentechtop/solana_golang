@@ -1,0 +1,859 @@
+跑通 PoS 链具体实施方案
+
+版本：v0.1
+日期：2026-06-15
+目标：在现有账户模型、P2P、存储、固定指令执行器基础上，先不引入 VM，把 PoS 链最小真实业务闭环跑通；未来可平滑接入 VM、SVM 兼容执行器和更高性能网络层。
+
+一、核心目标
+
+1. 跑通一条可持续出块的 PoS 链。
+2. 支持质押、解除质押、验证者注册、验证者退出。
+3. 按 epoch 生成 stake snapshot 和 leader schedule。
+4. leader 按 slot 出块，验证者验块、签名投票，达到 2/3 质押权重形成 QC。
+5. 支持 leader 掉线后的 skip vote 和 SkipQC，链继续前进。
+6. 支持恶意行为证据，包括双出块、双投票、无效区块，进入惩罚流程。
+7. 改造 KAD 网络，使它作为发现层，交易通过 leader-aware fast path 快速传递给当前和未来 leader。
+8. 所有交易仍走现有固定指令接口，保留未来 VM 执行入口。
+
+二、总体架构
+
+整体分三层：
+
+1. 共识层 consensus
+   负责 epoch、leader schedule、block proposal、vote、QC、fork choice、skip、slashing。
+
+2. 网络层 p2p
+   KAD 只负责发现验证者、同步节点能力、同步 leader 地址；交易和共识消息通过直接连接快速转发，不在 KAD 查询路径里逐跳寻找 leader。
+
+3. 执行层 structure / runtime
+   当前使用固定指令执行器执行透明交易和隐私交易；对外暴露统一 ExecuteTransaction 接口，未来 VM 只替换执行器，不影响共识层和网络层。
+
+建议链路：
+
+客户端交易
+  -> 任意节点 RPC / P2P submit
+  -> TransactionForwarder 识别当前 slot 与未来 N 个 leader
+  -> 直连 current leader 和 next leaders
+  -> leader mempool 排序
+  -> leader 打包区块
+  -> 验证者验块并投票
+  -> 形成 QC
+  -> 存储区块和状态根
+
+三、当前代码基础与复用点
+
+1. consensus/slot.go
+   已有 SlotClock、SlotTick、Vote、Quorum、VoteCollector，可作为 PoS slot 和 QC 的起点。
+
+2. p2p/kad_protocol.go
+   KADPeerHint 已包含 Role、Capabilities、LatestSlot、BlockHeight、BestBlockHash、Validator、StakeLamports，可扩展为 leader-aware 节点发现数据。
+
+3. p2p/message.go
+   已有统一 Message、ProtocolID、消息大小限制，可继续扩展交易转发、区块提案、投票、证据协议。
+
+4. p2p/host_messaging.go
+   已有 Host.Send 和 Host.Broadcast，可直接承载点对点转发和广播。
+
+5. structure 固定指令执行器
+   已能执行透明交易和隐私交易，短期作为链上交易执行入口。
+
+四、目录与模块落地设计
+
+1. consensus/validator_set.go
+   维护验证者集合、质押权重、公钥、状态。
+   核心类型：ValidatorID、ValidatorState、ValidatorSet、StakeWeight、ValidatorStatus。
+
+2. consensus/epoch.go
+   管理 epoch 生命周期和 stake snapshot 固化。
+   核心类型：EpochID、EpochConfig、EpochSnapshot、EpochTransition。
+
+3. consensus/leader_schedule.go
+   基于 epoch snapshot 生成确定性 leader schedule。
+   核心类型：LeaderSchedule、LeaderSlot、LeaderSelector。
+
+4. consensus/proposal.go
+   定义区块提案、区块头、交易根、状态根、签名。
+   核心类型：BlockHeader、BlockProposal、BlockSignature。
+
+5. consensus/engine.go
+   PoS 主状态机，处理 slot tick、出块、验块、投票、QC。
+   核心类型：ConsensusEngine、ProposalVerifier、BlockProducer、VoteProcessor。
+
+6. consensus/fork_choice.go
+   MVP 采用最高 QC 链优先；QC 高度相同时选择 hash 字典序小的链，保证确定性。
+
+7. consensus/evidence.go
+   生成和验证恶意行为证据。
+   核心类型：DoubleProposalEvidence、DoubleVoteEvidence、InvalidProposalEvidence。
+
+8. consensus/slashing.go
+   根据证据执行罚没、jail、退出。
+   核心类型：SlashingRule、SlashingRecord、ValidatorJail。
+
+9. consensus/store.go
+   抽象共识存储接口，便于替换本地文件、LevelDB、Badger 或自研存储。
+   核心接口：BlockStore、VoteStore、QCStore、EvidenceStore、EpochStore、ValidatorSetStore。
+
+10. p2p/leader_hint.go
+    从 KAD peer hint 维护 leader 地址缓存。
+    核心类型：LeaderPeerInfo、LeaderPeerCache。
+
+11. p2p/tx_forwarder.go
+    交易快速转发到当前和未来 leader。
+    核心类型：TransactionForwarder、TransactionForwardPolicy、ForwardResult。
+
+12. p2p/consensus_protocol.go
+    注册区块提案、投票、QC、证据传播协议。
+
+13. structure/stake_instruction.go
+    固定指令版本的质押业务。
+    指令：RegisterValidator、Stake、Unstake、WithdrawUnstaked、ExitValidator。
+
+14. cmd/posnode
+    启动一个可配置验证者节点，跑本地多节点集成测试。
+
+五、核心数据结构设计
+
+1. ValidatorState
+
+建议字段：
+ - ValidatorID：验证者身份 ID，建议为共识公钥 hash。
+ - AccountAddress：质押账户地址。
+ - ConsensusPublicKey：共识签名公钥。
+ - P2PPeerID：网络节点 ID。
+ - StakeLamports：有效质押金额。
+ - Status：Active、Jailed、Exiting、Inactive。
+ - CommissionBps：佣金比例。
+ - LastVotedSlot：最后投票 slot。
+ - MissedProposalCount：错过出块次数。
+ - MissedVoteCount：错过投票次数。
+ - JailUntilEpoch：惩罚冻结到哪个 epoch。
+
+设计原则：
+ - 质押账户、共识签名密钥、P2P 密钥分离。
+ - 质押变更不立即影响当前 epoch，只在下一个 epoch snapshot 生效。
+ - ValidatorID 必须稳定，不能依赖可变网络地址。
+
+2. EpochSnapshot
+
+建议字段：
+ - EpochID
+ - StartSlot
+ - EndSlot
+ - RandomSeed
+ - TotalActiveStake
+ - Validators
+ - SnapshotStateRoot
+
+设计原则：
+ - 所有节点用同一份 snapshot 生成完全一致的 leader schedule。
+ - RandomSeed 来自上一 epoch 已确认区块 hash 或 QC hash，不能由单个 leader 控制。
+
+3. LeaderSchedule
+
+建议字段：
+ - EpochID
+ - SlotToLeader
+ - LeaderToSlots
+ - SeedHash
+
+实现建议：
+ - MVP 使用 stake-weighted round-robin。
+ - 后续升级为基于 VRF 或加权洗牌的 leader schedule。
+ - 同一 epoch 内 schedule 固定，便于交易提前转发给未来 leader。
+
+4. BlockHeader
+
+建议字段：
+ - ChainID
+ - Slot
+ - Height
+ - ParentHash
+ - PreviousQCHash
+ - LeaderID
+ - EpochID
+ - TxRoot
+ - ReceiptRoot
+ - StateRoot
+ - AccountRoot
+ - TimestampUnixMilli
+ - BlockHash
+ - LeaderSignature
+
+验证规则：
+ - Slot 对应 leader 必须等于 LeaderID。
+ - ParentHash 必须在本地可验证链上。
+ - PreviousQCHash 必须引用有效 QC。
+ - TxRoot、ReceiptRoot、StateRoot 必须由交易执行结果计算得到。
+ - LeaderSignature 必须由该 leader 的 ConsensusPublicKey 验证通过。
+
+5. Vote
+
+当前已有 Vote 可继续扩展：
+ - VoteType：Confirm 或 Skip。
+ - Slot
+ - BlockHash
+ - VoterID
+ - Stake
+ - EpochID
+ - ParentHash
+ - Signature
+ - CreatedAtUnixMilli
+
+验证规则：
+ - 同一验证者同一 slot 只能投一个 Confirm 或 Skip。
+ - Confirm 必须绑定具体 BlockHash。
+ - Skip 必须绑定空 BlockHash 或固定 SkipHash。
+ - Vote 的 Stake 取自 epoch snapshot，不信任消息自报字段。
+
+6. QuorumCertificate
+
+建议字段：
+ - Slot
+ - BlockHash
+ - VoteType
+ - TotalStake
+ - VotedStake
+ - ThresholdStake
+ - VoterIDs
+ - Signatures
+
+MVP 建议：
+ - 先存单签名列表，便于调试和审计。
+ - 后续再升级 BLS 聚合签名或批量签名验证。
+
+7. Evidence
+
+双出块证据：
+ - 同一 leader、同一 slot、两个不同 BlockHash、两个有效签名。
+
+双投票证据：
+ - 同一 validator、同一 slot、两个冲突 Vote、两个有效签名。
+
+无效区块证据：
+ - BlockProposal
+ - InvalidReason
+ - VerifierID
+ - 可复算的错误证明，例如状态根不一致、签名不合法、非 leader 出块。
+
+六、KAD 网络改造方案
+
+核心原则：
+KAD 只做发现层和节点元数据同步，不做交易快速路径。交易如果每次通过 KAD 查找 leader，会引入不可控延迟，无法达到 Solana 类似的高吞吐交易传递效果。
+
+1. 扩展 KADPeerHint
+
+建议新增字段：
+ - ValidatorID
+ - ConsensusPublicKey
+ - TPUAddresses：接收交易地址。
+ - TVUAddresses：接收区块和分片地址。
+ - ConsensusAddresses：投票、QC、证据地址。
+ - CurrentEpoch
+ - LeaderSlots：短窗口 leader slot 摘要。
+ - LeaderReachability：节点是否可作为 leader 接收交易。
+ - GossipSequence：hint 单调递增版本。
+ - HintSignature：验证者签名，防止伪造 leader 地址。
+
+安全要求：
+ - PeerHint 必须由节点身份密钥签名。
+ - Validator 相关字段必须由共识密钥或注册账户授权。
+ - 过期 hint 不得进入 LeaderPeerCache。
+
+2. 新增 LeaderPeerCache
+
+职责：
+ - 从 KADPeerHint、Identify、主动连接结果中维护 validator -> addresses 映射。
+ - 按 leader schedule 查询 slot 对应 leader 地址。
+ - 定期探测当前和未来 leader 连通性。
+ - 缓存最近 N 个 epoch 的 leader 地址。
+
+关键接口：
+ - UpdatePeerHint(hint)
+ - ResolveLeader(slot)
+ - ResolveUpcomingLeaders(currentSlot, count)
+ - MarkLeaderReachable(validatorID, address)
+ - MarkLeaderFailed(validatorID, address, reason)
+
+3. 新增交易快速转发协议
+
+建议 ProtocolID：
+ - tx_submit_v1：客户端或普通节点提交交易。
+ - tx_forward_v1：节点向 leader 转发交易。
+ - tx_ack_v1：leader 返回接收确认。
+ - tx_reject_v1：leader 返回拒绝原因。
+
+TxForwardPacket 字段：
+ - TransactionHash
+ - RawTransaction
+ - FirstSeenSlot
+ - ExpireSlot
+ - SenderPeerID
+ - ForwardedBy
+ - HopCount
+ - Signature
+
+转发策略：
+ - 默认转发给当前 leader + 未来 4 个 leader。
+ - 高价值或低延迟交易可转发给未来 8 个 leader。
+ - 每个节点按 TransactionHash 去重。
+ - HopCount 最大为 2，避免网络风暴。
+ - leader 返回 ack 后，节点可停止额外重试。
+
+七、交易进入 leader 的完整流程
+
+1. 客户端把交易提交到任意节点。
+2. 节点校验交易基本格式、签名、过期 slot、大小限制。
+3. 节点计算当前 slot 和未来 leader。
+4. 节点从 LeaderPeerCache 获取地址。
+5. 节点向当前 leader 和未来 N 个 leader 并发发送 tx_forward_v1。
+6. leader 收到后做轻量校验：
+   - 交易 hash 是否已存在。
+   - 交易是否过期。
+   - 签名格式是否正确。
+   - 交易大小是否超限。
+   - 手续费是否满足最低门槛。
+7. leader 放入 mempool，并返回 ack。
+8. 非 leader 节点记录 ack，用于 RPC 返回“已进入 leader 队列”。
+
+注意：
+ - 非 leader 不执行完整交易，只做轻量校验，避免重复消耗 CPU。
+ - 完整执行只在出块和验块路径发生。
+ - 如果当前 leader 不可达，交易仍然已经发给未来 leader，下一 slot 可继续打包。
+
+八、leader 出块流程
+
+1. SlotClock 触发当前节点成为 leader。
+2. leader 从 mempool 拉取未过期交易。
+3. 按优先级排序：
+   - 费用优先。
+   - FirstSeenSlot 更早优先。
+   - 避免同一账户锁冲突。
+   - 隐私交易可单独计费或设计算力权重。
+4. leader 根据区块限制打包：
+   - MaxTransactionsPerBlock
+   - MaxBlockBytes
+   - MaxComputeUnits
+   - MaxExecutionMillis
+5. leader 调用执行层 ExecuteTransaction。
+6. 执行成功的交易进入区块，失败交易按策略决定是否进入 receipt。
+7. 计算 TxRoot、ReceiptRoot、StateRoot、AccountRoot。
+8. 构造 BlockHeader。
+9. 使用 ConsensusPrivateKey 签名。
+10. 广播 block_proposal_v1。
+
+MVP 建议：
+ - 先只把执行成功交易写入区块。
+ - 失败交易返回 RPC 失败，不进入链。
+ - 后续再引入 Solana 风格的失败交易 receipt 和费用扣除。
+
+九、验证者验块与投票流程
+
+验证者收到 proposal 后按顺序检查：
+
+1. 基础检查：
+   - 消息大小不超限。
+   - ChainID 正确。
+   - Slot 未过期太久。
+   - Header 字段完整。
+
+2. leader 检查：
+   - 根据 epoch snapshot 和 leader schedule 验证该 slot 的 leader。
+   - 验证 LeaderSignature。
+
+3. 父块和 QC 检查：
+   - ParentHash 必须存在。
+   - PreviousQCHash 必须有效。
+   - proposal 不能违反 fork choice 规则。
+
+4. 交易检查：
+   - 每笔交易签名有效。
+   - 交易未过期。
+   - 交易未重复。
+   - 账户锁冲突处理符合规则。
+
+5. 执行检查：
+   - 从 ParentHash 对应状态执行所有交易。
+   - 复算 ReceiptRoot。
+   - 复算 StateRoot。
+   - 复算 AccountRoot。
+
+6. 投票：
+   - 验证通过，签 Confirm Vote。
+   - 未收到合法 proposal 且 slot 超时，签 Skip Vote。
+   - 发现恶意行为，生成 Evidence 并广播。
+
+十、QC 与最终性
+
+MVP 规则：
+ - 某个 BlockHash 在同一 slot 获得超过 2/3 active stake 的 Confirm Vote，形成 ConfirmQC。
+ - 某个 slot 获得超过 2/3 active stake 的 Skip Vote，形成 SkipQC。
+ - ConfirmQC 表示该块被确认。
+ - 下一个高度的 ConfirmQC 形成后，父块可视为 finalized。
+
+后续升级：
+ - 引入 HotStuff 三链提交规则。
+ - 引入 BLS 聚合签名降低 QC 体积。
+ - 引入 optimistic confirmation，提升用户侧确认速度。
+
+十一、晚出块、掉线、恶意出块处理
+
+1. 晚出块
+
+定义：
+ - leader 在 slot 超时后才广播 proposal。
+
+处理：
+ - 如果该 slot 已形成 SkipQC，晚到 proposal 直接拒绝。
+ - 如果还未形成 SkipQC，但超过本地接收窗口，可不投票。
+ - 晚出块本身不作为硬罚没，只记录 MissedProposalCount。
+
+原因：
+ - 网络抖动可能导致晚到，不能把所有晚出块都当恶意。
+
+2. 掉线
+
+定义：
+ - leader 到 slot 结束仍未产生合法 proposal。
+ - validator 长期不投票或不可达。
+
+处理：
+ - 当前 slot 形成 SkipQC，链继续进入下一 slot。
+ - epoch 结束统计 MissedProposalCount 和 MissedVoteCount。
+ - 超过阈值后降低奖励、进入 jail 或临时移出 active set。
+
+建议阈值：
+ - MissedVoteRate >= 20%，扣除当期奖励。
+ - MissedVoteRate >= 50%，jail 一个 epoch。
+ - 连续 3 个 epoch 高掉线，退出 active set。
+
+3. 恶意出块
+
+硬惩罚行为：
+ - 同一 leader 同一 slot 签两个不同区块。
+ - 非 leader 伪造 leader 出块。
+ - 出块状态根与交易执行结果不一致。
+ - 包含非法交易并试图骗过验证者。
+
+处理：
+ - 生成 Evidence。
+ - 验证 Evidence。
+ - 写入链上惩罚记录。
+ - 扣除部分 stake。
+ - validator jail 或强制退出。
+
+十二、质押与选举流程
+
+1. 注册验证者
+
+RegisterValidator 输入：
+ - AccountAddress
+ - ConsensusPublicKey
+ - P2PPeerID
+ - CommissionBps
+ - Metadata
+ - Signature
+
+校验：
+ - AccountAddress 签名有效。
+ - ConsensusPublicKey 格式有效。
+ - CommissionBps 在 0 到 10000 之间。
+ - 账户余额满足最低质押要求。
+
+2. 质押
+
+Stake 输入：
+ - StakerAccount
+ - ValidatorID
+ - Amount
+ - LockupEpochs
+
+规则：
+ - Amount 必须大于最小质押。
+ - 当前 epoch 内新增质押进入 pending stake。
+ - 下一个 epoch snapshot 生效。
+
+3. 解除质押
+
+Unstake 输入：
+ - StakerAccount
+ - ValidatorID
+ - Amount
+
+规则：
+ - 进入 unlocking 状态。
+ - 等待 UnbondingEpochs 后可提现。
+ - 被 slash 的部分不可提现。
+
+4. 选举
+
+MVP 不做复杂投票选举，使用 active stake 排名：
+ - 达到最低自质押。
+ - 没有 jail。
+ - P2P 可达。
+ - 排名前 MaxActiveValidators 的节点进入 active set。
+
+后续可升级：
+ - 委托质押。
+ - 动态佣金。
+ - stake pool。
+ - 治理投票决定参数。
+
+十三、执行层接口设计
+
+当前不执行 VM，但必须保留未来接入 VM 的接口。
+
+建议接口：
+
+type TransactionExecutor interface {
+    ExecuteTransaction(context.Context, ExecutionRequest) (ExecutionResult, error)
+}
+
+type ExecutionRequest struct {
+    ChainID string
+    Slot uint64
+    ParentStateRoot []byte
+    TransactionBytes []byte
+    ExecutionMode string
+}
+
+type ExecutionResult struct {
+    Success bool
+    StateRoot []byte
+    ReceiptRoot []byte
+    AccountRoot []byte
+    Logs []string
+    ComputeUnits uint64
+    ErrorMessage string
+}
+
+ExecutionMode 建议值：
+ - fixed_instruction_v1：当前固定指令。
+ - gosvm_v1：未来自研 VM。
+ - svm_compat_v1：未来兼容 SVM。
+
+共识层只依赖 TransactionExecutor，不直接依赖具体业务代码。
+
+十四、存储设计
+
+MVP 可以先使用现有存储或文件存储，但必须通过接口隔离。
+
+1. BlockStore
+   - SaveBlock(block)
+   - GetBlock(hash)
+   - GetBlockBySlot(slot)
+   - HasBlock(hash)
+
+2. StateStore
+   - SaveStateRoot(blockHash, stateRoot)
+   - GetStateRoot(blockHash)
+   - LoadSnapshot(stateRoot)
+
+3. VoteStore
+   - SaveVote(vote)
+   - GetVotes(slot, blockHash)
+   - HasConflictingVote(voterID, slot, vote)
+
+4. QCStore
+   - SaveQC(qc)
+   - GetQC(hash)
+   - GetHighestQC()
+
+5. EvidenceStore
+   - SaveEvidence(evidence)
+   - HasEvidence(evidenceHash)
+
+6. EpochStore
+   - SaveEpochSnapshot(snapshot)
+   - GetEpochSnapshot(epochID)
+
+7. SlashingStore
+   - SaveSlashingRecord(record)
+   - GetValidatorSlashingHistory(validatorID)
+
+十五、配置参数建议
+
+MVP 参数：
+ - SlotDuration：400ms 到 1000ms，本地测试建议 1000ms，稳定后降到 400ms。
+ - SkipTimeout：SlotDuration 的 60% 到 80%。
+ - EpochSlots：100 到 1000，本地测试建议 32。
+ - QuorumThreshold：2/3 active stake + 1。
+ - ForwardLeaderCount：4。
+ - MaxTransactionBytes：按现有交易格式限制。
+ - MaxBlockBytes：1MB 起步。
+ - MaxTransactionsPerBlock：1000 起步。
+ - MaxActiveValidators：本地 4 到 10，后续扩大。
+
+十六、分阶段实施计划
+
+P0：共识模型补全
+
+任务：
+ - 新增 ValidatorSet、EpochSnapshot、LeaderSchedule。
+ - 扩展 Vote 和 QuorumCertificate 签名字段。
+ - 补齐 slot -> leader 的确定性查询。
+
+测试：
+ - 相同 snapshot 在不同节点生成相同 leader schedule。
+ - stake 权重变化只在下一个 epoch 生效。
+ - 2/3 stake 阈值计算边界正确。
+
+验收：
+ - 4 个验证者，权重 34、33、22、11，总权重 100，阈值 67。
+ - 任意投票组合能正确判断是否达成 QC。
+
+P1：质押固定指令
+
+任务：
+ - 实现 RegisterValidator、Stake、Unstake、WithdrawUnstaked、ExitValidator。
+ - 把质押状态接入 epoch snapshot。
+
+测试：
+ - 注册验证者成功。
+ - 质押低于最小值失败。
+ - 当前 epoch 质押不立即生效。
+ - jail 验证者不能进入 active set。
+
+验收：
+ - 能通过真实账户完成质押并进入下一个 epoch active set。
+
+P2：交易快速转发
+
+任务：
+ - 扩展 KADPeerHint。
+ - 实现 LeaderPeerCache。
+ - 实现 TransactionForwarder。
+ - 新增 tx_submit_v1、tx_forward_v1、tx_ack_v1、tx_reject_v1。
+
+测试：
+ - 非 leader 节点收到交易后转发给当前和未来 leader。
+ - leader 不可达时自动转发给未来 leader。
+ - 重复交易不会进入 mempool 多次。
+ - 过期交易被拒绝。
+
+验收：
+ - 本地 4 节点中，交易提交到任意节点，都能进入当前或下一个 leader mempool。
+
+P3：leader 出块与验证者投票
+
+任务：
+ - 实现 BlockProducer。
+ - 实现 ProposalVerifier。
+ - 实现 ConsensusEngine slot loop。
+ - 实现 block_proposal_v1、vote_v1、qc_v1。
+
+测试：
+ - leader 正常打包交易出块。
+ - 验证者复算状态根后投票。
+ - 达到 2/3 stake 后形成 QC。
+ - 非 leader 出块被拒绝。
+ - 状态根错误的区块被拒绝。
+
+验收：
+ - 本地 4 节点连续 100 个 slot 能持续推进。
+ - 透明交易和隐私交易都能被打包并验证。
+
+P4：skip 与掉线恢复
+
+任务：
+ - 实现 Skip Vote。
+ - 实现 SkipQC。
+ - 实现 missed proposal / missed vote 统计。
+
+测试：
+ - 当前 leader 停止出块，验证者形成 SkipQC。
+ - 下一 slot leader 正常继续出块。
+ - 掉线节点恢复后能通过 state sync 追上。
+
+验收：
+ - 关闭一个 leader 节点后，链不停止。
+
+P5：恶意证据与惩罚
+
+任务：
+ - 实现 DoubleProposalEvidence。
+ - 实现 DoubleVoteEvidence。
+ - 实现 InvalidProposalEvidence。
+ - 实现 SlashingRule 和 jail。
+
+测试：
+ - 同 slot 双出块生成证据并罚没。
+ - 同 slot 双投票生成证据并罚没。
+ - 无效区块不形成 QC。
+ - 被 jail 的验证者下个 epoch 不进入 active set。
+
+验收：
+ - 恶意行为有可验证证据，惩罚结果进入状态根。
+
+P6：状态同步与重启恢复
+
+任务：
+ - 实现 state_sync_v1。
+ - 实现节点重启后从本地 store 恢复 highest QC、epoch、mempool。
+ - 实现缺块拉取。
+
+测试：
+ - 节点重启后继续跟随链。
+ - 落后节点能同步区块和 QC。
+ - 状态根不一致时拒绝同步结果。
+
+验收：
+ - 本地 4 节点随机重启后链继续推进。
+
+十七、最小真实业务闭环验收场景
+
+场景一：正常出块
+ - 启动 4 个验证者。
+ - 初始质押为 34、33、22、11。
+ - 生成 epoch snapshot。
+ - 任意节点提交 10 笔透明交易。
+ - 交易转发到 leader。
+ - leader 打包。
+ - 验证者投票。
+ - 形成 ConfirmQC。
+ - 查询账户余额变化正确。
+
+场景二：隐私交易出块
+ - 任意节点提交透明到隐私交易。
+ - 任意节点提交隐私到隐私交易。
+ - leader 打包。
+ - 验证者执行固定隐私指令验证金额隐藏、余额守恒、范围证明、审计证明。
+ - 形成 ConfirmQC。
+ - 审计方可对涉及隐私的交易进行授权审计。
+
+场景三：leader 掉线
+ - 指定 slot 的 leader 不出块。
+ - 验证者等待 SkipTimeout。
+ - 验证者签 Skip Vote。
+ - 形成 SkipQC。
+ - 下一 slot leader 正常出块。
+
+场景四：恶意双出块
+ - leader 在同一 slot 签两个不同区块。
+ - 验证者识别 DoubleProposalEvidence。
+ - 证据广播。
+ - 下一个区块包含惩罚指令。
+ - 恶意验证者被 slash 并 jail。
+
+场景五：无效状态根
+ - leader 构造错误 StateRoot 的区块。
+ - 验证者复算失败。
+ - 不投 Confirm Vote。
+ - 生成 InvalidProposalEvidence。
+ - slot 超时后形成 SkipQC。
+
+十八、关键安全边界
+
+1. 不能信任消息里的 Stake 字段，必须从 epoch snapshot 取权重。
+2. 不能信任 KAD 广播的 leader 地址，必须验证签名和 epoch。
+3. 同一验证者同一 slot 的冲突签名必须作为 slash 证据。
+4. 交易转发必须有去重和过期机制，防止内存打满。
+5. leader 打包必须有账户锁和执行预算限制，防止单块执行拖垮节点。
+6. 验块必须复算状态根，不能只验 leader 签名。
+7. 质押变化必须延迟到下一个 epoch，避免当前 epoch 权重被操纵。
+8. 网络层必须限制消息大小、频率和来源，防止 DoS。
+
+十九、性能建议
+
+1. 交易哈希去重使用固定容量 LRU 或时间轮，避免无界 map。
+2. LeaderPeerCache 使用读写锁或 copy-on-write，避免转发路径长时间阻塞。
+3. Mempool 按 fee bucket + 到达时间排序，避免每次全量排序。
+4. 验块执行可先串行保证正确，后续按账户锁分组并行执行。
+5. Vote 验签可批量处理。
+6. QC MVP 使用签名列表，后续升级聚合签名降低网络和存储成本。
+7. KAD gossip 只传播元数据，不传播大交易和大区块。
+
+二十、测试矩阵
+
+单元测试：
+ - ValidatorSet 权重计算。
+ - EpochSnapshot 固化。
+ - LeaderSchedule 确定性。
+ - VoteCollector 阈值和冲突检测。
+ - ProposalVerifier 正常和异常路径。
+ - Evidence 验证。
+ - SlashingRule 边界。
+ - TransactionForwarder leader 选择和去重。
+
+集成测试：
+ - 4 节点正常出块 100 slot。
+ - 交易提交到非 leader 仍被打包。
+ - leader 掉线链继续推进。
+ - 验证者重启后追块。
+ - 隐私交易四种路径被打包并可审计。
+ - 恶意双出块被惩罚。
+
+压力测试：
+ - 单节点每秒 1000 笔交易转发。
+ - 4 节点每 slot 1000 笔交易打包。
+ - 大量重复交易不会导致内存持续增长。
+ - leader 切换时交易不丢失。
+
+二十一、推荐实现顺序
+
+第一步：
+ - consensus 中补齐 ValidatorSet、EpochSnapshot、LeaderSchedule。
+ - 写单元测试证明 leader schedule 确定性。
+
+第二步：
+ - structure 中补齐质押固定指令。
+ - 写账户真实质押测试。
+
+第三步：
+ - p2p 中实现 LeaderPeerCache 和 TransactionForwarder。
+ - 写交易从非 leader 到 leader 的测试。
+
+第四步：
+ - consensus 中实现 BlockProducer、ProposalVerifier、VoteProcessor。
+ - 写本地单进程多验证者测试。
+
+第五步：
+ - 加 SkipQC 和掉线统计。
+ - 写 leader 掉线测试。
+
+第六步：
+ - 加 Evidence 和 Slashing。
+ - 写恶意双出块、双投票、无效区块测试。
+
+第七步：
+ - 把本地多验证者跑成 cmd/posnode。
+ - 做 4 节点端到端演示。
+
+二十二、生产化前必须补齐
+
+1. 持久化存储必须支持崩溃恢复。
+2. 共识消息必须全部签名。
+3. P2P 必须有限流、黑名单、连接配额。
+4. 节点私钥必须支持本地加密存储或 HSM 接口。
+5. 区块和状态必须有可验证快照。
+6. 审计日志必须能关联 slot、block hash、transaction hash。
+7. 参数变更必须走治理或明确的链配置版本。
+8. 长期运行必须加入 metrics，包括 slot 延迟、出块成功率、投票率、转发延迟、mempool 积压。
+
+二十三、最终交付定义
+
+当以下条件全部满足，认为 PoS 链最小真实闭环跑通：
+
+1. 真实账户完成验证者注册和质押。
+2. epoch snapshot 正确生成 active validator set。
+3. leader schedule 在所有节点一致。
+4. 任意节点收到交易后能快速转发给当前和未来 leader。
+5. leader 能打包透明交易和隐私交易。
+6. 验证者能复算交易执行结果和状态根。
+7. 超过 2/3 质押权重投票后形成 QC。
+8. leader 掉线时形成 SkipQC，链继续推进。
+9. 双出块、双投票、无效区块能生成可验证证据。
+10. 惩罚结果能写入状态并影响下一个 epoch。
+11. 节点重启后能从本地状态恢复并继续跟链。
+
+二十四、架构结论
+
+当前阶段不要追求完整 Solana 运行时，也不要让 KAD 承担交易快速路径。最稳妥的路线是：
+
+1. 固定指令执行器先承载真实业务。
+2. 共识层先实现确定性 PoS + QC + SkipQC。
+3. 网络层用 KAD 做发现，用 leader-aware direct forwarding 做交易高速传递。
+4. 证据和惩罚必须从第一版进入模型，否则后续补安全会很痛。
+5. VM 只作为执行器接口的未来实现，不阻塞 PoS 链闭环。
+
+这样可以最短路径跑通真实链，同时保留未来升级到 VM、聚合签名、高性能并行执行和更接近 Solana TPU/TVU 架构的空间。
