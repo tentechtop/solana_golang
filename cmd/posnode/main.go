@@ -499,7 +499,21 @@ func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.M
 	if err != nil {
 		return err
 	}
-	return node.addTransaction(transaction)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		return err
+	}
+	node.mutex.Lock()
+	_, alreadySeen := node.seenTransactions[transactionID]
+	node.mutex.Unlock()
+	if alreadySeen {
+		return nil
+	}
+	if err := node.addTransaction(transaction); err != nil {
+		return err
+	}
+	node.broadcastTransaction(ctx, transaction)
+	return nil
 }
 
 func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Message) error {
@@ -755,9 +769,29 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 		node.logger.Error("posnode encode transaction failed", slog.Any("error", err))
 		return
 	}
-	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
-		node.logger.Warn("posnode broadcast transaction failed", slog.Any("error", err))
+	preferredPeerIDs, fallbackPeerIDs := node.transactionRouteTargets(ctx)
+	preferredPeerIDs = uniquePeerIDs(preferredPeerIDs)
+	fallbackPeerIDs = uniquePeerIDs(fallbackPeerIDs)
+	var preferredError error
+	if len(preferredPeerIDs) > 0 {
+		preferredError = node.host.Broadcast(ctx, preferredPeerIDs, message)
 	}
+	var fallbackError error
+	if len(fallbackPeerIDs) > 0 {
+		fallbackError = node.host.Broadcast(ctx, fallbackPeerIDs, message)
+	}
+	if err := mergeRouteErrors(preferredError, fallbackError); err != nil {
+		node.logger.Warn("posnode broadcast transaction failed",
+			slog.Int("preferred_peers", len(preferredPeerIDs)),
+			slog.Int("fallback_peers", len(fallbackPeerIDs)),
+			slog.Any("error", err),
+		)
+		return
+	}
+	node.logger.Debug("posnode transaction routed",
+		slog.Int("preferred_peers", len(preferredPeerIDs)),
+		slog.Int("fallback_peers", len(fallbackPeerIDs)),
+	)
 }
 
 func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.BlockProposal) {

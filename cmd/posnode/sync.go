@@ -468,8 +468,9 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 	currentLeader := ""
-	if node.epochSnapshot.StartSlot <= head.Slot+1 && head.Slot+1 <= node.epochSnapshot.EndSlot {
-		if leader, err := node.leaderSchedule.LeaderForSlot(head.Slot + 1); err == nil {
+	startSlot := node.currentRoutingSlotLocked()
+	if node.epochSnapshot.StartSlot <= startSlot && startSlot <= node.epochSnapshot.EndSlot {
+		if leader, err := node.leaderSchedule.LeaderForSlot(startSlot); err == nil {
 			currentLeader = string(leader)
 		}
 	}
@@ -486,6 +487,7 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		ValidatorCount:  len(node.epochSnapshot.Validators),
 		KnownPeerCount:  len(node.knownPeerIDs),
 		CurrentLeader:   currentLeader,
+		UpcomingLeaders: node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
 		Metrics:         node.metrics.snapshot(),
 	}
 }
