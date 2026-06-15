@@ -6,7 +6,7 @@ import (
 	svm "solana_golang/vm"
 )
 
-func TestTransactionSimulatorExecutesVirtualMachineProgram(t *testing.T) {
+func TestTransactionSimulatorRejectsVirtualMachineProgramByDefault(t *testing.T) {
 	payerKey, payerPrivateKey := newSimulationSigner(t)
 	dataKey := newTestPublicKey(151)
 	programKey := newTestPublicKey(152)
@@ -37,12 +37,12 @@ func TestTransactionSimulatorExecutesVirtualMachineProgram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Simulate() error = %v", err)
 	}
-	if result.Status != TransactionStatusConfirmed {
-		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	if result.Status != TransactionStatusFailed {
+		t.Fatalf("Status = %d, want failed", result.Status)
 	}
 	writtenDataAccount := findWrittenAccount(t, result.WrittenAccounts, dataKey)
-	if string(writtenDataAccount.Data) != string(instructionData) {
-		t.Fatalf("data account = %q, want %q", string(writtenDataAccount.Data), string(instructionData))
+	if len(writtenDataAccount.Data) != 0 {
+		t.Fatalf("data account mutated to %q", string(writtenDataAccount.Data))
 	}
 }
 

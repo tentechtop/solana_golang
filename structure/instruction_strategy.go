@@ -31,7 +31,7 @@ func NewInstructionStrategyRegistry(strategies ...InstructionStrategy) (Instruct
 	return NewInstructionStrategyRegistryWithFallback(nil, strategies...)
 }
 
-// NewInstructionStrategyRegistryWithFallback 创建带兜底执行器的注册表 + 支持任意 executable program 进入 VM。
+// NewInstructionStrategyRegistryWithFallback 创建带兜底执行器的注册表 + 作为未来 VM 接入点保留。
 func NewInstructionStrategyRegistryWithFallback(fallback InstructionStrategy, strategies ...InstructionStrategy) (InstructionStrategyRegistry, error) {
 	registry := InstructionStrategyRegistry{strategies: make(map[PublicKey]InstructionStrategy, len(strategies)), fallback: fallback}
 	for _, strategy := range strategies {
@@ -49,8 +49,7 @@ func NewInstructionStrategyRegistryWithFallback(fallback InstructionStrategy, st
 
 // DefaultInstructionStrategyRegistry 创建默认策略注册表 + 当前只执行固定系统和隐私指令。
 func DefaultInstructionStrategyRegistry(programIDs BuiltinProgramIDs) (InstructionStrategyRegistry, error) {
-	return NewInstructionStrategyRegistryWithFallback(
-		VirtualMachineInstructionStrategy{LoaderProgram: programIDs.BPFLoader},
+	return NewInstructionStrategyRegistry(
 		SystemInstructionStrategy{Program: programIDs.System},
 		PrivacyInstructionStrategy{Program: programIDs.Privacy},
 	)

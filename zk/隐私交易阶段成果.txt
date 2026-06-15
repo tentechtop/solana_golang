@@ -1,1 +1,147 @@
-：现在是“最小真实业务闭环”，不是最终生产级隐私协议。当前 ZK 证明的是隐私 note 花费授权；完整的金额隐藏、余额守恒、范围证明、ElGamal 余额密文、TSS 监管门限解密还属于下一阶段。
+隐私交易阶段成果记录
+
+更新时间：2026-06-15
+
+一、当前阶段定位
+
+当前已经从“只做花费授权证明”的阶段推进到“最小真实业务闭环”。
+执行路径不依赖 VM，默认通过固定指令接口执行，保留未来 VM 接入点。
+
+当前实现目标：
+1. 金额隐藏。
+2. Pedersen 金额承诺。
+3. 余额守恒证明。
+4. 16-bit 范围证明。
+5. P-256 ElGamal 金额密文。
+6. Shamir TSS 监管门限恢复。
+7. ElGamal-Pedersen 同金额一致性证明。
+8. 一个账户完成四类交易：
+   - 透明到透明。
+   - 透明到隐私。
+   - 隐私到隐私。
+   - 隐私到透明。
+
+二、ZK 包测试成果
+
+测试命令：
+
+go test ./zk -run "TestConfidential|TestAmountCiphertextProof|TestThreshold" -v
+
+通过用例：
+
+1. TestConfidentialAmountRangeConservationElGamalAndTSS
+   结果：PASS
+   验证内容：
+   - 创建金额开口和 Pedersen 承诺。
+   - 生成并验证范围证明。
+   - 生成并验证公开金额绑定证明。
+   - 生成并验证隐私转隐私余额守恒证明。
+   - 生成并验证隐私转透明余额守恒证明。
+   - 生成 P-256 ElGamal 金额密文。
+   - 使用 3-of-5 TSS 份额恢复监管私钥。
+   - 使用恢复后的监管私钥解密金额，结果为 700。
+
+2. TestConfidentialProofRejectsTampering
+   结果：PASS
+   验证内容：
+   - 篡改范围证明会被拒绝。
+   - 金额不守恒的隐私转隐私证明无法创建成功。
+   - 错误公开金额无法通过承诺金额绑定证明。
+
+3. TestAmountCiphertextProofBindsAuditCiphertextToCommitment
+   结果：PASS
+   验证内容：
+   - 生成 ElGamal-Pedersen 同金额一致性证明。
+   - 序列化和反序列化后仍可验证。
+   - 审计 ElGamal 密文必须和 Pedersen commitment 包含同一个金额。
+   - 替换为不同金额的审计密文会被拒绝。
+   - 使用不匹配的密文和开口无法创建证明。
+
+4. TestThresholdScalarRecoveryRejectsInvalidShares
+   结果：PASS
+   验证内容：
+   - 少于门限数量的份额无法恢复私钥。
+   - 重复份额无法恢复私钥。
+
+三、固定指令业务闭环测试成果
+
+测试命令：
+
+go test ./structure -run "TestFixedConfidentialInstructionExecutor" -v
+
+通过用例：
+
+1. TestFixedConfidentialInstructionExecutorCompletesFourTransactionTypes
+   结果：PASS
+   验证内容：
+   - 一个账户先发送透明到透明交易。
+   - 同一账户再发送透明到隐私交易。
+   - 同一账户再发送隐私到隐私交易。
+   - 同一账户最后发送隐私到透明交易。
+   - 隐私资金池余额随入金和提现正确变化。
+   - 隐私 note 被消费后写入 nullifier，防止重复花费。
+   - 每笔涉及隐私的交易都写入监管审计记录。
+   - 审计方使用 TSS 份额恢复监管私钥后，可以解密审计金额。
+   - 审计金额均验证为测试预期金额。
+
+2. TestFixedConfidentialInstructionExecutorRejectsBadSpendProof
+   结果：PASS
+   验证内容：
+   - 使用错误 spend 私钥生成的花费证明会被拒绝。
+   - 被拒绝交易不会把隐私 note 标记为已花费。
+
+3. TestFixedConfidentialInstructionExecutorRejectsMismatchedAuditCiphertext
+   结果：PASS
+   验证内容：
+   - 如果审计 ElGamal 密文金额与 note commitment 金额不一致，交易会被拒绝。
+   - 被拒绝交易不会扣减透明余额。
+   - 被拒绝交易不会增加隐私资金池。
+
+四、全量测试结果
+
+测试命令：
+
+go test ./...
+
+结果：PASS
+
+覆盖范围：
+1. zk 包通过。
+2. structure 包通过。
+3. vm 包仍可单独测试，但默认交易执行路径已经不自动进入 VM。
+4. 其他已有模块测试通过。
+
+五、当前已经具备的能力
+
+1. 金额不会以明文形式保存在新固定隐私 note 中。
+2. 链上隐私 note 使用 Pedersen commitment 表达隐藏金额。
+3. 交易审计金额使用 ElGamal 密文表达。
+4. 监管方可以使用 TSS 份额恢复监管私钥并解密审计金额。
+5. 范围证明可以证明金额处于 16-bit 合法范围。
+6. 余额守恒证明可以证明隐私输入、隐私输出、公开提现金额之间守恒。
+7. Spend proof 可以证明花费者拥有 note 对应花费权限。
+8. ElGamal-Pedersen 同金额一致性证明可以强制审计密文金额等于 note commitment 的隐藏金额。
+9. 固定指令接口已经支持未来替换为 VM 后端。
+
+六、严格审查结论
+
+当前可以称为“可运行、可测试、准确可审计的最小真实业务闭环”。
+
+准确审计已经补齐的关键点：
+
+1. 输出 note 的 ElGamal 金额密文必须和 Pedersen commitment 同金额。
+2. 每条监管审计记录的 ElGamal 金额密文必须和记录引用的 commitment 同金额。
+3. 审计读取侧在解密前会再次校验同金额一致性证明，防止坏状态污染审计结果。
+4. 一旦审计密文金额与 commitment 金额不一致，固定指令拒绝执行，状态不改变。
+
+但当前还不能称为最终生产级隐私协议，原因如下：
+
+1. 范围证明当前是 16-bit OR-bit 证明，适合最小闭环和快速验证，不是 Bulletproof 或 Plonk 级大范围生产方案。
+2. TSS 当前测试路径会恢复监管私钥后再解密，生产级应升级为真正的门限解密协议，避免重构完整私钥。
+3. 当前执行路径是固定指令接口，不执行 VM；这是按当前阶段要求保留未来扩展点。
+
+七、下一阶段建议
+
+1. 将 16-bit 范围证明升级为更适合生产金额范围的证明系统。
+2. 将 TSS 恢复私钥模式升级为分布式门限解密模式。
+3. 给证明字节定义稳定交易编码，便于未来 VM syscall 或链上程序直接验证。
