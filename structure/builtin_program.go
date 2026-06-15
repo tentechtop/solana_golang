@@ -7,6 +7,7 @@ var DefaultBuiltinProgramIDs = BuiltinProgramIDs{
 	ComputeBudget:      MustPublicKeyFromBase58("ComputeBudget111111111111111111111111111111"),
 	AddressLookupTable: MustPublicKeyFromBase58("AddressLookupTab1e1111111111111111111111111"),
 	NativeLoader:       MustPublicKeyFromBase58("NativeLoader1111111111111111111111111111111"),
+	BPFLoader:          MustPublicKeyFromBase58("BPFLoader2111111111111111111111111111111111"),
 	Vote:               MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111"),
 	Stake:              MustPublicKeyFromBase58("Stake11111111111111111111111111111111111111"),
 	Config:             MustPublicKeyFromBase58("Config1111111111111111111111111111111111111"),
@@ -19,6 +20,7 @@ type BuiltinProgramIDs struct {
 	ComputeBudget      PublicKey
 	AddressLookupTable PublicKey
 	NativeLoader       PublicKey
+	BPFLoader          PublicKey
 	Vote               PublicKey
 	Stake              PublicKey
 	Config             PublicKey
@@ -35,6 +37,9 @@ func (programIDs BuiltinProgramIDs) Validate() error {
 	}
 	if programIDs.NativeLoader.IsZero() {
 		return fmt.Errorf("%w: native loader program is empty", ErrInvalidAccount)
+	}
+	if programIDs.BPFLoader.IsZero() {
+		return fmt.Errorf("%w: bpf loader program is empty", ErrInvalidAccount)
 	}
 	if programIDs.Vote.IsZero() {
 		return fmt.Errorf("%w: vote program is empty", ErrInvalidAccount)
@@ -57,6 +62,7 @@ func (programIDs BuiltinProgramIDs) IsBuiltinProgram(programID PublicKey) bool {
 		programID == programIDs.ComputeBudget ||
 		programID == programIDs.AddressLookupTable ||
 		programID == programIDs.NativeLoader ||
+		programID == programIDs.BPFLoader ||
 		programID == programIDs.Vote ||
 		programID == programIDs.Stake ||
 		programID == programIDs.Config ||

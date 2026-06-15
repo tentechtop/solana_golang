@@ -10,6 +10,7 @@ type InstructionExecutionContext struct {
 	Accounts         map[PublicKey]Account
 	CurrentSlot      uint64
 	RentConfig       RentConfig
+	ComputeBudget    ComputeBudgetLimits
 	BuiltinPrograms  BuiltinProgramIDs
 }
 
@@ -22,11 +23,17 @@ type InstructionStrategy interface {
 // InstructionStrategyRegistry 保存程序执行策略 + 使用程序 ID 做 O(1) 分发。
 type InstructionStrategyRegistry struct {
 	strategies map[PublicKey]InstructionStrategy
+	fallback   InstructionStrategy
 }
 
 // NewInstructionStrategyRegistry 创建策略注册表 + 拒绝重复程序防止分发歧义。
 func NewInstructionStrategyRegistry(strategies ...InstructionStrategy) (InstructionStrategyRegistry, error) {
-	registry := InstructionStrategyRegistry{strategies: make(map[PublicKey]InstructionStrategy, len(strategies))}
+	return NewInstructionStrategyRegistryWithFallback(nil, strategies...)
+}
+
+// NewInstructionStrategyRegistryWithFallback 创建带兜底执行器的注册表 + 支持任意 executable program 进入 VM。
+func NewInstructionStrategyRegistryWithFallback(fallback InstructionStrategy, strategies ...InstructionStrategy) (InstructionStrategyRegistry, error) {
+	registry := InstructionStrategyRegistry{strategies: make(map[PublicKey]InstructionStrategy, len(strategies)), fallback: fallback}
 	for _, strategy := range strategies {
 		if strategy == nil {
 			return InstructionStrategyRegistry{}, fmt.Errorf("%w: nil instruction strategy", ErrInvalidInstruction)
@@ -42,7 +49,8 @@ func NewInstructionStrategyRegistry(strategies ...InstructionStrategy) (Instruct
 
 // DefaultInstructionStrategyRegistry 创建默认策略注册表 + 当前只执行固定系统和隐私指令。
 func DefaultInstructionStrategyRegistry(programIDs BuiltinProgramIDs) (InstructionStrategyRegistry, error) {
-	return NewInstructionStrategyRegistry(
+	return NewInstructionStrategyRegistryWithFallback(
+		VirtualMachineInstructionStrategy{LoaderProgram: programIDs.BPFLoader},
 		SystemInstructionStrategy{Program: programIDs.System},
 		PrivacyInstructionStrategy{Program: programIDs.Privacy},
 	)
@@ -55,10 +63,13 @@ func (registry InstructionStrategyRegistry) Execute(context InstructionExecution
 	}
 	programID := context.Message.AccountKeys[context.Instruction.ProgramIDIndex]
 	strategy, exists := registry.strategies[programID]
-	if !exists {
-		return fmt.Errorf("unsupported program %s", programID.String())
+	if exists {
+		return strategy.Execute(context)
 	}
-	return strategy.Execute(context)
+	if registry.fallback != nil {
+		return registry.fallback.Execute(context)
+	}
+	return fmt.Errorf("unsupported program %s", programID.String())
 }
 
 // SystemInstructionStrategy 执行系统固定指令 + 保持现阶段无需 VM 的转账闭环。

@@ -200,6 +200,7 @@ func executeSimulatedInstruction(instructionIndex int, instruction CompiledInstr
 		Accounts:         accounts,
 		CurrentSlot:      input.CurrentSlot,
 		RentConfig:       input.RentConfig,
+		ComputeBudget:    input.ComputeBudget,
 		BuiltinPrograms:  input.BuiltinPrograms,
 	})
 }

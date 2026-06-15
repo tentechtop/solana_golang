@@ -72,7 +72,7 @@ func runBusinessLoopTransparentTransfer(t *testing.T, sourceKey PublicKey, sourc
 		{PublicKey: DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
 	}, []PublicKey{sourceKey, destinationKey}, instructionData, blockhash, map[PublicKey][]byte{sourceKey: sourcePrivateKey})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := GoSVM{}.ExecuteTransaction(TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       simulationAccounts(t, sourceKey, sourceLamports, destinationKey, destinationLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 201),
@@ -107,7 +107,7 @@ func runBusinessLoopDeposit(t *testing.T, sourceKey PublicKey, sourcePrivateKey 
 		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
 	}, []PublicKey{sourceKey, privacyStateKey}, instructionData, blockhash, map[PublicKey][]byte{sourceKey: sourcePrivateKey})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := GoSVM{}.ExecuteTransaction(TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       privacySimulationAccounts(t, sourceKey, sourceLamports, privacyStateKey, stateLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 202),
@@ -152,7 +152,7 @@ func runBusinessLoopPrivateTransfer(t *testing.T, sourceKey PublicKey, sourcePri
 		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
 	}, []PublicKey{privacyStateKey}, instructionData, blockhash, map[PublicKey][]byte{sourceKey: sourcePrivateKey})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := GoSVM{}.ExecuteTransaction(TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, sourceKey, sourceLamports, DefaultBuiltinProgramIDs.System, false),
@@ -198,7 +198,7 @@ func runBusinessLoopWithdraw(t *testing.T, sourceKey PublicKey, sourcePrivateKey
 		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
 	}, []PublicKey{privacyStateKey, destinationKey}, instructionData, blockhash, map[PublicKey][]byte{sourceKey: sourcePrivateKey})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := GoSVM{}.ExecuteTransaction(TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, sourceKey, sourceLamports, DefaultBuiltinProgramIDs.System, false),
