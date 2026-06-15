@@ -19,6 +19,7 @@ type TransactionSimulationInput struct {
 	ComputeBudget   ComputeBudgetLimits
 	RentConfig      RentConfig
 	BuiltinPrograms BuiltinProgramIDs
+	Strategies      []InstructionStrategy
 }
 
 // TransactionSimulator 执行交易模拟 + 只返回写集不直接提交数据库。
@@ -35,9 +36,28 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 		return result, nil
 	}
 
+	strategyRegistry, err := DefaultInstructionStrategyRegistry(normalizedInput.BuiltinPrograms)
+	if err != nil {
+		result.Status = TransactionStatusFailed
+		result.Error = transactionFailure(TransactionErrorCodeInvalidProgramForExecution, err.Error())
+		result.PostBalances = balancesFromLoadedAccounts(loadedTransaction.Accounts)
+		result.WrittenAccounts = writtenAccountsFromLoadedAccounts(loadedTransaction.Accounts)
+		return result, result.Validate()
+	}
+	if len(normalizedInput.Strategies) > 0 {
+		strategyRegistry, err = NewInstructionStrategyRegistry(normalizedInput.Strategies...)
+		if err != nil {
+			result.Status = TransactionStatusFailed
+			result.Error = transactionFailure(TransactionErrorCodeInvalidProgramForExecution, err.Error())
+			result.PostBalances = balancesFromLoadedAccounts(loadedTransaction.Accounts)
+			result.WrittenAccounts = writtenAccountsFromLoadedAccounts(loadedTransaction.Accounts)
+			return result, result.Validate()
+		}
+	}
+
 	accountStates := cloneLoadedAccountsToMap(loadedTransaction.Accounts)
 	for instructionIndex, instruction := range loadedTransaction.Message.Instructions {
-		if err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, normalizedInput); err != nil {
+		if err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, normalizedInput, strategyRegistry); err != nil {
 			result.Status = TransactionStatusFailed
 			result.Error = instructionFailure(uint16(instructionIndex), InstructionErrorCodeGeneric, err.Error())
 			result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
@@ -172,16 +192,16 @@ func addMissingCreateAccountPlaceholders(message ResolvedMessage, accounts map[P
 	}
 }
 
-func executeSimulatedInstruction(_ int, instruction CompiledInstruction, message ResolvedMessage, accounts map[PublicKey]Account, input TransactionSimulationInput) error {
-	programID := message.AccountKeys[instruction.ProgramIDIndex]
-	if programID != input.BuiltinPrograms.System {
-		return fmt.Errorf("unsupported program %s", programID.String())
-	}
-	systemInstruction, err := UnmarshalSystemInstructionBinary(instruction.Data)
-	if err != nil {
-		return err
-	}
-	return executeSystemInstruction(systemInstruction, instruction, message, accounts, input.RentConfig)
+func executeSimulatedInstruction(instructionIndex int, instruction CompiledInstruction, message ResolvedMessage, accounts map[PublicKey]Account, input TransactionSimulationInput, registry InstructionStrategyRegistry) error {
+	return registry.Execute(InstructionExecutionContext{
+		InstructionIndex: instructionIndex,
+		Instruction:      instruction,
+		Message:          message,
+		Accounts:         accounts,
+		CurrentSlot:      input.CurrentSlot,
+		RentConfig:       input.RentConfig,
+		BuiltinPrograms:  input.BuiltinPrograms,
+	})
 }
 
 func executeSystemInstruction(systemInstruction SystemInstruction, compiledInstruction CompiledInstruction, message ResolvedMessage, accounts map[PublicKey]Account, rentConfig RentConfig) error {
@@ -365,6 +385,17 @@ func writtenAccountsFromMessage(accountKeys []PublicKey, accounts map[PublicKey]
 		writtenAccounts[index] = AddressedAccount{
 			Address: accountKey,
 			Account: accounts[accountKey].Clone(),
+		}
+	}
+	return writtenAccounts
+}
+
+func writtenAccountsFromLoadedAccounts(accounts []LoadedAccount) []AddressedAccount {
+	writtenAccounts := make([]AddressedAccount, len(accounts))
+	for index, account := range accounts {
+		writtenAccounts[index] = AddressedAccount{
+			Address: account.Address,
+			Account: account.Account.Clone(),
 		}
 	}
 	return writtenAccounts

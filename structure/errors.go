@@ -16,6 +16,7 @@ var (
 	ErrRentExemption              = errors.New("structure: account is not rent exempt")
 	ErrInvalidInstruction         = errors.New("structure: invalid instruction")
 	ErrInvalidSystemInstruction   = errors.New("structure: invalid system instruction")
+	ErrInvalidPrivacyInstruction  = errors.New("structure: invalid privacy instruction")
 	ErrInvalidFee                 = errors.New("structure: invalid fee")
 	ErrInvalidExecutionResult     = errors.New("structure: invalid execution result")
 	ErrInvalidLoadedTransaction   = errors.New("structure: invalid loaded transaction")

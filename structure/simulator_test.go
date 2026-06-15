@@ -36,7 +36,7 @@ func TestTransactionSimulatorTransfersLamports(t *testing.T) {
 		t.Fatalf("Simulate() error = %v", err)
 	}
 	if result.Status != TransactionStatusConfirmed {
-		t.Fatalf("Status = %d, want confirmed", result.Status)
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
 	}
 	if result.Error != nil {
 		t.Fatalf("Error = %v, want nil", result.Error)
@@ -91,7 +91,7 @@ func TestTransactionSimulatorCreatesAccount(t *testing.T) {
 		t.Fatalf("Simulate() error = %v", err)
 	}
 	if result.Status != TransactionStatusConfirmed {
-		t.Fatalf("Status = %d, want confirmed", result.Status)
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
 	}
 
 	payerWritten := findWrittenAccount(t, result.WrittenAccounts, payerKey)
