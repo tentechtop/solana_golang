@@ -1,4 +1,4 @@
-package structure
+package runtime_test
 
 import (
 	"testing"
@@ -26,7 +26,7 @@ func TestTransactionSimulatorTransfersLamports(t *testing.T) {
 		sourceKey: sourcePrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       simulationAccounts(t, sourceKey, sourceLamports, destinationKey, destinationLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 1),
@@ -81,7 +81,7 @@ func TestTransactionSimulatorCreatesAccount(t *testing.T) {
 		newAccountKey: newAccountPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       simulationAccounts(t, payerKey, payerLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 10),
@@ -128,7 +128,7 @@ func TestTransactionSimulatorRejectsInsufficientFeeReserve(t *testing.T) {
 		sourceKey: sourcePrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       simulationAccounts(t, sourceKey, sourceLamports, destinationKey, destinationMinimum),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 20),

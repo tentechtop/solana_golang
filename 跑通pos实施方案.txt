@@ -26,7 +26,7 @@
    KAD 只负责节点发现和地址查询，不决定验证者列表、不决定 leader、不承载交易快速路径；交易和共识消息通过直接连接快速转发。
 
 3. 结构层 structure
-   只放账户、交易、指令、区块、签名、状态根等纯数据结构和编解码，不放业务执行逻辑，不持有状态副作用。
+   只放账户、交易、指令、区块、签名、状态根等结构和纯方法；允许 Hash、ValidateBasic、Marshal、Size 这类无副作用方法，不放跨账户、跨状态的业务执行逻辑。
 
 4. 执行层 runtime
    当前使用固定指令执行器执行透明交易和隐私交易；对外暴露统一 TransactionExecutor 接口，未来 VM 只替换 runtime 的执行器实现，不影响 structure、共识层和网络层。
@@ -58,7 +58,7 @@
    已有 Host.Send 和 Host.Broadcast，可直接承载点对点转发和广播。
 
 5. structure 结构模型
-   只承载交易、账户、区块、指令载荷等结构定义；现有执行逻辑应逐步迁移到 runtime 或 programs，不继续在 structure 中扩展业务执行代码。
+   承载交易、账户、区块、指令载荷等结构定义和纯方法；现有带状态副作用的执行逻辑应逐步迁移到 runtime 或 programs，不继续在 structure 中扩展业务执行代码。
 
 6. runtime 固定指令执行器
    短期作为链上交易执行入口，负责调用透明交易、隐私交易、质押等固定指令处理器。
@@ -572,10 +572,18 @@ MVP 不做复杂投票选举，使用 active stake 排名：
 当前不执行 VM，但必须保留未来接入 VM 的接口。
 
 包边界：
- - structure：只定义数据结构和编解码，例如 Transaction、Instruction、Account、BlockHeader。
+ - structure：定义数据结构、编解码和无副作用方法，例如 Transaction、Instruction、Account、BlockHeader、Hash、ValidateBasic、MarshalBinary。
  - runtime：定义执行接口、执行上下文、执行结果、固定指令调度器、Program 接口、未来 VM 适配器。
  - programs：放具体业务程序，例如 stake、privacy、token；这些程序实现 runtime.Program 接口。
  - consensus：只调用 runtime.TransactionExecutor，不直接调用 programs，也不修改 structure 内部状态。
+
+Go 极简落地原则：
+ - 结构体和紧密相关的纯方法应该放在一起，这符合 Go 的简洁风格。
+ - 不为了分层把一个简单结构拆成 model、dto、entity、service 多套概念。
+ - 分包的目的只解决真实问题：防循环引用、防状态副作用扩散、防共识层耦合具体业务程序。
+ - 判断一个方法能不能放进 structure，看它是否只依赖结构体自身字段和入参，且不读写全局状态、不访问账本、不调用网络、不提交状态。
+ - 可以放在 structure 的方法：Hash、ID、Size、ValidateBasic、Clone、MarshalBinary、UnmarshalBinary、RequiredSigners。
+ - 不应放在 structure 的方法：Execute、ApplyToState、TransferBalance、SlashValidator、RegisterValidator、AuditDecrypt、Commit。
 
 依赖方向铁律：
  - 只能上层 import 下层，禁止下层反向 import 上层。

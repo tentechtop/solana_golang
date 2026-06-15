@@ -1,4 +1,4 @@
-package structure
+package runtime_test
 
 import "testing"
 
@@ -30,7 +30,7 @@ func TestTransactionSimulatorDepositsTransparentToPrivate(t *testing.T) {
 		sourceKey: sourcePrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    transaction,
 		Accounts:       privacySimulationAccounts(t, sourceKey, sourceLamports, privacyStateKey, stateLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 30),
@@ -85,7 +85,7 @@ func TestTransactionSimulatorSameAccountSendsTransparentAndPrivateTransactions(t
 	}, []PublicKey{sourceKey, destinationKey}, transferData, firstBlockhash, map[PublicKey][]byte{
 		sourceKey: sourcePrivateKey,
 	})
-	transparentResult, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	transparentResult, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    transparentTransaction,
 		Accounts:       simulationAccounts(t, sourceKey, sourceLamports, destinationKey, destinationLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, firstBlockhash, 35),
@@ -113,7 +113,7 @@ func TestTransactionSimulatorSameAccountSendsTransparentAndPrivateTransactions(t
 	}, []PublicKey{sourceKey, privacyStateKey}, privateData, secondBlockhash, map[PublicKey][]byte{
 		sourceKey: sourcePrivateKey,
 	})
-	privateResult, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	privateResult, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction:    privateTransaction,
 		Accounts:       privacySimulationAccounts(t, sourceKey, sourceAfterTransparent, privacyStateKey, stateLamports),
 		BlockhashQueue: newSimulationBlockhashQueue(t, secondBlockhash, 36),
@@ -155,7 +155,7 @@ func TestTransactionSimulatorWithdrawsPrivateToTransparent(t *testing.T) {
 		destinationKey: destinationPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, destinationKey, destinationLamports, DefaultBuiltinProgramIDs.System, false),
@@ -218,7 +218,7 @@ func TestTransactionSimulatorTransfersPrivateToPrivate(t *testing.T) {
 		authorityKey: authorityPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, authorityKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
@@ -279,7 +279,7 @@ func TestTransactionSimulatorAuthorizesPrivacyAudit(t *testing.T) {
 		authorityKey: authorityPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, authorityKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
@@ -330,7 +330,7 @@ func TestTransactionSimulatorRejectsExpiredPrivacyAuditAuthorization(t *testing.
 		authorityKey: authorityPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, authorityKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
@@ -377,7 +377,7 @@ func TestTransactionSimulatorRejectsDuplicatePrivacyNullifier(t *testing.T) {
 		destinationKey: destinationPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, destinationKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
@@ -419,7 +419,7 @@ func TestTransactionSimulatorRejectsPrivacySpendWithoutAuthority(t *testing.T) {
 		attackerKey: attackerPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, attackerKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
@@ -469,7 +469,7 @@ func TestTransactionSimulatorRejectsInvalidPrivacySpendProof(t *testing.T) {
 		feePayerKey: feePayerPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, feePayerKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),

@@ -1,4 +1,4 @@
-package structure
+package runtime_test
 
 import "testing"
 

@@ -1,4 +1,4 @@
-package structure
+package privacy
 
 import (
 	"bytes"

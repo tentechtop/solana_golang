@@ -1,4 +1,4 @@
-package structure
+package runtime_test
 
 import (
 	"testing"
@@ -24,7 +24,7 @@ func TestTransactionSimulatorRejectsVirtualMachineProgramByDefault(t *testing.T)
 		payerKey: payerPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, payerKey, payerLamports, DefaultBuiltinProgramIDs.System, false),
@@ -60,7 +60,7 @@ func TestTransactionSimulatorRejectsVMReadonlyWrite(t *testing.T) {
 		payerKey: payerPrivateKey,
 	})
 
-	result, err := TransactionSimulator{}.Simulate(TransactionSimulationInput{
+	result, err := simulateWithVirtualMachine(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
 			newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
