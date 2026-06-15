@@ -1,0 +1,218 @@
+P2P 非并发下单次连接请求响应测试报告
+测试日期：2026-06-15
+测试目标：排除极限压测中的排队影响，只测试单客户端、单并发、单次 request/response 的实际响应时间，判断内网单包响应是否满足 400ms 出块窗口。
+
+
+1. 测试结论
+
+单次 request/response 的响应时间并不慢，和 5 客户端极限压测中看到的 258ms p50 不是同一个问题。
+
+干净复测结果：
+
+| 客户端 | 场景 | 成功请求 | 失败 | 单次响应延迟 |
+|---|---|---:|---:|---:|
+| linux-136 | 冷连接后请求 | 1 | 0 | 7.783 ms |
+| linux-136 | 预热连接后请求 | 1 | 0 | 1.223 ms |
+| mac-223 | 冷连接后请求 | 1 | 0 | 48.511 ms |
+| mac-223 | 预热连接后请求 | 1 | 0 | 17.881 ms |
+
+结论：
+1. Linux VM 到本机服务端的单包 request/response 在 1.2ms-7.8ms 量级。
+2. Mac 到本机服务端的单包 request/response 在 17.9ms-48.5ms 量级，明显高于 Linux VM，主要受不同网络路径影响。
+3. 之前 5 客户端极限压测的 p50 约 258ms，主要是高并发排队延迟，不是单包网络响应慢。
+4. 如果用于 400ms 出块，单包网络响应本身不是主要问题；问题在于不能用“每笔交易同步 request/response 等返回”的模型承载高吞吐出块。
+
+
+2. 测试拓扑
+
+服务端：
+- 机器：本机 Windows
+- 工作目录：F:\workSpace2029\solana_golang
+- 协议：TCP
+- 监听地址：0.0.0.0
+
+客户端：
+
+| 客户端 | IP | 访问服务端地址 |
+|---|---|---|
+| linux-136 | 192.168.181.136 | 192.168.181.1 |
+| mac-223 | 192.168.120.223 | 192.168.121.225 |
+
+说明：
+- Linux VM 通过 VMware 网段访问本机 192.168.181.1。
+- Mac 通过局域网访问本机 192.168.121.225。
+- 两条路径不同，因此 Mac 延迟不能简单视为 P2P 模块自身延迟。
+
+
+3. 测试参数
+
+服务端参数：
+- protocol：tcp
+- listen-ip：0.0.0.0
+- duration：0，常驻服务端
+- request-timeout：10s
+- max-connections：64
+- max-peers：64
+- write-queue：128
+- protocol-workers：4
+- stress-concurrency：stateless
+- inbound-rate-limit：0
+
+客户端参数：
+- protocol：tcp
+- duration：10s
+- concurrency：1
+- max-requests：1
+- payload：256 bytes
+- request-timeout：10s
+- report-interval：1s
+- max-connections：64
+- max-peers：64
+- write-queue：128
+- protocol-workers：4
+- stress-concurrency：stateless
+- inbound-rate-limit：0
+
+统计口径：
+- p2pstress 在 max-requests=1 时，sent 可能显示为 2，这是 worker 退出前的计数行为；实际成功请求以 succeeded=1 为准。
+- 延迟字段取 STRESS_SUMMARY 的 p50。由于每轮只有 1 个成功请求，所以 p50/p95/p99/max_latency 相同。
+
+
+4. 冷连接测试
+
+冷连接测试不启用 -warmup。客户端启动后先进行连接建立、安全会话、必要的连接初始化，然后发起 1 次业务 request/response。
+
+结果：
+
+| 客户端 | sent | succeeded | failed | latency | errors |
+|---|---:|---:|---:|---:|---|
+| linux-136 | 2 | 1 | 0 | 7.783 ms | {} |
+| linux-137 | 2 | 1 | 0 | 3.872 ms | {} |
+| linux-138 | 2 | 1 | 0 | 7.233 ms | {} |
+| linux-139 | 2 | 1 | 0 | 3.525 ms | {} |
+| mac-223 | 2 | 1 | 0 | 36.381 ms | {} |
+
+随后使用每轮新服务端的方式做干净复测：
+
+| 客户端 | sent | succeeded | failed | latency | errors |
+|---|---:|---:|---:|---:|---|
+| linux-136 | 2 | 1 | 0 | 7.783 ms | {} |
+| mac-223 | 2 | 1 | 0 | 48.511 ms | {} |
+
+分析：
+1. Linux VM 冷连接单次请求稳定在 3.5ms-7.8ms。
+2. Mac 冷连接单次请求约 36ms-49ms，网络路径和系统栈开销更明显。
+3. 冷连接包含连接建立和 secure session 成本，不代表长连接常态下的单包业务延迟。
+
+
+5. 预热连接测试
+
+预热连接测试启用 -warmup。客户端先通过 DialPeer 建立连接，然后再发起 1 次业务 request/response。
+
+首次连续复测中，部分客户端在复用同一个服务端连续跑多轮时出现 context deadline exceeded：
+- linux-138：1 次失败
+- linux-139：1 次失败
+- mac-223：1 次失败
+
+这组失败不作为单包延迟结论，原因是测试流程连续复用同一个服务端进行冷/热多轮切换，可能受到前序连接状态、测试进程退出和连接清理时序影响。
+
+为了排除污染，后续使用“每个场景单独启动新服务端”的方式做干净复测，结果如下：
+
+| 客户端 | sent | succeeded | failed | latency | errors |
+|---|---:|---:|---:|---:|---|
+| linux-136 | 2 | 1 | 0 | 1.223 ms | {} |
+| mac-223 | 2 | 1 | 0 | 17.881 ms | {} |
+
+分析：
+1. Linux VM 预热连接后单次 request/response 可低至约 1.2ms。
+2. Mac 预热连接后约 17.9ms，低于冷连接，但仍高于 Linux VM。
+3. 预热连接结果更接近真实 P2P 长连接场景。
+
+
+6. 为什么极限压测 p50 是 258ms
+
+5 台客户端 3 分钟极限压测结果：
+- 总并发：5120
+- 总吞吐：19,379.48 req/s
+- p50：258.1ms
+
+按 Little's Law 粗算：
+
+排队时间约等于 并发数 / 吞吐
+
+5120 / 19379.48 = 0.264s
+
+也就是约 264ms，和实测 p50 258ms 非常接近。
+
+这说明极限压测时的响应时间主要来自系统饱和后的排队，而不是内网单次 request/response 本身需要 258ms。
+
+换句话说：
+- 非并发单包：Linux 约 1ms-8ms，Mac 约 18ms-49ms。
+- 极限并发压测：由于 5120 个请求持续排队，典型响应时间被推高到约 258ms。
+
+
+7. 对 400ms 出块的影响
+
+如果按 400ms 出块窗口理解，单包网络延迟本身不是最大问题：
+- Linux VM 热连接单次请求约 1.2ms。
+- Linux VM 冷连接单次请求约 3.5ms-7.8ms。
+- Mac 热连接单次请求约 17.9ms。
+- Mac 冷连接单次请求约 36ms-49ms。
+
+真正的问题是业务模型：
+1. 如果每笔交易都走同步 request/response 并等待返回，高并发下必然产生排队，延迟会被并发和服务端处理能力放大。
+2. 400ms 出块应避免把交易传播设计成每笔交易同步等待确认。
+3. 更合理的模型是长连接、异步单向推送、批量传输、pipeline 处理、异步 ack 和重试。
+
+因此：
+- 当前 P2P 单包响应能力可以满足 400ms 窗口。
+- 当前 request/response 极限压测下的排队延迟不适合作为出块传播模型。
+- 需要为交易和区块传播设计独立的异步数据面，而不是复用同步 Request 路径。
+
+
+8. 设计判断
+
+当前现象不能简单判断为“网络设计有问题”。
+
+可以确认：
+1. 单次 request/response 延迟正常。
+2. 高并发慢主要是排队效应。
+3. request/response 模型不适合高吞吐交易传播和 400ms 出块路径。
+
+需要警惕：
+1. p2pstress 的 warmup + max-requests=1 连续复用服务端时出现过超时，说明测试流程或连接清理路径需要进一步排查。
+2. Mac 路径延迟和尾延迟明显高于 Linux VM，应单独确认网络路径、Wi-Fi/有线、路由和系统调度。
+3. 如果未来把出块传播放在同步 Request 上，会遇到结构性上限。
+
+
+9. 后续建议
+
+建议把 P2P 分成控制面和数据面：
+
+控制面：
+- 使用 Request/Response。
+- 用于握手、查询、peer 管理、小规模状态同步。
+
+数据面：
+- 使用长连接上的异步 Send 或专用 Stream。
+- 交易传播不等待每笔响应。
+- 批量消息降低 per-message 开销。
+- 按 peer、优先级、状态 key 分区调度。
+- ack 和重试异步处理。
+
+建议追加测试：
+1. 长连接连续 1000 次单并发 request，统计平均值、p50、p95、p99。
+2. 长连接单向 Send 连续 10000 条，测纯发送吞吐和服务端处理延迟。
+3. 批量发送 100/500/1000 条交易，测每交易摊销延迟。
+4. 在服务端开启 pprof，确认高并发排队时 CPU、GC、锁竞争和调度开销。
+
+
+10. 原始结果文件
+
+原始结果保存位置：
+- F:\workSpace2029\solana_golang\tmp\single-request-latency.json
+- F:\workSpace2029\solana_golang\tmp\single-request-clean-latency.json
+
+测试结束状态：
+- 本机无残留 p2pstress 进程。
+- 远程客户端无残留 p2pstress 进程。

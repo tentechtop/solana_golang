@@ -784,6 +784,11 @@ type SecureConnection struct {
 	session    *SecureSession
 }
 
+type secureSessionHandshakeTransport interface {
+	ReadHandshakeMessage(ctx context.Context) (Message, error)
+	FinishHandshake()
+}
+
 // SecureDialConnection 主动建立安全连接 + 先完成握手再返回加密连接包装器。
 func SecureDialConnection(ctx context.Context, connection Connection, identity SecureSessionIdentity) (*SecureConnection, error) {
 	return SecureDialConnectionWithMaxMessageSize(ctx, connection, identity, DefaultMaxMessageSize)
@@ -803,7 +808,7 @@ func SecureDialConnectionWithMaxMessageSize(ctx context.Context, connection Conn
 		return nil, fmt.Errorf("%w: write secure session request: %w", ErrSecureSession, err)
 	}
 
-	response, err := connection.ReadMessage(ctx)
+	response, err := readSecureSessionHandshakeMessage(ctx, connection)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read secure session response: %w", ErrSecureSession, err)
 	}
@@ -815,7 +820,12 @@ func SecureDialConnectionWithMaxMessageSize(ctx context.Context, connection Conn
 	if err != nil {
 		return nil, err
 	}
-	return NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
+	secureConnection, err := NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
+	if err != nil {
+		return nil, err
+	}
+	finishSecureSessionHandshake(connection)
+	return secureConnection, nil
 }
 
 // SecureAcceptConnection 接收入站安全连接 + 读取握手请求后返回加密连接包装器。
@@ -825,7 +835,7 @@ func SecureAcceptConnection(ctx context.Context, connection Connection, identity
 
 // SecureAcceptConnectionWithMaxMessageSize 接收入站安全连接 + 保持安全载荷上限与传输层一致。
 func SecureAcceptConnectionWithMaxMessageSize(ctx context.Context, connection Connection, identity SecureSessionIdentity, maxMessageSize int) (*SecureConnection, error) {
-	request, err := connection.ReadMessage(ctx)
+	request, err := readSecureSessionHandshakeMessage(ctx, connection)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read secure session request: %w", ErrSecureSession, err)
 	}
@@ -849,7 +859,27 @@ func SecureAcceptConnectionWithMaxMessageSize(ctx context.Context, connection Co
 	if err := connection.WriteMessage(ctx, response); err != nil {
 		return nil, fmt.Errorf("%w: write secure session response: %w", ErrSecureSession, err)
 	}
-	return NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
+	secureConnection, err := NewSecureConnectionWithMaxMessageSize(connection, session, maxMessageSize)
+	if err != nil {
+		return nil, err
+	}
+	finishSecureSessionHandshake(connection)
+	return secureConnection, nil
+}
+
+func readSecureSessionHandshakeMessage(ctx context.Context, connection Connection) (Message, error) {
+	handshakeTransport, ok := connection.(secureSessionHandshakeTransport)
+	if ok {
+		return handshakeTransport.ReadHandshakeMessage(ctx)
+	}
+	return connection.ReadMessage(ctx)
+}
+
+func finishSecureSessionHandshake(connection Connection) {
+	handshakeTransport, ok := connection.(secureSessionHandshakeTransport)
+	if ok {
+		handshakeTransport.FinishHandshake()
+	}
 }
 
 // NewSecureConnection 创建安全连接包装器 + 显式接收已完成握手的会话对象。

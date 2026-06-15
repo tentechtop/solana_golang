@@ -309,6 +309,9 @@ type QUICConnection struct {
 	normalReads         chan quicReadResult
 	lowReads            chan quicReadResult
 	readNotify          chan struct{}
+	initialStream       *quic.Stream
+	initialReadOnce     sync.Once
+	initialReadMutex    sync.Mutex
 	done                chan struct{}
 	streamMutex         sync.Mutex
 	writeStreams        map[MessagePriority]*quicPriorityStreamPool
@@ -388,6 +391,7 @@ func (connection *QUICConnection) ReadMessage(ctx context.Context) (Message, err
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	connection.startInitialStreamReader()
 	for {
 		if result, ok := connection.tryReadResult(); ok {
 			return result.message, result.err
@@ -400,6 +404,36 @@ func (connection *QUICConnection) ReadMessage(ctx context.Context) (Message, err
 			return Message{}, ctx.Err()
 		}
 	}
+}
+
+// ReadHandshakeMessage reads the secure-session handshake from the initial stream before normal QUIC dispatch starts.
+func (connection *QUICConnection) ReadHandshakeMessage(ctx context.Context) (Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	connection.initialReadMutex.Lock()
+	defer connection.initialReadMutex.Unlock()
+
+	connection.streamMutex.Lock()
+	stream := connection.initialStream
+	closed := connection.closed
+	connection.streamMutex.Unlock()
+	if closed || stream == nil {
+		return Message{}, ErrConnectionClosed
+	}
+
+	stopDeadline := armConnectionDeadline(ctx, stream.SetReadDeadline)
+	defer stopDeadline()
+
+	message, err := readMessageFrame(stream, connection.maxMessageSize)
+	if err != nil {
+		return Message{}, normalizeConnectionError("read", err)
+	}
+	return message, nil
+}
+
+func (connection *QUICConnection) FinishHandshake() {
+	connection.startInitialStreamReader()
 }
 
 // WriteMessage 写入 QUIC 消息 + 默认按协议内置优先级选择独立 stream。
@@ -495,8 +529,8 @@ func (connection *QUICConnection) registerInitialStream(stream *quic.Stream) {
 		streams: []*quicPriorityStream{priorityStream},
 	}
 	connection.allStreams[stream] = struct{}{}
+	connection.initialStream = stream
 	connection.streamMutex.Unlock()
-	connection.startStreamReader(stream)
 }
 
 func (connection *QUICConnection) writerStream(ctx context.Context, schedule messageWriteSchedule) (*quicPriorityStream, error) {
@@ -588,6 +622,22 @@ func (connection *QUICConnection) trackAcceptedStream(stream *quic.Stream) bool 
 
 func (connection *QUICConnection) startStreamReader(stream *quic.Stream) {
 	go connection.readStreamLoop(stream)
+}
+
+func (connection *QUICConnection) startInitialStreamReader() {
+	connection.initialReadOnce.Do(func() {
+		connection.initialReadMutex.Lock()
+		defer connection.initialReadMutex.Unlock()
+
+		connection.streamMutex.Lock()
+		stream := connection.initialStream
+		closed := connection.closed
+		connection.streamMutex.Unlock()
+		if stream == nil || closed {
+			return
+		}
+		connection.startStreamReader(stream)
+	})
 }
 
 func (connection *QUICConnection) acceptStreamLoop() {

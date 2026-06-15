@@ -216,6 +216,94 @@ func TestSecureConnectionHandshakeAndEncryptedMessage(t *testing.T) {
 	}
 }
 
+func TestSecureDialConnectionUsesHandshakeTransport(t *testing.T) {
+	clientIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
+	serverIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.1")
+	clientBase, serverRaw := newSecureSessionTestConnectionPair(clientIdentity.PeerID, serverIdentity.PeerID)
+	clientRaw := &secureSessionHandshakeTestConnection{
+		secureSessionTestConnection: clientBase,
+		handshakeInbound:            make(chan Message, 1),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	serverResult := make(chan error, 1)
+	go func() {
+		request, err := serverRaw.ReadMessage(ctx)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		remoteHandshake, err := parseSecureSessionRequest(request, serverIdentity.PeerID)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		state, err := NewSecureSessionState(serverIdentity, SecureSessionRoleResponder)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		session, err := state.Finalize(remoteHandshake, remoteHandshake.PeerID)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		serverSecure, err := NewSecureConnection(serverRaw, session)
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		earlyMessage, err := NewRequestMessage(serverIdentity.PeerID, ProtocolIdentifyRequestV1, []byte("early-identify"))
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		earlyMessage.ToPeerID = clientIdentity.PeerID
+		if err := serverSecure.WriteMessage(ctx, earlyMessage); err != nil {
+			serverResult <- err
+			return
+		}
+		response, err := newSecureSessionResponse(serverIdentity.PeerID, remoteHandshake.PeerID, request.ID, state.Handshake())
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		select {
+		case clientRaw.handshakeInbound <- response:
+			serverResult <- nil
+		case <-ctx.Done():
+			serverResult <- ctx.Err()
+		}
+	}()
+
+	clientSecure, err := SecureDialConnection(ctx, clientRaw, clientIdentity)
+	if err != nil {
+		t.Fatalf("SecureDialConnection() error = %v", err)
+	}
+	if calls := clientRaw.readMessageCalls(); calls != 0 {
+		t.Fatalf("ReadMessage() calls during handshake = %d, want 0", calls)
+	}
+	if !clientRaw.finishCalled() {
+		t.Fatal("FinishHandshake() was not called")
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatalf("server handshake setup error = %v", err)
+	}
+
+	received, err := clientSecure.ReadMessage(ctx)
+	if err != nil {
+		t.Fatalf("ReadMessage(early) error = %v", err)
+	}
+	if received.Type != ProtocolIdentifyRequestV1 {
+		t.Fatalf("early Type = %d, want identify request", received.Type)
+	}
+	if !bytes.Equal(received.Payload, []byte("early-identify")) {
+		t.Fatalf("early Payload = %q, want early-identify", received.Payload)
+	}
+}
+
 func TestHostSecureHandlerStoresConnectionStateAndTicket(t *testing.T) {
 	clientIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.0")
 	serverIdentity := testSecureSessionIdentity(t, "localnet", "node/1.0.1")
@@ -446,4 +534,48 @@ func (connection *secureSessionTestConnection) Close() error {
 		close(connection.closed)
 	}
 	return nil
+}
+
+type secureSessionHandshakeTestConnection struct {
+	*secureSessionTestConnection
+	handshakeInbound chan Message
+	mutex            sync.Mutex
+	readCalls        int
+	finished         bool
+}
+
+func (connection *secureSessionHandshakeTestConnection) ReadHandshakeMessage(ctx context.Context) (Message, error) {
+	select {
+	case message := <-connection.handshakeInbound:
+		return message, nil
+	case <-connection.closed:
+		return Message{}, ErrConnectionClosed
+	case <-ctx.Done():
+		return Message{}, ctx.Err()
+	}
+}
+
+func (connection *secureSessionHandshakeTestConnection) FinishHandshake() {
+	connection.mutex.Lock()
+	defer connection.mutex.Unlock()
+	connection.finished = true
+}
+
+func (connection *secureSessionHandshakeTestConnection) ReadMessage(ctx context.Context) (Message, error) {
+	connection.mutex.Lock()
+	connection.readCalls++
+	connection.mutex.Unlock()
+	return connection.secureSessionTestConnection.ReadMessage(ctx)
+}
+
+func (connection *secureSessionHandshakeTestConnection) readMessageCalls() int {
+	connection.mutex.Lock()
+	defer connection.mutex.Unlock()
+	return connection.readCalls
+}
+
+func (connection *secureSessionHandshakeTestConnection) finishCalled() bool {
+	connection.mutex.Lock()
+	defer connection.mutex.Unlock()
+	return connection.finished
 }
