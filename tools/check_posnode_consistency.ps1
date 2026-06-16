@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param(
     [string[]]$RpcUrls = @(),
     [string]$RpcUrlFile = "",
@@ -5,9 +6,11 @@ param(
     [int]$IntervalSeconds = 5,
     [int]$TimeoutSeconds = 5,
     [int]$MaxHeightDrift = 2,
+    [int]$MinNodeCount = 0,
     [string]$OutputPath = "",
     [switch]$Help,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$FailFast
 )
 
 Set-StrictMode -Version Latest
@@ -17,6 +20,8 @@ function Show-Usage {
     Write-Host "Usage:"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrls http://127.0.0.1:5300,http://127.0.0.1:5301 -Rounds 12 -IntervalSeconds 5"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -OutputPath .\report\node-consistency.json"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -MinNodeCount 30"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -FailFast"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -SelfTest"
 }
 
@@ -24,6 +29,40 @@ function Stop-WithUsageError {
     param([string]$Message)
     [Console]::Error.WriteLine($Message)
     exit 2
+}
+
+function Split-RpcUrlValue {
+    param([string]$Value)
+    $items = @()
+    foreach ($item in ($Value -split ",")) {
+        $trimmed = $item.Trim()
+        if ($trimmed.Length -gt 0) {
+            $items += $trimmed
+        }
+    }
+    return $items
+}
+
+function Normalize-RpcUrl {
+    param([string]$Value)
+    $trimmed = $Value.Trim()
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($trimmed, [System.UriKind]::Absolute, [ref]$uri)) {
+        Stop-WithUsageError "Invalid RpcUrl: $trimmed"
+    }
+    if ($uri.Scheme -ne "http" -and $uri.Scheme -ne "https") {
+        Stop-WithUsageError "RpcUrl must use http or https: $trimmed"
+    }
+    return $uri.AbsoluteUri
+}
+
+function Remove-InlineComment {
+    param([string]$Value)
+    $index = $Value.IndexOf("#")
+    if ($index -lt 0) {
+        return $Value
+    }
+    return $Value.Substring(0, $index)
 }
 
 function Assert-ValidOptions {
@@ -38,6 +77,9 @@ function Assert-ValidOptions {
     }
     if ($MaxHeightDrift -lt 0) {
         Stop-WithUsageError "MaxHeightDrift must be greater than or equal to 0"
+    }
+    if ($MinNodeCount -lt 0) {
+        Stop-WithUsageError "MinNodeCount must be greater than or equal to 0"
     }
 }
 
@@ -165,17 +207,26 @@ function Invoke-PosNodeRpc {
 function Read-RpcUrls {
     $urls = @()
     foreach ($url in $RpcUrls) {
-        if ($url.Trim().Length -gt 0) {
-            $urls += $url.Trim()
+        foreach ($urlItem in (Split-RpcUrlValue $url)) {
+            $urls += Normalize-RpcUrl $urlItem
         }
     }
     if ($RpcUrlFile.Trim().Length -gt 0) {
-        $fileUrls = Get-Content -Path $RpcUrlFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith("#") }
+        if (-not (Test-Path -LiteralPath $RpcUrlFile)) {
+            Stop-WithUsageError "RpcUrlFile does not exist: $RpcUrlFile"
+        }
+        $fileUrls = Get-Content -Path $RpcUrlFile | ForEach-Object { Remove-InlineComment $_ } | Where-Object { $_.Trim().Length -gt 0 }
         foreach ($url in $fileUrls) {
-            $urls += $url.Trim()
+            foreach ($urlItem in (Split-RpcUrlValue $url)) {
+                $urls += Normalize-RpcUrl $urlItem
+            }
         }
     }
-    return $urls | Select-Object -Unique
+    $uniqueUrls = @($urls | Select-Object -Unique)
+    if ($MinNodeCount -gt 0 -and $uniqueUrls.Count -lt $MinNodeCount) {
+        Stop-WithUsageError "RpcUrl count $($uniqueUrls.Count) is less than MinNodeCount $MinNodeCount"
+    }
+    return $uniqueUrls
 }
 
 function Get-ValidatorFingerprint {
@@ -371,6 +422,9 @@ function Invoke-SelfTest {
     Assert-SelfTest ((Get-StringProperty -InputObject $missing -Name "peer_id") -eq "") "missing string property should return default"
     Assert-SelfTest ((Get-UInt64Property -InputObject ([pscustomobject]@{ value = "bad" }) -Name "value" -Default 7) -eq 7) "invalid uint64 should return default"
     Assert-SelfTest ((Get-Int64Property -InputObject ([pscustomobject]@{ layer = -1 }) -Name "layer") -eq -1) "signed turbine layer should keep -1"
+    Assert-SelfTest (((Split-RpcUrlValue "http://a:1,http://b:2").Count) -eq 2) "comma separated rpc urls should split"
+    Assert-SelfTest ((Normalize-RpcUrl " http://127.0.0.1:1 ") -eq "http://127.0.0.1:1/") "rpc url should be normalized"
+    Assert-SelfTest ((Remove-InlineComment "http://127.0.0.1:1 # local node").Trim() -eq "http://127.0.0.1:1") "rpc url file inline comment should be stripped"
 
     $validatorsA = [pscustomobject]@{
         validators = @(
@@ -412,15 +466,28 @@ if ($urls.Count -eq 0) {
     Stop-WithUsageError "RpcUrls or RpcUrlFile is required"
 }
 
+$checkStartedAt = Get-Date
 $allRounds = @()
+$failedSnapshots = @()
 $globalErrors = [System.Collections.Generic.List[string]]::new()
+$globalWarnings = [System.Collections.Generic.List[string]]::new()
 for ($round = 1; $round -le $Rounds; $round++) {
     Write-Host "==> consistency round $round/$Rounds"
+    $roundStartedAt = Get-Date
     $snapshots = @()
+    $roundFailedSnapshots = @()
     foreach ($url in $urls) {
         try {
             $snapshots += New-NodeSnapshot -Url $url
         } catch {
+            $failure = [pscustomobject]@{
+                Round     = $round
+                Url       = $url
+                Error     = $_.Exception.Message
+                Timestamp = (Get-Date).ToString("o")
+            }
+            $failedSnapshots += $failure
+            $roundFailedSnapshots += $failure
             $globalErrors.Add("$url snapshot failed: $($_.Exception.Message)")
         }
     }
@@ -429,31 +496,60 @@ for ($round = 1; $round -le $Rounds; $round++) {
         $globalErrors.Add("round ${round}: $errorMessage")
     }
     foreach ($warningMessage in $roundResult.Warnings) {
+        $globalWarnings.Add("round ${round}: $warningMessage")
         Write-Warning "round ${round}: $warningMessage"
     }
     $allRounds += [pscustomobject]@{
-        Round     = $round
-        Timestamp = (Get-Date).ToString("o")
-        Nodes     = $snapshots
-        Errors    = @($roundResult.Errors)
-        Warnings  = @($roundResult.Warnings)
+        Round           = $round
+        Timestamp       = (Get-Date).ToString("o")
+        DurationMs      = [int64]((Get-Date) - $roundStartedAt).TotalMilliseconds
+        Nodes           = $snapshots
+        FailedSnapshots = $roundFailedSnapshots
+        Errors          = @($roundResult.Errors)
+        Warnings        = @($roundResult.Warnings)
+    }
+    if ($FailFast -and ($roundResult.Errors.Count -gt 0 -or $roundFailedSnapshots.Count -gt 0)) {
+        $globalWarnings.Add("round ${round}: fail fast stopped remaining rounds")
+        Write-Warning "round ${round}: fail fast stopped remaining rounds"
+        break
     }
     if ($round -lt $Rounds) {
         Start-Sleep -Seconds $IntervalSeconds
     }
 }
 
+$successfulSnapshotCount = 0
+foreach ($roundData in $allRounds) {
+    $successfulSnapshotCount += @($roundData.Nodes).Count
+}
+$exitCode = 0
+if ($globalErrors.Count -gt 0) {
+    $exitCode = 1
+}
+$finishedAt = Get-Date
 $summary = [pscustomobject]@{
-    CheckedAt = (Get-Date).ToString("o")
-    Urls      = $urls
-    Rounds    = $allRounds
-    Errors    = @($globalErrors)
-    OK        = ($globalErrors.Count -eq 0)
+    CheckedAt               = $finishedAt.ToString("o")
+    StartedAt               = $checkStartedAt.ToString("o")
+    FinishedAt              = $finishedAt.ToString("o")
+    DurationMs              = [int64]($finishedAt - $checkStartedAt).TotalMilliseconds
+    ExitCode                = $exitCode
+    Urls                    = $urls
+    NodeCount               = $urls.Count
+    RoundCount              = $allRounds.Count
+    SuccessfulSnapshotCount = $successfulSnapshotCount
+    FailedSnapshotCount     = $failedSnapshots.Count
+    ErrorCount              = $globalErrors.Count
+    WarningCount            = $globalWarnings.Count
+    Rounds                  = $allRounds
+    FailedSnapshots         = $failedSnapshots
+    Errors                  = @($globalErrors)
+    Warnings                = @($globalWarnings)
+    OK                      = ($globalErrors.Count -eq 0)
 }
 
 Write-JsonReport -Value $summary -Path $OutputPath
 
-if ($globalErrors.Count -gt 0) {
+if ($exitCode -ne 0) {
     foreach ($errorMessage in $globalErrors) {
         Write-Error $errorMessage -ErrorAction Continue
     }

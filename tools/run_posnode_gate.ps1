@@ -1,6 +1,8 @@
+[CmdletBinding()]
 param(
     [string]$PackagePattern = "",
     [string]$PosNodePackage = "",
+    [string]$OutputPath = "",
     [switch]$RequireRace,
     [switch]$SkipRace,
     [switch]$Help
@@ -19,7 +21,34 @@ function Show-Usage {
 function Stop-WithUsageError {
     param([string]$Message)
     [Console]::Error.WriteLine($Message)
+    Write-GateSummary -ExitCode 2 -Message $Message
     exit 2
+}
+
+function Write-GateSummary {
+    param(
+        [int]$ExitCode,
+        [string]$Message
+    )
+    if ($OutputPath.Trim().Length -eq 0) {
+        return
+    }
+    $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+    $parentDirectory = Split-Path -Path $resolvedPath -Parent
+    if ($parentDirectory.Trim().Length -gt 0 -and -not (Test-Path -LiteralPath $parentDirectory)) {
+        New-Item -ItemType Directory -Path $parentDirectory -Force | Out-Null
+    }
+    $summary = [pscustomobject]@{
+        CheckedAt     = (Get-Date).ToString("o")
+        ExitCode      = $ExitCode
+        Message       = $Message
+        PackagePattern = $resolvedPackagePattern
+        PosNodePackage = $resolvedPosNodePackage
+        RequireRace   = [bool]$RequireRace
+        SkipRace      = [bool]$SkipRace
+        Steps         = @($gateSteps)
+    }
+    $summary | ConvertTo-Json -Depth 20 | Set-Content -Path $resolvedPath -Encoding UTF8
 }
 
 function Test-WindowsPlatform {
@@ -54,9 +83,18 @@ function Invoke-GoStep {
         [string[]]$Arguments
     )
     Write-Host "==> $Name"
+    $startedAt = Get-Date
     & go @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Name failed with exit code $LASTEXITCODE"
+    $exitCode = $LASTEXITCODE
+    $gateSteps.Add([pscustomobject]@{
+        Name       = $Name
+        Arguments  = $Arguments
+        ExitCode   = $exitCode
+        DurationMs = [int64]((Get-Date) - $startedAt).TotalMilliseconds
+        OK         = ($exitCode -eq 0)
+    })
+    if ($exitCode -ne 0) {
+        throw "$Name failed with exit code $exitCode"
     }
 }
 
@@ -70,17 +108,19 @@ function Remove-PosNodeBuildArtifact {
     }
 }
 
+$resolvedPackagePattern = Resolve-GoPackagePattern $PackagePattern
+$resolvedPosNodePackage = Resolve-PosNodePackage $PosNodePackage
+$gateSteps = [System.Collections.Generic.List[object]]::new()
+
 if ($Help) {
     Show-Usage
+    Write-GateSummary -ExitCode 0 -Message "help"
     exit 0
 }
 
 if ($SkipRace -and $RequireRace) {
     Stop-WithUsageError "-SkipRace and -RequireRace cannot be used together"
 }
-
-$resolvedPackagePattern = Resolve-GoPackagePattern $PackagePattern
-$resolvedPosNodePackage = Resolve-PosNodePackage $PosNodePackage
 
 try {
     Invoke-GoStep "go test $resolvedPackagePattern" @("test", $resolvedPackagePattern)
@@ -89,7 +129,9 @@ try {
     Remove-PosNodeBuildArtifact
 
     if ($SkipRace) {
-        Write-Warning "race gate skipped by -SkipRace. Production release must run go test -race on Linux or macOS."
+        $message = "race gate skipped by -SkipRace. Production release must run go test -race on Linux or macOS."
+        Write-Warning $message
+        Write-GateSummary -ExitCode 0 -Message $message
         exit 0
     }
 
@@ -99,10 +141,15 @@ try {
             Stop-WithUsageError $message
         }
         Write-Warning $message
+        Write-GateSummary -ExitCode 0 -Message $message
         exit 0
     }
 
     Invoke-GoStep "go test -race $resolvedPackagePattern" @("test", "-race", $resolvedPackagePattern)
+    Write-GateSummary -ExitCode 0 -Message "gate passed"
+} catch {
+    Write-GateSummary -ExitCode 1 -Message $_.Exception.Message
+    throw
 }
 finally {
     Remove-PosNodeBuildArtifact

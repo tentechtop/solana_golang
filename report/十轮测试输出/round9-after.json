@@ -1,0 +1,56 @@
+﻿{
+    "CheckedAt":  "2026-06-16T11:26:50.5615767+08:00",
+    "StartedAt":  "2026-06-16T11:26:49.3916811+08:00",
+    "FinishedAt":  "2026-06-16T11:26:50.5615767+08:00",
+    "DurationMs":  1170,
+    "ExitCode":  1,
+    "Urls":  [
+                 "http://127.0.0.1:1/"
+             ],
+    "NodeCount":  1,
+    "RoundCount":  1,
+    "SuccessfulSnapshotCount":  0,
+    "FailedSnapshotCount":  1,
+    "ErrorCount":  2,
+    "WarningCount":  0,
+    "Rounds":  [
+                   {
+                       "Round":  1,
+                       "Timestamp":  "2026-06-16T11:26:50.5540088+08:00",
+                       "DurationMs":  1119,
+                       "Nodes":  [
+
+                                 ],
+                       "FailedSnapshots":  [
+                                               {
+                                                   "Round":  1,
+                                                   "Url":  "http://127.0.0.1:1/",
+                                                   "Error":  "操作超时",
+                                                   "Timestamp":  "2026-06-16T11:26:50.5301276+08:00"
+                                               }
+                                           ],
+                       "Errors":  [
+                                      "round 1 has no successful node snapshot"
+                                  ],
+                       "Warnings":  [
+
+                                    ]
+                   }
+               ],
+    "FailedSnapshots":  [
+                            {
+                                "Round":  1,
+                                "Url":  "http://127.0.0.1:1/",
+                                "Error":  "操作超时",
+                                "Timestamp":  "2026-06-16T11:26:50.5301276+08:00"
+                            }
+                        ],
+    "Errors":  [
+                   "http://127.0.0.1:1/ snapshot failed: 操作超时",
+                   "round 1: round 1 has no successful node snapshot"
+               ],
+    "Warnings":  [
+
+                 ],
+    "OK":  false
+}
