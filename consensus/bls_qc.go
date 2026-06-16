@@ -40,6 +40,22 @@ func BLSKeyPairFromSeed(seed []byte) (BLSKeyPair, error) {
 	return BLSKeyPair{PrivateKey: privateKeyBytes, PublicKey: publicKeyBytes}, nil
 }
 
+// BLSKeyPairFromPrivateKey 加载 BLS 私钥 + 从私钥派生公钥避免 keystore 重复保存可校验材料。
+func BLSKeyPairFromPrivateKey(privateKeyBytes []byte) (BLSKeyPair, error) {
+	privateKey := &bls.PrivateKey[bls.KeyG2SigG1]{}
+	if err := privateKey.UnmarshalBinary(privateKeyBytes); err != nil {
+		return BLSKeyPair{}, fmt.Errorf("consensus: unmarshal bls private key: %w", err)
+	}
+	publicKeyBytes, err := privateKey.PublicKey().MarshalBinary()
+	if err != nil {
+		return BLSKeyPair{}, fmt.Errorf("consensus: marshal bls public key: %w", err)
+	}
+	return BLSKeyPair{
+		PrivateKey: append([]byte(nil), privateKeyBytes...),
+		PublicKey:  publicKeyBytes,
+	}, nil
+}
+
 // SignBLSVote 签署投票消息 + 每个验证者消息包含 voter_id 防止 BASIC 聚合模式同消息风险。
 func SignBLSVote(privateKeyBytes []byte, vote Vote) ([]byte, error) {
 	if err := vote.Validate(); err != nil {

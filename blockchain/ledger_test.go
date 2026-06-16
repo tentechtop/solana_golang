@@ -105,6 +105,64 @@ func TestLedgerRejectsNonIncreasingSlot(t *testing.T) {
 	}
 }
 
+func TestLedgerRejectsCommittedTransactionReplay(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	source := testKeyPair(t, "staker-a")
+	destination := testKeyPair(t, "replay-destination")
+	transaction, err := NewTransferTransaction(source, destination.PublicKey, 1_000_000, ledger.Head().BlockHash)
+	if err != nil {
+		t.Fatalf("NewTransferTransaction() error = %v", err)
+	}
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+
+	proposalOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "replay-one")
+	proposalOne.Transactions = []structure.Transaction{transaction}
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposalOne, NextState: stateOne}); err != nil {
+		t.Fatalf("commit first transaction block: %v", err)
+	}
+	committed, err := ledger.HasCommittedTransaction(transactionID)
+	if err != nil {
+		t.Fatalf("HasCommittedTransaction() error = %v", err)
+	}
+	if !committed {
+		t.Fatalf("transaction %s not marked committed", transactionID)
+	}
+
+	proposalTwo, stateTwo := testProposalFromHead(t, ledger.Head(), ledger.State(), 2, 2, "replay-two")
+	proposalTwo.Transactions = []structure.Transaction{transaction}
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposalTwo, NextState: stateTwo}); !errors.Is(err, ErrInvalidCommit) {
+		t.Fatalf("commit replay transaction error = %v, want ErrInvalidCommit", err)
+	}
+
+	reloaded, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	committedAfterReload, err := reloaded.HasCommittedTransaction(transactionID)
+	if err != nil {
+		t.Fatalf("HasCommittedTransaction(after reload) error = %v", err)
+	}
+	if !committedAfterReload {
+		t.Fatalf("transaction %s not marked committed after reload", transactionID)
+	}
+}
+
 func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
@@ -145,6 +203,64 @@ func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
 		if !strings.Contains(logLine, expected) {
 			t.Fatalf("log output = %q, want %s", logLine, expected)
 		}
+	}
+}
+
+func TestRewardQCsUseMainChainBestSlot(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "reward-main-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 2, 2, "reward-main-2")
+	headTwo, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwo, NextState: stateTwo})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	forkTwo, forkState := testProposalFromParent(t, headOne, stateOne, 12, 2, "reward-fork-2")
+	forkTwoHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: forkTwo, NextState: forkState})
+	if err != nil {
+		t.Fatalf("save fork block: %v", err)
+	}
+
+	qcs := []consensus.QuorumCertificate{
+		testRewardLedgerQC(1, 1, headOne.BlockHash, 1, []string{"validator-a"}, 1),
+		testRewardLedgerQC(1, 1, headOne.BlockHash, 2, []string{"validator-a", "validator-b"}, 2),
+		testRewardLedgerQC(2, 2, headTwo.BlockHash, 2, []string{"validator-a", "validator-b"}, 3),
+		testRewardLedgerQC(12, 2, forkTwoHash, 2, []string{"validator-a", "validator-c"}, 4),
+	}
+	for _, qc := range qcs {
+		if _, err := ledger.SaveQC(qc); err != nil {
+			t.Fatalf("save qc slot %d hash %s: %v", qc.Slot, qc.BlockHash.String(), err)
+		}
+	}
+
+	rewardQCs, err := ledger.RewardQCs(2, 10)
+	if err != nil {
+		t.Fatalf("RewardQCs() error = %v", err)
+	}
+	if len(rewardQCs) != 2 {
+		t.Fatalf("RewardQCs() len = %d, want 2: %+v", len(rewardQCs), rewardQCs)
+	}
+	if rewardQCs[0].Slot != 1 || rewardQCs[0].BlockHash != headOne.BlockHash || rewardQCs[0].ConfirmedStake != 2 {
+		t.Fatalf("slot 1 reward qc = %+v, want best main-chain qc", rewardQCs[0])
+	}
+	if rewardQCs[1].Slot != 2 || rewardQCs[1].BlockHash != headTwo.BlockHash {
+		t.Fatalf("slot 2 reward qc = %+v, want main-chain qc", rewardQCs[1])
 	}
 }
 
@@ -266,6 +382,82 @@ func TestLedgerImportFinalizedSnapshotAndContinueCommit(t *testing.T) {
 	}
 }
 
+func TestLedgerFinalityDepthConfig(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	ledger, err := NewLedgerFromGenesisWithConfig(db, testGenesis(t), LedgerConfig{FinalityDepth: 3})
+	if err != nil {
+		t.Fatalf("NewLedgerFromGenesisWithConfig() error = %v", err)
+	}
+	if ledger.FinalityDepth() != 3 {
+		t.Fatalf("FinalityDepth() = %d, want 3", ledger.FinalityDepth())
+	}
+	state := ledger.State()
+	head := ledger.Head()
+	for height := uint64(1); height <= 4; height++ {
+		proposal, nextState := testProposalFromHead(t, head, state, height, height, "finality")
+		head, err = ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState})
+		if err != nil {
+			t.Fatalf("CommitBlock(%d) error = %v", height, err)
+		}
+		state = nextState
+	}
+	if head.FinalizedHeight != 1 {
+		t.Fatalf("finalized height = %d, want 1", head.FinalizedHeight)
+	}
+}
+
+func TestLoadOrCreateLedgerRecoversCorruptedAccountTable(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	ledger, err := LoadOrCreateLedgerWithConfig(db, testGenesis(t), LedgerConfig{})
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedgerWithConfig() error = %v", err)
+	}
+	proposal, nextState := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "recover")
+	committedHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	account := nextState.Accounts[0]
+	corruptedAccount := account.Account
+	corruptedAccount.Lamports++
+	corruptedBytes, err := corruptedAccount.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal corrupted account: %v", err)
+	}
+	if err := db.Put(database.TableAccount, account.Address[:], corruptedBytes); err != nil {
+		t.Fatalf("corrupt account table: %v", err)
+	}
+
+	recoveredLedger, err := LoadOrCreateLedgerWithConfig(db, testGenesis(t), LedgerConfig{})
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedgerWithConfig(recover) error = %v", err)
+	}
+	if recoveredLedger.Head().BlockHash != committedHead.BlockHash {
+		t.Fatalf("head hash = %s, want %s", recoveredLedger.Head().BlockHash.String(), committedHead.BlockHash.String())
+	}
+	recoveredAccount := findAccount(t, recoveredLedger.State(), account.Address)
+	if recoveredAccount.Account.Lamports != account.Account.Lamports {
+		t.Fatalf("recovered lamports = %d, want %d", recoveredAccount.Account.Lamports, account.Account.Lamports)
+	}
+}
+
 func testGenesis(t *testing.T) GenesisConfig {
 	t.Helper()
 	staker := testKeyPair(t, "staker-a")
@@ -340,6 +532,19 @@ func testHash(t *testing.T, seed string) structure.Hash {
 		t.Fatalf("hash: %v", err)
 	}
 	return hash
+}
+
+func testRewardLedgerQC(slot uint64, height uint64, blockHash structure.Hash, stake uint64, voters []string, offset int64) consensus.QuorumCertificate {
+	return consensus.QuorumCertificate{
+		Type:               consensus.VoteTypeConfirm,
+		Slot:               slot,
+		BlockHeight:        height,
+		BlockHash:          blockHash,
+		ThresholdStake:     1,
+		ConfirmedStake:     stake,
+		Voters:             voters,
+		CreatedAtUnixMilli: time.Now().UnixMilli() + offset,
+	}
 }
 
 func findAccount(t *testing.T, state consensus.ChainState, address structure.PublicKey) structure.AddressedAccount {

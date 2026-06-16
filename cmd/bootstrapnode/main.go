@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +24,7 @@ const (
 	defaultMaxPeers           = 256
 	defaultMaxConnections     = 256
 	defaultSoftwareVersion    = "bootstrapnode/0.1.0"
+	maxPeerKeystoreBytes      = 8192
 )
 
 type bootstrapConfig struct {
@@ -31,6 +35,7 @@ type bootstrapConfig struct {
 	AdvertisedIP       string       `json:"advertised_ip"`
 	ListenPort         int          `json:"listen_port"`
 	PeerSeed           string       `json:"peer_seed"`
+	PeerKeyPath        string       `json:"peer_key_path,omitempty"`
 	AllowInsecureP2P   *bool        `json:"allow_insecure_p2p,omitempty"`
 	NetworkID          string       `json:"network_id,omitempty"`
 	SoftwareVersion    string       `json:"software_version,omitempty"`
@@ -52,6 +57,12 @@ type rawKeyPair struct {
 	publicKey  []byte
 	privateKey []byte
 	peerID     string
+}
+
+type peerKeystoreFile struct {
+	Seed             string `json:"seed,omitempty"`
+	SeedBase64       string `json:"seed_base64,omitempty"`
+	PrivateKeyBase64 string `json:"private_key_base64,omitempty"`
 }
 
 func main() {
@@ -85,9 +96,9 @@ func run(configPath string) error {
 		return err
 	}
 	slog.SetDefault(logger)
-	keyPair, err := rawKeyPairFromSeed(config.PeerSeed)
+	keyPair, err := loadPeerKeyPair(config)
 	if err != nil {
-		return fmt.Errorf("bootstrapnode: derive peer key: %w", err)
+		return fmt.Errorf("bootstrapnode: load peer key: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -147,6 +158,7 @@ func normalizeConfig(config bootstrapConfig) (bootstrapConfig, error) {
 	config.ListenIP = strings.TrimSpace(config.ListenIP)
 	config.AdvertisedIP = strings.TrimSpace(config.AdvertisedIP)
 	config.PeerSeed = strings.TrimSpace(config.PeerSeed)
+	config.PeerKeyPath = strings.TrimSpace(config.PeerKeyPath)
 	config.NetworkID = strings.TrimSpace(config.NetworkID)
 	config.SoftwareVersion = strings.TrimSpace(config.SoftwareVersion)
 	if config.NodeName == "" {
@@ -158,8 +170,11 @@ func normalizeConfig(config bootstrapConfig) (bootstrapConfig, error) {
 	if config.ListenPort < 1 || config.ListenPort > 65535 {
 		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: invalid listen port")
 	}
-	if config.PeerSeed == "" {
-		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: peer seed is empty")
+	if config.PeerSeed == "" && config.PeerKeyPath == "" {
+		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: peer key material is empty")
+	}
+	if isProductionBootstrapConfig(config) && config.PeerKeyPath == "" {
+		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: production peer key path is required")
 	}
 	if config.MaxPeers == 0 {
 		config.MaxPeers = defaultMaxPeers
@@ -328,22 +343,111 @@ func parsePeerCapabilities(values []string, role p2p.PeerRole) p2p.PeerCapabilit
 
 func (config bootstrapConfig) allowInsecure() bool {
 	if config.AllowInsecureP2P == nil {
+		if isProductionBootstrapConfig(config) {
+			return false
+		}
 		return true
 	}
 	return *config.AllowInsecureP2P
+}
+
+func isProductionBootstrapConfig(config bootstrapConfig) bool {
+	if config.Production {
+		return true
+	}
+	environment := strings.TrimSpace(strings.ToLower(config.Environment))
+	return environment == "production" || environment == "prod"
 }
 
 func (config bootstrapConfig) dialInterval() time.Duration {
 	return time.Duration(config.DialIntervalMillis) * time.Millisecond
 }
 
+func loadPeerKeyPair(config bootstrapConfig) (rawKeyPair, error) {
+	if strings.TrimSpace(config.PeerKeyPath) != "" {
+		keyFile, err := loadPeerKeystore(config.PeerKeyPath, isProductionBootstrapConfig(config))
+		if err != nil {
+			return rawKeyPair{}, err
+		}
+		return rawKeyPairFromKeystore(keyFile)
+	}
+	if isProductionBootstrapConfig(config) {
+		return rawKeyPair{}, fmt.Errorf("bootstrapnode: peer key path is required in production")
+	}
+	return rawKeyPairFromSeed(config.PeerSeed)
+}
+
+func loadPeerKeystore(path string, production bool) (peerKeystoreFile, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: peer keystore path is empty")
+	}
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: stat peer keystore: %w", err)
+	}
+	if info.IsDir() {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: peer keystore is a directory")
+	}
+	if info.Size() <= 0 || info.Size() > maxPeerKeystoreBytes {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: invalid peer keystore size")
+	}
+	if production && goruntime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: peer keystore must not be group/world readable")
+	}
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: read peer keystore: %w", err)
+	}
+	keyFile := peerKeystoreFile{}
+	if err := json.Unmarshal(data, &keyFile); err != nil {
+		return peerKeystoreFile{}, fmt.Errorf("bootstrapnode: decode peer keystore: %w", err)
+	}
+	return keyFile, nil
+}
+
+func rawKeyPairFromKeystore(keyFile peerKeystoreFile) (rawKeyPair, error) {
+	privateKey, err := privateKeyFromKeystore(keyFile)
+	if err != nil {
+		return rawKeyPair{}, err
+	}
+	return rawKeyPairFromPrivateKey(privateKey)
+}
+
+func privateKeyFromKeystore(keyFile peerKeystoreFile) ([]byte, error) {
+	if strings.TrimSpace(keyFile.Seed) != "" {
+		return utils.SHA256([]byte(strings.TrimSpace(keyFile.Seed))), nil
+	}
+	if strings.TrimSpace(keyFile.SeedBase64) != "" {
+		return decodeSizedKeystoreBase64(keyFile.SeedBase64, utils.Ed25519KeySize, "peer seed")
+	}
+	if strings.TrimSpace(keyFile.PrivateKeyBase64) != "" {
+		return decodeSizedKeystoreBase64(keyFile.PrivateKeyBase64, utils.Ed25519KeySize, "peer private key")
+	}
+	return nil, fmt.Errorf("bootstrapnode: peer keystore has no key material")
+}
+
+func decodeSizedKeystoreBase64(encodedValue string, expectedSize int, fieldName string) ([]byte, error) {
+	value, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedValue))
+	if err != nil {
+		return nil, fmt.Errorf("bootstrapnode: decode %s: %w", fieldName, err)
+	}
+	if len(value) != expectedSize {
+		return nil, fmt.Errorf("bootstrapnode: %s requires %d bytes", fieldName, expectedSize)
+	}
+	return value, nil
+}
+
 func rawKeyPairFromSeed(seedText string) (rawKeyPair, error) {
-	privateKey := utils.SHA256([]byte(strings.TrimSpace(seedText)))
+	return rawKeyPairFromPrivateKey(utils.SHA256([]byte(strings.TrimSpace(seedText))))
+}
+
+func rawKeyPairFromPrivateKey(privateKey []byte) (rawKeyPair, error) {
 	publicKey, err := utils.DeriveEd25519PublicKeyFromPrivateKey(privateKey)
 	if err != nil {
 		return rawKeyPair{}, err
 	}
-	return rawKeyPair{publicKey: publicKey, privateKey: privateKey, peerID: utils.Base58Encode(publicKey)}, nil
+	return rawKeyPair{publicKey: utils.CloneBytes(publicKey), privateKey: utils.CloneBytes(privateKey), peerID: utils.Base58Encode(publicKey)}, nil
 }
 
 func uniqueStrings(values []string) []string {

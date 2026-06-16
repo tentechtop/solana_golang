@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"solana_golang/consensus"
 	"solana_golang/database"
 	"solana_golang/p2p"
+	"solana_golang/programs/privacy"
 	"solana_golang/programs/stake"
 	"solana_golang/programs/system"
 	"solana_golang/rpc"
@@ -26,6 +28,7 @@ import (
 
 const (
 	protocolNetworkID      = "pos-localnet"
+	posNodeSoftwareVersion = "posnode/1.0.0"
 	defaultConsensusQuorum = 2
 )
 
@@ -129,21 +132,42 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 	executor, err := runtime.NewFixedExecutor(
 		system.NewProgram(structure.DefaultBuiltinProgramIDs.System),
 		stake.NewProgram(structure.DefaultBuiltinProgramIDs.Stake),
+		privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("posnode: create executor: %w", err)
 	}
 	executor.Logger = logger
+	peerKeyPair, err := loadRawKeyPair(config.PeerSeed, config.PeerKeyPath, config, "peer")
+	if err != nil {
+		return nil, err
+	}
+	stakerKeyPair, err := loadStructureKeyPair(config.StakerSeed, config.StakerKeyPath, config, "staker")
+	if err != nil {
+		return nil, err
+	}
+	validatorKeyPair, err := loadStructureKeyPair(config.ValidatorSeed, config.ValidatorKeyPath, config, "validator")
+	if err != nil {
+		return nil, err
+	}
+	consensusKeyPair, err := loadStructureKeyPair(config.ConsensusSeed, config.ConsensusKeyPath, config, "consensus")
+	if err != nil {
+		return nil, err
+	}
+	blsKeyPair, err := loadBLSKeyPair(config.ConsensusSeed, config.BLSKeyPath, config)
+	if err != nil {
+		return nil, err
+	}
 	node := &posNode{
 		config:           config,
 		logger:           logger,
 		startedAt:        time.Now(),
 		executor:         executor,
-		peerKeyPair:      mustRawKeyPair(config.PeerSeed),
-		stakerKeyPair:    mustStructureKeyPair(config.StakerSeed),
-		validatorKeyPair: mustStructureKeyPair(config.ValidatorSeed),
-		consensusKeyPair: mustStructureKeyPair(config.ConsensusSeed),
-		blsKeyPair:       mustBLSKeyPair(config.ConsensusSeed),
+		peerKeyPair:      peerKeyPair,
+		stakerKeyPair:    stakerKeyPair,
+		validatorKeyPair: validatorKeyPair,
+		consensusKeyPair: consensusKeyPair,
+		blsKeyPair:       blsKeyPair,
 		seenTransactions: make(map[string]struct{}),
 		seenProposals:    make(map[string]struct{}),
 		orphanProposals:  make(map[structure.Hash][]consensus.BlockProposal),
@@ -171,6 +195,9 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.String("consensus", node.consensusKeyPair.PublicKey.String()),
 		slog.Uint64("genesis_supply", node.config.Genesis.InitialSupplyLamports),
 		slog.Int64("genesis_start_unix_millis", node.config.GenesisStartMs),
+		slog.Uint64("finality_depth", node.config.FinalityDepth),
+		slog.Bool("p2p_insecure_allowed", node.config.allowInsecureP2P()),
+		slog.Bool("state_recovery_enabled", !node.config.DisableStateRecovery),
 		slog.String("data_path", node.config.DataPath),
 	)
 	if node.config.AutoRegister {
@@ -209,7 +236,15 @@ func (node *posNode) openLedger() error {
 		return fmt.Errorf("posnode: open blockchain database: %w", err)
 	}
 	node.db = db
-	ledger, err := blockchain.LoadOrCreateLedger(db, node.blockchainGenesisConfig())
+	genesisConfig, err := node.blockchainGenesisConfig()
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	ledger, err := blockchain.LoadOrCreateLedgerWithConfig(db, genesisConfig, blockchain.LedgerConfig{
+		FinalityDepth:        node.config.FinalityDepth,
+		DisableStateRecovery: node.config.DisableStateRecovery,
+	})
 	if err != nil {
 		_ = db.Close()
 		return fmt.Errorf("posnode: load blockchain ledger: %w", err)
@@ -239,35 +274,101 @@ func (node *posNode) openLedger() error {
 	return nil
 }
 
-func (node *posNode) blockchainGenesisConfig() blockchain.GenesisConfig {
+func (node *posNode) blockchainGenesisConfig() (blockchain.GenesisConfig, error) {
 	genesis := blockchain.GenesisConfig{
 		ChainID:               node.config.ChainID,
 		InitialSupplyLamports: node.config.Genesis.InitialSupplyLamports,
 		FundedAccounts:        make([]blockchain.GenesisAccount, 0, len(node.config.Genesis.FundedAccounts)),
 		InitialValidators:     make([]blockchain.GenesisValidator, 0, len(node.config.Genesis.InitialValidators)),
 	}
+	if node.config.Genesis.TreasuryAddress != "" {
+		treasuryAddress, err := structure.PublicKeyFromBase58(node.config.Genesis.TreasuryAddress)
+		if err != nil {
+			return blockchain.GenesisConfig{}, fmt.Errorf("posnode: decode genesis treasury address: %w", err)
+		}
+		genesis.TreasuryAddress = treasuryAddress
+	}
 	for _, account := range node.config.Genesis.FundedAccounts {
-		keyPair := mustStructureKeyPair(account.Seed)
+		address, err := genesisPublicKeyFromAddressOrSeed(account.Address, account.Seed, "funded account")
+		if err != nil {
+			return blockchain.GenesisConfig{}, err
+		}
 		genesis.FundedAccounts = append(genesis.FundedAccounts, blockchain.GenesisAccount{
-			Address:  keyPair.PublicKey,
+			Address:  address,
 			Lamports: account.Lamports,
 		})
 	}
 	for _, validator := range node.config.Genesis.InitialValidators {
-		staker := mustStructureKeyPair(validator.StakerSeed)
-		validatorAccount := mustStructureKeyPair(validator.ValidatorSeed)
-		consensusKey := mustStructureKeyPair(validator.ConsensusSeed)
-		blsKeyPair := mustBLSKeyPair(validator.ConsensusSeed)
+		stakerAddress, err := genesisPublicKeyFromAddressOrSeed(validator.StakerAddress, validator.StakerSeed, "validator staker")
+		if err != nil {
+			return blockchain.GenesisConfig{}, err
+		}
+		validatorAddress, err := genesisPublicKeyFromAddressOrSeed(validator.ValidatorAddress, validator.ValidatorSeed, "validator account")
+		if err != nil {
+			return blockchain.GenesisConfig{}, err
+		}
+		consensusPublicKey, err := genesisPublicKeyFromAddressOrSeed(validator.ConsensusPublicKey, validator.ConsensusSeed, "validator consensus")
+		if err != nil {
+			return blockchain.GenesisConfig{}, err
+		}
+		blsPublicKey, err := genesisBLSPublicKey(validator.BLSPublicKeyBase64, validator.ConsensusSeed)
+		if err != nil {
+			return blockchain.GenesisConfig{}, err
+		}
 		genesis.InitialValidators = append(genesis.InitialValidators, blockchain.GenesisValidator{
-			StakerAddress:      staker.PublicKey,
-			ValidatorAddress:   validatorAccount.PublicKey,
-			ConsensusPublicKey: consensusKey.PublicKey,
-			BLSPublicKey:       blsKeyPair.PublicKey,
+			StakerAddress:      stakerAddress,
+			ValidatorAddress:   validatorAddress,
+			ConsensusPublicKey: consensusPublicKey,
+			BLSPublicKey:       blsPublicKey,
 			P2PPeerID:          validator.PeerID,
 			StakeLamports:      validator.StakeLamports,
+			CommissionBps:      validator.CommissionBps,
 		})
 	}
-	return genesis
+	return genesis, nil
+}
+
+func genesisPublicKeyFromAddressOrSeed(addressText string, seedText string, fieldName string) (structure.PublicKey, error) {
+	addressText = strings.TrimSpace(addressText)
+	if addressText != "" {
+		publicKey, err := structure.PublicKeyFromBase58(addressText)
+		if err != nil {
+			return structure.PublicKey{}, fmt.Errorf("posnode: decode genesis %s address: %w", fieldName, err)
+		}
+		return publicKey, nil
+	}
+	seedText = strings.TrimSpace(seedText)
+	if seedText == "" {
+		return structure.PublicKey{}, fmt.Errorf("posnode: genesis %s key is empty", fieldName)
+	}
+	keyPair, err := keyPairFromSeed(seedText)
+	if err != nil {
+		return structure.PublicKey{}, fmt.Errorf("posnode: derive genesis %s key: %w", fieldName, err)
+	}
+	return keyPair.PublicKey, nil
+}
+
+func genesisBLSPublicKey(encodedPublicKey string, consensusSeed string) ([]byte, error) {
+	encodedPublicKey = strings.TrimSpace(encodedPublicKey)
+	if encodedPublicKey != "" {
+		publicKey, err := utils.Base64Decode(encodedPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("posnode: decode genesis bls public key: %w", err)
+		}
+		if err := consensus.ValidateBLSPublicKey(publicKey); err != nil {
+			return nil, err
+		}
+		return publicKey, nil
+	}
+	consensusSeed = strings.TrimSpace(consensusSeed)
+	if consensusSeed == "" {
+		return nil, nil
+	}
+	keyPair, err := consensus.BLSKeyPairFromSeed(utils.SHA256([]byte(consensusSeed)))
+	if err != nil {
+		return nil, fmt.Errorf("posnode: derive genesis bls public key: %w", err)
+	}
+	return keyPair.PublicKey, nil
 }
 
 func (node *posNode) startP2P(ctx context.Context) error {
@@ -275,9 +376,10 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("posnode: build listen address: %w", err)
 	}
-	host, err := p2p.NewHost(p2p.HostConfig{
+	allowInsecureP2P := node.config.allowInsecureP2P()
+	hostConfig := p2p.HostConfig{
 		PeerID:        node.peerKeyPair.peerID,
-		AllowInsecure: node.config.allowInsecureP2P(),
+		AllowInsecure: allowInsecureP2P,
 		Production:    node.config.Production,
 		Environment:   node.config.Environment,
 		PreferredProtocols: []utils.MultiAddressProtocol{
@@ -286,12 +388,17 @@ func (node *posNode) startP2P(ctx context.Context) error {
 		MaxPeers:       128,
 		MaxConnections: 128,
 		Logger:         node.logger,
-	})
+	}
+	if !allowInsecureP2P {
+		hostConfig.EnableSecureSession = true
+		hostConfig.SecureIdentity = node.secureSessionIdentity()
+	}
+	host, err := p2p.NewHost(hostConfig)
 	if err != nil {
 		return fmt.Errorf("posnode: create host: %w", err)
 	}
 	node.host = host
-	if node.config.allowInsecureP2P() {
+	if allowInsecureP2P {
 		node.logger.Warn("posnode p2p insecure mode enabled", slog.String("node", node.config.NodeName))
 	}
 	if err := node.registerProtocols(); err != nil {
@@ -328,6 +435,16 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	go node.connectPeersLoop(ctx)
 	go node.bootstrapDiscoveryLoop(ctx)
 	return nil
+}
+
+func (node *posNode) secureSessionIdentity() p2p.SecureSessionIdentity {
+	return p2p.SecureSessionIdentity{
+		PeerID:          node.peerKeyPair.peerID,
+		PublicKey:       utils.CloneBytes(node.peerKeyPair.publicKey),
+		PrivateKey:      utils.CloneBytes(node.peerKeyPair.privateKey),
+		NetworkID:       node.config.ChainID,
+		SoftwareVersion: posNodeSoftwareVersion,
+	}
 }
 
 func (node *posNode) registerProtocols() error {
@@ -642,6 +759,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode commit produced block failed", slog.Uint64("slot", slot), slog.Any("error", err))
 		return
 	}
+	node.removeCommittedMempoolTransactions(proposal.Transactions)
 	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.mutex.Lock()
 	node.lastProducedSlot = slot
@@ -885,6 +1003,7 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	if !acceptedProposal {
 		return nil
 	}
+	node.removeCommittedMempoolTransactions(proposal.Transactions)
 	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.metrics.proposalsAccepted.Add(1)
 	node.retryOrphanChildren(ctx, proposalHash)
@@ -990,6 +1109,14 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 	transactionID, err := transaction.TxIDString()
 	if err != nil {
 		return err
+	}
+	committed, err := node.transactionAlreadyCommitted(transactionID)
+	if err != nil {
+		return err
+	}
+	if committed {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: transaction already committed")
 	}
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
@@ -1325,12 +1452,11 @@ func mustBLSKeyPair(seedText string) consensus.BLSKeyPair {
 }
 
 func mustRawKeyPair(seedText string) rawKeyPair {
-	privateKey := utils.SHA256([]byte(seedText))
-	publicKey, err := utils.DeriveEd25519PublicKeyFromPrivateKey(privateKey)
+	keyPair, err := rawKeyPairFromSeedText(seedText)
 	if err != nil {
 		panic(err)
 	}
-	return rawKeyPair{publicKey: publicKey, privateKey: privateKey, peerID: utils.Base58Encode(publicKey)}
+	return keyPair
 }
 
 func mustHash(text string) structure.Hash {

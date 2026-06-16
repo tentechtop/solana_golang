@@ -25,14 +25,41 @@ type treasuryKeystoreFile struct {
 func (node *posNode) treasuryKeyPair() (structure.SolanaKeyPair, string, error) {
 	keyPath := strings.TrimSpace(node.config.TreasuryKeyPath)
 	if keyPath != "" {
-		keyPair, err := loadTreasuryKeyPairFromFile(keyPath, node.config.Production)
-		return keyPair, "keystore", err
+		keyPair, err := loadTreasuryKeyPairFromFile(keyPath, isProductionNodeConfig(node.config))
+		if err != nil {
+			return structure.SolanaKeyPair{}, "", err
+		}
+		if err := node.validateTreasuryKeyPair(keyPair); err != nil {
+			return structure.SolanaKeyPair{}, "", err
+		}
+		return keyPair, "keystore", nil
 	}
 	if !node.config.allowHardcodedTreasury() {
 		return structure.SolanaKeyPair{}, "", fmt.Errorf("posnode: treasury keystore is required")
 	}
 	keyPair, err := consensus.HardcodedGenesisTreasuryKeyPair()
-	return keyPair, "hardcoded_testnet", err
+	if err != nil {
+		return structure.SolanaKeyPair{}, "", err
+	}
+	if err := node.validateTreasuryKeyPair(keyPair); err != nil {
+		return structure.SolanaKeyPair{}, "", err
+	}
+	return keyPair, "hardcoded_testnet", nil
+}
+
+func (node *posNode) validateTreasuryKeyPair(keyPair structure.SolanaKeyPair) error {
+	expectedAddress := strings.TrimSpace(node.config.Genesis.TreasuryAddress)
+	if expectedAddress == "" {
+		return nil
+	}
+	expectedPublicKey, err := structure.PublicKeyFromBase58(expectedAddress)
+	if err != nil {
+		return fmt.Errorf("posnode: decode configured treasury address: %w", err)
+	}
+	if keyPair.PublicKey != expectedPublicKey {
+		return fmt.Errorf("posnode: treasury keystore public key does not match genesis treasury address")
+	}
+	return nil
 }
 
 func loadTreasuryKeyPairFromFile(path string, production bool) (structure.SolanaKeyPair, error) {

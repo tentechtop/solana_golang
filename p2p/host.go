@@ -241,6 +241,13 @@ func (host *Host) PeerID() string {
 	return host.peerID
 }
 
+// SecureSessionEnabled 返回安全会话状态 + 供节点状态和监控直接读取真实 Host 配置。
+func (host *Host) SecureSessionEnabled() bool {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	return host.secureSession
+}
+
 // RegisterTransport 注册传输实现 + 允许按协议替换 TCP 或 QUIC 实现。
 func (host *Host) RegisterTransport(transport Transport) error {
 	if transport == nil {

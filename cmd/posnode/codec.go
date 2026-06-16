@@ -71,10 +71,14 @@ type statusResponseEnvelope struct {
 	HeadQCHash      string              `json:"head_qc_hash,omitempty"`
 	FinalizedHeight uint64              `json:"finalized_height"`
 	FinalizedHash   string              `json:"finalized_hash"`
+	FinalityDepth   uint64              `json:"finality_depth"`
 	EpochID         uint64              `json:"epoch_id"`
 	MempoolSize     int                 `json:"mempool_size"`
 	ValidatorCount  int                 `json:"validator_count"`
 	KnownPeerCount  int                 `json:"known_peer_count"`
+	P2PSecure       bool                `json:"p2p_secure_session"`
+	P2PInsecure     bool                `json:"p2p_insecure_allowed"`
+	StateRecovery   bool                `json:"state_recovery_enabled"`
 	CurrentLeader   string              `json:"current_leader,omitempty"`
 	UpcomingLeaders []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
 	Turbine         turbinePositionJSON `json:"turbine"`

@@ -24,7 +24,7 @@ const (
 	defaultInvalidMessagePenalty         = 20
 	defaultRateLimitPenalty              = 15
 	defaultDuplicateMessagePenalty       = 5
-	defaultDialFailurePenalty            = 10
+	defaultDialFailurePenalty            = 0
 	defaultPeerSuccessReward             = 1
 	defaultSlowHandlerThreshold          = 250 * time.Millisecond
 )
@@ -165,7 +165,7 @@ func normalizePeerProtectionConfig(config PeerProtectionConfig, maxConnections .
 	if config.DuplicateMessagePenalty <= 0 {
 		config.DuplicateMessagePenalty = defaultDuplicateMessagePenalty
 	}
-	if config.DialFailurePenalty <= 0 {
+	if config.DialFailurePenalty < 0 {
 		config.DialFailurePenalty = defaultDialFailurePenalty
 	}
 	if config.SuccessReward <= 0 {
@@ -258,7 +258,9 @@ func (protection *peerProtection) recordDialFailure(peerID string, now time.Time
 	state := protection.peers[peerID]
 	state.dialFailures++
 	state.dialBackoffUntilUnixMilli = now.Add(protection.dialBackoff(state.dialFailures)).UnixMilli()
-	state = protection.penalizeState(state, protection.config.DialFailurePenalty, "dial-failure", now)
+	if protection.config.DialFailurePenalty > 0 {
+		state = protection.penalizeState(state, protection.config.DialFailurePenalty, "dial-failure", now)
+	}
 	protection.peers[peerID] = state
 	return snapshotPeerProtection(peerID, state, now)
 }

@@ -907,6 +907,9 @@ func TestHostDialPeerBacksOffAfterAllAttemptsFail(t *testing.T) {
 	if host.Metrics().DialBackoffs == 0 {
 		t.Fatal("DialBackoffs = 0, want backoff metric")
 	}
+	if host.Metrics().PeerBlocks != 0 {
+		t.Fatalf("PeerBlocks = %d, want 0 for dial failures", host.Metrics().PeerBlocks)
+	}
 }
 
 func TestHostDialPeerReturnsConcurrentExistingConnectionWithoutBackoff(t *testing.T) {
@@ -1193,6 +1196,37 @@ func TestHostDoesNotPenalizePeerOnWriteQueueBackpressure(t *testing.T) {
 	}
 	if peer.Score != 0 {
 		t.Fatalf("peer.Score = %d, want 0", peer.Score)
+	}
+}
+
+func TestHostRemovesConnectionOnUnexpectedWriteError(t *testing.T) {
+	localPeerID := testPeerID(98)
+	remotePeerID := testPeerID(99)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	if err := host.storeConnection(remotePeerID, connection); err != nil {
+		t.Fatalf("storeConnection() error = %v", err)
+	}
+	storedConnection, ok := host.Connection(remotePeerID)
+	if !ok {
+		t.Fatal("Connection() ok = false, want true")
+	}
+	host.recordConnectionError(storedConnection, errors.New("simulated broken pipe"))
+
+	if _, ok := host.Connection(remotePeerID); ok {
+		t.Fatal("Connection() ok = true after write error, want false")
+	}
+	replacement := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
+	if err := host.storeConnection(remotePeerID, replacement); err != nil {
+		t.Fatalf("storeConnection(replacement) error = %v", err)
 	}
 }
 

@@ -492,6 +492,7 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 	if errors.Is(err, ErrWriteQueueFull) {
 		return
 	}
+	unexpectedClose := !isExpectedConnectionClose(err)
 	var storedPeer Peer
 	shouldPersist := false
 	connectionID := connection.ID()
@@ -515,7 +516,7 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 	if shouldPersist {
 		host.savePeerBestEffort(storedPeer)
 	}
-	if !isExpectedConnectionClose(err) {
+	if unexpectedClose {
 		host.penalizePeer(peerID, host.peerProtection.config.InvalidMessagePenalty, "connection-error")
 		host.logger.Warn("p2p connection error recorded",
 			slog.String("peer_id", peerID),
@@ -523,6 +524,7 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 			slog.Uint64("failure_count", uint64(state.FailureCount)),
 			slog.Any("error", err),
 		)
+		host.closePeerConnection(peerID)
 	}
 }
 

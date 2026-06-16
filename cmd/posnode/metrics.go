@@ -50,9 +50,17 @@ type nodeOperationalMetrics struct {
 	QCHash            string              `json:"qc_hash"`
 	QCHeight          uint64              `json:"qc_height"`
 	FinalizedHeight   uint64              `json:"finalized_height"`
+	FinalityDepth     uint64              `json:"finality_depth"`
 	MempoolSize       int                 `json:"mempool_size"`
 	ValidatorCount    int                 `json:"validator_count"`
 	KnownPeerCount    int                 `json:"known_peer_count"`
+	P2PSecure         bool                `json:"p2p_secure_session"`
+	P2PConnections    uint64              `json:"p2p_connections"`
+	P2PHandshakeOK    uint64              `json:"p2p_secure_handshake_ok"`
+	P2PHandshakeFail  uint64              `json:"p2p_secure_handshake_failed"`
+	P2PRateLimited    uint64              `json:"p2p_messages_rate_limited"`
+	RuntimeGoroutines uint64              `json:"runtime_goroutines"`
+	RuntimeRSSBytes   uint64              `json:"runtime_rss_bytes"`
 	ForkCount         uint64              `json:"fork_count"`
 	ReorgCount        uint64              `json:"reorg_count"`
 	TurbineLayer      int                 `json:"turbine_layer"`
@@ -93,6 +101,23 @@ func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
 	node.refreshKnownPeersFromHost()
 	head := node.ledger.Head()
 	counters := node.metrics.snapshot()
+	p2pSecure := false
+	p2pConnections := uint64(0)
+	p2pHandshakeOK := uint64(0)
+	p2pHandshakeFail := uint64(0)
+	p2pRateLimited := uint64(0)
+	runtimeGoroutines := uint64(0)
+	runtimeRSSBytes := uint64(0)
+	if node.host != nil {
+		hostMetrics := node.host.Metrics()
+		p2pSecure = node.host.SecureSessionEnabled()
+		p2pConnections = hostMetrics.ConnectionCount
+		p2pHandshakeOK = hostMetrics.SecureHandshakeOK
+		p2pHandshakeFail = hostMetrics.SecureHandshakeFailed
+		p2pRateLimited = hostMetrics.MessagesRateLimited
+		runtimeGoroutines = hostMetrics.RuntimeGoroutines
+		runtimeRSSBytes = hostMetrics.RuntimeRSSBytes
+	}
 	uptimeSeconds := int64(0)
 	if !node.startedAt.IsZero() {
 		uptimeSeconds = int64(time.Since(node.startedAt).Seconds())
@@ -132,9 +157,17 @@ func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
 		QCHash:            head.QCHash.String(),
 		QCHeight:          qcHeight,
 		FinalizedHeight:   head.FinalizedHeight,
+		FinalityDepth:     node.ledger.FinalityDepth(),
 		MempoolSize:       len(node.mempool),
 		ValidatorCount:    len(node.epochSnapshot.Validators),
 		KnownPeerCount:    len(node.knownPeerIDs),
+		P2PSecure:         p2pSecure,
+		P2PConnections:    p2pConnections,
+		P2PHandshakeOK:    p2pHandshakeOK,
+		P2PHandshakeFail:  p2pHandshakeFail,
+		P2PRateLimited:    p2pRateLimited,
+		RuntimeGoroutines: runtimeGoroutines,
+		RuntimeRSSBytes:   runtimeRSSBytes,
 		ForkCount:         counters.ForkDecisions,
 		ReorgCount:        counters.Reorgs,
 		TurbineLayer:      turbine.Layer,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"solana_golang/blockchain"
 	"solana_golang/consensus"
 	"solana_golang/programs/stake"
 )
@@ -35,12 +36,19 @@ type nodeConfig struct {
 	StakerSeed                    string              `json:"staker_seed"`
 	ValidatorSeed                 string              `json:"validator_seed"`
 	ConsensusSeed                 string              `json:"consensus_seed"`
+	PeerKeyPath                   string              `json:"peer_key_path,omitempty"`
+	StakerKeyPath                 string              `json:"staker_key_path,omitempty"`
+	ValidatorKeyPath              string              `json:"validator_key_path,omitempty"`
+	ConsensusKeyPath              string              `json:"consensus_key_path,omitempty"`
+	BLSKeyPath                    string              `json:"bls_key_path,omitempty"`
 	StakeLamports                 uint64              `json:"stake_lamports"`
 	BootstrapPeers                []peerConfig        `json:"bootstrap_peers"`
 	Genesis                       genesisConfig       `json:"genesis"`
 	SlotMillis                    int                 `json:"slot_millis"`
 	GenesisStartMs                int64               `json:"genesis_start_unix_millis"`
 	EpochSlots                    uint64              `json:"epoch_slots"`
+	FinalityDepth                 uint64              `json:"finality_depth"`
+	DisableStateRecovery          bool                `json:"disable_state_recovery,omitempty"`
 	TurbineFanout                 int                 `json:"turbine_fanout"`
 	AutoRegister                  bool                `json:"auto_register"`
 	MempoolMaxTransactions        int                 `json:"mempool_max_transactions"`
@@ -61,21 +69,28 @@ type peerConfig struct {
 
 type genesisConfig struct {
 	InitialSupplyLamports uint64                   `json:"initial_supply_lamports"`
+	TreasuryAddress       string                   `json:"treasury_address,omitempty"`
 	FundedAccounts        []genesisAccountConfig   `json:"funded_accounts"`
 	InitialValidators     []genesisValidatorConfig `json:"initial_validators"`
 }
 
 type genesisAccountConfig struct {
+	Address  string `json:"address,omitempty"`
 	Seed     string `json:"seed"`
 	Lamports uint64 `json:"lamports"`
 }
 
 type genesisValidatorConfig struct {
-	StakerSeed    string `json:"staker_seed"`
-	ValidatorSeed string `json:"validator_seed"`
-	ConsensusSeed string `json:"consensus_seed"`
-	PeerID        string `json:"peer_id"`
-	StakeLamports uint64 `json:"stake_lamports"`
+	StakerSeed         string `json:"staker_seed"`
+	ValidatorSeed      string `json:"validator_seed"`
+	ConsensusSeed      string `json:"consensus_seed"`
+	StakerAddress      string `json:"staker_address,omitempty"`
+	ValidatorAddress   string `json:"validator_address,omitempty"`
+	ConsensusPublicKey string `json:"consensus_public_key,omitempty"`
+	BLSPublicKeyBase64 string `json:"bls_public_key_base64,omitempty"`
+	PeerID             string `json:"peer_id"`
+	StakeLamports      uint64 `json:"stake_lamports"`
+	CommissionBps      uint16 `json:"commission_bps,omitempty"`
 }
 
 type autoTransferConfig struct {
@@ -132,6 +147,12 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if config.EpochSlots == 0 {
 		config.EpochSlots = defaultEpochSlots
 	}
+	if config.FinalityDepth == 0 {
+		config.FinalityDepth = blockchain.DefaultFinalityDepth
+	}
+	if config.FinalityDepth < 1 || config.FinalityDepth > 1_000_000 {
+		return nodeConfig{}, fmt.Errorf("posnode: finality depth must be 1..1000000")
+	}
 	if config.TurbineFanout == 0 {
 		config.TurbineFanout = consensus.DefaultTurbineFanout
 	}
@@ -165,6 +186,9 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if isProductionNodeConfig(config) && strings.TrimSpace(config.TreasuryKeyPath) == "" {
 		return nodeConfig{}, fmt.Errorf("posnode: production treasury key path is required")
 	}
+	if isProductionNodeConfig(config) && !config.hasProductionKeyPaths() {
+		return nodeConfig{}, fmt.Errorf("posnode: production key paths are required")
+	}
 	if isProductionNodeConfig(config) && config.allowInsecureP2P() {
 		return nodeConfig{}, fmt.Errorf("posnode: insecure p2p disabled in production")
 	}
@@ -174,8 +198,11 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if len(config.Genesis.FundedAccounts) == 0 {
 		return nodeConfig{}, fmt.Errorf("posnode: genesis funded accounts are empty")
 	}
-	if config.PeerSeed == "" || config.StakerSeed == "" || config.ValidatorSeed == "" || config.ConsensusSeed == "" {
-		return nodeConfig{}, fmt.Errorf("posnode: node seeds are required")
+	if isProductionNodeConfig(config) && !config.hasProductionGenesisPublicKeys() {
+		return nodeConfig{}, fmt.Errorf("posnode: production genesis public keys are required")
+	}
+	if !config.hasNodeKeyMaterial() {
+		return nodeConfig{}, fmt.Errorf("posnode: node key material is required")
 	}
 	return config, nil
 }
@@ -190,6 +217,9 @@ func (config nodeConfig) genesisStartTime() time.Time {
 
 func (config nodeConfig) allowInsecureP2P() bool {
 	if config.AllowInsecureP2P == nil {
+		if isProductionNodeConfig(config) {
+			return false
+		}
 		return true
 	}
 	return *config.AllowInsecureP2P
@@ -218,4 +248,56 @@ func isProductionNodeConfig(config nodeConfig) bool {
 	}
 	environment := strings.TrimSpace(strings.ToLower(config.Environment))
 	return environment == "production" || environment == "prod"
+}
+
+func (config nodeConfig) hasProductionKeyPaths() bool {
+	return strings.TrimSpace(config.PeerKeyPath) != "" &&
+		strings.TrimSpace(config.StakerKeyPath) != "" &&
+		strings.TrimSpace(config.ValidatorKeyPath) != "" &&
+		strings.TrimSpace(config.ConsensusKeyPath) != "" &&
+		strings.TrimSpace(config.BLSKeyPath) != ""
+}
+
+func (config nodeConfig) hasNodeKeyMaterial() bool {
+	if strings.TrimSpace(config.PeerSeed) == "" && strings.TrimSpace(config.PeerKeyPath) == "" {
+		return false
+	}
+	if strings.TrimSpace(config.StakerSeed) == "" && strings.TrimSpace(config.StakerKeyPath) == "" {
+		return false
+	}
+	if strings.TrimSpace(config.ValidatorSeed) == "" && strings.TrimSpace(config.ValidatorKeyPath) == "" {
+		return false
+	}
+	if strings.TrimSpace(config.ConsensusSeed) == "" && strings.TrimSpace(config.ConsensusKeyPath) == "" {
+		return false
+	}
+	if strings.TrimSpace(config.ConsensusSeed) == "" && strings.TrimSpace(config.BLSKeyPath) == "" {
+		return false
+	}
+	return true
+}
+
+func (config nodeConfig) hasProductionGenesisPublicKeys() bool {
+	if strings.TrimSpace(config.Genesis.TreasuryAddress) == "" {
+		return false
+	}
+	for _, account := range config.Genesis.FundedAccounts {
+		if strings.TrimSpace(account.Address) == "" || strings.TrimSpace(account.Seed) != "" {
+			return false
+		}
+	}
+	for _, validator := range config.Genesis.InitialValidators {
+		if strings.TrimSpace(validator.StakerAddress) == "" ||
+			strings.TrimSpace(validator.ValidatorAddress) == "" ||
+			strings.TrimSpace(validator.ConsensusPublicKey) == "" ||
+			strings.TrimSpace(validator.BLSPublicKeyBase64) == "" {
+			return false
+		}
+		if strings.TrimSpace(validator.StakerSeed) != "" ||
+			strings.TrimSpace(validator.ValidatorSeed) != "" ||
+			strings.TrimSpace(validator.ConsensusSeed) != "" {
+			return false
+		}
+	}
+	return true
 }

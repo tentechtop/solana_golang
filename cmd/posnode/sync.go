@@ -603,6 +603,10 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 	defer node.mutex.Unlock()
 	currentLeader := ""
 	startSlot := node.currentRoutingSlotLocked()
+	p2pSecure := false
+	if node.host != nil {
+		p2pSecure = node.host.SecureSessionEnabled()
+	}
 	if node.epochSnapshot.StartSlot <= startSlot && startSlot <= node.epochSnapshot.EndSlot {
 		if leader, err := node.leaderSchedule.LeaderForSlot(startSlot); err == nil {
 			currentLeader = string(leader)
@@ -620,10 +624,14 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		HeadQCHash:      head.QCHash.String(),
 		FinalizedHeight: head.FinalizedHeight,
 		FinalizedHash:   head.FinalizedHash.String(),
+		FinalityDepth:   node.ledger.FinalityDepth(),
 		EpochID:         node.epochSnapshot.EpochID,
 		MempoolSize:     len(node.mempool),
 		ValidatorCount:  len(node.epochSnapshot.Validators),
 		KnownPeerCount:  len(node.knownPeerIDs),
+		P2PSecure:       p2pSecure,
+		P2PInsecure:     node.config.allowInsecureP2P(),
+		StateRecovery:   !node.config.DisableStateRecovery,
 		CurrentLeader:   currentLeader,
 		UpcomingLeaders: node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
 		Turbine:         turbine,

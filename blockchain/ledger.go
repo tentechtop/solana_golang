@@ -20,31 +20,43 @@ var (
 	chainHeadKey   = []byte("pos/head")
 	qcKeyPrefix    = []byte("qc/")
 	stateKeyPrefix = []byte("state/")
-	finalityDepth  = uint64(2)
 )
+
+const DefaultFinalityDepth = uint64(2)
 
 // Ledger 保存链账本状态 + 统一提交区块、账户和 QC，避免业务散落在 cmd。
 type Ledger struct {
-	mutex  sync.RWMutex
-	db     database.Database
-	logger *slog.Logger
-	head   Head
-	state  consensus.ChainState
-	closed bool
+	mutex                 sync.RWMutex
+	db                    database.Database
+	logger                *slog.Logger
+	head                  Head
+	state                 consensus.ChainState
+	committedTransactions map[string]structure.Hash
+	finalityDepth         uint64
+	closed                bool
 }
 
 // NewLedgerFromGenesis 创建账本 + 空数据库和内存模式都从同一 genesis 状态启动。
 func NewLedgerFromGenesis(db database.Database, genesis GenesisConfig) (*Ledger, error) {
+	return NewLedgerFromGenesisWithConfig(db, genesis, LedgerConfig{})
+}
+
+// NewLedgerFromGenesisWithConfig 创建账本 + 按配置写入 finality 参数和创世状态。
+func NewLedgerFromGenesisWithConfig(db database.Database, genesis GenesisConfig, config LedgerConfig) (*Ledger, error) {
+	config = normalizeLedgerConfig(config)
 	state, head, err := BuildGenesisState(genesis)
 	if err != nil {
 		return nil, err
 	}
-	ledger := &Ledger{db: db, head: head, state: state}
+	ledger := &Ledger{
+		db:                    db,
+		head:                  head,
+		state:                 state,
+		committedTransactions: make(map[string]structure.Hash),
+		finalityDepth:         config.FinalityDepth,
+	}
 	if db != nil {
-		if err := ledger.persistStateLocked(state); err != nil {
-			return nil, err
-		}
-		if err := ledger.persistHeadLocked(head); err != nil {
+		if err := ledger.persistGenesisLocked(state, head); err != nil {
 			return nil, err
 		}
 	}
@@ -57,17 +69,37 @@ func (ledger *Ledger) SetLogger(logger *slog.Logger) {
 	ledger.logger = utils.EnsureLogger(logger)
 }
 
+// HasCommittedTransaction 查询主链交易索引 + mempool 和 RPC 用它阻止已上链交易重放。
+func (ledger *Ledger) HasCommittedTransaction(transactionID string) (bool, error) {
+	if transactionID == "" {
+		return false, nil
+	}
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return false, ErrLedgerClosed
+	}
+	_, exists := ledger.committedTransactions[transactionID]
+	return exists, nil
+}
+
 // LoadOrCreateLedger 加载已有账本或创建 genesis + 节点重启后不能回到创世状态。
 func LoadOrCreateLedger(db database.Database, genesis GenesisConfig) (*Ledger, error) {
+	return LoadOrCreateLedgerWithConfig(db, genesis, LedgerConfig{})
+}
+
+// LoadOrCreateLedgerWithConfig 加载账本并校验状态根 + 防止损坏账户表绕过链头状态。
+func LoadOrCreateLedgerWithConfig(db database.Database, genesis GenesisConfig, config LedgerConfig) (*Ledger, error) {
+	config = normalizeLedgerConfig(config)
 	if db == nil {
-		return NewLedgerFromGenesis(nil, genesis)
+		return NewLedgerFromGenesisWithConfig(nil, genesis, config)
 	}
 	headBytes, err := db.Get(database.TableChain, chainHeadKey)
 	if err != nil {
-		return NewLedgerFromGenesis(db, genesis)
+		return NewLedgerFromGenesisWithConfig(db, genesis, config)
 	}
 	if len(headBytes) == 0 {
-		return NewLedgerFromGenesis(db, genesis)
+		return NewLedgerFromGenesisWithConfig(db, genesis, config)
 	}
 	head, err := unmarshalHead(headBytes)
 	if err != nil {
@@ -77,7 +109,26 @@ func LoadOrCreateLedger(db database.Database, genesis GenesisConfig) (*Ledger, e
 	if err != nil {
 		return nil, err
 	}
-	return &Ledger{db: db, head: head, state: state}, nil
+	if !config.DisableStateRecovery {
+		recoveredState, _, err := recoverLoadedStateFromSnapshot(db, head, state)
+		if err != nil {
+			return nil, err
+		}
+		state = recoveredState
+	} else if err := validateStateRootMatchesHead(state, head); err != nil {
+		return nil, err
+	}
+	transactionIndex, err := loadCommittedTransactionIndex(db, head)
+	if err != nil {
+		return nil, err
+	}
+	return &Ledger{
+		db:                    db,
+		head:                  head,
+		state:                 state,
+		committedTransactions: transactionIndex,
+		finalityDepth:         config.FinalityDepth,
+	}, nil
 }
 
 // BuildGenesisState 构建创世状态 + 写死 treasury 并初始化启动验证者 stake account。
@@ -89,9 +140,13 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		genesis.InitialSupplyLamports = consensus.DefaultGenesisSupplyLamports
 	}
 
-	treasuryKeyPair, err := consensus.HardcodedGenesisTreasuryKeyPair()
-	if err != nil {
-		return consensus.ChainState{}, Head{}, err
+	treasuryAddress := genesis.TreasuryAddress
+	if treasuryAddress.IsZero() {
+		treasuryKeyPair, err := consensus.HardcodedGenesisTreasuryKeyPair()
+		if err != nil {
+			return consensus.ChainState{}, Head{}, err
+		}
+		treasuryAddress = treasuryKeyPair.PublicKey
 	}
 	accounts := make([]structure.AddressedAccount, 0, len(genesis.FundedAccounts)+len(genesis.InitialValidators)+3)
 	treasuryLamports := genesis.InitialSupplyLamports
@@ -117,7 +172,7 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		}
 		accounts = append(accounts, account)
 	}
-	accounts = append(accounts, mustAccount(treasuryKeyPair.PublicKey, treasuryLamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
+	accounts = append(accounts, mustAccount(treasuryAddress, treasuryLamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
 	accounts = append(accounts, mustAccount(structure.DefaultBuiltinProgramIDs.System, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
 	accounts = append(accounts, mustAccount(structure.DefaultBuiltinProgramIDs.Stake, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
 	state := consensus.ChainState{Accounts: mergeGenesisAccounts(accounts)}
@@ -159,6 +214,13 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (committedHead Hea
 	if err := request.validate(ledger.head); err != nil {
 		return Head{}, err
 	}
+	transactionIDs, err := transactionIDsForProposal(request.Proposal)
+	if err != nil {
+		return Head{}, err
+	}
+	if err := ledger.rejectCommittedTransactionIDsLocked(transactionIDs); err != nil {
+		return Head{}, err
+	}
 	blockHash, err = request.Proposal.Hash()
 	if err != nil {
 		return Head{}, fmt.Errorf("blockchain: hash proposal: %w", err)
@@ -196,10 +258,11 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (committedHead Hea
 		nextHead.QCHash = qcHash
 	}
 	if ledger.db != nil {
-		if err := ledger.persistCommitLocked(request, blockHash, nextHead); err != nil {
+		if err := ledger.persistCommitLocked(request, blockHash, nextHead, transactionIDs); err != nil {
 			return Head{}, err
 		}
 	}
+	ledger.addCommittedTransactionIDsLocked(transactionIDs, blockHash)
 	ledger.state = request.NextState
 	ledger.head = nextHead
 	return nextHead, nil
@@ -227,6 +290,9 @@ func (ledger *Ledger) SaveBlockCandidate(request CommitBlockRequest) (blockHash 
 	}
 	if stateRoot != request.Proposal.Header.StateRoot {
 		return structure.Hash{}, fmt.Errorf("%w: candidate state root mismatch", ErrInvalidCommit)
+	}
+	if _, err := transactionIDsForProposal(request.Proposal); err != nil {
+		return structure.Hash{}, err
 	}
 	if ledger.db != nil {
 		ops, err := ledger.collectBlockStorageOps(request.Proposal, blockHash, request.NextState)
@@ -311,13 +377,14 @@ func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (decision ForkDeci
 		FinalizedHash:   finalizedHash,
 		UpdatedAtMs:     time.Now().UnixMilli(),
 	}
-	ops, err := collectReorgOps(readTx, nextHead, oldBlocks, newBlocks, nextState)
+	ops, transactionDelta, err := collectReorgOps(readTx, nextHead, oldBlocks, newBlocks, nextState)
 	if err != nil {
 		return ForkDecision{}, err
 	}
 	if err := ledger.db.DataTransaction(ops); err != nil {
 		return ForkDecision{}, fmt.Errorf("blockchain: commit reorg transaction: %w", err)
 	}
+	ledger.applyTransactionIndexDeltaLocked(transactionDelta)
 	ledger.head = nextHead
 	ledger.state = nextState
 	loggedHead = nextHead
@@ -396,15 +463,31 @@ func (ledger *Ledger) RewardQCs(maxBlockHeight uint64, limit int) ([]consensus.Q
 	if err != nil {
 		return nil, fmt.Errorf("blockchain: read reward qcs: %w", err)
 	}
-	qcs := make([]consensus.QuorumCertificate, 0, len(values))
+	bestQCsBySlot := make(map[uint64]consensus.QuorumCertificate)
+	mainChainHashesByHeight := make(map[uint64]structure.Hash)
+	missingMainChainHeights := make(map[uint64]struct{})
 	for _, value := range values {
 		qc, err := consensus.UnmarshalCertificateBinary(value.Value)
 		if err != nil {
 			return nil, err
 		}
-		if qc.Type != consensus.VoteTypeConfirm || qc.BlockHeight == 0 || qc.BlockHeight > maxBlockHeight {
+		if !isRewardCandidateQC(qc, maxBlockHeight) {
 			continue
 		}
+		mainChainHash, exists, err := readMainChainHashForRewardQC(readTx, mainChainHashesByHeight, missingMainChainHeights, qc.BlockHeight)
+		if err != nil {
+			return nil, err
+		}
+		if !exists || mainChainHash != qc.BlockHash {
+			continue
+		}
+		currentQC, exists := bestQCsBySlot[qc.Slot]
+		if !exists || isBetterRewardQC(qc, currentQC) {
+			bestQCsBySlot[qc.Slot] = qc
+		}
+	}
+	qcs := make([]consensus.QuorumCertificate, 0, len(bestQCsBySlot))
+	for _, qc := range bestQCsBySlot {
 		qcs = append(qcs, qc)
 	}
 	sort.Slice(qcs, func(leftIndex int, rightIndex int) bool {
@@ -424,6 +507,57 @@ func (ledger *Ledger) RewardQCs(maxBlockHeight uint64, limit int) ([]consensus.Q
 	return qcs, nil
 }
 
+// isRewardCandidateQC 过滤奖励候选 QC + 只允许已 finalized 范围内的确认票参与奖励。
+func isRewardCandidateQC(qc consensus.QuorumCertificate, maxBlockHeight uint64) bool {
+	return qc.Type == consensus.VoteTypeConfirm && qc.BlockHeight > 0 && qc.BlockHeight <= maxBlockHeight
+}
+
+// readMainChainHashForRewardQC 读取主链高度索引 + 奖励只能基于当前主链区块防止侧链污染。
+func readMainChainHashForRewardQC(
+	readTx database.ReadTransaction,
+	cachedHashes map[uint64]structure.Hash,
+	missingHeights map[uint64]struct{},
+	height uint64,
+) (structure.Hash, bool, error) {
+	if hash, exists := cachedHashes[height]; exists {
+		return hash, true, nil
+	}
+	if _, missing := missingHeights[height]; missing {
+		return structure.Hash{}, false, nil
+	}
+	hashBytes, err := readTx.Get(database.TableHeightToHash, uint64Key(height))
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: read reward main chain hash: %w", err)
+	}
+	if len(hashBytes) == 0 {
+		missingHeights[height] = struct{}{}
+		return structure.Hash{}, false, nil
+	}
+	hash, err := structure.NewHash(hashBytes)
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: decode reward main chain hash: %w", err)
+	}
+	cachedHashes[height] = hash
+	return hash, true, nil
+}
+
+// isBetterRewardQC 选择同 slot 最佳 QC + 多阶段聚合时只用最高确认权重生成奖励。
+func isBetterRewardQC(candidate consensus.QuorumCertificate, current consensus.QuorumCertificate) bool {
+	if candidate.ConfirmedStake != current.ConfirmedStake {
+		return candidate.ConfirmedStake > current.ConfirmedStake
+	}
+	if len(candidate.Voters) != len(current.Voters) {
+		return len(candidate.Voters) > len(current.Voters)
+	}
+	if candidate.CreatedAtUnixMilli != current.CreatedAtUnixMilli {
+		return candidate.CreatedAtUnixMilli > current.CreatedAtUnixMilli
+	}
+	if candidate.BlockHeight != current.BlockHeight {
+		return candidate.BlockHeight > current.BlockHeight
+	}
+	return candidate.BlockHash.String() < current.BlockHash.String()
+}
+
 // State 返回账户状态快照 + 调用方不能修改账本内部切片。
 func (ledger *Ledger) State() consensus.ChainState {
 	ledger.mutex.RLock()
@@ -436,6 +570,16 @@ func (ledger *Ledger) Head() Head {
 	ledger.mutex.RLock()
 	defer ledger.mutex.RUnlock()
 	return ledger.head
+}
+
+// FinalityDepth 返回不可回滚深度 + 供 RPC 和监控确认所有节点使用一致规则。
+func (ledger *Ledger) FinalityDepth() uint64 {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.finalityDepth == 0 {
+		return DefaultFinalityDepth
+	}
+	return ledger.finalityDepth
 }
 
 // StateAtBlockHash 读取指定区块状态快照 + 分叉验证必须基于父块快照而不是当前 head。
@@ -882,7 +1026,7 @@ func hashesToStrings(hashes []structure.Hash) []string {
 	return values
 }
 
-func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash structure.Hash, head Head) error {
+func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash structure.Hash, head Head, transactionIDs []string) error {
 	operations, err := ledger.collectBlockStorageOps(request.Proposal, blockHash, request.NextState)
 	if err != nil {
 		return err
@@ -891,6 +1035,7 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), blockHash[:]),
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
+	appendTransactionIndexOps(&operations, transactionIDs, blockHash)
 	if request.QC != nil {
 		qcBytes, err := request.QC.MarshalBinary()
 		if err != nil {
@@ -982,6 +1127,83 @@ func (ledger *Ledger) collectBlockStorageOps(proposal consensus.BlockProposal, b
 	return operations, nil
 }
 
+func transactionIDsForProposal(proposal consensus.BlockProposal) ([]string, error) {
+	transactionIDs := make([]string, 0, len(proposal.Transactions))
+	seenTransactionIDs := make(map[string]struct{}, len(proposal.Transactions))
+	for _, transaction := range proposal.Transactions {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return nil, fmt.Errorf("blockchain: calculate transaction id: %w", err)
+		}
+		if _, exists := seenTransactionIDs[transactionID]; exists {
+			return nil, fmt.Errorf("%w: duplicate transaction %s in block", ErrInvalidCommit, transactionID)
+		}
+		seenTransactionIDs[transactionID] = struct{}{}
+		transactionIDs = append(transactionIDs, transactionID)
+	}
+	return transactionIDs, nil
+}
+
+func appendTransactionIndexOps(operations *[]database.DBOperation, transactionIDs []string, blockHash structure.Hash) {
+	for _, transactionID := range transactionIDs {
+		*operations = append(*operations, database.NewUpdateOperation(database.TableTxToBlock, []byte(transactionID), blockHash[:]))
+	}
+}
+
+func (ledger *Ledger) rejectCommittedTransactionIDsLocked(transactionIDs []string) error {
+	for _, transactionID := range transactionIDs {
+		if _, exists := ledger.committedTransactions[transactionID]; exists {
+			return fmt.Errorf("%w: transaction %s already committed", ErrInvalidCommit, transactionID)
+		}
+	}
+	return nil
+}
+
+func (ledger *Ledger) addCommittedTransactionIDsLocked(transactionIDs []string, blockHash structure.Hash) {
+	if ledger.committedTransactions == nil {
+		ledger.committedTransactions = make(map[string]structure.Hash)
+	}
+	for _, transactionID := range transactionIDs {
+		ledger.committedTransactions[transactionID] = blockHash
+	}
+}
+
+func (ledger *Ledger) applyTransactionIndexDeltaLocked(delta transactionIndexDelta) {
+	if ledger.committedTransactions == nil {
+		ledger.committedTransactions = make(map[string]structure.Hash)
+	}
+	for _, transactionID := range delta.RemoveIDs {
+		delete(ledger.committedTransactions, transactionID)
+	}
+	for transactionID, blockHash := range delta.Add {
+		ledger.committedTransactions[transactionID] = blockHash
+	}
+}
+
+func (ledger *Ledger) persistGenesisLocked(state consensus.ChainState, head Head) error {
+	operations := make([]database.DBOperation, 0, len(state.Accounts)*2+3)
+	for _, account := range state.Accounts {
+		accountBytes, err := account.Account.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("blockchain: marshal genesis account: %w", err)
+		}
+		operations = append(operations,
+			database.NewUpdateOperation(database.TableAccount, account.Address[:], accountBytes),
+			database.NewUpdateOperation(database.TableCheckpoint, stateAccountKey(head.BlockHash, account.Address), accountBytes),
+		)
+	}
+	headBytes, err := marshalHead(head)
+	if err != nil {
+		return err
+	}
+	operations = append(operations,
+		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), head.BlockHash[:]),
+		database.NewUpdateOperation(database.TableHashToHeight, head.BlockHash[:], uint64Key(head.Height)),
+		database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes),
+	)
+	return ledger.db.DataTransaction(operations)
+}
+
 func (ledger *Ledger) persistStateLocked(state consensus.ChainState) error {
 	operations := make([]database.DBOperation, 0, len(state.Accounts))
 	for _, account := range state.Accounts {
@@ -1029,6 +1251,121 @@ func loadStateFromReader(readTx database.ReadTransaction) (consensus.ChainState,
 		accounts = append(accounts, structure.AddressedAccount{Address: address, Account: account})
 	}
 	return consensus.ChainState{Accounts: accounts}, nil
+}
+
+func normalizeLedgerConfig(config LedgerConfig) LedgerConfig {
+	if config.FinalityDepth == 0 {
+		config.FinalityDepth = DefaultFinalityDepth
+	}
+	return config
+}
+
+func validateStateRootMatchesHead(state consensus.ChainState, head Head) error {
+	stateRoot, err := state.RootHash()
+	if err != nil {
+		return fmt.Errorf("blockchain: hash loaded state: %w", err)
+	}
+	if stateRoot != head.StateRoot {
+		return fmt.Errorf("%w: loaded state root %s does not match head %s", ErrInvalidCommit, stateRoot.String(), head.StateRoot.String())
+	}
+	return nil
+}
+
+func recoverLoadedStateFromSnapshot(db database.Database, head Head, state consensus.ChainState) (consensus.ChainState, bool, error) {
+	if err := validateStateRootMatchesHead(state, head); err == nil {
+		return state, false, nil
+	}
+	readTx, err := db.BeginReadTransaction()
+	if err != nil {
+		return consensus.ChainState{}, false, fmt.Errorf("blockchain: begin state recovery snapshot: %w", err)
+	}
+	defer readTx.Close()
+	recoveredState, err := loadStateSnapshot(readTx, head.BlockHash)
+	if err != nil {
+		return consensus.ChainState{}, false, err
+	}
+	if len(recoveredState.Accounts) == 0 {
+		return consensus.ChainState{}, false, fmt.Errorf("%w: head state snapshot not found", ErrInvalidCommit)
+	}
+	if err := validateStateRootMatchesHead(recoveredState, head); err != nil {
+		return consensus.ChainState{}, false, err
+	}
+	operations := make([]database.DBOperation, 0, len(recoveredState.Accounts))
+	if err := appendAccountSnapshotImportOps(db, &operations, recoveredState); err != nil {
+		return consensus.ChainState{}, false, err
+	}
+	if err := db.DataTransaction(operations); err != nil {
+		return consensus.ChainState{}, false, fmt.Errorf("blockchain: commit recovered state: %w", err)
+	}
+	return recoveredState, true, nil
+}
+
+func loadCommittedTransactionIndex(db database.Database, head Head) (map[string]structure.Hash, error) {
+	readTx, err := db.BeginReadTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("blockchain: begin transaction index snapshot: %w", err)
+	}
+	defer readTx.Close()
+	values, err := readTx.RangeQuery(database.TableTxToBlock, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("blockchain: load transaction index: %w", err)
+	}
+	if len(values) > 0 {
+		index := make(map[string]structure.Hash, len(values))
+		for _, value := range values {
+			blockHash, err := structure.NewHash(value.Value)
+			if err != nil {
+				return nil, err
+			}
+			index[string(value.Key)] = blockHash
+		}
+		return index, nil
+	}
+	return rebuildCommittedTransactionIndex(readTx, head)
+}
+
+func rebuildCommittedTransactionIndex(readTx database.ReadTransaction, head Head) (map[string]structure.Hash, error) {
+	index := make(map[string]structure.Hash)
+	for height := uint64(1); height <= head.Height; height++ {
+		blockHashBytes, err := readTx.Get(database.TableHeightToHash, uint64Key(height))
+		if err != nil {
+			return nil, fmt.Errorf("blockchain: read height index for transaction rebuild: %w", err)
+		}
+		if len(blockHashBytes) == 0 {
+			continue
+		}
+		blockHash, err := structure.NewHash(blockHashBytes)
+		if err != nil {
+			return nil, err
+		}
+		proposal, err := loadProposalByHash(readTx, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		transactionIDs, err := transactionIDsForProposal(proposal)
+		if err != nil {
+			return nil, err
+		}
+		for _, transactionID := range transactionIDs {
+			index[transactionID] = blockHash
+		}
+	}
+	return index, nil
+}
+
+func readTransactionIndex(readTx database.ReadTransaction, transactionID string) (structure.Hash, bool, error) {
+	blockHashBytes, err := readTx.Get(database.TableTxToBlock, []byte(transactionID))
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: read transaction index: %w", err)
+	}
+	if len(blockHashBytes) == 0 {
+		return structure.Hash{}, false, nil
+	}
+	blockHash, err := structure.NewHash(blockHashBytes)
+	if err != nil {
+		return structure.Hash{}, false, err
+	}
+	return blockHash, true, nil
 }
 
 func loadStateSnapshot(readTx database.ReadTransaction, blockHash structure.Hash) (consensus.ChainState, error) {
@@ -1280,19 +1617,57 @@ func collectNewBlocks(readTx database.ReadTransaction, newTip consensus.BlockPro
 	return reversed, nil
 }
 
-func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []structure.Hash, newBlocks []structure.Hash, state consensus.ChainState) ([]database.DBOperation, error) {
+type transactionIndexDelta struct {
+	RemoveIDs []string
+	Add       map[string]structure.Hash
+}
+
+func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []structure.Hash, newBlocks []structure.Hash, state consensus.ChainState) ([]database.DBOperation, transactionIndexDelta, error) {
 	operations := make([]database.DBOperation, 0, len(oldBlocks)+len(newBlocks)+len(state.Accounts)+1)
+	delta := transactionIndexDelta{Add: make(map[string]structure.Hash)}
+	oldBlockSet := make(map[structure.Hash]struct{}, len(oldBlocks))
 	for _, oldHash := range oldBlocks {
+		oldBlockSet[oldHash] = struct{}{}
 		oldBlock, err := loadProposalByHash(readTx, oldHash)
 		if err != nil {
-			return nil, err
+			return nil, delta, err
+		}
+		oldTransactionIDs, err := transactionIDsForProposal(oldBlock)
+		if err != nil {
+			return nil, delta, err
+		}
+		for _, transactionID := range oldTransactionIDs {
+			delta.RemoveIDs = append(delta.RemoveIDs, transactionID)
+			operations = append(operations, database.NewDeleteOperation(database.TableTxToBlock, []byte(transactionID)))
 		}
 		operations = append(operations, database.NewDeleteOperation(database.TableHeightToHash, uint64Key(oldBlock.Header.Height)))
 	}
+	seenNewTransactionIDs := make(map[string]struct{})
 	for _, newHash := range newBlocks {
 		newBlock, err := loadProposalByHash(readTx, newHash)
 		if err != nil {
-			return nil, err
+			return nil, delta, err
+		}
+		newTransactionIDs, err := transactionIDsForProposal(newBlock)
+		if err != nil {
+			return nil, delta, err
+		}
+		for _, transactionID := range newTransactionIDs {
+			if _, exists := seenNewTransactionIDs[transactionID]; exists {
+				return nil, delta, fmt.Errorf("%w: duplicate transaction %s in new fork", ErrInvalidCommit, transactionID)
+			}
+			seenNewTransactionIDs[transactionID] = struct{}{}
+			indexedBlockHash, exists, err := readTransactionIndex(readTx, transactionID)
+			if err != nil {
+				return nil, delta, err
+			}
+			if exists {
+				if _, rolledBack := oldBlockSet[indexedBlockHash]; !rolledBack {
+					return nil, delta, fmt.Errorf("%w: transaction %s already committed", ErrInvalidCommit, transactionID)
+				}
+			}
+			delta.Add[transactionID] = newHash
+			operations = append(operations, database.NewUpdateOperation(database.TableTxToBlock, []byte(transactionID), newHash[:]))
 		}
 		heightBytes := uint64Key(newBlock.Header.Height)
 		operations = append(operations, database.NewUpdateOperation(database.TableHeightToHash, heightBytes, newHash[:]))
@@ -1300,16 +1675,16 @@ func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []str
 	for _, account := range state.Accounts {
 		accountBytes, err := account.Account.MarshalBinary()
 		if err != nil {
-			return nil, fmt.Errorf("blockchain: marshal reorg account: %w", err)
+			return nil, delta, fmt.Errorf("blockchain: marshal reorg account: %w", err)
 		}
 		operations = append(operations, database.NewUpdateOperation(database.TableAccount, account.Address[:], accountBytes))
 	}
 	headBytes, err := marshalHead(head)
 	if err != nil {
-		return nil, err
+		return nil, delta, err
 	}
 	operations = append(operations, database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes))
-	return operations, nil
+	return operations, delta, nil
 }
 
 func isBetterTip(header consensus.BlockHeader, hash structure.Hash, head Head) bool {
@@ -1383,6 +1758,10 @@ func finalizedHashFromReorgPlan(
 }
 
 func (ledger *Ledger) nextFinalizedHeight(nextHeight uint64) uint64 {
+	finalityDepth := ledger.finalityDepth
+	if finalityDepth == 0 {
+		finalityDepth = DefaultFinalityDepth
+	}
 	if nextHeight <= finalityDepth {
 		return ledger.head.FinalizedHeight
 	}

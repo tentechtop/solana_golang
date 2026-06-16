@@ -9,15 +9,16 @@
   "rpc_enabled": true,
   "rpc_listen_ip": "0.0.0.0",
   "rpc_port": 8899,
-  "allow_insecure_p2p": true,
+  "allow_insecure_p2p": false,
   "peer_seed": "node-local-win",
   "staker_seed": "staker-local-win",
   "validator_seed": "validator-local-win",
   "consensus_seed": "consensus-local-win",
   "stake_lamports": 10000000,
   "slot_millis": 2000,
-  "genesis_start_unix_millis": 1781597588224,
+  "genesis_start_unix_millis": 1781599860553,
   "epoch_slots": 1500,
+  "finality_depth": 2,
   "turbine_fanout": 2,
   "auto_register": false,
   "mempool_max_transactions": 5000,
@@ -33,7 +34,7 @@
     },
     {
       "peer_id": "EPqwecxfEdeeB3ZtKCVVjEohLYZXQ1XHZapdkeBYirB1",
-      "ip": "192.168.120.223",
+      "ip": "192.168.150.1",
       "port": 5105,
       "network": "tcp"
     }

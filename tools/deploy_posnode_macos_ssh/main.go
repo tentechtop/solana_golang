@@ -13,16 +13,17 @@ import (
 )
 
 const (
-	remoteRoot      = "/Users/mac/solana_golang"
-	remoteBinary    = remoteRoot + "/bin/posnode"
-	remoteConfig    = remoteRoot + "/config/posnode-223.json"
-	remotePlist     = remoteRoot + "/Library/LaunchAgents/com.solana_golang.posnode.plist"
-	remoteDataPath  = remoteRoot + "/data/posnode-223-stage"
-	launchAgentPath = "/Users/mac/Library/LaunchAgents/com.solana_golang.posnode.plist"
-	launchLabel     = "com.solana_golang.posnode"
+	remoteRoot            = "/Users/mac/solana_golang"
+	remoteBinary          = remoteRoot + "/bin/posnode"
+	defaultConfig         = "deploy/posnode-223-mac.json"
+	defaultRemoteConfig   = remoteRoot + "/config/posnode-223.json"
+	defaultRemoteDataPath = remoteRoot + "/data/posnode-223-stage"
+	launchAgentPath      = "/Users/mac/Library/LaunchAgents/com.solana_golang.posnode.plist"
+	launchLabel          = "com.solana_golang.posnode"
 )
 
-const plistText = `<?xml version="1.0" encoding="UTF-8"?>
+func buildPlistText(remoteConfig string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -32,7 +33,7 @@ const plistText = `<?xml version="1.0" encoding="UTF-8"?>
   <array>
     <string>/Users/mac/solana_golang/bin/posnode</string>
     <string>-config</string>
-    <string>/Users/mac/solana_golang/config/posnode-223.json</string>
+    <string>%s</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/mac/solana_golang</string>
@@ -51,7 +52,8 @@ const plistText = `<?xml version="1.0" encoding="UTF-8"?>
   <string>/Users/mac/solana_golang/logs/posnode.err.log</string>
 </dict>
 </plist>
-`
+`, remoteConfig)
+}
 
 func main() {
 	host := envOrDefault("POSNODE_MAC_DEPLOY_HOST", "192.168.120.223")
@@ -66,8 +68,15 @@ func main() {
 	}
 	defer client.Close()
 
+	localConfigPath := envOrDefault("POSNODE_MAC_DEPLOY_CONFIG", defaultConfig)
+	remoteConfigPath := envOrDefault("POSNODE_MAC_REMOTE_CONFIG", defaultRemoteConfig)
+	remoteDataPath := envOrDefault("POSNODE_MAC_REMOTE_DATA_PATH", defaultRemoteDataPath)
+
 	if envOrDefault("POSNODE_MAC_DEPLOY_RESET_DATA", "false") == "true" {
-		if err := run(client, "launchctl bootout gui/$(id -u) "+shellQuote(launchAgentPath)+" >/dev/null 2>&1 || true; pkill -x posnode >/dev/null 2>&1 || true; rm -rf "+shellQuote(remoteDataPath)); err != nil {
+		if !validRemoteDataPath(remoteDataPath) {
+			exitError("unsafe remote data path: %s", remoteDataPath)
+		}
+		if err := run(client, resetCommand(remoteDataPath)); err != nil {
 			exitError("reset remote data: %v", err)
 		}
 	}
@@ -77,16 +86,16 @@ func main() {
 	if err := uploadFile(client, localPath("dist", "posnode-darwin-arm64"), remoteBinary, "0755"); err != nil {
 		exitError("upload binary: %v", err)
 	}
-	if err := uploadFile(client, localPath("deploy", "posnode-223-mac.json"), remoteConfig, "0644"); err != nil {
+	if err := uploadFile(client, localConfigPath, remoteConfigPath, "0644"); err != nil {
 		exitError("upload config: %v", err)
 	}
-	if err := uploadBytes(client, []byte(plistText), launchAgentPath, "0644"); err != nil {
+	if err := uploadBytes(client, []byte(buildPlistText(remoteConfigPath)), launchAgentPath, "0644"); err != nil {
 		exitError("upload launchd plist: %v", err)
 	}
 
 	if err := startWithLaunchd(client); err != nil {
 		fmt.Printf("launchd start failed, fallback to nohup: %v\n", err)
-		if err := startWithNohup(client); err != nil {
+		if err := startWithNohup(client, remoteConfigPath); err != nil {
 			exitError("start fallback: %v", err)
 		}
 	}
@@ -115,12 +124,27 @@ func startWithLaunchd(client *ssh.Client) error {
 	return run(client, command)
 }
 
-func startWithNohup(client *ssh.Client) error {
+func startWithNohup(client *ssh.Client, remoteConfig string) error {
 	command := strings.Join([]string{
-		"pkill -x posnode >/dev/null 2>&1 || true",
+		"pkill -f " + shellQuote(remoteBinary) + " >/dev/null 2>&1 || true",
 		"SG_LOG_FORMAT=json nohup " + shellQuote(remoteBinary) + " -config " + shellQuote(remoteConfig) + " >> " + shellQuote(remoteRoot+"/logs/posnode.out.log") + " 2>> " + shellQuote(remoteRoot+"/logs/posnode.err.log") + " &",
 	}, "; ")
 	return run(client, command)
+}
+
+func resetCommand(remoteDataPath string) string {
+	commands := []string{
+		"launchctl bootout gui/$(id -u) " + shellQuote(launchAgentPath) + " >/dev/null 2>&1 || true",
+		"pkill -TERM -f " + shellQuote(remoteBinary) + " >/dev/null 2>&1 || true",
+		"for pid in $(lsof -tiTCP:8899 -sTCP:LISTEN 2>/dev/null); do kill -TERM \"$pid\" >/dev/null 2>&1 || true; done",
+		"for pid in $(lsof -tiTCP:5101 -sTCP:LISTEN 2>/dev/null); do kill -TERM \"$pid\" >/dev/null 2>&1 || true; done",
+		"sleep 1",
+		"pkill -KILL -f " + shellQuote(remoteBinary) + " >/dev/null 2>&1 || true",
+		"for pid in $(lsof -tiTCP:8899 -sTCP:LISTEN 2>/dev/null); do kill -KILL \"$pid\" >/dev/null 2>&1 || true; done",
+		"for pid in $(lsof -tiTCP:5101 -sTCP:LISTEN 2>/dev/null); do kill -KILL \"$pid\" >/dev/null 2>&1 || true; done",
+		"rm -rf " + shellQuote(remoteDataPath),
+	}
+	return strings.Join(commands, "; ")
 }
 
 func dialSSH(host string, user string, password string) (*ssh.Client, error) {
@@ -197,6 +221,14 @@ func localPath(parts ...string) string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func validRemoteDataPath(value string) bool {
+	cleanValue := strings.TrimRight(strings.TrimSpace(value), "/")
+	if cleanValue == "" || cleanValue == remoteRoot || cleanValue == remoteRoot+"/data" {
+		return false
+	}
+	return strings.HasPrefix(cleanValue, remoteRoot+"/data/")
 }
 
 func envOrDefault(name string, fallback string) string {

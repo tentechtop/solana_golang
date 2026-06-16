@@ -11,8 +11,15 @@ import (
 type GenesisConfig struct {
 	ChainID               string
 	InitialSupplyLamports uint64
+	TreasuryAddress       structure.PublicKey
 	FundedAccounts        []GenesisAccount
 	InitialValidators     []GenesisValidator
+}
+
+// LedgerConfig 描述账本运行参数 + 让 finality 和启动恢复由节点配置显式控制。
+type LedgerConfig struct {
+	FinalityDepth        uint64
+	DisableStateRecovery bool
 }
 
 // GenesisAccount 描述创世普通账户 + 用于冷启动分配初始余额。

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"solana_golang/p2p"
+	"solana_golang/utils"
 )
 
 func TestNormalizeConfigRequiresSecureNetworkID(t *testing.T) {
@@ -42,5 +46,25 @@ func TestNewStaticPeerParsesValidatorCapabilities(t *testing.T) {
 	}
 	if peer.Capabilities&p2p.PeerCapabilityRelay == 0 {
 		t.Fatalf("relay capability missing: %d", peer.Capabilities)
+	}
+}
+
+func TestLoadPeerKeyPairFromKeystore(t *testing.T) {
+	seed := utils.SHA256([]byte("bootstrap-keystore"))
+	path := filepath.Join(t.TempDir(), "peer.json")
+	content := `{"private_key_base64":"` + base64.StdEncoding.EncodeToString(seed) + `"}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write keystore: %v", err)
+	}
+	keyPair, err := loadPeerKeyPair(bootstrapConfig{PeerKeyPath: path})
+	if err != nil {
+		t.Fatalf("loadPeerKeyPair() error = %v", err)
+	}
+	expected, err := rawKeyPairFromPrivateKey(seed)
+	if err != nil {
+		t.Fatalf("rawKeyPairFromPrivateKey() error = %v", err)
+	}
+	if keyPair.peerID != expected.peerID {
+		t.Fatalf("peer id = %s, want %s", keyPair.peerID, expected.peerID)
 	}
 }

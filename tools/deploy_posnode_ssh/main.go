@@ -15,9 +15,11 @@ import (
 const (
 	remoteRoot    = "/opt/solana_golang"
 	remoteBinary  = remoteRoot + "/bin/posnode"
-	remoteConfig  = remoteRoot + "/config/posnode-101.json"
-	remoteService = "/etc/systemd/system/posnode.service"
-	serviceText   = `[Unit]
+	defaultConfig = "deploy/posnode-101.json"
+)
+
+func buildServiceText(remoteConfig string) string {
+	return fmt.Sprintf(`[Unit]
 Description=solana_golang posnode
 After=network-online.target
 Wants=network-online.target
@@ -25,7 +27,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/solana_golang
-ExecStart=/opt/solana_golang/bin/posnode -config /opt/solana_golang/config/posnode-101.json
+ExecStart=/opt/solana_golang/bin/posnode -config %s
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -33,8 +35,8 @@ Environment=SG_LOG_FORMAT=json
 
 [Install]
 WantedBy=multi-user.target
-`
-)
+`, remoteConfig)
+}
 
 func main() {
 	host := envOrDefault("POSNODE_DEPLOY_HOST", "101.35.87.31")
@@ -49,11 +51,23 @@ func main() {
 	}
 	defer client.Close()
 
+	localConfigPath := envOrDefault("POSNODE_DEPLOY_CONFIG", defaultConfig)
+	remoteConfig := envOrDefault("POSNODE_REMOTE_CONFIG", remoteRoot+"/config/"+filepath.Base(localConfigPath))
+	serviceName := envOrDefault("POSNODE_SERVICE_NAME", "posnode.service")
+	if !validServiceName(serviceName) {
+		exitError("invalid service name: %s", serviceName)
+	}
+	remoteService := "/etc/systemd/system/" + serviceName
+	remoteDataPath := envOrDefault("POSNODE_REMOTE_DATA_PATH", remoteRoot+"/data/posnode-101")
+
 	if envOrDefault("POSNODE_DEPLOY_RESET_DATA", "false") == "true" {
-		if err := run(client, "systemctl stop posnode.service >/dev/null 2>&1 || true"); err != nil {
+		if !validRemoteDataPath(remoteDataPath) {
+			exitError("unsafe remote data path: %s", remoteDataPath)
+		}
+		if err := run(client, "systemctl stop "+shellQuote(serviceName)+" >/dev/null 2>&1 || true"); err != nil {
 			exitError("stop service before reset: %v", err)
 		}
-		if err := run(client, "rm -rf /opt/solana_golang/data/posnode-101"); err != nil {
+		if err := run(client, "rm -rf "+shellQuote(remoteDataPath)); err != nil {
 			exitError("reset remote data: %v", err)
 		}
 	}
@@ -63,19 +77,19 @@ func main() {
 	if err := uploadFile(client, localPath("dist", "posnode-linux-amd64"), remoteBinary, "0755"); err != nil {
 		exitError("upload binary: %v", err)
 	}
-	if err := uploadFile(client, localPath("deploy", "posnode-101.json"), remoteConfig, "0644"); err != nil {
+	if err := uploadFile(client, localConfigPath, remoteConfig, "0644"); err != nil {
 		exitError("upload config: %v", err)
 	}
-	if err := uploadBytes(client, []byte(serviceText), remoteService, "0644"); err != nil {
+	if err := uploadBytes(client, []byte(buildServiceText(remoteConfig)), remoteService, "0644"); err != nil {
 		exitError("upload service: %v", err)
 	}
 	commands := []string{
 		"systemctl daemon-reload",
-		"systemctl enable posnode.service",
-		"systemctl restart posnode.service",
-		"sleep 2; systemctl --no-pager --full status posnode.service | head -n 40",
-		"journalctl -u posnode.service -n 80 --no-pager",
-		"systemctl is-active --quiet posnode.service",
+		"systemctl enable " + shellQuote(serviceName),
+		"systemctl restart " + shellQuote(serviceName),
+		"sleep 2; systemctl --no-pager --full status " + shellQuote(serviceName) + " | head -n 40",
+		"journalctl -u " + shellQuote(serviceName) + " -n 80 --no-pager",
+		"systemctl is-active --quiet " + shellQuote(serviceName),
 		"if command -v curl >/dev/null 2>&1; then curl -sS -X POST http://127.0.0.1:8899/ -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\",\"params\":[]}'; else echo 'curl not installed; skip health check'; fi",
 	}
 	for _, command := range commands {
@@ -160,6 +174,21 @@ func localPath(parts ...string) string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func validServiceName(value string) bool {
+	if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "/\\") {
+		return false
+	}
+	return strings.HasSuffix(value, ".service")
+}
+
+func validRemoteDataPath(value string) bool {
+	cleanValue := strings.TrimRight(strings.TrimSpace(value), "/")
+	if cleanValue == "" || cleanValue == remoteRoot || cleanValue == remoteRoot+"/data" {
+		return false
+	}
+	return strings.HasPrefix(cleanValue, remoteRoot+"/data/")
 }
 
 func envOrDefault(name string, fallback string) string {

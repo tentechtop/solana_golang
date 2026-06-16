@@ -111,6 +111,20 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 			delete(node.seenTransactions, transactionID)
 			continue
 		}
+		committed, err := node.transactionAlreadyCommitted(transactionID)
+		if err != nil {
+			node.logger.Warn("posnode mempool committed transaction check failed",
+				"tx_id", transactionID,
+				"error", err,
+			)
+			remaining = append(remaining, transaction)
+			continue
+		}
+		if committed {
+			removeIDs = append(removeIDs, transactionID)
+			delete(node.seenTransactions, transactionID)
+			continue
+		}
 		if transactionConflictsWithLocks(transaction, writableLocks) {
 			remaining = append(remaining, transaction)
 			continue
@@ -122,6 +136,54 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 	}
 	node.mempool = remaining
 	return selected, removeIDs
+}
+
+func (node *posNode) transactionAlreadyCommitted(transactionID string) (bool, error) {
+	if node.ledger == nil || transactionID == "" {
+		return false, nil
+	}
+	committed, err := node.ledger.HasCommittedTransaction(transactionID)
+	if err != nil {
+		return false, fmt.Errorf("posnode: query committed transaction index: %w", err)
+	}
+	return committed, nil
+}
+
+func (node *posNode) removeCommittedMempoolTransactions(transactions []structure.Transaction) {
+	if len(transactions) == 0 {
+		return
+	}
+	transactionIDs := make(map[string]struct{}, len(transactions))
+	for _, transaction := range transactions {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			continue
+		}
+		transactionIDs[transactionID] = struct{}{}
+	}
+	if len(transactionIDs) == 0 {
+		return
+	}
+
+	node.mutex.Lock()
+	remaining := make([]structure.Transaction, 0, len(node.mempool))
+	removeIDs := make([]string, 0, len(transactionIDs))
+	for _, transaction := range node.mempool {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			continue
+		}
+		if _, committed := transactionIDs[transactionID]; committed {
+			removeIDs = append(removeIDs, transactionID)
+			delete(node.seenTransactions, transactionID)
+			continue
+		}
+		remaining = append(remaining, transaction)
+	}
+	node.mempool = remaining
+	node.mutex.Unlock()
+
+	node.deleteMempoolTransactions(removeIDs)
 }
 
 func (node *posNode) sortMempoolLocked() {

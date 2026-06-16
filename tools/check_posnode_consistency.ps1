@@ -8,6 +8,7 @@ param(
     [int]$MaxHeightDrift = 2,
     [int]$MinNodeCount = 0,
     [string]$OutputPath = "",
+    [switch]$RequireSecureP2P,
     [switch]$Help,
     [switch]$SelfTest,
     [switch]$FailFast
@@ -22,6 +23,7 @@ function Show-Usage {
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -OutputPath .\report\node-consistency.json"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -MinNodeCount 30"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -FailFast"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -RpcUrlFile .\rpc_urls.txt -RequireSecureP2P"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\tools\check_posnode_consistency.ps1 -SelfTest"
 }
 
@@ -198,10 +200,12 @@ function Invoke-PosNodeRpc {
         params  = @()
     } | ConvertTo-Json -Depth 8 -Compress
     $response = Invoke-RestMethod -Uri $Url -Method Post -ContentType "application/json" -Body $requestBody -TimeoutSec $TimeoutSeconds
-    if ($null -ne $response.error) {
-        throw "$Method returned JSON-RPC error: $($response.error.message)"
+    $rpcError = Get-PropertyValue -InputObject $response -Name "error" -Default $null
+    if ($null -ne $rpcError) {
+        $errorMessage = Get-StringProperty -InputObject $rpcError -Name "message" -Default "unknown JSON-RPC error"
+        throw "$Method returned JSON-RPC error: $errorMessage"
     }
-    return $response.result
+    return (Get-PropertyValue -InputObject $response -Name "result" -Default $null)
 }
 
 function Read-RpcUrls {
@@ -329,6 +333,10 @@ function New-NodeSnapshot {
         HeadHash               = Get-StringProperty -InputObject $status -Name "head_hash"
         FinalizedHeight        = Get-UInt64Property -InputObject $status -Name "finalized_height"
         FinalizedHash          = Get-StringProperty -InputObject $status -Name "finalized_hash"
+        FinalityDepth          = Get-UInt64Property -InputObject $status -Name "finality_depth"
+        P2PSecure              = [bool](Get-PropertyValue -InputObject $status -Name "p2p_secure_session" -Default $false)
+        P2PInsecure            = [bool](Get-PropertyValue -InputObject $status -Name "p2p_insecure_allowed" -Default $true)
+        StateRecovery          = [bool](Get-PropertyValue -InputObject $status -Name "state_recovery_enabled" -Default $false)
         StateRoot              = Get-StringProperty -InputObject $metrics -Name "state_root"
         QCHash                 = Get-StringProperty -InputObject $metrics -Name "qc_hash"
         CurrentLeader          = Get-StringProperty -InputObject $status -Name "current_leader"
@@ -379,6 +387,8 @@ function Test-SnapshotRound {
     Add-GroupMismatchErrors -Snapshots $Snapshots -Property "ConsensusEpoch" -Label "epoch" -Errors $errors
     Add-GroupMismatchErrors -Snapshots $Snapshots -Property "TotalActiveStake" -Label "total active stake" -Errors $errors
     Add-GroupMismatchErrors -Snapshots $Snapshots -Property "ValidatorFingerprint" -Label "validator stake fingerprint" -Errors $errors
+    Add-GroupMismatchErrors -Snapshots $Snapshots -Property "FinalityDepth" -Label "finality depth" -Errors $errors
+    Add-GroupMismatchErrors -Snapshots $Snapshots -Property "StateRecovery" -Label "state recovery enabled" -Errors $errors
 
     foreach ($group in ($Snapshots | Group-Object HeadHeight)) {
         Add-GroupMismatchErrors -Snapshots @($group.Group) -Property "HeadHash" -Label "head hash at height $($group.Name)" -Errors $errors
@@ -403,6 +413,9 @@ function Test-SnapshotRound {
 
     foreach ($snapshot in $Snapshots) {
         Assert-TransactionFastPath -Snapshot $snapshot -Errors $errors
+        if ($RequireSecureP2P -and (-not $snapshot.P2PSecure -or $snapshot.P2PInsecure)) {
+            $errors.Add("$($snapshot.Url) p2p secure session is not enforced")
+        }
     }
     return [pscustomobject]@{ Errors = $errors; Warnings = $warnings }
 }
@@ -536,6 +549,7 @@ $summary = [pscustomobject]@{
     Urls                    = $urls
     NodeCount               = $urls.Count
     RoundCount              = $allRounds.Count
+    RequireSecureP2P        = [bool]$RequireSecureP2P
     SuccessfulSnapshotCount = $successfulSnapshotCount
     FailedSnapshotCount     = $failedSnapshots.Count
     ErrorCount              = $globalErrors.Count

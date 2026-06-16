@@ -302,9 +302,9 @@ func (state PrivacyState) MarshalBinary() ([]byte, error) {
 	return writer.Bytes(), nil
 }
 
-// UnmarshalPrivacyStateBinary 反序列化隐私状态 + 空状态账户按版本一初始化。
+// UnmarshalPrivacyStateBinary 反序列化隐私状态 + 空账户和预分配零数据都按版本一初始化。
 func UnmarshalPrivacyStateBinary(data []byte) (PrivacyState, error) {
-	if len(data) == 0 {
+	if len(data) == 0 || isZeroFilledPrivacyStateData(data) {
 		return PrivacyState{Version: PrivacyStateVersion}, nil
 	}
 
@@ -324,6 +324,15 @@ func UnmarshalPrivacyStateBinary(data []byte) (PrivacyState, error) {
 		return PrivacyState{}, fmt.Errorf("structure: decode privacy state eof: %w", err)
 	}
 	return state, state.Validate()
+}
+
+func isZeroFilledPrivacyStateData(data []byte) bool {
+	for _, value := range data {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate 校验隐私状态 + 防止重复 commitment 和重复 nullifier。
