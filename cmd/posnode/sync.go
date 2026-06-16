@@ -259,11 +259,85 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 		if status.HeadHeight <= localHead.Height {
 			continue
 		}
+		if status.FinalizedHeight > localHead.Height+maxSyncBlocksPerRound {
+			imported, err := node.importFinalizedSnapshotFromPeer(ctx, peerID, status)
+			if err != nil {
+				node.metrics.syncFailures.Add(1)
+				node.logger.Warn("posnode finalized snapshot sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
+				continue
+			}
+			if imported {
+				localHead = node.ledger.Head()
+			}
+		}
+		if status.HeadHeight <= localHead.Height {
+			continue
+		}
 		if err := node.syncBlocksFromPeer(ctx, peerID, localHead.Height+1, status.HeadHeight); err != nil {
 			node.metrics.syncFailures.Add(1)
 			node.logger.Warn("posnode block sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
 		}
 		localHead = node.ledger.Head()
+	}
+}
+
+func (node *posNode) importFinalizedSnapshotFromPeer(ctx context.Context, peerID string, status statusResponseEnvelope) (bool, error) {
+	if status.FinalizedHash == "" || status.FinalizedHeight == 0 {
+		return false, nil
+	}
+	finalizedHash, err := structure.HashFromBase58(status.FinalizedHash)
+	if err != nil {
+		return false, fmt.Errorf("posnode: decode finalized hash: %w", err)
+	}
+	proposal, blockHash, found, err := node.requestBlockByHeight(ctx, peerID, status.FinalizedHeight)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("posnode: finalized block height %d not found", status.FinalizedHeight)
+	}
+	if blockHash != finalizedHash {
+		return false, fmt.Errorf("posnode: finalized block hash mismatch")
+	}
+	snapshot, found, err := node.requestStateSnapshot(ctx, peerID, finalizedHash)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("posnode: finalized snapshot not found")
+	}
+	stateRoot, err := snapshot.RootHash()
+	if err != nil {
+		return false, err
+	}
+	if stateRoot != proposal.Header.StateRoot {
+		return false, fmt.Errorf("posnode: finalized snapshot state root mismatch")
+	}
+	importedHead, err := node.ledger.ImportFinalizedSnapshot(blockchain.ImportSnapshotRequest{Proposal: proposal, State: snapshot})
+	if err != nil {
+		return false, err
+	}
+	node.recordCommittedBlockhash(proposal.Header.Slot, finalizedHash)
+	node.refreshEpochAfterSnapshotImport(importedHead.Slot)
+	node.logger.Info("posnode finalized snapshot synced",
+		slog.String("peer_id", peerID),
+		slog.Uint64("height", importedHead.Height),
+		slog.Uint64("slot", importedHead.Slot),
+		slog.String("block_hash", importedHead.BlockHash.String()),
+	)
+	return true, nil
+}
+
+func (node *posNode) refreshEpochAfterSnapshotImport(importedSlot uint64) {
+	targetSlot := node.currentWallSlot()
+	if importedSlot > targetSlot {
+		targetSlot = importedSlot
+	}
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	epochID, startSlot := node.epochForSlot(targetSlot)
+	if err := node.rebuildEpochLocked(epochID, startSlot, node.epochSeed(epochID)); err != nil {
+		node.logger.Warn("posnode epoch refresh after snapshot failed", slog.Uint64("slot", targetSlot), slog.Any("error", err))
 	}
 }
 
@@ -339,6 +413,7 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		if _, err := node.ledger.CommitBlock(commitRequest); err != nil {
 			return err
 		}
+		node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 		node.metrics.proposalsAccepted.Add(1)
 		node.retryOrphanChildren(ctx, proposalHash)
 		return nil
@@ -367,6 +442,7 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		slog.Any("new_chain_blocks", hashesToStrings(decision.NewBlocks)),
 	)
 	if decision.Accepted {
+		node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 		node.metrics.proposalsAccepted.Add(1)
 		node.retryOrphanChildren(ctx, proposalHash)
 	}
@@ -496,6 +572,7 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		HeadHeight:      head.Height,
 		HeadSlot:        head.Slot,
 		HeadHash:        head.BlockHash.String(),
+		HeadQCHash:      head.QCHash.String(),
 		FinalizedHeight: head.FinalizedHeight,
 		FinalizedHash:   head.FinalizedHash.String(),
 		EpochID:         node.epochSnapshot.EpochID,

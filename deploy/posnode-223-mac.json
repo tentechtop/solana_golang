@@ -1,0 +1,59 @@
+{
+  "chain_id": "pos-public-testnet",
+  "environment": "stage",
+  "production": false,
+  "node_name": "node-223",
+  "data_path": "/Users/mac/solana_golang/data/posnode-223-stage",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 5105,
+  "rpc_enabled": true,
+  "rpc_listen_ip": "0.0.0.0",
+  "rpc_port": 8899,
+  "allow_insecure_p2p": true,
+  "peer_seed": "node-223",
+  "staker_seed": "staker-223",
+  "validator_seed": "validator-223",
+  "consensus_seed": "consensus-223",
+  "stake_lamports": 10000000,
+  "slot_millis": 400,
+  "genesis_start_unix_millis": 1781591472292,
+  "epoch_slots": 1500,
+  "turbine_fanout": 2,
+  "auto_register": true,
+  "mempool_max_transactions": 5000,
+  "mempool_transaction_ttl_millis": 60000,
+  "transaction_leader_forward_slots": 4,
+  "transaction_forward_validators": true,
+  "bootstrap_peers": [
+    {
+      "peer_id": "GAEb8wVMHNiKiRaWmZtnmAvLtKoCAfJnzSMBcH4C3B57",
+      "ip": "101.35.87.31",
+      "port": 5100,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+      "ip": "101.35.87.31",
+      "port": 5101,
+      "network": "tcp"
+    }
+  ],
+  "genesis": {
+    "initial_supply_lamports": 1000000000000000000,
+    "funded_accounts": [
+      {
+        "seed": "staker-101",
+        "lamports": 900000000000000000
+      }
+    ],
+    "initial_validators": [
+      {
+        "staker_seed": "staker-101",
+        "validator_seed": "validator-101",
+        "consensus_seed": "consensus-101",
+        "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+        "stake_lamports": 10000000
+      }
+    ]
+  }
+}

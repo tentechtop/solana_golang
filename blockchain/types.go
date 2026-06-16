@@ -53,6 +53,12 @@ type CommitBlockRequest struct {
 	QC        *consensus.QuorumCertificate
 }
 
+// ImportSnapshotRequest 描述可信 finalized 快照导入 + 新节点 state sync 用它快速建立本地 root。
+type ImportSnapshotRequest struct {
+	Proposal consensus.BlockProposal
+	State    consensus.ChainState
+}
+
 // ForkDecision 描述分叉裁决结果 + 用于审计重组是否发生。
 type ForkDecision struct {
 	Accepted       bool

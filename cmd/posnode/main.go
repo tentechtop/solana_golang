@@ -220,7 +220,7 @@ func (node *posNode) openLedger() error {
 	node.blockhashQueue = structure.NewBlockhashQueue(150)
 	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
 		Blockhash:     head.BlockHash,
-		Slot:          head.Slot + 1,
+		Slot:          head.Slot,
 		FeeCalculator: structure.DefaultFeeCalculator(),
 		TimestampUnix: time.Now().Unix(),
 	}); err != nil {
@@ -455,12 +455,22 @@ func (node *posNode) refreshKnownPeersFromHost() {
 }
 
 func (node *posNode) autoRegisterLoop(ctx context.Context) {
-	timer := time.NewTimer(1500 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return
-	case <-timer.C:
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if node.localValidatorStakeAccountExists() {
+			node.registeredSelf = true
+			node.logger.Info("posnode register validator skipped; local validator stake account exists")
+			return
+		}
+		if !node.autoRegisterBlockhashReady() {
+			continue
+		}
 		transaction, err := node.buildRegisterTransaction()
 		if err != nil {
 			node.logger.Error("posnode build register transaction failed", slog.Any("error", err))
@@ -473,7 +483,44 @@ func (node *posNode) autoRegisterLoop(ctx context.Context) {
 		node.broadcastTransaction(ctx, transaction)
 		node.registeredSelf = true
 		node.logger.Info("posnode register validator transaction submitted", slog.Uint64("stake", node.config.StakeLamports))
+		return
 	}
+}
+
+func (node *posNode) localValidatorStakeAccountExists() bool {
+	account, found, err := node.ledger.Account(node.validatorKeyPair.PublicKey)
+	if err != nil {
+		node.logger.Warn("posnode local validator stake account check failed", slog.Any("error", err))
+		return false
+	}
+	return found && account.Owner == structure.DefaultBuiltinProgramIDs.Stake && len(account.Data) > 0
+}
+
+func (node *posNode) autoRegisterBlockhashReady() bool {
+	headSlot := node.ledger.Head().Slot
+	wallSlot := node.currentWallSlot()
+	if headSlot >= wallSlot {
+		return true
+	}
+	if wallSlot-headSlot <= structure.MaxRecentBlockhashAgeSlots {
+		return true
+	}
+	node.logger.Debug("posnode auto register waits for ledger sync",
+		slog.Uint64("head_slot", headSlot),
+		slog.Uint64("wall_slot", wallSlot),
+		slog.Uint64("max_recent_blockhash_age_slots", structure.MaxRecentBlockhashAgeSlots),
+	)
+	return false
+}
+
+// currentWallSlot 计算当前墙钟 slot + 自动注册必须避免使用过期 blockhash。
+func (node *posNode) currentWallSlot() uint64 {
+	startedAt := node.config.genesisStartTime()
+	now := time.Now()
+	if !now.After(startedAt) {
+		return 1
+	}
+	return uint64(now.Sub(startedAt)/node.config.slotDuration()) + 1
 }
 
 func (node *posNode) slotLoop(ctx context.Context) {
@@ -566,6 +613,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode commit produced block failed", slog.Uint64("slot", slot), slog.Any("error", err))
 		return
 	}
+	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.mutex.Lock()
 	node.lastProducedSlot = slot
 	node.mutex.Unlock()
@@ -808,6 +856,7 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	if !acceptedProposal {
 		return nil
 	}
+	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.metrics.proposalsAccepted.Add(1)
 	node.retryOrphanChildren(ctx, proposalHash)
 	node.mutex.Lock()

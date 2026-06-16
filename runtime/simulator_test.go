@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"testing"
 
+	stakeprogram "solana_golang/programs/stake"
 	"solana_golang/utils"
 )
 
@@ -52,6 +53,102 @@ func TestTransactionSimulatorTransfersLamports(t *testing.T) {
 	}
 	if result.FeeDetails.TotalFee != LamportsPerSignature {
 		t.Fatalf("TotalFee = %d, want %d", result.FeeDetails.TotalFee, LamportsPerSignature)
+	}
+}
+
+func TestTransactionSimulatorTransfersToMissingDestinationAccount(t *testing.T) {
+	sourceKey, sourcePrivateKey := newSimulationSigner(t)
+	destinationKey := newTestPublicKey(36)
+	blockhash := newTestHash(37)
+	transferLamportsValue := mustMinimumBalance(t, 0) + 100
+	sourceLamports := mustMinimumBalance(t, 0) + LamportsPerSignature + transferLamportsValue + 100
+
+	transferInstruction, err := NewTransferInstruction(TransferParams{Lamports: transferLamportsValue})
+	systemInstruction := mustSystemInstructionBytes(t, transferInstruction, err)
+	transaction := signedSimulationTransaction(t, []AccountMeta{
+		{PublicKey: sourceKey, IsSigner: true, IsWritable: true},
+		{PublicKey: destinationKey, IsSigner: false, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
+	}, []PublicKey{sourceKey, destinationKey}, systemInstruction, blockhash, map[PublicKey][]byte{
+		sourceKey: sourcePrivateKey,
+	})
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction:    transaction,
+		Accounts:       simulationAccounts(t, sourceKey, sourceLamports),
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 2),
+		CurrentSlot:    2,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+	destinationWritten := findWrittenAccount(t, result.WrittenAccounts, destinationKey)
+	if destinationWritten.Lamports != transferLamportsValue {
+		t.Fatalf("destination lamports = %d, want %d", destinationWritten.Lamports, transferLamportsValue)
+	}
+}
+
+func TestTransactionSimulatorRegistersValidatorWithMissingStakeAccount(t *testing.T) {
+	stakerKey, stakerPrivateKey := newSimulationSigner(t)
+	validatorKey := newTestPublicKey(38)
+	consensusKey := newTestPublicKey(39)
+	blockhash := newTestHash(40)
+	stakeLamportsValue := uint64(10_000_000)
+	currentEpoch := uint64(7)
+	stakerLamports := mustMinimumBalance(t, 0) + LamportsPerSignature + stakeLamportsValue + 100
+
+	stakeInstruction, err := stakeprogram.NewRegisterValidatorInstruction(consensusKey, "peer-223", 0, stakeLamportsValue)
+	if err != nil {
+		t.Fatalf("NewRegisterValidatorInstruction() error = %v", err)
+	}
+	instructionData, err := stakeInstruction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	transaction := signedStakeSimulationTransaction(t, []AccountMeta{
+		{PublicKey: stakerKey, IsSigner: true, IsWritable: true},
+		{PublicKey: validatorKey, IsSigner: false, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.Stake, IsSigner: false, IsWritable: false},
+	}, []PublicKey{stakerKey, validatorKey}, instructionData, blockhash, map[PublicKey][]byte{
+		stakerKey: stakerPrivateKey,
+	})
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction:    transaction,
+		Accounts:       simulationAccountsWithPrograms(t, stakerKey, stakerLamports, DefaultBuiltinProgramIDs.Stake),
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 3),
+		CurrentSlot:    3,
+		CurrentEpoch:   currentEpoch,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+
+	validatorWritten := findWrittenAccount(t, result.WrittenAccounts, validatorKey)
+	if validatorWritten.Owner != DefaultBuiltinProgramIDs.Stake {
+		t.Fatalf("validator owner = %s, want stake", validatorWritten.Owner.String())
+	}
+	if validatorWritten.Lamports != stakeLamportsValue {
+		t.Fatalf("validator lamports = %d, want %d", validatorWritten.Lamports, stakeLamportsValue)
+	}
+	validatorState, err := stakeprogram.UnmarshalValidatorStateBinary(validatorWritten.Data)
+	if err != nil {
+		t.Fatalf("UnmarshalValidatorStateBinary() error = %v", err)
+	}
+	if validatorState.StakerAccount != stakerKey {
+		t.Fatal("validator staker mismatch")
+	}
+	if validatorState.PendingStake != stakeLamportsValue {
+		t.Fatalf("pending stake = %d, want %d", validatorState.PendingStake, stakeLamportsValue)
+	}
+	if validatorState.ActivationEpoch != currentEpoch+1 {
+		t.Fatalf("activation epoch = %d, want %d", validatorState.ActivationEpoch, currentEpoch+1)
 	}
 }
 
@@ -186,6 +283,29 @@ func signedSimulationTransaction(t *testing.T, accounts []AccountMeta, instructi
 	return signedTransaction
 }
 
+func signedStakeSimulationTransaction(t *testing.T, accounts []AccountMeta, instructionAccounts []PublicKey, instructionData []byte, blockhash Blockhash, privateKeys map[PublicKey][]byte) Transaction {
+	t.Helper()
+
+	accountIndexByKey, err := AccountIndexMap(accounts)
+	if err != nil {
+		t.Fatalf("AccountIndexMap() error = %v", err)
+	}
+	compiledInstruction, err := CompileInstruction(DefaultBuiltinProgramIDs.Stake, instructionAccounts, instructionData, accountIndexByKey)
+	if err != nil {
+		t.Fatalf("CompileInstruction() error = %v", err)
+	}
+	transaction := Transaction{
+		Accounts:        accounts,
+		Instructions:    []CompiledInstruction{compiledInstruction},
+		RecentBlockhash: blockhash,
+	}
+	signedTransaction, err := transaction.Sign(privateKeys)
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	return signedTransaction
+}
+
 func mustSystemInstructionBytes(t *testing.T, instruction SystemInstruction, err error) []byte {
 	t.Helper()
 
@@ -216,6 +336,22 @@ func simulationAccounts(t *testing.T, firstAddress PublicKey, firstLamports uint
 			t.Fatalf("rest[%d] is %T, want uint64", index+1, rest[index+1])
 		}
 		accounts = append(accounts, newSimulationAccount(t, address, lamports, DefaultBuiltinProgramIDs.System, false))
+	}
+	return accounts
+}
+
+func simulationAccountsWithPrograms(t *testing.T, firstAddress PublicKey, firstLamports uint64, programAddresses ...PublicKey) []AddressedAccount {
+	t.Helper()
+
+	accounts := []AddressedAccount{
+		newSimulationAccount(t, firstAddress, firstLamports, DefaultBuiltinProgramIDs.System, false),
+		newSimulationAccount(t, DefaultBuiltinProgramIDs.System, mustMinimumBalance(t, 0), DefaultBuiltinProgramIDs.NativeLoader, true),
+	}
+	for _, programAddress := range programAddresses {
+		if programAddress == DefaultBuiltinProgramIDs.System {
+			continue
+		}
+		accounts = append(accounts, newSimulationAccount(t, programAddress, mustMinimumBalance(t, 0), DefaultBuiltinProgramIDs.NativeLoader, true))
 	}
 	return accounts
 }

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 
@@ -8,8 +9,9 @@ import (
 )
 
 const (
-	SimulationLogInstructionSuccess = "instruction success"
-	SimulationLogTransactionSuccess = "transaction success"
+	SimulationLogInstructionSuccess       = "instruction success"
+	SimulationLogTransactionSuccess       = "transaction success"
+	stakeInstructionRegisterValidatorType = uint32(0)
 )
 
 // TransactionSimulationInput 描述交易模拟输入 + runtime 使用内存账户快照替代数据库读写。
@@ -144,7 +146,7 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 		result.Error = transactionFailure(structure.TransactionErrorCodeAccountLoadedTwice, err.Error())
 		return structure.LoadedTransaction{}, result, result.Validate()
 	}
-	addMissingCreateAccountPlaceholders(resolvedMessage, accountStates, input.BuiltinPrograms)
+	addMissingAccountPlaceholders(resolvedMessage, accountStates, input.BuiltinPrograms)
 	loadedAccounts, err := loadSimulationAccounts(resolvedMessage, accountStates, input.BuiltinPrograms)
 	if err != nil {
 		result.Status = structure.TransactionStatusFailed
@@ -178,25 +180,71 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 	return loadedTransaction, result, nil
 }
 
-func addMissingCreateAccountPlaceholders(message structure.ResolvedMessage, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {
+// addMissingAccountPlaceholders 补齐可创建账户占位 + 指令执行前必须先完成账户加载。
+func addMissingAccountPlaceholders(message structure.ResolvedMessage, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {
 	for _, instruction := range message.Instructions {
 		if int(instruction.ProgramIDIndex) >= len(message.AccountKeys) {
 			continue
 		}
 		programID := message.AccountKeys[instruction.ProgramIDIndex]
-		if programID != builtinPrograms.System || len(instruction.AccountIndexes) < 2 {
+		if programID == builtinPrograms.System {
+			addMissingSystemAccountPlaceholder(instruction, message, accounts, builtinPrograms)
 			continue
 		}
-		systemInstruction, err := structure.UnmarshalSystemInstructionBinary(instruction.Data)
-		if err != nil || systemInstruction.Type != structure.SystemInstructionCreateAccount {
-			continue
+		if programID == builtinPrograms.Stake {
+			addMissingStakeAccountPlaceholder(instruction, message, accounts, builtinPrograms)
 		}
-		newAccountAddress := message.AccountKeys[instruction.AccountIndexes[1]]
-		if _, exists := accounts[newAccountAddress]; exists {
-			continue
-		}
-		accounts[newAccountAddress] = structure.Account{Owner: builtinPrograms.System}
 	}
+}
+
+func addMissingSystemAccountPlaceholder(
+	instruction structure.CompiledInstruction,
+	message structure.ResolvedMessage,
+	accounts map[structure.PublicKey]structure.Account,
+	builtinPrograms structure.BuiltinProgramIDs,
+) {
+	if len(instruction.AccountIndexes) < 2 {
+		return
+	}
+	systemInstruction, err := structure.UnmarshalSystemInstructionBinary(instruction.Data)
+	if err != nil {
+		return
+	}
+	if !systemInstructionCreatesOrFundsDestination(systemInstruction.Type) {
+		return
+	}
+	addMissingWritableSystemAccount(message.AccountKeys[instruction.AccountIndexes[1]], accounts, builtinPrograms)
+}
+
+func systemInstructionCreatesOrFundsDestination(instructionType structure.SystemInstructionType) bool {
+	return instructionType == structure.SystemInstructionCreateAccount || instructionType == structure.SystemInstructionTransfer
+}
+
+func addMissingStakeAccountPlaceholder(
+	instruction structure.CompiledInstruction,
+	message structure.ResolvedMessage,
+	accounts map[structure.PublicKey]structure.Account,
+	builtinPrograms structure.BuiltinProgramIDs,
+) {
+	if len(instruction.AccountIndexes) < 2 || !isStakeRegisterValidatorInstruction(instruction.Data) {
+		return
+	}
+	addMissingWritableSystemAccount(message.AccountKeys[instruction.AccountIndexes[1]], accounts, builtinPrograms)
+}
+
+// isStakeRegisterValidatorInstruction 识别 stake 注册 wire type + 避免 runtime 反向 import stake 程序造成循环依赖。
+func isStakeRegisterValidatorInstruction(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	return binary.LittleEndian.Uint32(data[:4]) == stakeInstructionRegisterValidatorType
+}
+
+func addMissingWritableSystemAccount(address structure.PublicKey, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {
+	if _, exists := accounts[address]; exists {
+		return
+	}
+	accounts[address] = structure.Account{Owner: builtinPrograms.System}
 }
 
 func executeSimulatedInstruction(

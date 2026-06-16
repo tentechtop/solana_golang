@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	privacyprogram "solana_golang/programs/privacy"
+	stakeprogram "solana_golang/programs/stake"
 	systemprogram "solana_golang/programs/system"
 	vmprogram "solana_golang/programs/vm"
 	runtimepkg "solana_golang/runtime"
@@ -84,6 +85,7 @@ func simulateWithDefaultPrograms(t *testing.T, input TransactionSimulationInput)
 	t.Helper()
 	input.Programs = append(input.Programs,
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
+		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
 		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
 	)
 	return runtimepkg.TransactionSimulator{}.Simulate(input)

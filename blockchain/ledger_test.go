@@ -204,6 +204,51 @@ func TestLedgerReorganizeToBetterFork(t *testing.T) {
 	}
 }
 
+func TestLedgerImportFinalizedSnapshotAndContinueCommit(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedger() error = %v", err)
+	}
+	genesisHead := ledger.Head()
+	genesisState := ledger.State()
+	importProposal, importState := testProposalFromParent(t, Head{
+		ChainID:   genesisHead.ChainID,
+		Height:    9,
+		Slot:      99,
+		BlockHash: testHash(t, "snapshot-parent"),
+		QCHash:    genesisHead.QCHash,
+		EpochID:   3,
+	}, genesisState, 100, 10, "import-finalized")
+
+	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState})
+	if err != nil {
+		t.Fatalf("ImportFinalizedSnapshot() error = %v", err)
+	}
+	if importedHead.Height != 10 || importedHead.FinalizedHeight != 10 {
+		t.Fatalf("imported head = %+v, want height/finalized 10", importedHead)
+	}
+	nextProposal, nextState := testProposalFromHead(t, importedHead, importState, 101, 11, "after-import")
+	nextHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: nextProposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock(after import) error = %v", err)
+	}
+	if nextHead.Height != 11 {
+		t.Fatalf("next height = %d, want 11", nextHead.Height)
+	}
+	if nextHead.FinalizedHeight != importedHead.FinalizedHeight {
+		t.Fatalf("finalized height = %d, want %d", nextHead.FinalizedHeight, importedHead.FinalizedHeight)
+	}
+}
+
 func testGenesis(t *testing.T) GenesisConfig {
 	t.Helper()
 	staker := testKeyPair(t, "staker-a")
@@ -269,6 +314,15 @@ func testPeerID(t *testing.T, seed string) string {
 		t.Fatalf("peer id: %v", err)
 	}
 	return utils.Base58Encode(publicKey)
+}
+
+func testHash(t *testing.T, seed string) structure.Hash {
+	t.Helper()
+	hash, err := structure.NewHash(utils.SHA256([]byte(seed)))
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	return hash
 }
 
 func findAccount(t *testing.T, state consensus.ChainState, address structure.PublicKey) structure.AddressedAccount {

@@ -613,6 +613,64 @@ func (ledger *Ledger) SaveExternalBlockSnapshot(proposal consensus.BlockProposal
 	return ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: proposal, NextState: state})
 }
 
+// ImportFinalizedSnapshot 导入可信 finalized 状态 + 新节点同步无需从创世逐块回放。
+func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (Head, error) {
+	startedAt := time.Now()
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	if ledger.closed {
+		return Head{}, ErrLedgerClosed
+	}
+	if request.Proposal.Header.ChainID != ledger.head.ChainID {
+		return Head{}, fmt.Errorf("%w: snapshot chain id mismatch", ErrInvalidCommit)
+	}
+	blockHash, err := request.Proposal.Hash()
+	if err != nil {
+		return Head{}, fmt.Errorf("blockchain: hash snapshot block: %w", err)
+	}
+	stateRoot, err := request.State.RootHash()
+	if err != nil {
+		return Head{}, fmt.Errorf("blockchain: hash snapshot state: %w", err)
+	}
+	if stateRoot != request.Proposal.Header.StateRoot {
+		return Head{}, fmt.Errorf("%w: snapshot state root mismatch", ErrInvalidCommit)
+	}
+	if request.Proposal.Header.Height <= ledger.head.Height {
+		return ledger.head, nil
+	}
+	nextHead := Head{
+		ChainID:         request.Proposal.Header.ChainID,
+		Height:          request.Proposal.Header.Height,
+		Slot:            request.Proposal.Header.Slot,
+		BlockHash:       blockHash,
+		QCHash:          request.Proposal.Header.PreviousQCHash,
+		StateRoot:       stateRoot,
+		EpochID:         request.Proposal.Header.EpochID,
+		FinalizedHeight: request.Proposal.Header.Height,
+		FinalizedHash:   blockHash,
+		UpdatedAtMs:     time.Now().UnixMilli(),
+	}
+	if nextHead.QCHash.IsZero() {
+		nextHead.QCHash = blockHash
+	}
+	if ledger.db != nil {
+		if err := ledger.persistImportedSnapshotLocked(request, blockHash, nextHead); err != nil {
+			return Head{}, err
+		}
+	}
+	ledger.state = cloneState(request.State)
+	ledger.head = nextHead
+	ledger.loggerLocked().Info("ledger finalized snapshot imported",
+		slog.String("chain_id", nextHead.ChainID),
+		slog.Uint64("slot", nextHead.Slot),
+		slog.Uint64("height", nextHead.Height),
+		slog.String("block_hash", nextHead.BlockHash.String()),
+		slog.String("state_root", nextHead.StateRoot.String()),
+		slog.Duration("duration", time.Since(startedAt)),
+	)
+	return nextHead, nil
+}
+
 func (request CommitBlockRequest) validate(head Head) error {
 	if request.Proposal.Header.ChainID == "" {
 		return fmt.Errorf("%w: chain id is empty", ErrInvalidCommit)
@@ -850,6 +908,56 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 	}
 	operations = append(operations, database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes))
 	return ledger.db.DataTransaction(operations)
+}
+
+func (ledger *Ledger) persistImportedSnapshotLocked(request ImportSnapshotRequest, blockHash structure.Hash, head Head) error {
+	operations, err := ledger.collectBlockStorageOps(request.Proposal, blockHash, request.State)
+	if err != nil {
+		return err
+	}
+	operations = append(operations,
+		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), blockHash[:]),
+		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
+	)
+	if err := appendAccountSnapshotImportOps(ledger.db, &operations, request.State); err != nil {
+		return err
+	}
+	headBytes, err := marshalHead(head)
+	if err != nil {
+		return err
+	}
+	operations = append(operations, database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes))
+	return ledger.db.DataTransaction(operations)
+}
+
+// appendAccountSnapshotImportOps 覆盖当前账户表 + 快照导入后读路径必须与 state root 完全一致。
+func appendAccountSnapshotImportOps(db database.Database, operations *[]database.DBOperation, state consensus.ChainState) error {
+	snapshotAddresses := make(map[structure.PublicKey]struct{}, len(state.Accounts))
+	for _, account := range state.Accounts {
+		snapshotAddresses[account.Address] = struct{}{}
+	}
+	currentAccounts, err := db.PrefixQuery(database.TableAccount, nil)
+	if err != nil {
+		return fmt.Errorf("blockchain: list current accounts for snapshot import: %w", err)
+	}
+	for _, currentAccount := range currentAccounts {
+		address, err := structure.NewPublicKey(currentAccount.Key)
+		if err != nil {
+			return fmt.Errorf("blockchain: decode current account address: %w", err)
+		}
+		if _, exists := snapshotAddresses[address]; exists {
+			continue
+		}
+		*operations = append(*operations, database.NewDeleteOperation(database.TableAccount, currentAccount.Key))
+	}
+	for _, account := range state.Accounts {
+		accountBytes, err := account.Account.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("blockchain: marshal imported account: %w", err)
+		}
+		*operations = append(*operations, database.NewUpdateOperation(database.TableAccount, account.Address[:], accountBytes))
+	}
+	return nil
 }
 
 func (ledger *Ledger) collectBlockStorageOps(proposal consensus.BlockProposal, blockHash structure.Hash, state consensus.ChainState) ([]database.DBOperation, error) {
@@ -1275,7 +1383,11 @@ func (ledger *Ledger) nextFinalizedHeight(nextHeight uint64) uint64 {
 	if nextHeight <= finalityDepth {
 		return ledger.head.FinalizedHeight
 	}
-	return nextHeight - finalityDepth
+	nextFinalizedHeight := nextHeight - finalityDepth
+	if nextFinalizedHeight < ledger.head.FinalizedHeight {
+		return ledger.head.FinalizedHeight
+	}
+	return nextFinalizedHeight
 }
 
 func prefixedHashKey(prefix []byte, hash structure.Hash) []byte {

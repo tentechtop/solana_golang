@@ -16,6 +16,7 @@
   "consensus_seed": "consensus-101",
   "stake_lamports": 10000000,
   "slot_millis": 400,
+  "genesis_start_unix_millis": 1781591472292,
   "epoch_slots": 1500,
   "turbine_fanout": 2,
   "auto_register": false,

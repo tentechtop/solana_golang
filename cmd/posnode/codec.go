@@ -68,6 +68,7 @@ type statusResponseEnvelope struct {
 	HeadHeight      uint64              `json:"head_height"`
 	HeadSlot        uint64              `json:"head_slot"`
 	HeadHash        string              `json:"head_hash"`
+	HeadQCHash      string              `json:"head_qc_hash,omitempty"`
 	FinalizedHeight uint64              `json:"finalized_height"`
 	FinalizedHash   string              `json:"finalized_hash"`
 	EpochID         uint64              `json:"epoch_id"`
