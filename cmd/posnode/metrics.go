@@ -90,6 +90,7 @@ func (node *posNode) GetMetrics(ctx context.Context) (any, error) {
 }
 
 func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
+	node.refreshKnownPeersFromHost()
 	head := node.ledger.Head()
 	counters := node.metrics.snapshot()
 	uptimeSeconds := int64(0)

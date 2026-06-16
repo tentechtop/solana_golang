@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -85,6 +86,22 @@ func TestLedgerCommitPersistsAndReloads(t *testing.T) {
 	}
 	if reloaded.Head().Height != 1 || reloaded.Head().BlockHash != newHead.BlockHash {
 		t.Fatalf("reloaded head mismatch: %+v != %+v", reloaded.Head(), newHead)
+	}
+}
+
+func TestLedgerRejectsNonIncreasingSlot(t *testing.T) {
+	ledger, err := NewLedgerFromGenesis(nil, testGenesis(t))
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	proposalOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 10, 1, "slot-one")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposalOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit first block: %v", err)
+	}
+	proposalTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 9, 2, "slot-two")
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposalTwo, NextState: stateTwo}); !errors.Is(err, ErrInvalidCommit) {
+		t.Fatalf("commit non-increasing slot error = %v, want ErrInvalidCommit", err)
 	}
 }
 

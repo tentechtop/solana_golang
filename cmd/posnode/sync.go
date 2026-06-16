@@ -15,6 +15,7 @@ import (
 
 const maxOrphanProposals = 1024
 const maxSyncBlocksPerRound = 32
+const productionPeerStatusTimeout = 200 * time.Millisecond
 
 func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
@@ -250,7 +251,7 @@ func (node *posNode) blockSyncLoop(ctx context.Context) {
 
 func (node *posNode) syncOneRound(ctx context.Context) {
 	localHead := node.ledger.Head()
-	for _, peerID := range node.peerIDsSnapshot() {
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
 		status, err := node.requestStatus(ctx, peerID)
 		if err != nil {
 			node.logger.Debug("posnode status sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
@@ -279,6 +280,24 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 		}
 		localHead = node.ledger.Head()
 	}
+}
+
+func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint64) bool {
+	if node.host == nil {
+		return false
+	}
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+		statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+		status, err := node.requestStatus(statusContext, peerID)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if status.HeadHeight > localHeight {
+			return true
+		}
+	}
+	return false
 }
 
 func (node *posNode) importFinalizedSnapshotFromPeer(ctx context.Context, peerID string, status statusResponseEnvelope) (bool, error) {
@@ -454,7 +473,11 @@ func (node *posNode) ensureParentAvailable(ctx context.Context, parentHash struc
 	if err == nil {
 		return state, true
 	}
-	for _, peerID := range node.peerIDsSnapshot() {
+	if node.host == nil {
+		node.metrics.syncFailures.Add(1)
+		return consensus.ChainState{}, false
+	}
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
 		proposal, foundBlock, blockErr := node.requestBlockByHash(ctx, peerID, parentHash)
 		if blockErr != nil || !foundBlock {
 			node.logSyncMiss(peerID, parentHash, blockErr)
@@ -504,11 +527,32 @@ func (node *posNode) logSyncMiss(peerID string, blockHash structure.Hash, err er
 }
 
 func (node *posNode) peerIDsSnapshot() []string {
+	node.refreshKnownPeersFromHost()
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 	peerIDs := make([]string, len(node.knownPeerIDs))
 	copy(peerIDs, node.knownPeerIDs)
 	return peerIDs
+}
+
+func (node *posNode) validatorPeerIDsSnapshot(excludeLocal bool) []string {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	return node.filterTransactionRoutePeersLocked(node.validatorPeerIDsLocked(), excludeLocal)
+}
+
+func (node *posNode) connectionPeerIDsSnapshot() []string {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	peerIDs := make([]string, 0, len(node.config.BootstrapPeers)+len(node.epochSnapshot.Validators))
+	for _, peerConfig := range node.config.BootstrapPeers {
+		if peerConfig.PeerID == "" || peerConfig.PeerID == node.peerKeyPair.peerID {
+			continue
+		}
+		peerIDs = append(peerIDs, peerConfig.PeerID)
+	}
+	peerIDs = append(peerIDs, node.filterTransactionRoutePeersLocked(node.validatorPeerIDsLocked(), true)...)
+	return uniquePeerIDs(peerIDs)
 }
 
 func (node *posNode) storeOrphanProposal(proposal consensus.BlockProposal) {
@@ -553,6 +597,7 @@ func (node *posNode) orphanProposalCountLocked() int {
 }
 
 func (node *posNode) statusSnapshot() statusResponseEnvelope {
+	node.refreshKnownPeersFromHost()
 	head := node.ledger.Head()
 	node.mutex.Lock()
 	defer node.mutex.Unlock()

@@ -378,7 +378,7 @@ func (node *posNode) connectPeersLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, peerID := range node.knownPeerIDs {
+			for _, peerID := range node.connectionPeerIDsSnapshot() {
 				if _, ok := node.host.Connection(peerID); ok {
 					continue
 				}
@@ -446,6 +446,9 @@ func (node *posNode) runBootstrapDiscovery(ctx context.Context, bootnodes []util
 }
 
 func (node *posNode) refreshKnownPeersFromHost() {
+	if node.host == nil {
+		return
+	}
 	for _, snapshot := range node.host.PeerSnapshots() {
 		if snapshot.ID == "" || snapshot.ID == node.peerKeyPair.peerID {
 			continue
@@ -543,6 +546,9 @@ func (node *posNode) slotLoop(ctx context.Context) {
 }
 
 func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
+	if !tick.Started {
+		return
+	}
 	node.mutex.Lock()
 	if tick.Slot <= node.lastProducedSlot {
 		node.mutex.Unlock()
@@ -573,8 +579,31 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.mutex.Unlock()
 		return
 	}
-	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli())
 	head := node.ledger.Head()
+	if slot <= head.Slot {
+		node.mutex.Unlock()
+		return
+	}
+	node.mutex.Unlock()
+	if node.hasAheadValidatorPeer(ctx, head.Height) {
+		node.logger.Info("posnode production paused for block sync",
+			slog.Uint64("slot", slot),
+			slog.Uint64("local_height", head.Height),
+			slog.String("local_hash", head.BlockHash.String()),
+		)
+		return
+	}
+	node.mutex.Lock()
+	if slot <= node.lastProducedSlot {
+		node.mutex.Unlock()
+		return
+	}
+	head = node.ledger.Head()
+	if slot <= head.Slot {
+		node.mutex.Unlock()
+		return
+	}
+	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli())
 	rewardQCs, err := node.ledger.RewardQCs(head.FinalizedHeight, consensus.MaxRewardQCsPerBlock)
 	if err != nil {
 		node.logger.Warn("posnode reward qc load failed", slog.Any("error", err))
@@ -1097,7 +1126,8 @@ func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
 		node.logger.Error("posnode encode vote failed", slog.Any("error", err))
 		return
 	}
-	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
+	peerIDs := node.validatorPeerIDsSnapshot(true)
+	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
 		node.logger.Warn("posnode broadcast vote failed",
 			slog.Uint64("slot", vote.Slot),
 			slog.Uint64("height", vote.BlockHeight),
@@ -1112,7 +1142,7 @@ func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
 		slog.Uint64("height", vote.BlockHeight),
 		slog.String("block_hash", vote.BlockHash.String()),
 		slog.String("validator_id", vote.VoterID),
-		slog.Int("peer_count", len(node.knownPeerIDs)),
+		slog.Int("peer_count", len(peerIDs)),
 	)
 }
 
@@ -1188,7 +1218,8 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		node.logger.Error("posnode encode qc failed", slog.Any("error", err))
 		return
 	}
-	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
+	peerIDs := node.validatorPeerIDsSnapshot(true)
+	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
 		node.logger.Warn("posnode broadcast qc failed",
 			slog.Uint64("slot", qc.Slot),
 			slog.Uint64("height", qc.BlockHeight),
@@ -1203,7 +1234,7 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		slog.Uint64("height", qc.BlockHeight),
 		slog.String("block_hash", qc.BlockHash.String()),
 		slog.String("qc_hash", qcHash.String()),
-		slog.Int("peer_count", len(node.knownPeerIDs)),
+		slog.Int("peer_count", len(peerIDs)),
 	)
 }
 

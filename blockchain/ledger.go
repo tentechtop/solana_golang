@@ -681,6 +681,9 @@ func (request CommitBlockRequest) validate(head Head) error {
 	if request.Proposal.Header.ParentHash != head.BlockHash {
 		return fmt.Errorf("%w: parent hash mismatch", ErrInvalidCommit)
 	}
+	if request.Proposal.Header.Slot <= head.Slot {
+		return fmt.Errorf("%w: slot must increase", ErrInvalidCommit)
+	}
 	return nil
 }
 

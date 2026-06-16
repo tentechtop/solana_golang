@@ -10,13 +10,5 @@
   "max_peers": 256,
   "max_connections": 256,
   "dial_interval_millis": 2000,
-  "static_peers": [
-    {
-      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
-      "ip": "101.35.87.31",
-      "port": 5101,
-      "role": "validator",
-      "capabilities": ["validator", "relay", "state_sync", "dht"]
-    }
-  ]
+  "static_peers": []
 }

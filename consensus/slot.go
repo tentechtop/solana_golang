@@ -36,6 +36,7 @@ type SlotTick struct {
 	SlotDeadline  time.Time
 	Elapsed       time.Duration
 	ShouldSkip    bool
+	Started       bool
 }
 
 // NewSlotClock 创建 slot 时钟 + 固定 slot 时间和 skip 超时必须显式校验。
@@ -61,8 +62,10 @@ func NewSlotClock(startedAt time.Time, initialSlot uint64, slotDuration time.Dur
 // Tick 计算当前 slot + startedAt 和 now 来自 time.Now 时 Go 会优先使用单调时钟差值。
 func (clock *SlotClock) Tick(now time.Time) SlotTick {
 	elapsed := now.Sub(clock.startedAt)
+	started := true
 	if elapsed < 0 {
 		elapsed = 0
+		started = false
 	}
 
 	slotOffset := uint64(elapsed / clock.slotDuration)
@@ -79,6 +82,7 @@ func (clock *SlotClock) Tick(now time.Time) SlotTick {
 		SlotDeadline:  slotDeadline,
 		Elapsed:       elapsed,
 		ShouldSkip:    !now.Before(slotDeadline),
+		Started:       started,
 	}
 }
 

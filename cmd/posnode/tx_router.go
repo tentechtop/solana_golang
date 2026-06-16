@@ -29,7 +29,7 @@ func (node *posNode) transactionRouteTargets(ctx context.Context) ([]string, []s
 	}
 
 	fallbackPeerIDs := make([]string, 0)
-	for _, peerID := range node.peerIDsSnapshot() {
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
 		if peerID == "" || peerID == node.peerKeyPair.peerID {
 			continue
 		}

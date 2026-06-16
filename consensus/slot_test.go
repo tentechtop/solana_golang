@@ -34,6 +34,27 @@ func TestSlotClockTickAndSkip(t *testing.T) {
 	}
 }
 
+func TestSlotClockTickBeforeStartIsNotStarted(t *testing.T) {
+	startedAt := time.Unix(1710000000, 0)
+	clock, err := NewSlotClock(startedAt, 1, time.Second, 700*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewSlotClock() error = %v", err)
+	}
+
+	beforeTick := clock.Tick(startedAt.Add(-time.Millisecond))
+	if beforeTick.Started {
+		t.Fatal("before start tick Started = true, want false")
+	}
+	if beforeTick.Slot != 1 {
+		t.Fatalf("before start slot = %d, want 1", beforeTick.Slot)
+	}
+
+	startTick := clock.Tick(startedAt)
+	if !startTick.Started {
+		t.Fatal("start tick Started = false, want true")
+	}
+}
+
 func TestVoteCollectorBuildsQuorumCertificate(t *testing.T) {
 	collector := newTestVoteCollector(t)
 	blockHash := testHash(1)
