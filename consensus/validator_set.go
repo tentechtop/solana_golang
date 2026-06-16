@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	MaxValidatorsPerSet = 4096
+	MaxValidatorsPerSet         = 4096
+	MaxValidatorBLSPublicKeyLen = 128
 )
 
 type ValidatorStatus uint8
@@ -30,6 +31,7 @@ type ValidatorState struct {
 	ValidatorID         ValidatorID
 	AccountAddress      structure.PublicKey
 	ConsensusPublicKey  structure.PublicKey
+	BLSPublicKey        []byte
 	P2PPeerID           string
 	StakeLamports       uint64
 	Status              ValidatorStatus
@@ -113,6 +115,12 @@ func normalizeValidatorState(validator ValidatorState) (ValidatorState, error) {
 	if validator.ConsensusPublicKey.IsZero() {
 		return ValidatorState{}, fmt.Errorf("%w: consensus public key is empty", ErrInvalidVote)
 	}
+	if len(validator.BLSPublicKey) > MaxValidatorBLSPublicKeyLen {
+		return ValidatorState{}, fmt.Errorf("%w: bls public key too long", ErrInvalidVote)
+	}
+	if err := ValidateBLSPublicKey(validator.BLSPublicKey); err != nil {
+		return ValidatorState{}, fmt.Errorf("%w: invalid bls public key", ErrInvalidVote)
+	}
 	if validator.ValidatorID == "" {
 		validator.ValidatorID = NewValidatorID(validator.ConsensusPublicKey)
 	}
@@ -125,6 +133,7 @@ func normalizeValidatorState(validator ValidatorState) (ValidatorState, error) {
 	if validator.CommissionBps > 10000 {
 		return ValidatorState{}, fmt.Errorf("%w: commission exceeds 10000 bps", ErrInvalidVote)
 	}
+	validator.BLSPublicKey = append([]byte(nil), validator.BLSPublicKey...)
 	if validator.Status == ValidatorStatusInactive {
 		validator.Status = ValidatorStatusActive
 	}

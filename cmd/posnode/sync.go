@@ -487,6 +487,9 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 			currentLeader = string(leader)
 		}
 	}
+	turbine := node.turbinePositionForSlotLocked(startSlot)
+	transactionFastPath := node.transactionFastPathForSlotLocked(startSlot, true)
+	consensusStatus := node.consensusStatusForSlotLocked(startSlot)
 	return statusResponseEnvelope{
 		NodeName:        node.config.NodeName,
 		PeerID:          node.peerKeyPair.peerID,
@@ -501,6 +504,9 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		KnownPeerCount:  len(node.knownPeerIDs),
 		CurrentLeader:   currentLeader,
 		UpcomingLeaders: node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
+		Turbine:         turbine,
+		TransactionFast: transactionFastPath,
+		Consensus:       consensusStatus,
 		Metrics:         node.metrics.snapshot(),
 	}
 }

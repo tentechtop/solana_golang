@@ -17,6 +17,7 @@ type InstructionContext struct {
 	Message          structure.ResolvedMessage
 	Accounts         map[structure.PublicKey]structure.Account
 	CurrentSlot      uint64
+	CurrentEpoch     uint64
 	RentConfig       structure.RentConfig
 	ComputeBudget    structure.ComputeBudgetLimits
 	BuiltinPrograms  structure.BuiltinProgramIDs

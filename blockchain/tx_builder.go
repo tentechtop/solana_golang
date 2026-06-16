@@ -42,7 +42,12 @@ func NewTransferTransaction(source structure.SolanaKeyPair, destination structur
 
 // NewRegisterValidatorTransaction 构造验证者注册交易 + 新节点必须链上注册并质押后才可选 leader。
 func NewRegisterValidatorTransaction(staker structure.SolanaKeyPair, validatorAccount structure.PublicKey, consensusPublicKey structure.PublicKey, p2pPeerID string, amount uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
-	instruction, err := stake.NewRegisterValidatorInstruction(consensusPublicKey, p2pPeerID, 0, amount)
+	return NewRegisterValidatorTransactionWithBLS(staker, validatorAccount, consensusPublicKey, nil, p2pPeerID, amount, recentBlockhash)
+}
+
+// NewRegisterValidatorTransactionWithBLS 构造带 BLS 公钥的注册交易 + 高性能 QC 需要链上绑定聚合验签公钥。
+func NewRegisterValidatorTransactionWithBLS(staker structure.SolanaKeyPair, validatorAccount structure.PublicKey, consensusPublicKey structure.PublicKey, blsPublicKey []byte, p2pPeerID string, amount uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	instruction, err := stake.NewRegisterValidatorInstructionWithBLS(consensusPublicKey, blsPublicKey, p2pPeerID, 0, amount)
 	if err != nil {
 		return structure.Transaction{}, err
 	}

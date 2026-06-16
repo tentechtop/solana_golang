@@ -1,6 +1,10 @@
 package main
 
-import "sync/atomic"
+import (
+	"context"
+	"sync/atomic"
+	"time"
+)
 
 type nodeMetrics struct {
 	blocksProduced    atomic.Uint64
@@ -34,6 +38,34 @@ type nodeMetricsSnapshot struct {
 	EvidenceReceived  uint64 `json:"evidence_received"`
 }
 
+type nodeOperationalMetrics struct {
+	NodeName          string              `json:"node_name"`
+	PeerID            string              `json:"peer_id"`
+	CurrentSlot       uint64              `json:"current_slot"`
+	CurrentLeader     string              `json:"current_leader,omitempty"`
+	HeadHeight        uint64              `json:"head_height"`
+	HeadSlot          uint64              `json:"head_slot"`
+	BlockHash         string              `json:"block_hash"`
+	StateRoot         string              `json:"state_root"`
+	QCHash            string              `json:"qc_hash"`
+	QCHeight          uint64              `json:"qc_height"`
+	FinalizedHeight   uint64              `json:"finalized_height"`
+	MempoolSize       int                 `json:"mempool_size"`
+	ValidatorCount    int                 `json:"validator_count"`
+	KnownPeerCount    int                 `json:"known_peer_count"`
+	ForkCount         uint64              `json:"fork_count"`
+	ReorgCount        uint64              `json:"reorg_count"`
+	TurbineLayer      int                 `json:"turbine_layer"`
+	TurbineFanout     int                 `json:"turbine_fanout"`
+	TurbineParentPeer string              `json:"turbine_parent_peer,omitempty"`
+	TurbineChildCount int                 `json:"turbine_child_count"`
+	FastPathPeerCount int                 `json:"transaction_fast_path_peer_count"`
+	FastPathLeaderNum int                 `json:"transaction_fast_path_leader_count"`
+	VoteRatePerMinute float64             `json:"vote_rate_per_minute"`
+	UptimeSeconds     int64               `json:"uptime_seconds"`
+	Counters          nodeMetricsSnapshot `json:"counters"`
+}
+
 func (metrics *nodeMetrics) snapshot() nodeMetricsSnapshot {
 	return nodeMetricsSnapshot{
 		BlocksProduced:    metrics.blocksProduced.Load(),
@@ -49,5 +81,69 @@ func (metrics *nodeMetrics) snapshot() nodeMetricsSnapshot {
 		TransactionsIn:    metrics.transactionsIn.Load(),
 		TransactionsDrop:  metrics.transactionsDrop.Load(),
 		EvidenceReceived:  metrics.evidenceReceived.Load(),
+	}
+}
+
+func (node *posNode) GetMetrics(ctx context.Context) (any, error) {
+	_ = ctx
+	return node.metricsSnapshot(), nil
+}
+
+func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
+	head := node.ledger.Head()
+	counters := node.metrics.snapshot()
+	uptimeSeconds := int64(0)
+	if !node.startedAt.IsZero() {
+		uptimeSeconds = int64(time.Since(node.startedAt).Seconds())
+	}
+	voteRatePerMinute := 0.0
+	if uptimeSeconds > 0 {
+		voteRatePerMinute = float64(counters.VotesSent) * 60 / float64(uptimeSeconds)
+	}
+
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	currentSlot := head.Slot + 1
+	if node.config.SlotMillis > 0 {
+		currentSlot = node.currentRoutingSlotLocked()
+	}
+	currentLeader := ""
+	if node.epochSnapshot.StartSlot <= currentSlot && currentSlot <= node.epochSnapshot.EndSlot {
+		if leader, err := node.leaderSchedule.LeaderForSlot(currentSlot); err == nil {
+			currentLeader = string(leader)
+		}
+	}
+	turbine := node.turbinePositionForSlotLocked(currentSlot)
+	transactionFastPath := node.transactionFastPathForSlotLocked(currentSlot, true)
+	qcHeight := uint64(0)
+	if !head.QCHash.IsZero() {
+		qcHeight = head.Height
+	}
+	return nodeOperationalMetrics{
+		NodeName:          node.config.NodeName,
+		PeerID:            node.peerKeyPair.peerID,
+		CurrentSlot:       currentSlot,
+		CurrentLeader:     currentLeader,
+		HeadHeight:        head.Height,
+		HeadSlot:          head.Slot,
+		BlockHash:         head.BlockHash.String(),
+		StateRoot:         head.StateRoot.String(),
+		QCHash:            head.QCHash.String(),
+		QCHeight:          qcHeight,
+		FinalizedHeight:   head.FinalizedHeight,
+		MempoolSize:       len(node.mempool),
+		ValidatorCount:    len(node.epochSnapshot.Validators),
+		KnownPeerCount:    len(node.knownPeerIDs),
+		ForkCount:         counters.ForkDecisions,
+		ReorgCount:        counters.Reorgs,
+		TurbineLayer:      turbine.Layer,
+		TurbineFanout:     turbine.Fanout,
+		TurbineParentPeer: turbine.ParentPeerID,
+		TurbineChildCount: len(turbine.ChildPeerIDs),
+		FastPathPeerCount: len(transactionFastPath.PreferredPeerIDs),
+		FastPathLeaderNum: len(transactionFastPath.LeaderSlots),
+		VoteRatePerMinute: voteRatePerMinute,
+		UptimeSeconds:     uptimeSeconds,
+		Counters:          counters,
 	}
 }

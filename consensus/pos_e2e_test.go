@@ -72,7 +72,7 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		t.Fatalf("confirm qc = %+v, want two thirds threshold", confirmQC)
 	}
 
-	nextSet := fixture.validatorSetFromStakeAccounts(t, verifiedState)
+	nextSet := fixture.validatorSetFromStakeAccounts(t, verifiedState, 1)
 	epochOne := mustEpochSnapshot(t, 1, 33, 32, proposalHash, nextSet)
 	scheduleOne := mustLeaderSchedule(t, epochOne)
 	transferTransaction := fixture.transferTransaction(t, 5_000_000)
@@ -187,7 +187,11 @@ func TestValidatorJoinsOnlyAfterRegisterStakeTransaction(t *testing.T) {
 	}
 	assertSameStateRoot(t, registeredState, verifiedState)
 
-	joinedSet := fixture.validatorSetFromRegisteredStakeAccounts(t, verifiedState)
+	currentSet := fixture.validatorSetFromRegisteredStakeAccounts(t, verifiedState, 0)
+	if len(currentSet.Validators()) != 0 {
+		t.Fatalf("current epoch joined validator count = %d, want 0", len(currentSet.Validators()))
+	}
+	joinedSet := fixture.validatorSetFromRegisteredStakeAccounts(t, verifiedState, 1)
 	joinedValidators := joinedSet.Validators()
 	if len(joinedValidators) != 1 {
 		t.Fatalf("joined validator count = %d, want 1", len(joinedValidators))
@@ -307,7 +311,7 @@ func (fixture posTestFixture) validatorSetFromIndexes(t *testing.T, indexes ...i
 	return set
 }
 
-func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state ChainState) ValidatorSet {
+func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state ChainState, epochID uint64) ValidatorSet {
 	t.Helper()
 	validators := make([]ValidatorState, 0, len(fixture.validatorKeys))
 	for _, validator := range fixture.validatorKeys {
@@ -316,14 +320,24 @@ func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state 
 		if err != nil {
 			t.Fatalf("decode stake state: %v", err)
 		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+		if err != nil {
+			t.Fatalf("effective stake: %v", err)
+		}
+		if effectiveStake == 0 {
+			continue
+		}
 		validators = append(validators, ValidatorState{
 			AccountAddress:     validator.PublicKey,
 			ConsensusPublicKey: stakeState.ConsensusPublicKey,
 			P2PPeerID:          stakeState.P2PPeerID,
-			StakeLamports:      stakeState.ActiveStake + stakeState.PendingStake,
+			StakeLamports:      effectiveStake,
 			Status:             ValidatorStatusActive,
 			CommissionBps:      stakeState.CommissionBps,
 		})
+	}
+	if len(validators) == 0 {
+		return ValidatorSet{validators: make(map[ValidatorID]ValidatorState)}
 	}
 	set, err := NewValidatorSet(validators)
 	if err != nil {
@@ -332,7 +346,7 @@ func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state 
 	return set
 }
 
-func (fixture posTestFixture) validatorSetFromRegisteredStakeAccounts(t *testing.T, state ChainState) ValidatorSet {
+func (fixture posTestFixture) validatorSetFromRegisteredStakeAccounts(t *testing.T, state ChainState, epochID uint64) ValidatorSet {
 	t.Helper()
 	validators := make([]ValidatorState, 0, len(fixture.validatorKeys))
 	for _, validator := range fixture.validatorKeys {
@@ -344,14 +358,24 @@ func (fixture posTestFixture) validatorSetFromRegisteredStakeAccounts(t *testing
 		if err != nil {
 			t.Fatalf("decode stake state: %v", err)
 		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+		if err != nil {
+			t.Fatalf("effective stake: %v", err)
+		}
+		if effectiveStake == 0 {
+			continue
+		}
 		validators = append(validators, ValidatorState{
 			AccountAddress:     validator.PublicKey,
 			ConsensusPublicKey: stakeState.ConsensusPublicKey,
 			P2PPeerID:          stakeState.P2PPeerID,
-			StakeLamports:      stakeState.ActiveStake + stakeState.PendingStake,
+			StakeLamports:      effectiveStake,
 			Status:             ValidatorStatusActive,
 			CommissionBps:      stakeState.CommissionBps,
 		})
+	}
+	if len(validators) == 0 {
+		return ValidatorSet{validators: make(map[ValidatorID]ValidatorState)}
 	}
 	set, err := NewValidatorSet(validators)
 	if err != nil {

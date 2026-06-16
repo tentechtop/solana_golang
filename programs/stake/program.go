@@ -13,7 +13,8 @@ import (
 
 const (
 	MaxPeerIDLength      = 128
-	MaxStakeStateBytes   = 512
+	MaxBLSPublicKeyBytes = 128
+	MaxStakeStateBytes   = 768
 	MinimumStakeLamports = uint64(10_000_000)
 )
 
@@ -46,6 +47,7 @@ type Program struct {
 type Instruction struct {
 	Type               InstructionType
 	ConsensusPublicKey structure.PublicKey
+	BLSPublicKey       []byte
 	P2PPeerID          string
 	CommissionBps      uint16
 	Amount             uint64
@@ -55,6 +57,7 @@ type Instruction struct {
 // ValidatorState 描述质押账户数据 + 由共识组合层转换为 consensus.ValidatorState。
 type ValidatorState struct {
 	ConsensusPublicKey  structure.PublicKey
+	BLSPublicKey        []byte
 	StakerAccount       structure.PublicKey
 	P2PPeerID           string
 	CommissionBps       uint16
@@ -71,6 +74,9 @@ type ValidatorState struct {
 	MissedVoteCount     uint64
 	MissedProposalCount uint64
 	JailUntilEpoch      uint64
+	ActivationEpoch     uint64
+	DeactivationEpoch   uint64
+	LastEffectiveStake  uint64
 }
 
 // NewProgram 创建质押程序 + 由组合层显式注册到 runtime。
@@ -111,9 +117,15 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 
 // NewRegisterValidatorInstruction 创建注册指令 + 强制初始质押满足最低要求。
 func NewRegisterValidatorInstruction(consensusPublicKey structure.PublicKey, p2pPeerID string, commissionBps uint16, amount uint64) (Instruction, error) {
+	return NewRegisterValidatorInstructionWithBLS(consensusPublicKey, nil, p2pPeerID, commissionBps, amount)
+}
+
+// NewRegisterValidatorInstructionWithBLS 创建带 BLS 公钥的注册指令 + QC 聚合验证需要从验证者集合读取公钥。
+func NewRegisterValidatorInstructionWithBLS(consensusPublicKey structure.PublicKey, blsPublicKey []byte, p2pPeerID string, commissionBps uint16, amount uint64) (Instruction, error) {
 	instruction := Instruction{
 		Type:               InstructionRegisterValidator,
 		ConsensusPublicKey: consensusPublicKey,
+		BLSPublicKey:       cloneBytes(blsPublicKey),
 		P2PPeerID:          p2pPeerID,
 		CommissionBps:      commissionBps,
 		Amount:             amount,
@@ -161,6 +173,9 @@ func (instruction Instruction) Validate() error {
 	if instruction.P2PPeerID != "" && len(instruction.P2PPeerID) > MaxPeerIDLength {
 		return fmt.Errorf("stake: p2p peer id too long")
 	}
+	if len(instruction.BLSPublicKey) > MaxBLSPublicKeyBytes {
+		return fmt.Errorf("stake: bls public key too long")
+	}
 	if instruction.CommissionBps > 10000 {
 		return fmt.Errorf("stake: commission exceeds 10000 bps")
 	}
@@ -195,6 +210,9 @@ func (instruction Instruction) MarshalBinary() ([]byte, error) {
 	writer.WriteUint16(instruction.CommissionBps)
 	writer.WriteUint64(instruction.Amount)
 	writer.WriteUint64(instruction.UnlockEpoch)
+	if err := writer.WriteBytes(instruction.BLSPublicKey); err != nil {
+		return nil, fmt.Errorf("stake: encode bls public key: %w", err)
+	}
 	return writer.Bytes(), nil
 }
 
@@ -225,9 +243,6 @@ func UnmarshalInstructionBinary(data []byte) (Instruction, error) {
 	if err != nil {
 		return Instruction{}, fmt.Errorf("stake: decode unlock epoch: %w", err)
 	}
-	if err := reader.EnsureEOF(); err != nil {
-		return Instruction{}, fmt.Errorf("stake: decode instruction eof: %w", err)
-	}
 	instruction := Instruction{
 		Type:               InstructionType(instructionType),
 		ConsensusPublicKey: consensusPublicKey,
@@ -235,6 +250,15 @@ func UnmarshalInstructionBinary(data []byte) (Instruction, error) {
 		CommissionBps:      commissionBps,
 		Amount:             amount,
 		UnlockEpoch:        unlockEpoch,
+	}
+	if reader.Remaining() == 0 {
+		return instruction, instruction.Validate()
+	}
+	if instruction.BLSPublicKey, err = reader.ReadBytes(); err != nil {
+		return Instruction{}, fmt.Errorf("stake: decode bls public key: %w", err)
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		return Instruction{}, fmt.Errorf("stake: decode instruction eof: %w", err)
 	}
 	return instruction, instruction.Validate()
 }
@@ -264,6 +288,12 @@ func (state ValidatorState) MarshalBinary() ([]byte, error) {
 	writer.WriteUint64(state.MissedVoteCount)
 	writer.WriteUint64(state.MissedProposalCount)
 	writer.WriteUint64(state.JailUntilEpoch)
+	writer.WriteUint64(state.ActivationEpoch)
+	writer.WriteUint64(state.DeactivationEpoch)
+	writer.WriteUint64(state.LastEffectiveStake)
+	if err := writer.WriteBytes(state.BLSPublicKey); err != nil {
+		return nil, fmt.Errorf("stake: encode validator bls public key: %w", err)
+	}
 	return writer.Bytes(), nil
 }
 
@@ -344,6 +374,24 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 	if state.JailUntilEpoch, err = reader.ReadUint64(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode jail until epoch: %w", err)
 	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.ActivationEpoch, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode activation epoch: %w", err)
+	}
+	if state.DeactivationEpoch, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode deactivation epoch: %w", err)
+	}
+	if state.LastEffectiveStake, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode effective stake: %w", err)
+	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.BLSPublicKey, err = reader.ReadBytes(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode validator bls public key: %w", err)
+	}
 	if err := reader.EnsureEOF(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
 	}
@@ -354,6 +402,9 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 func (state ValidatorState) Validate() error {
 	if state.ConsensusPublicKey.IsZero() {
 		return fmt.Errorf("stake: consensus public key is empty")
+	}
+	if len(state.BLSPublicKey) > MaxBLSPublicKeyBytes {
+		return fmt.Errorf("stake: bls public key too long")
 	}
 	if state.StakerAccount.IsZero() {
 		return fmt.Errorf("stake: staker account is empty")
@@ -373,8 +424,71 @@ func (state ValidatorState) Validate() error {
 	if state.ActiveStake+state.PendingStake < MinimumStakeLamports && state.Status == ValidatorStatusActive {
 		return fmt.Errorf("stake: active validator stake below minimum")
 	}
+	totalBondedStake := state.ActiveStake + state.PendingStake
+	if ^uint64(0)-totalBondedStake < state.UnlockingStake {
+		return fmt.Errorf("stake: stake overflow")
+	}
+	totalBondedStake += state.UnlockingStake
+	if state.LastEffectiveStake > totalBondedStake {
+		return fmt.Errorf("stake: effective stake exceeds bonded stake")
+	}
 	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting && state.Status != ValidatorStatusJailed {
 		return fmt.Errorf("stake: invalid validator status %d", state.Status)
+	}
+	return nil
+}
+
+// EffectiveStakeAtEpoch 计算 epoch 生效权重 + 避免 pending stake 在当前 epoch 立即影响共识。
+func EffectiveStakeAtEpoch(state ValidatorState, epochID uint64) (uint64, error) {
+	if err := state.Validate(); err != nil {
+		return 0, err
+	}
+	if state.Status == ValidatorStatusJailed && state.JailUntilEpoch > epochID {
+		return 0, nil
+	}
+	if state.Status == ValidatorStatusExiting && state.DeactivationEpoch <= epochID {
+		return 0, nil
+	}
+
+	effectiveStake := state.ActiveStake
+	if state.UnlockingStake > 0 && state.DeactivationEpoch > epochID {
+		if ^uint64(0)-effectiveStake < state.UnlockingStake {
+			return 0, fmt.Errorf("stake: effective stake overflow")
+		}
+		effectiveStake += state.UnlockingStake
+	}
+	if state.PendingStake > 0 && state.ActivationEpoch <= epochID {
+		if ^uint64(0)-effectiveStake < state.PendingStake {
+			return 0, fmt.Errorf("stake: effective stake overflow")
+		}
+		effectiveStake += state.PendingStake
+	}
+	if effectiveStake < MinimumStakeLamports {
+		return 0, nil
+	}
+	return effectiveStake, nil
+}
+
+// MatureStakeForEpoch 迁移到期 pending stake + 让后续 unstake/slash 看到一致的 active bucket。
+func MatureStakeForEpoch(state *ValidatorState, epochID uint64) error {
+	if state == nil {
+		return fmt.Errorf("stake: nil validator state")
+	}
+	if state.PendingStake > 0 && state.ActivationEpoch <= epochID {
+		if ^uint64(0)-state.ActiveStake < state.PendingStake {
+			return fmt.Errorf("stake: active stake overflow")
+		}
+		state.ActiveStake += state.PendingStake
+		state.PendingStake = 0
+		state.ActivationEpoch = 0
+	}
+	effectiveStake, err := EffectiveStakeAtEpoch(*state, epochID)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
+	if state.Status == ValidatorStatusJailed && state.JailUntilEpoch <= epochID && effectiveStake >= MinimumStakeLamports {
+		state.Status = ValidatorStatusActive
 	}
 	return nil
 }
@@ -398,12 +512,19 @@ func executeRegisterValidator(instruction Instruction, context runtime.Instructi
 	}
 	state := ValidatorState{
 		ConsensusPublicKey: instruction.ConsensusPublicKey,
+		BLSPublicKey:       cloneBytes(instruction.BLSPublicKey),
 		StakerAccount:      stakerAddress,
 		P2PPeerID:          instruction.P2PPeerID,
 		CommissionBps:      instruction.CommissionBps,
-		ActiveStake:        instruction.Amount,
+		PendingStake:       instruction.Amount,
 		Status:             ValidatorStatusActive,
+		ActivationEpoch:    context.CurrentEpoch + 1,
 	}
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("register_validator", validatorAddress, validatorAccount, state, context)
 }
 
@@ -415,6 +536,9 @@ func executeStake(instruction Instruction, context runtime.InstructionContext) e
 	if state.Status != ValidatorStatusActive {
 		return fmt.Errorf("stake: validator is not active")
 	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
+		return err
+	}
 	if err := runtime.TransferLamports(stakerAddress, validatorAddress, instruction.Amount, context.Accounts, context.RentConfig); err != nil {
 		return err
 	}
@@ -422,6 +546,12 @@ func executeStake(instruction Instruction, context runtime.InstructionContext) e
 		return fmt.Errorf("stake: pending stake overflow")
 	}
 	state.PendingStake += instruction.Amount
+	state.ActivationEpoch = context.CurrentEpoch + 1
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	validatorAccount := context.Accounts[validatorAddress].Clone()
 	return writeValidatorState("stake", validatorAddress, validatorAccount, state, context)
 }
@@ -431,18 +561,30 @@ func executeUnstake(instruction Instruction, context runtime.InstructionContext)
 	if err != nil {
 		return err
 	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
+		return err
+	}
 	if instruction.Amount > state.ActiveStake {
 		return fmt.Errorf("stake: unstake exceeds active stake")
 	}
 	state.ActiveStake -= instruction.Amount
 	state.UnlockingStake += instruction.Amount
 	state.UnlockEpoch = instruction.UnlockEpoch
+	state.DeactivationEpoch = context.CurrentEpoch + 1
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("unstake", validatorAddress, validatorAccount, state, context)
 }
 
 func executeWithdrawUnstaked(instruction Instruction, context runtime.InstructionContext) error {
 	stakerAddress, validatorAddress, state, _, err := loadWritableValidator(context)
 	if err != nil {
+		return err
+	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
 		return err
 	}
 	if state.UnlockingStake == 0 || instruction.UnlockEpoch < state.UnlockEpoch {
@@ -463,12 +605,21 @@ func executeExitValidator(context runtime.InstructionContext) error {
 		return err
 	}
 	state.Status = ValidatorStatusExiting
+	state.DeactivationEpoch = context.CurrentEpoch + 1
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("exit_validator", validatorAddress, validatorAccount, state, context)
 }
 
 func executeSlashValidator(instruction Instruction, context runtime.InstructionContext) error {
 	_, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
 	if err != nil {
+		return err
+	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
 		return err
 	}
 	totalStake, err := validatorTotalStake(state)
@@ -489,6 +640,11 @@ func executeSlashValidator(instruction Instruction, context runtime.InstructionC
 		state.Status = ValidatorStatusJailed
 		state.JailUntilEpoch = state.UnlockEpoch
 	}
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("slash_validator", validatorAddress, validatorAccount, state, context)
 }
 
@@ -500,6 +656,11 @@ func executeJailValidator(instruction Instruction, context runtime.InstructionCo
 	state.Status = ValidatorStatusJailed
 	state.UnlockEpoch = instruction.UnlockEpoch
 	state.JailUntilEpoch = instruction.UnlockEpoch
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("jail_validator", validatorAddress, validatorAccount, state, context)
 }
 
@@ -571,6 +732,7 @@ func logValidatorStateWrite(action string, address structure.PublicKey, state Va
 		slog.String("validator_account", address.String()),
 		slog.String("validator_id", ValidatorIDFromConsensusKey(state.ConsensusPublicKey)),
 		slog.String("consensus_public_key", state.ConsensusPublicKey.String()),
+		slog.Int("bls_public_key_bytes", len(state.BLSPublicKey)),
 		slog.String("staker", state.StakerAccount.String()),
 		slog.String("p2p_peer_id", state.P2PPeerID),
 		slog.Int("status", int(state.Status)),
@@ -579,6 +741,9 @@ func logValidatorStateWrite(action string, address structure.PublicKey, state Va
 		slog.Uint64("unlocking_stake", state.UnlockingStake),
 		slog.Uint64("unlock_epoch", state.UnlockEpoch),
 		slog.Uint64("jail_until_epoch", state.JailUntilEpoch),
+		slog.Uint64("activation_epoch", state.ActivationEpoch),
+		slog.Uint64("deactivation_epoch", state.DeactivationEpoch),
+		slog.Uint64("effective_stake", state.LastEffectiveStake),
 		slog.Uint64("vote_credits", state.VoteCredits),
 		slog.Uint64("missed_vote_count", state.MissedVoteCount),
 		slog.Uint64("missed_proposal_count", state.MissedProposalCount),
@@ -613,6 +778,15 @@ func readPublicKey(reader *borsh.Reader, field string) (structure.PublicKey, err
 		return structure.PublicKey{}, fmt.Errorf("stake: decode %s: %w", field, err)
 	}
 	return publicKey, nil
+}
+
+func cloneBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]byte, len(value))
+	copy(cloned, value)
+	return cloned
 }
 
 // ValidatorIDFromConsensusKey 计算验证者 ID + 供 cmd 和测试不 import consensus 时使用。

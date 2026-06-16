@@ -465,28 +465,50 @@ func (ledger *Ledger) StateAtBlockHash(blockHash structure.Hash) (consensus.Chai
 
 // ValidatorSetFromState 从 stake account 生成验证者集合 + leader 选举只依赖链上状态。
 func (ledger *Ledger) ValidatorSetFromState() (consensus.ValidatorSet, error) {
+	return ledger.ValidatorSetFromStateAtEpoch(ledger.Head().EpochID)
+}
+
+// ValidatorSetFromStateAtEpoch 从 stake account 生成目标 epoch 集合 + stake 激活和 jail 过滤必须按同一 epoch 计算。
+func (ledger *Ledger) ValidatorSetFromStateAtEpoch(epochID uint64) (consensus.ValidatorSet, error) {
 	ledger.mutex.RLock()
 	defer ledger.mutex.RUnlock()
-	return ValidatorSetFromState(ledger.state)
+	return ValidatorSetFromStateAtEpoch(ledger.state, epochID)
 }
 
 // ValidatorSetFromState 从状态扫描 active validator + 新节点必须注册质押后才能进入集合。
 func ValidatorSetFromState(state consensus.ChainState) (consensus.ValidatorSet, error) {
+	return ValidatorSetFromStateAtEpoch(state, 0)
+}
+
+// ValidatorSetFromStateAtEpoch 从状态扫描有效验证者 + 按目标 epoch 计算 effective stake。
+func ValidatorSetFromStateAtEpoch(state consensus.ChainState, epochID uint64) (consensus.ValidatorSet, error) {
 	validators := make([]consensus.ValidatorState, 0)
 	for _, account := range state.Accounts {
 		if account.Account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Account.Data) == 0 {
 			continue
 		}
 		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
-		if err != nil || stakeState.Status != stake.ValidatorStatusActive {
+		if err != nil {
+			continue
+		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+		if err != nil || effectiveStake == 0 {
+			continue
+		}
+		status := consensus.ValidatorStatusActive
+		if stakeState.Status == stake.ValidatorStatusExiting && stakeState.DeactivationEpoch <= epochID {
+			status = consensus.ValidatorStatusExiting
+		}
+		if status != consensus.ValidatorStatusActive {
 			continue
 		}
 		validators = append(validators, consensus.ValidatorState{
 			AccountAddress:      account.Address,
 			ConsensusPublicKey:  stakeState.ConsensusPublicKey,
+			BLSPublicKey:        append([]byte(nil), stakeState.BLSPublicKey...),
 			P2PPeerID:           stakeState.P2PPeerID,
-			StakeLamports:       stakeState.ActiveStake + stakeState.PendingStake,
-			Status:              consensus.ValidatorStatusActive,
+			StakeLamports:       effectiveStake,
+			Status:              status,
 			CommissionBps:       stakeState.CommissionBps,
 			LastVotedSlot:       stakeState.LastVoteSlot,
 			MissedProposalCount: stakeState.MissedProposalCount,
@@ -610,11 +632,14 @@ func buildGenesisValidatorAccount(validator GenesisValidator) (structure.Address
 	}
 	stakeState := stake.ValidatorState{
 		ConsensusPublicKey: validator.ConsensusPublicKey,
+		BLSPublicKey:       append([]byte(nil), validator.BLSPublicKey...),
 		StakerAccount:      validator.StakerAddress,
 		P2PPeerID:          validator.P2PPeerID,
 		CommissionBps:      validator.CommissionBps,
 		ActiveStake:        validator.StakeLamports,
 		Status:             stake.ValidatorStatusActive,
+		ActivationEpoch:    0,
+		LastEffectiveStake: validator.StakeLamports,
 	}
 	data, err := stakeState.MarshalBinary()
 	if err != nil {

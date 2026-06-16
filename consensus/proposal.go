@@ -307,12 +307,14 @@ func (producer BlockProducer) executeTransaction(
 	return producer.Executor.ExecuteTransaction(contextValue, runtime.TransactionRequest{
 		ChainID: producer.ChainID,
 		Slot:    request.Slot,
+		Epoch:   request.EpochSnapshot.EpochID,
 		Mode:    runtime.ExecutionModeFixedInstruction,
 		Simulation: runtime.TransactionSimulationInput{
 			Transaction:    transaction,
 			Accounts:       state.Accounts,
 			BlockhashQueue: request.BlockhashQueue,
 			CurrentSlot:    request.Slot,
+			CurrentEpoch:   request.EpochSnapshot.EpochID,
 		},
 	})
 }
@@ -326,12 +328,14 @@ func (verifier ProposalVerifier) executeVerifyTransaction(
 	return verifier.Executor.ExecuteTransaction(contextValue, runtime.TransactionRequest{
 		ChainID: verifier.ChainID,
 		Slot:    request.Proposal.Header.Slot,
+		Epoch:   request.EpochSnapshot.EpochID,
 		Mode:    runtime.ExecutionModeFixedInstruction,
 		Simulation: runtime.TransactionSimulationInput{
 			Transaction:    transaction,
 			Accounts:       state.Accounts,
 			BlockhashQueue: request.BlockhashQueue,
 			CurrentSlot:    request.Proposal.Header.Slot,
+			CurrentEpoch:   request.EpochSnapshot.EpochID,
 		},
 	})
 }

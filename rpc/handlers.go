@@ -7,19 +7,21 @@ import (
 )
 
 const (
-	MethodGetBalance        = "getBalance"
-	MethodSendTransaction   = "sendTransaction"
-	MethodGetBlock          = "getBlock"
-	MethodTreasuryTransfer  = "treasuryTransfer"
-	MethodTransfer          = "transfer"
-	MethodRegisterValidator = "registerValidator"
-	MethodStake             = "stake"
-	MethodUnstake           = "unstake"
-	MethodSlashValidator    = "slashValidator"
-	MethodJailValidator     = "jailValidator"
-	MethodGetValidatorSet   = "getValidatorSet"
-	MethodGetNodeStatus     = "getNodeStatus"
-	MethodGetHealth         = "getHealth"
+	MethodGetBalance         = "getBalance"
+	MethodSendTransaction    = "sendTransaction"
+	MethodGetBlock           = "getBlock"
+	MethodTreasuryTransfer   = "treasuryTransfer"
+	MethodTransfer           = "transfer"
+	MethodRegisterValidator  = "registerValidator"
+	MethodStake              = "stake"
+	MethodUnstake            = "unstake"
+	MethodSlashValidator     = "slashValidator"
+	MethodJailValidator      = "jailValidator"
+	MethodGetValidatorSet    = "getValidatorSet"
+	MethodGetNodeStatus      = "getNodeStatus"
+	MethodGetConsensusStatus = "getConsensusStatus"
+	MethodGetMetrics         = "getMetrics"
+	MethodGetHealth          = "getHealth"
 )
 
 // LedgerBackend 定义链业务后端 + 让 RPC 层只负责协议转换和参数校验。
@@ -55,6 +57,14 @@ type ValidatorSetBackend interface {
 type NodeStatusBackend interface {
 	GetNodeStatus(ctx context.Context) (any, error)
 	GetHealth(ctx context.Context) (HealthResult, error)
+}
+
+type ConsensusStatusBackend interface {
+	GetConsensusStatus(ctx context.Context) (any, error)
+}
+
+type MetricsBackend interface {
+	GetMetrics(ctx context.Context) (any, error)
 }
 
 type BalanceResult struct {
@@ -107,6 +117,8 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodJailValidator, jailValidatorHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
 	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetConsensusStatus, getConsensusStatusHandler(backend))
+	_ = router.Register(MethodGetMetrics, getMetricsHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
 }
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {
@@ -389,6 +401,40 @@ func getNodeStatusHandler(backend LedgerBackend) HandlerFunc {
 		result, err := statusBackend.GetNodeStatus(ctx)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get node status: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getConsensusStatusHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		statusBackend, ok := backend.(ConsensusStatusBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := statusBackend.GetConsensusStatus(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get consensus status: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getMetricsHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		metricsBackend, ok := backend.(MetricsBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := metricsBackend.GetMetrics(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get metrics: %v", err))
 		}
 		return result, nil
 	}

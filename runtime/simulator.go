@@ -18,6 +18,7 @@ type TransactionSimulationInput struct {
 	Accounts        []structure.AddressedAccount
 	BlockhashQueue  structure.BlockhashQueue
 	CurrentSlot     uint64
+	CurrentEpoch    uint64
 	FeeCalculator   structure.FeeCalculator
 	ComputeBudget   structure.ComputeBudgetLimits
 	RentConfig      structure.RentConfig
@@ -212,6 +213,7 @@ func executeSimulatedInstruction(
 		Message:          message,
 		Accounts:         accounts,
 		CurrentSlot:      input.CurrentSlot,
+		CurrentEpoch:     input.CurrentEpoch,
 		RentConfig:       input.RentConfig,
 		ComputeBudget:    input.ComputeBudget,
 		BuiltinPrograms:  input.BuiltinPrograms,

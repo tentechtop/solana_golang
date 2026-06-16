@@ -23,6 +23,7 @@ const (
 type TransactionRequest struct {
 	ChainID    string
 	Slot       uint64
+	Epoch      uint64
 	Mode       ExecutionMode
 	Simulation TransactionSimulationInput
 }

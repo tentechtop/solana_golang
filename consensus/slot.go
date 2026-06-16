@@ -264,6 +264,9 @@ type QuorumCertificate struct {
 	ConfirmedStake     uint64
 	Voters             []string
 	CreatedAtUnixMilli int64
+	SignatureScheme    string `json:"signature_scheme,omitempty"`
+	AggregateSignature []byte `json:"aggregate_signature,omitempty"`
+	VoterBitmap        []byte `json:"voter_bitmap,omitempty"`
 }
 
 // Validate 校验证书字段 + 防止伪造或不完整 QC 被上层接受。
@@ -292,6 +295,9 @@ func (certificate QuorumCertificate) Validate() error {
 	if certificate.CreatedAtUnixMilli <= 0 {
 		return fmt.Errorf("%w: created_at must be positive", ErrInvalidCertificate)
 	}
+	if err := validateAggregateFields(certificate); err != nil {
+		return err
+	}
 	return validateVoterList(certificate.Voters)
 }
 
@@ -316,6 +322,15 @@ func (certificate QuorumCertificate) MarshalBinary() ([]byte, error) {
 			return nil, fmt.Errorf("consensus: marshal qc voter id: %w", err)
 		}
 	}
+	if err := writer.WriteString(certificate.SignatureScheme); err != nil {
+		return nil, fmt.Errorf("consensus: marshal qc signature scheme: %w", err)
+	}
+	if err := writer.WriteBytes(certificate.AggregateSignature); err != nil {
+		return nil, fmt.Errorf("consensus: marshal qc aggregate signature: %w", err)
+	}
+	if err := writer.WriteBytes(certificate.VoterBitmap); err != nil {
+		return nil, fmt.Errorf("consensus: marshal qc voter bitmap: %w", err)
+	}
 	return writer.Bytes(), nil
 }
 
@@ -333,6 +348,18 @@ func UnmarshalCertificateBinary(data []byte) (QuorumCertificate, error) {
 	certificate, err := readCertificateFields(reader)
 	if err != nil {
 		return QuorumCertificate{}, err
+	}
+	if reader.Remaining() == 0 {
+		return certificate, certificate.Validate()
+	}
+	if certificate.SignatureScheme, err = reader.ReadString(); err != nil {
+		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc signature scheme: %w", err)
+	}
+	if certificate.AggregateSignature, err = reader.ReadBytes(); err != nil {
+		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc aggregate signature: %w", err)
+	}
+	if certificate.VoterBitmap, err = reader.ReadBytes(); err != nil {
+		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc voter bitmap: %w", err)
 	}
 	if err := reader.EnsureEOF(); err != nil {
 		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc eof: %w", err)
@@ -372,6 +399,21 @@ func NewVoteCollector(validatorStake map[string]uint64, quorum Quorum) (*VoteCol
 
 // AddVote 添加投票 + 同一验证者同一 slot 同一类型只能选择一个结果。
 func (collector *VoteCollector) AddVote(vote Vote) (QuorumCertificate, bool, error) {
+	return collector.addVote(vote, nil, nil)
+}
+
+// AddVoteWithBLS 添加 BLS 投票 + 达到阈值时生成 aggregate_signature 和 voter_bitmap。
+func (collector *VoteCollector) AddVoteWithBLS(vote Vote, blsSignature []byte, validatorOrder []string) (QuorumCertificate, bool, error) {
+	if len(blsSignature) == 0 {
+		return QuorumCertificate{}, false, fmt.Errorf("%w: missing bls vote signature", ErrInvalidVote)
+	}
+	if len(validatorOrder) == 0 {
+		return QuorumCertificate{}, false, fmt.Errorf("%w: missing validator order", ErrInvalidVote)
+	}
+	return collector.addVote(vote, blsSignature, validatorOrder)
+}
+
+func (collector *VoteCollector) addVote(vote Vote, blsSignature []byte, validatorOrder []string) (QuorumCertificate, bool, error) {
 	if err := vote.Validate(); err != nil {
 		return QuorumCertificate{}, false, err
 	}
@@ -400,6 +442,9 @@ func (collector *VoteCollector) AddVote(vote Vote) (QuorumCertificate, bool, err
 	bucket.stake += registeredStake
 	bucket.blockHeight = vote.BlockHeight
 	bucket.voters[vote.VoterID] = struct{}{}
+	if len(blsSignature) > 0 {
+		bucket.blsSignatures[vote.VoterID] = append([]byte(nil), blsSignature...)
+	}
 	if vote.CreatedAtUnixMilli > bucket.createdAtUnixMilli {
 		bucket.createdAtUnixMilli = vote.CreatedAtUnixMilli
 	}
@@ -408,7 +453,15 @@ func (collector *VoteCollector) AddVote(vote Vote) (QuorumCertificate, bool, err
 	if bucket.stake < collector.thresholdStake {
 		return QuorumCertificate{}, false, nil
 	}
-	return collector.certificate(key, bucket), true, nil
+	certificate := collector.certificate(key, bucket)
+	if len(validatorOrder) == 0 || len(bucket.blsSignatures) != len(bucket.voters) {
+		return certificate, true, nil
+	}
+	aggregateCertificate, err := AttachBLSAggregate(certificate, validatorOrder, bucket.blsSignatures)
+	if err != nil {
+		return QuorumCertificate{}, false, err
+	}
+	return aggregateCertificate, true, nil
 }
 
 // ThresholdStake 返回确认阈值 + 测试和调试可以直接观察本地配置结果。
@@ -441,6 +494,7 @@ type voteBucket struct {
 	blockHeight        uint64
 	stake              uint64
 	voters             map[string]struct{}
+	blsSignatures      map[string][]byte
 	createdAtUnixMilli int64
 }
 
@@ -449,7 +503,10 @@ func (collector *VoteCollector) bucket(key voteKey) *voteBucket {
 	if exists {
 		return bucket
 	}
-	bucket = &voteBucket{voters: make(map[string]struct{})}
+	bucket = &voteBucket{
+		voters:        make(map[string]struct{}),
+		blsSignatures: make(map[string][]byte),
+	}
 	collector.buckets[key] = bucket
 	return bucket
 }
@@ -587,6 +644,23 @@ func validateVoterList(voters []string) error {
 		}
 		seen[voterID] = struct{}{}
 		previousVoterID = voterID
+	}
+	return nil
+}
+
+func validateAggregateFields(certificate QuorumCertificate) error {
+	hasAggregate := certificate.SignatureScheme != "" || len(certificate.AggregateSignature) > 0 || len(certificate.VoterBitmap) > 0
+	if !hasAggregate {
+		return nil
+	}
+	if certificate.SignatureScheme != BLSSignatureSchemeBasic {
+		return fmt.Errorf("%w: unsupported aggregate signature scheme", ErrInvalidCertificate)
+	}
+	if len(certificate.AggregateSignature) == 0 {
+		return fmt.Errorf("%w: missing aggregate signature", ErrInvalidCertificate)
+	}
+	if len(certificate.VoterBitmap) == 0 {
+		return fmt.Errorf("%w: missing voter bitmap", ErrInvalidCertificate)
 	}
 	return nil
 }

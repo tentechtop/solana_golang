@@ -1,0 +1,26 @@
+﻿{
+    "CheckedAt":  "2026-06-16T11:15:30.7796324+08:00",
+    "Urls":  [
+                 "http://127.0.0.1:1"
+             ],
+    "Rounds":  [
+                   {
+                       "Round":  1,
+                       "Timestamp":  "2026-06-16T11:15:30.7775951+08:00",
+                       "Nodes":  [
+
+                                 ],
+                       "Errors":  [
+                                      "round 1 has no successful node snapshot"
+                                  ],
+                       "Warnings":  [
+
+                                    ]
+                   }
+               ],
+    "Errors":  [
+                   "http://127.0.0.1:1 snapshot failed: 操作超时",
+                   "round 1: round 1 has no successful node snapshot"
+               ],
+    "OK":  false
+}

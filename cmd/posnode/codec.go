@@ -19,9 +19,11 @@ type proposalEnvelope struct {
 }
 
 type voteEnvelope struct {
-	Vote      consensus.Vote      `json:"vote"`
-	PublicKey structure.PublicKey `json:"public_key"`
-	Signature structure.Signature `json:"signature"`
+	Vote         consensus.Vote      `json:"vote"`
+	PublicKey    structure.PublicKey `json:"public_key"`
+	Signature    structure.Signature `json:"signature"`
+	BLSPublicKey []byte              `json:"bls_public_key,omitempty"`
+	BLSSignature []byte              `json:"bls_signature,omitempty"`
 }
 
 type qcEnvelope struct {
@@ -74,6 +76,9 @@ type statusResponseEnvelope struct {
 	KnownPeerCount  int                 `json:"known_peer_count"`
 	CurrentLeader   string              `json:"current_leader,omitempty"`
 	UpcomingLeaders []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
+	Turbine         turbinePositionJSON `json:"turbine"`
+	TransactionFast transactionFastJSON `json:"transaction_fast_path"`
+	Consensus       consensusStatusJSON `json:"consensus"`
 	Metrics         nodeMetricsSnapshot `json:"metrics"`
 }
 
@@ -81,6 +86,68 @@ type leaderSlotJSON struct {
 	Slot        uint64 `json:"slot"`
 	ValidatorID string `json:"validator_id"`
 	PeerID      string `json:"peer_id"`
+}
+
+type turbinePositionJSON struct {
+	Slot             uint64   `json:"slot"`
+	Fanout           int      `json:"fanout"`
+	Layer            int      `json:"layer"`
+	LeaderID         string   `json:"leader_id,omitempty"`
+	LeaderPeerID     string   `json:"leader_peer_id,omitempty"`
+	ParentValidator  string   `json:"parent_validator_id,omitempty"`
+	ParentPeerID     string   `json:"parent_peer_id,omitempty"`
+	ChildValidators  []string `json:"child_validator_ids,omitempty"`
+	ChildPeerIDs     []string `json:"child_peer_ids,omitempty"`
+	ValidatorInTree  bool     `json:"validator_in_tree"`
+	TurbineAvailable bool     `json:"turbine_available"`
+}
+
+type transactionFastJSON struct {
+	StartSlot         uint64           `json:"start_slot"`
+	ForwardSlots      int              `json:"forward_slots"`
+	LeaderSlots       []leaderSlotJSON `json:"leader_slots,omitempty"`
+	ValidatorPeerIDs  []string         `json:"validator_peer_ids,omitempty"`
+	PreferredPeerIDs  []string         `json:"preferred_peer_ids,omitempty"`
+	ForwardValidators bool             `json:"forward_validators"`
+	FastPathAvailable bool             `json:"fast_path_available"`
+}
+
+type consensusStatusJSON struct {
+	Available        bool                           `json:"available"`
+	Slot             uint64                         `json:"slot"`
+	EpochID          uint64                         `json:"epoch_id"`
+	EpochStartSlot   uint64                         `json:"epoch_start_slot"`
+	EpochEndSlot     uint64                         `json:"epoch_end_slot"`
+	TotalActiveStake uint64                         `json:"total_active_stake_lamports"`
+	ValidatorCount   int                            `json:"validator_count"`
+	LocalValidatorID string                         `json:"local_validator_id,omitempty"`
+	LocalValidator   consensusValidatorStatusJSON   `json:"local_validator"`
+	Validators       []consensusValidatorStatusJSON `json:"validators,omitempty"`
+}
+
+type consensusValidatorStatusJSON struct {
+	ValidatorID                string   `json:"validator_id"`
+	AccountAddress             string   `json:"account_address,omitempty"`
+	ConsensusPublicKey         string   `json:"consensus_public_key,omitempty"`
+	P2PPeerID                  string   `json:"p2p_peer_id,omitempty"`
+	Status                     string   `json:"status,omitempty"`
+	InCurrentEpoch             bool     `json:"in_current_epoch"`
+	InTurbineTree              bool     `json:"in_turbine_tree"`
+	TurbineLayer               int      `json:"turbine_layer"`
+	TurbineParentValidatorID   string   `json:"turbine_parent_validator_id,omitempty"`
+	TurbineParentPeerID        string   `json:"turbine_parent_peer_id,omitempty"`
+	TurbineChildValidatorIDs   []string `json:"turbine_child_validator_ids,omitempty"`
+	TurbineChildPeerIDs        []string `json:"turbine_child_peer_ids,omitempty"`
+	EffectiveStakeLamports     uint64   `json:"effective_stake_lamports"`
+	WeightBps                  uint64   `json:"weight_bps"`
+	ActiveStakeLamports        uint64   `json:"active_stake_lamports"`
+	PendingStakeLamports       uint64   `json:"pending_stake_lamports"`
+	UnlockingStakeLamports     uint64   `json:"unlocking_stake_lamports"`
+	ActivationEpoch            uint64   `json:"activation_epoch"`
+	DeactivationEpoch          uint64   `json:"deactivation_epoch"`
+	LastEffectiveStakeLamports uint64   `json:"last_effective_stake_lamports"`
+	JailUntilEpoch             uint64   `json:"jail_until_epoch"`
+	CommissionBps              uint16   `json:"commission_bps"`
 }
 
 type posProposalJSON struct {
@@ -135,7 +202,7 @@ func decodeProposalMessage(message p2p.Message) (consensus.BlockProposal, error)
 	return proposalFromJSON(envelope.Proposal)
 }
 
-func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair) (p2p.Message, error) {
+func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair) (p2p.Message, error) {
 	voteBytes, err := vote.MarshalBinary()
 	if err != nil {
 		return p2p.Message{}, err
@@ -144,7 +211,16 @@ func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair) (p2
 	if err != nil {
 		return p2p.Message{}, fmt.Errorf("posnode: sign vote: %w", err)
 	}
-	payload, err := json.Marshal(voteEnvelope{Vote: vote, PublicKey: keyPair.PublicKey, Signature: signature})
+	envelope := voteEnvelope{Vote: vote, PublicKey: keyPair.PublicKey, Signature: signature}
+	if len(blsKeyPair.PrivateKey) > 0 {
+		blsSignature, err := consensus.SignBLSVote(blsKeyPair.PrivateKey, vote)
+		if err != nil {
+			return p2p.Message{}, fmt.Errorf("posnode: sign bls vote: %w", err)
+		}
+		envelope.BLSPublicKey = append([]byte(nil), blsKeyPair.PublicKey...)
+		envelope.BLSSignature = blsSignature
+	}
+	payload, err := json.Marshal(envelope)
 	if err != nil {
 		return p2p.Message{}, fmt.Errorf("posnode: marshal vote envelope: %w", err)
 	}

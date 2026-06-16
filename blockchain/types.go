@@ -26,6 +26,7 @@ type GenesisValidator struct {
 	StakerAddress      structure.PublicKey
 	ValidatorAddress   structure.PublicKey
 	ConsensusPublicKey structure.PublicKey
+	BLSPublicKey       []byte
 	P2PPeerID          string
 	StakeLamports      uint64
 	CommissionBps      uint16

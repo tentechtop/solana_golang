@@ -54,6 +54,15 @@ func TestHTTPJSONRPCSubmitsSignedTransaction(t *testing.T) {
 	if health.MempoolSize != 1 {
 		t.Fatalf("health mempool size = %d, want 1", health.MempoolSize)
 	}
+
+	metricsResponse := postPosNodeJSONRPC(t, server, 4, rpc.MethodGetMetrics, []any{})
+	metrics := decodePosNodeRPCResult[nodeOperationalMetrics](t, metricsResponse)
+	if metrics.MempoolSize != 1 {
+		t.Fatalf("metrics mempool size = %d, want 1", metrics.MempoolSize)
+	}
+	if metrics.Counters.TransactionsIn != 1 {
+		t.Fatalf("metrics transactions in = %d, want 1", metrics.Counters.TransactionsIn)
+	}
 }
 
 func TestHTTPJSONRPCRejectsInvalidSignedTransaction(t *testing.T) {

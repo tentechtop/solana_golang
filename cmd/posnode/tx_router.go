@@ -46,13 +46,40 @@ func (node *posNode) preferredTransactionPeerIDs() []string {
 	defer node.mutex.Unlock()
 
 	startSlot := node.currentRoutingSlotLocked()
+	fastPath := node.transactionFastPathForSlotLocked(startSlot, false)
+	if fastPath.FastPathAvailable {
+		return fastPath.PreferredPeerIDs
+	}
+	node.logger.Debug("posnode transaction route epoch unavailable", slog.Uint64("slot", startSlot))
+	return fastPath.PreferredPeerIDs
+}
+
+func (node *posNode) transactionFastPathForSlotLocked(startSlot uint64, excludeLocalPeer bool) transactionFastJSON {
+	forwardSlots := node.config.TransactionLeaderForwardSlots
+	if forwardSlots < 0 {
+		forwardSlots = 0
+	}
+	fastPath := transactionFastJSON{
+		StartSlot:         startSlot,
+		ForwardSlots:      forwardSlots,
+		ForwardValidators: node.config.forwardTransactionsToValidators(),
+	}
+	if node.config.EpochSlots == 0 || len(node.epochSnapshot.Validators) == 0 {
+		validatorPeerIDs := node.validatorPeerIDsLocked()
+		fastPath.ValidatorPeerIDs = append(fastPath.ValidatorPeerIDs, validatorPeerIDs...)
+		fastPath.PreferredPeerIDs = node.filterTransactionRoutePeersLocked(validatorPeerIDs, excludeLocalPeer)
+		return fastPath
+	}
 	if err := node.ensureEpochForSlotLocked(startSlot); err != nil {
-		node.logger.Debug("posnode transaction route epoch unavailable", slog.Uint64("slot", startSlot), slog.Any("error", err))
-		return node.validatorPeerIDsLocked()
+		validatorPeerIDs := node.validatorPeerIDsLocked()
+		fastPath.ValidatorPeerIDs = append(fastPath.ValidatorPeerIDs, validatorPeerIDs...)
+		fastPath.PreferredPeerIDs = node.filterTransactionRoutePeersLocked(validatorPeerIDs, excludeLocalPeer)
+		return fastPath
 	}
 
-	peerIDs := make([]string, 0, len(node.epochSnapshot.Validators)+node.config.TransactionLeaderForwardSlots+1)
-	forwardSlots := node.config.TransactionLeaderForwardSlots
+	validatorPeerIDs := node.validatorPeerIDsLocked()
+	fastPath.ValidatorPeerIDs = append(fastPath.ValidatorPeerIDs, validatorPeerIDs...)
+	peerIDs := make([]string, 0, len(node.epochSnapshot.Validators)+forwardSlots+1)
 	for offset := 0; offset <= forwardSlots; offset++ {
 		slot := startSlot + uint64(offset)
 		if slot > node.epochSnapshot.EndSlot {
@@ -64,13 +91,34 @@ func (node *posNode) preferredTransactionPeerIDs() []string {
 		}
 		leader, exists := node.epochSnapshot.ValidatorByID(leaderID)
 		if exists {
+			fastPath.LeaderSlots = append(fastPath.LeaderSlots, leaderSlotJSON{
+				Slot:        slot,
+				ValidatorID: string(leaderID),
+				PeerID:      leader.P2PPeerID,
+			})
 			peerIDs = append(peerIDs, leader.P2PPeerID)
 		}
 	}
-	if node.config.forwardTransactionsToValidators() {
-		peerIDs = append(peerIDs, node.validatorPeerIDsLocked()...)
+	if fastPath.ForwardValidators {
+		peerIDs = append(peerIDs, validatorPeerIDs...)
 	}
-	return peerIDs
+	fastPath.FastPathAvailable = true
+	fastPath.PreferredPeerIDs = node.filterTransactionRoutePeersLocked(peerIDs, excludeLocalPeer)
+	return fastPath
+}
+
+func (node *posNode) filterTransactionRoutePeersLocked(peerIDs []string, excludeLocalPeer bool) []string {
+	if !excludeLocalPeer {
+		return uniquePeerIDs(peerIDs)
+	}
+	filteredPeerIDs := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if peerID == node.peerKeyPair.peerID {
+			continue
+		}
+		filteredPeerIDs = append(filteredPeerIDs, peerID)
+	}
+	return uniquePeerIDs(filteredPeerIDs)
 }
 
 func (node *posNode) validatorPeerIDsLocked() []string {

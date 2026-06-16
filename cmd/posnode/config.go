@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"solana_golang/consensus"
 	"solana_golang/programs/stake"
 )
 
@@ -40,11 +41,14 @@ type nodeConfig struct {
 	SlotMillis                    int                 `json:"slot_millis"`
 	GenesisStartMs                int64               `json:"genesis_start_unix_millis"`
 	EpochSlots                    uint64              `json:"epoch_slots"`
+	TurbineFanout                 int                 `json:"turbine_fanout"`
 	AutoRegister                  bool                `json:"auto_register"`
 	MempoolMaxTransactions        int                 `json:"mempool_max_transactions"`
 	MempoolTransactionTTLMillis   int64               `json:"mempool_transaction_ttl_millis"`
 	TransactionLeaderForwardSlots int                 `json:"transaction_leader_forward_slots"`
 	TransactionForwardValidators  *bool               `json:"transaction_forward_validators,omitempty"`
+	TreasuryKeyPath               string              `json:"treasury_key_path,omitempty"`
+	AllowHardcodedTreasury        *bool               `json:"allow_hardcoded_treasury,omitempty"`
 	AutoTransfer                  *autoTransferConfig `json:"auto_transfer,omitempty"`
 }
 
@@ -128,6 +132,12 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if config.EpochSlots == 0 {
 		config.EpochSlots = defaultEpochSlots
 	}
+	if config.TurbineFanout == 0 {
+		config.TurbineFanout = consensus.DefaultTurbineFanout
+	}
+	if config.TurbineFanout < 1 || config.TurbineFanout > consensus.MaxTurbineFanout {
+		return nodeConfig{}, fmt.Errorf("posnode: turbine fanout must be 1..1024")
+	}
 	if config.StakeLamports == 0 {
 		config.StakeLamports = stake.MinimumStakeLamports
 	}
@@ -151,6 +161,12 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	}
 	if config.TransactionLeaderForwardSlots < 0 || config.TransactionLeaderForwardSlots > 64 {
 		return nodeConfig{}, fmt.Errorf("posnode: transaction leader forward slots must be 0..64")
+	}
+	if isProductionNodeConfig(config) && strings.TrimSpace(config.TreasuryKeyPath) == "" {
+		return nodeConfig{}, fmt.Errorf("posnode: production treasury key path is required")
+	}
+	if isProductionNodeConfig(config) && config.allowInsecureP2P() {
+		return nodeConfig{}, fmt.Errorf("posnode: insecure p2p disabled in production")
 	}
 	if config.Genesis.InitialSupplyLamports == 0 {
 		config.Genesis.InitialSupplyLamports = defaultInitialSupply
@@ -184,4 +200,22 @@ func (config nodeConfig) forwardTransactionsToValidators() bool {
 		return true
 	}
 	return *config.TransactionForwardValidators
+}
+
+func (config nodeConfig) allowHardcodedTreasury() bool {
+	if isProductionNodeConfig(config) {
+		return false
+	}
+	if config.AllowHardcodedTreasury == nil {
+		return true
+	}
+	return *config.AllowHardcodedTreasury
+}
+
+func isProductionNodeConfig(config nodeConfig) bool {
+	if config.Production {
+		return true
+	}
+	environment := strings.TrimSpace(strings.ToLower(config.Environment))
+	return environment == "production" || environment == "prod"
 }

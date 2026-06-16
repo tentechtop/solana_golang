@@ -49,6 +49,7 @@ func (executor FixedExecutor) ExecuteTransaction(contextValue context.Context, r
 	if request.Slot != 0 {
 		input.CurrentSlot = request.Slot
 	}
+	input.CurrentEpoch = request.Epoch
 	if len(input.Programs) == 0 && input.FallbackProgram == nil && !executor.Programs.IsEmpty() {
 		input.Programs = make([]Program, 0, len(executor.Programs.programs))
 		for _, program := range executor.Programs.programs {

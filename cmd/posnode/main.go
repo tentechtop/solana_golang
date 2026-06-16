@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ type posNode struct {
 	mutex            sync.Mutex
 	config           nodeConfig
 	logger           *slog.Logger
+	startedAt        time.Time
 	host             *p2p.Host
 	rpcServer        *rpc.Server
 	db               database.Database
@@ -41,9 +43,11 @@ type posNode struct {
 	stakerKeyPair    structure.SolanaKeyPair
 	validatorKeyPair structure.SolanaKeyPair
 	consensusKeyPair structure.SolanaKeyPair
+	blsKeyPair       consensus.BLSKeyPair
 	blockhashQueue   structure.BlockhashQueue
 	mempool          []structure.Transaction
 	seenTransactions map[string]struct{}
+	seenProposals    map[string]struct{}
 	orphanProposals  map[structure.Hash][]consensus.BlockProposal
 	epochSnapshot    consensus.EpochSnapshot
 	leaderSchedule   consensus.LeaderSchedule
@@ -133,12 +137,15 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 	node := &posNode{
 		config:           config,
 		logger:           logger,
+		startedAt:        time.Now(),
 		executor:         executor,
 		peerKeyPair:      mustRawKeyPair(config.PeerSeed),
 		stakerKeyPair:    mustStructureKeyPair(config.StakerSeed),
 		validatorKeyPair: mustStructureKeyPair(config.ValidatorSeed),
 		consensusKeyPair: mustStructureKeyPair(config.ConsensusSeed),
+		blsKeyPair:       mustBLSKeyPair(config.ConsensusSeed),
 		seenTransactions: make(map[string]struct{}),
+		seenProposals:    make(map[string]struct{}),
 		orphanProposals:  make(map[structure.Hash][]consensus.BlockProposal),
 	}
 	if err := node.openLedger(); err != nil {
@@ -250,10 +257,12 @@ func (node *posNode) blockchainGenesisConfig() blockchain.GenesisConfig {
 		staker := mustStructureKeyPair(validator.StakerSeed)
 		validatorAccount := mustStructureKeyPair(validator.ValidatorSeed)
 		consensusKey := mustStructureKeyPair(validator.ConsensusSeed)
+		blsKeyPair := mustBLSKeyPair(validator.ConsensusSeed)
 		genesis.InitialValidators = append(genesis.InitialValidators, blockchain.GenesisValidator{
 			StakerAddress:      staker.PublicKey,
 			ValidatorAddress:   validatorAccount.PublicKey,
 			ConsensusPublicKey: consensusKey.PublicKey,
+			BLSPublicKey:       blsKeyPair.PublicKey,
 			P2PPeerID:          validator.PeerID,
 			StakeLamports:      validator.StakeLamports,
 		})
@@ -561,7 +570,14 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("tx_count", len(proposal.Transactions)),
 	)
-	return node.voteForProposal(ctx, proposal)
+	firstSeen := node.markProposalSeen(proposalHash)
+	if err := node.voteForProposal(ctx, proposal); err != nil {
+		return err
+	}
+	if firstSeen {
+		node.forwardProposalByTurbine(ctx, proposal, proposalHash, message.FromPeerID)
+	}
+	return nil
 }
 
 func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message) error {
@@ -573,7 +589,14 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		return err
 	}
 	node.mutex.Lock()
-	qc, formed, err := node.voteCollector.AddVote(envelope.Vote)
+	validatorOrder := node.epochSnapshot.ValidatorOrder()
+	var qc consensus.QuorumCertificate
+	var formed bool
+	if len(envelope.BLSSignature) > 0 {
+		qc, formed, err = node.voteCollector.AddVoteWithBLS(envelope.Vote, envelope.BLSSignature, validatorOrder)
+	} else {
+		qc, formed, err = node.voteCollector.AddVote(envelope.Vote)
+	}
 	node.mutex.Unlock()
 	if err != nil {
 		return err
@@ -606,7 +629,7 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	if err := jsonUnmarshal(message.Payload, &envelope); err != nil {
 		return err
 	}
-	if err := envelope.QC.Validate(); err != nil {
+	if err := node.verifyQuorumCertificate(envelope.QC); err != nil {
 		return err
 	}
 	head, err := node.ledger.SaveQC(envelope.QC)
@@ -800,7 +823,7 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 }
 
 func (node *posNode) handleLocalVote(ctx context.Context, vote consensus.Vote) error {
-	message, err := encodeVoteMessage(vote, node.consensusKeyPair)
+	message, err := encodeVoteMessage(vote, node.consensusKeyPair, node.blsKeyPair)
 	if err != nil {
 		return err
 	}
@@ -902,20 +925,45 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 }
 
 func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.BlockProposal) {
+	if node.host == nil {
+		utils.EnsureLogger(node.logger).Debug("posnode turbine proposal broadcast skipped", slog.String("reason", "host unavailable"))
+		return
+	}
 	proposalHash, hashErr := proposal.Hash()
 	if hashErr != nil {
 		proposalHash = structure.Hash{}
 	}
+	node.markProposalSeen(proposalHash)
 	message, err := encodeProposalMessage(proposal)
 	if err != nil {
 		node.logger.Error("posnode encode proposal failed", slog.Any("error", err))
 		return
 	}
-	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
+	peerIDs, position, err := node.turbineChildPeerIDs(ctx, proposal.Header.Slot, proposal.Header.LeaderID, "")
+	if err != nil {
+		node.logger.Warn("posnode turbine proposal route failed",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Any("error", err),
+		)
+		return
+	}
+	if len(peerIDs) == 0 {
+		node.logger.Debug("posnode turbine proposal has no children",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Int("turbine_layer", position.Layer),
+		)
+		return
+	}
+	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
 		node.logger.Warn("posnode broadcast proposal failed",
 			slog.Uint64("slot", proposal.Header.Slot),
 			slog.Uint64("height", proposal.Header.Height),
 			slog.String("block_hash", proposalHash.String()),
+			slog.Int("turbine_layer", position.Layer),
+			slog.Int("child_count", len(peerIDs)),
 			slog.Any("error", err),
 		)
 		return
@@ -924,12 +972,13 @@ func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.B
 		slog.Uint64("slot", proposal.Header.Slot),
 		slog.Uint64("height", proposal.Header.Height),
 		slog.String("block_hash", proposalHash.String()),
-		slog.Int("peer_count", len(node.knownPeerIDs)),
+		slog.Int("turbine_layer", position.Layer),
+		slog.Int("child_count", len(peerIDs)),
 	)
 }
 
 func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
-	message, err := encodeVoteMessage(vote, node.consensusKeyPair)
+	message, err := encodeVoteMessage(vote, node.consensusKeyPair, node.blsKeyPair)
 	if err != nil {
 		node.logger.Error("posnode encode vote failed", slog.Any("error", err))
 		return
@@ -971,7 +1020,48 @@ func (node *posNode) verifyVoteEnvelope(envelope voteEnvelope) error {
 	if validator.ConsensusPublicKey != envelope.PublicKey {
 		return fmt.Errorf("posnode: vote public key mismatch")
 	}
+	if len(validator.BLSPublicKey) == 0 {
+		return nil
+	}
+	if len(envelope.BLSPublicKey) == 0 || len(envelope.BLSSignature) == 0 {
+		return fmt.Errorf("posnode: missing bls vote proof")
+	}
+	if !bytes.Equal(validator.BLSPublicKey, envelope.BLSPublicKey) {
+		return fmt.Errorf("posnode: bls public key mismatch")
+	}
+	if err := consensus.VerifyBLSVote(envelope.BLSPublicKey, envelope.BLSSignature, envelope.Vote); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (node *posNode) verifyQuorumCertificate(qc consensus.QuorumCertificate) error {
+	if err := qc.Validate(); err != nil {
+		return err
+	}
+	node.mutex.Lock()
+	if err := node.ensureEpochForSlotLocked(qc.Slot); err != nil {
+		node.mutex.Unlock()
+		return err
+	}
+	validatorOrder := node.epochSnapshot.ValidatorOrder()
+	publicKeysByValidator := node.epochSnapshot.BLSPublicKeys()
+	stakeByValidator := node.epochSnapshot.StakeMap()
+	blsComplete := len(node.epochSnapshot.Validators) > 0 && len(publicKeysByValidator) == len(node.epochSnapshot.Validators)
+	node.mutex.Unlock()
+	if qc.SignatureScheme == "" {
+		if blsComplete {
+			return fmt.Errorf("posnode: aggregate qc required for bls validator set")
+		}
+		return nil
+	}
+	return consensus.VerifyBLSAggregateWithStake(
+		qc,
+		validatorOrder,
+		publicKeysByValidator,
+		stakeByValidator,
+		consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3},
+	)
 }
 
 func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertificate) {
@@ -1010,7 +1100,7 @@ func (node *posNode) rebuildEpoch(epochID uint64, startSlot uint64, seed structu
 }
 
 func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed structure.Hash) error {
-	validatorSet, err := node.ledger.ValidatorSetFromState()
+	validatorSet, err := node.ledger.ValidatorSetFromStateAtEpoch(epochID)
 	if err != nil {
 		return err
 	}
@@ -1040,7 +1130,7 @@ func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed s
 }
 
 func (node *posNode) buildRegisterTransaction() (structure.Transaction, error) {
-	instruction, err := stake.NewRegisterValidatorInstruction(node.consensusKeyPair.PublicKey, node.peerKeyPair.peerID, 0, node.config.StakeLamports)
+	instruction, err := stake.NewRegisterValidatorInstructionWithBLS(node.consensusKeyPair.PublicKey, node.blsKeyPair.PublicKey, node.peerKeyPair.peerID, 0, node.config.StakeLamports)
 	if err != nil {
 		return structure.Transaction{}, err
 	}
@@ -1075,6 +1165,14 @@ func newAccount(address structure.PublicKey, lamports uint64, owner structure.Pu
 
 func mustStructureKeyPair(seedText string) structure.SolanaKeyPair {
 	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(seedText)))
+	if err != nil {
+		panic(err)
+	}
+	return keyPair
+}
+
+func mustBLSKeyPair(seedText string) consensus.BLSKeyPair {
+	keyPair, err := consensus.BLSKeyPairFromSeed(utils.SHA256([]byte(seedText)))
 	if err != nil {
 		panic(err)
 	}

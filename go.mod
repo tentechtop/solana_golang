@@ -3,9 +3,11 @@ module solana_golang
 go 1.24.6
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/quic-go/quic-go v0.57.1
 	github.com/syndtr/goleveldb v1.0.0
+	golang.org/x/crypto v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -32,7 +34,6 @@ require (
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect

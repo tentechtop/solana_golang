@@ -67,6 +67,29 @@ func (snapshot EpochSnapshot) StakeMap() map[string]uint64 {
 	return stakeByValidator
 }
 
+// ValidatorOrder 返回快照验证者顺序 + voter bitmap 使用同一顺序才能跨节点验证一致。
+func (snapshot EpochSnapshot) ValidatorOrder() []string {
+	order := make([]string, len(snapshot.Validators))
+	for index, validator := range snapshot.Validators {
+		order[index] = string(validator.ValidatorID)
+	}
+	return order
+}
+
+// BLSPublicKeys 返回 BLS 公钥表 + QC 聚合验证通过 voter bitmap 找到公钥集合。
+func (snapshot EpochSnapshot) BLSPublicKeys() map[string][]byte {
+	publicKeysByValidator := make(map[string][]byte, len(snapshot.Validators))
+	for _, validator := range snapshot.Validators {
+		if len(validator.BLSPublicKey) == 0 {
+			continue
+		}
+		publicKey := make([]byte, len(validator.BLSPublicKey))
+		copy(publicKey, validator.BLSPublicKey)
+		publicKeysByValidator[string(validator.ValidatorID)] = publicKey
+	}
+	return publicKeysByValidator
+}
+
 // ValidatorByID 查询验证者 + 验块时取公钥验证 leader 签名。
 func (snapshot EpochSnapshot) ValidatorByID(validatorID ValidatorID) (ValidatorState, bool) {
 	for _, validator := range snapshot.Validators {
@@ -86,6 +109,8 @@ func hashEpochSnapshot(epochID uint64, startSlot uint64, epochSlots uint64, seed
 	for _, validator := range validators {
 		encoded = append(encoded, []byte(validator.ValidatorID)...)
 		encoded = append(encoded, validator.ConsensusPublicKey[:]...)
+		encoded = appendUint64ForHash(encoded, uint64(len(validator.BLSPublicKey)))
+		encoded = append(encoded, validator.BLSPublicKey...)
 		encoded = appendUint64ForHash(encoded, validator.StakeLamports)
 	}
 	return structure.NewHash(utils.SHA256(encoded))

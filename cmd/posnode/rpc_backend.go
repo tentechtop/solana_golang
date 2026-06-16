@@ -73,7 +73,7 @@ func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, l
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode destination: %w", err)
 	}
-	treasury, err := consensus.HardcodedGenesisTreasuryKeyPair()
+	treasury, keySource, err := node.treasuryKeyPair()
 	if err != nil {
 		return "", err
 	}
@@ -84,6 +84,7 @@ func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, l
 	return node.submitTransaction(ctx, transaction, "treasury_transfer",
 		slog.String("destination", destinationKey.String()),
 		slog.Uint64("lamports", lamports),
+		slog.String("treasury_key_source", keySource),
 	)
 }
 
@@ -120,7 +121,11 @@ func (node *posNode) RegisterValidator(ctx context.Context, stakerSeed string, v
 	if err != nil {
 		return "", err
 	}
-	transaction, err := blockchain.NewRegisterValidatorTransaction(staker, validatorAccount.PublicKey, consensusKey.PublicKey, strings.TrimSpace(peerID), stakeLamports, node.ledger.Head().BlockHash)
+	blsKeyPair, err := consensus.BLSKeyPairFromSeed(utils.SHA256([]byte(strings.TrimSpace(consensusSeed))))
+	if err != nil {
+		return "", err
+	}
+	transaction, err := blockchain.NewRegisterValidatorTransactionWithBLS(staker, validatorAccount.PublicKey, consensusKey.PublicKey, blsKeyPair.PublicKey, strings.TrimSpace(peerID), stakeLamports, node.ledger.Head().BlockHash)
 	if err != nil {
 		return "", err
 	}
