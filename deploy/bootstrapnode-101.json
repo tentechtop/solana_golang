@@ -7,7 +7,7 @@
   "listen_port": 5100,
   "peer_seed": "bootstrap-101",
   "allow_insecure_p2p": false,
-  "network_id": "pos-public-testnet",
+  "network_id": "DfjpA3KAY2W1EQvg249WPo3pZyYAsE2R9ake85TMEujN",
   "max_peers": 256,
   "max_connections": 256,
   "dial_interval_millis": 2000,

@@ -17,8 +17,8 @@
   "validator_seed": "validator-local-win",
   "consensus_seed": "consensus-local-win",
   "stake_lamports": 10000000,
-  "slot_millis": 2000,
-  "genesis_start_unix_millis": 1781611012315,
+  "slot_millis": 400,
+  "genesis_start_unix_millis": 1781614150000,
   "epoch_slots": 1500,
   "finality_depth": 2,
   "turbine_fanout": 2,
@@ -29,15 +29,19 @@
   "transaction_forward_validators": true,
   "bootstrap_peers": [
     {
-      "peer_id": "GAEb8wVMHNiKiRaWmZtnmAvLtKoCAfJnzSMBcH4C3B57",
+      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
       "ip": "101.35.87.31",
-      "port": 5100,
+      "port": 5101,
       "network": "tcp"
     }
   ],
   "genesis": {
-    "initial_supply_lamports": 1000000000000000000,
+    "initial_supply_lamports": 1000000000060000000,
     "funded_accounts": [
+      {
+        "seed": "staker-101",
+        "lamports": 100000000000000000
+      },
       {
         "seed": "staker-223",
         "lamports": 450000000000000000
@@ -48,6 +52,13 @@
       }
     ],
     "initial_validators": [
+      {
+        "staker_seed": "staker-101",
+        "validator_seed": "validator-101",
+        "consensus_seed": "consensus-101",
+        "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+        "stake_lamports": 10000000
+      },
       {
         "staker_seed": "staker-223",
         "validator_seed": "validator-223",

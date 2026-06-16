@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"solana_golang/database"
 	"solana_golang/rpc"
 	"solana_golang/structure"
+	"solana_golang/utils"
 )
 
 type posNodeRPCResponse struct {
@@ -185,6 +187,192 @@ func TestHTTPJSONRPCGetTransactionReturnsCommittedBlockDetails(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONRPCGetAddressTransactionsReturnsCommittedHistory(t *testing.T) {
+	source := mustStructureKeyPair("rpc-history-source")
+	destination := mustStructureKeyPair("rpc-history-destination")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := blockchain.LoadOrCreateLedger(db, blockchain.GenesisConfig{
+		ChainID: "posnode-rpc-history",
+		FundedAccounts: []blockchain.GenesisAccount{
+			{Address: source.PublicKey, Lamports: 1_000_000_000},
+			{Address: destination.PublicKey, Lamports: 1_000_000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedger() error = %v", err)
+	}
+	ledger.SetLogger(logger)
+	node := &posNode{
+		config: nodeConfig{
+			MempoolMaxTransactions:      10,
+			MempoolTransactionTTLMillis: 60_000,
+		},
+		logger:           logger,
+		db:               db,
+		ledger:           ledger,
+		seenTransactions: make(map[string]struct{}),
+	}
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+
+	transaction := newRPCTransferTransaction(t, node, source, destination.PublicKey, 25_000)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	proposal, nextState := blockchainTestProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "rpc-history-block")
+	proposal.Transactions = []structure.Transaction{transaction}
+	committedHead, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	address := encodeTestProtocolAddress(protocolAddressTransparent, source.PublicKey[:], "t")
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetAddressTransactions, []any{address, 10})
+	history := decodePosNodeRPCResult[rpc.AccountTransactionHistoryResult](t, response)
+	if history.Scope != "transparent_balance_changes_only" {
+		t.Fatalf("scope = %s, want transparent_balance_changes_only", history.Scope)
+	}
+	if len(history.Records) != 1 {
+		t.Fatalf("history records = %d, want 1", len(history.Records))
+	}
+
+	record := history.Records[0]
+	if record.Signature != transactionID {
+		t.Fatalf("record signature = %s, want %s", record.Signature, transactionID)
+	}
+	if record.Direction != "outgoing" {
+		t.Fatalf("record direction = %s, want outgoing", record.Direction)
+	}
+	if record.Kind != "transfer" {
+		t.Fatalf("record kind = %s, want transfer", record.Kind)
+	}
+	if record.Counterparty != destination.PublicKey.String() {
+		t.Fatalf("record counterparty = %s, want %s", record.Counterparty, destination.PublicKey.String())
+	}
+	if record.AmountLamports != "25000" {
+		t.Fatalf("record amount = %s, want 25000", record.AmountLamports)
+	}
+	if record.BlockHeight != committedHead.Height {
+		t.Fatalf("record block height = %d, want %d", record.BlockHeight, committedHead.Height)
+	}
+	if record.Blockhash != committedHead.BlockHash.String() {
+		t.Fatalf("record block hash = %s, want %s", record.Blockhash, committedHead.BlockHash.String())
+	}
+}
+
+func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
+	owner := mustStructureKeyPair("rpc-privacy-owner")
+	other := mustStructureKeyPair("rpc-privacy-other")
+	stateAccount := mustStructureKeyPair("rpc-privacy-state")
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ledger, err := blockchain.NewLedgerFromGenesis(nil, blockchain.GenesisConfig{
+		ChainID: "posnode-rpc-privacy-balance",
+		FundedAccounts: []blockchain.GenesisAccount{
+			{Address: owner.PublicKey, Lamports: 1_000_000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLedgerFromGenesis() error = %v", err)
+	}
+	ledger.SetLogger(logger)
+	node := &posNode{
+		config: nodeConfig{
+			MempoolMaxTransactions:      10,
+			MempoolTransactionTTLMillis: 60_000,
+		},
+		logger:           logger,
+		ledger:           ledger,
+		seenTransactions: make(map[string]struct{}),
+	}
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+
+	privacyState := structure.PrivacyState{
+		Version: structure.PrivacyStateVersion,
+		Notes: []structure.PrivacyNoteRecord{
+			{
+				Commitment:     blockchainTestHash(t, "rpc-privacy-note-available"),
+				SpendAuthority: owner.PublicKey,
+				Amount:         7,
+				VMVersion:      structure.PrivacyStateVersion,
+				EncryptedNote:  []byte("available"),
+			},
+			{
+				Commitment:     blockchainTestHash(t, "rpc-privacy-note-spent"),
+				SpendAuthority: owner.PublicKey,
+				Amount:         4,
+				Spent:          true,
+				SpentSlot:      2,
+				SpendNullifier: blockchainTestHash(t, "rpc-privacy-note-nullifier"),
+				VMVersion:      structure.PrivacyStateVersion,
+				EncryptedNote:  []byte("spent"),
+			},
+			{
+				Commitment:     blockchainTestHash(t, "rpc-privacy-note-other"),
+				SpendAuthority: other.PublicKey,
+				Amount:         9,
+				VMVersion:      structure.PrivacyStateVersion,
+				EncryptedNote:  []byte("other"),
+			},
+		},
+		SpentNullifiers: []structure.Hash{blockchainTestHash(t, "rpc-privacy-note-nullifier")},
+	}
+	data, err := privacyState.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(privacy state) error = %v", err)
+	}
+	rentLamports, err := structure.MinimumBalanceForRentExemption(len(data))
+	if err != nil {
+		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
+	}
+	account, err := structure.NewAccount(rentLamports+50, data, structure.DefaultBuiltinProgramIDs.Privacy, false, 0)
+	if err != nil {
+		t.Fatalf("NewAccount() error = %v", err)
+	}
+
+	nextState := ledger.State()
+	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{
+		Address: stateAccount.PublicKey,
+		Account: account,
+	})
+	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, 1, 1, "rpc-privacy-balance-block")
+	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	stateAddress := encodeTestProtocolAddress(protocolAddressPrivacy, stateAccount.PublicKey[:], "z")
+	ownerAddress := encodeTestProtocolAddress(protocolAddressTransparent, owner.PublicKey[:], "t")
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetPrivacyBalance, []any{stateAddress, ownerAddress})
+	summary := decodePosNodeRPCResult[rpc.PrivacyBalanceResult](t, response)
+	if summary.AvailableLamports != "7" {
+		t.Fatalf("available = %s, want 7", summary.AvailableLamports)
+	}
+	if summary.EscrowLamports != fmt.Sprintf("%d", rentLamports+50) {
+		t.Fatalf("escrow = %s, want %d", summary.EscrowLamports, rentLamports+50)
+	}
+	if summary.SpendableNoteCount != 1 {
+		t.Fatalf("spendable note count = %d, want 1", summary.SpendableNoteCount)
+	}
+	if summary.SpentNoteCount != 1 {
+		t.Fatalf("spent note count = %d, want 1", summary.SpentNoteCount)
+	}
+	if summary.OwnedNoteCount != 2 {
+		t.Fatalf("owned note count = %d, want 2", summary.OwnedNoteCount)
+	}
+	if summary.StateNoteCount != 3 {
+		t.Fatalf("state note count = %d, want 3", summary.StateNoteCount)
+	}
+}
+
 func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.SolanaKeyPair, structure.SolanaKeyPair) {
 	t.Helper()
 	source := mustStructureKeyPair("rpc-source")
@@ -242,6 +430,15 @@ func blockchainTestProposalFromHead(t *testing.T, head blockchain.Head, state co
 			TimestampUnixMilli: 1,
 		},
 	}, state
+}
+
+func blockchainTestHash(t *testing.T, seed string) structure.Hash {
+	t.Helper()
+	hash, err := structure.NewHash(utils.SHA256([]byte(seed)))
+	if err != nil {
+		t.Fatalf("NewHash(%q) error = %v", seed, err)
+	}
+	return hash
 }
 
 func encodeRPCTransaction(t *testing.T, transaction structure.Transaction) string {

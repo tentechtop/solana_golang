@@ -487,7 +487,7 @@ func TestSaveQCPromotesOnlyBestMainChainCertificate(t *testing.T) {
 	}
 
 	bestMainQC := testRewardLedgerQC(2, 2, headTwoMain.BlockHash, 6, []string{"validator-a", "validator-b", "validator-c"}, 10)
-	bestMainHash, err := HashQC(bestMainQC)
+	bestMainHash, err := HashCanonicalQC(bestMainQC)
 	if err != nil {
 		t.Fatalf("hash best main qc: %v", err)
 	}
@@ -499,6 +499,13 @@ func TestSaveQCPromotesOnlyBestMainChainCertificate(t *testing.T) {
 	}
 
 	worseMainQC := testRewardLedgerQC(2, 2, headTwoMain.BlockHash, 4, []string{"validator-a", "validator-b"}, 1)
+	worseMainHash, err := HashCanonicalQC(worseMainQC)
+	if err != nil {
+		t.Fatalf("hash worse main qc: %v", err)
+	}
+	if worseMainHash != bestMainHash {
+		t.Fatalf("canonical qc hash mismatch: worse=%s best=%s", worseMainHash.String(), bestMainHash.String())
+	}
 	if _, err := ledger.SaveQC(worseMainQC); err != nil {
 		t.Fatalf("save worse main qc: %v", err)
 	}
@@ -593,6 +600,98 @@ func TestLedgerReorganizeToBetterFork(t *testing.T) {
 	}
 	if string(headTwoMain.BlockHash[:]) == string(blockTwoForkHash[:]) {
 		t.Fatalf("test setup produced identical fork hash")
+	}
+}
+
+func TestLedgerReorganizeStopsAtImportedFinalizedSnapshot(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedger() error = %v", err)
+	}
+	genesisHead := ledger.Head()
+	genesisState := ledger.State()
+	importProposal, importState := testProposalFromParent(t, Head{
+		ChainID:   genesisHead.ChainID,
+		Height:    9,
+		Slot:      99,
+		BlockHash: testHash(t, "missing-import-parent"),
+		QCHash:    genesisHead.QCHash,
+		EpochID:   3,
+	}, genesisState, 100, 10, "import-finalized-reorg")
+	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState})
+	if err != nil {
+		t.Fatalf("ImportFinalizedSnapshot() error = %v", err)
+	}
+
+	oldEleven, oldState := testProposalFromHead(t, importedHead, importState, 101, 11, "old-after-import-11")
+	oldHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: oldEleven, NextState: oldState})
+	if err != nil {
+		t.Fatalf("commit old eleven: %v", err)
+	}
+	oldTwelve, oldState := testProposalFromHead(t, oldHead, oldState, 102, 12, "old-after-import-12")
+	oldHead, err = ledger.CommitBlock(CommitBlockRequest{Proposal: oldTwelve, NextState: oldState})
+	if err != nil {
+		t.Fatalf("commit old twelve: %v", err)
+	}
+
+	newEleven, newState := testProposalFromParent(t, importedHead, importState, 111, 11, "new-after-import-11")
+	newElevenHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: newEleven, NextState: newState})
+	if err != nil {
+		t.Fatalf("save new eleven: %v", err)
+	}
+	newTwelve, newState := testProposalFromParent(t, Head{
+		ChainID:   newEleven.Header.ChainID,
+		Height:    newEleven.Header.Height,
+		Slot:      newEleven.Header.Slot,
+		BlockHash: newElevenHash,
+		QCHash:    importedHead.QCHash,
+		EpochID:   newEleven.Header.EpochID,
+	}, newState, 112, 12, "new-after-import-12")
+	newTwelveHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: newTwelve, NextState: newState})
+	if err != nil {
+		t.Fatalf("save new twelve: %v", err)
+	}
+	newThirteen, newState := testProposalFromParent(t, Head{
+		ChainID:   newTwelve.Header.ChainID,
+		Height:    newTwelve.Header.Height,
+		Slot:      newTwelve.Header.Slot,
+		BlockHash: newTwelveHash,
+		QCHash:    importedHead.QCHash,
+		EpochID:   newTwelve.Header.EpochID,
+	}, newState, 113, 13, "new-after-import-13")
+	newThirteenHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: newThirteen, NextState: newState})
+	if err != nil {
+		t.Fatalf("save new thirteen: %v", err)
+	}
+
+	decision, err := ledger.ReorganizeTo(newThirteenHash)
+	if err != nil {
+		t.Fatalf("ReorganizeTo() error = %v", err)
+	}
+	if !decision.Accepted || !decision.Reorganized {
+		t.Fatalf("decision = %+v, want accepted reorg", decision)
+	}
+	if decision.CommonAncestor.BlockHash != importedHead.BlockHash {
+		t.Fatalf("common ancestor = %s, want imported finalized %s", decision.CommonAncestor.BlockHash.String(), importedHead.BlockHash.String())
+	}
+	if ledger.Head().BlockHash != newThirteenHash || ledger.Head().Height != 13 {
+		t.Fatalf("head = %+v, want new height 13", ledger.Head())
+	}
+	if ledger.Head().FinalizedHeight != 11 || ledger.Head().FinalizedHash != newElevenHash {
+		t.Fatalf("finalized head = %+v, want new block eleven %s", ledger.Head(), newElevenHash.String())
+	}
+	if oldHead.BlockHash == ledger.Head().BlockHash {
+		t.Fatalf("old head still selected after reorg")
 	}
 }
 

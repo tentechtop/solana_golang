@@ -139,6 +139,29 @@ func (node *posNode) GetTransaction(ctx context.Context, signature string) (rpc.
 	return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: committed transaction index mismatch for %s", signature)
 }
 
+func (node *posNode) GetAddressTransactions(ctx context.Context, address string, cursor string, limit int) (rpc.AccountTransactionHistoryResult, error) {
+	_ = ctx
+	publicKey, addressType, err := decodeProtocolPublicKey(address, "history address")
+	if err != nil {
+		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: decode history address: %w", err)
+	}
+	if addressType == protocolAddressPrivacy {
+		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: public address history does not support privacy addresses")
+	}
+	account, found, err := node.ledger.Account(publicKey)
+	if err != nil {
+		return rpc.AccountTransactionHistoryResult{}, err
+	}
+	if found && account.Owner == structure.DefaultBuiltinProgramIDs.Privacy {
+		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: public address history does not support privacy state accounts")
+	}
+	page, err := node.ledger.AddressHistory(publicKey, strings.TrimSpace(cursor), limit)
+	if err != nil {
+		return rpc.AccountTransactionHistoryResult{}, err
+	}
+	return accountTransactionHistoryResult(publicKey, page, node.ledger.Head().FinalizedHeight), nil
+}
+
 func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error) {
 	destinationKey, _, err := decodeProtocolPublicKey(destination, "destination")
 	if err != nil {
@@ -190,6 +213,26 @@ func (node *posNode) GetPrivacyState(ctx context.Context, stateAddress string) (
 		return rpc.PrivacyStateResult{}, err
 	}
 	return privacyStateResult(stateKey, state), nil
+}
+
+func (node *posNode) GetPrivacyBalance(ctx context.Context, stateAddress string, spendAuthority string) (rpc.PrivacyBalanceResult, error) {
+	_ = ctx
+	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy state")
+	if err != nil {
+		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: decode privacy state for balance: %w", err)
+	}
+	authorityKey, authorityType, err := decodeProtocolPublicKey(spendAuthority, "privacy spend authority")
+	if err != nil {
+		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: decode privacy spend authority: %w", err)
+	}
+	if authorityType == protocolAddressPrivacy {
+		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: privacy spend authority must be a transparent public key")
+	}
+	summary, err := node.ledger.PrivacyBalance(stateKey, authorityKey)
+	if err != nil {
+		return rpc.PrivacyBalanceResult{}, err
+	}
+	return privacyBalanceResult(stateKey, authorityKey, summary), nil
 }
 
 func (node *posNode) PrivacyDeposit(ctx context.Context, sourceSeed string, stateSeed string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
@@ -777,6 +820,51 @@ func privacyStateResult(address structure.PublicKey, state structure.PrivacyStat
 		Version:         state.Version,
 		Notes:           notes,
 		SpentNullifiers: nullifiers,
+	}
+}
+
+func accountTransactionHistoryResult(address structure.PublicKey, page blockchain.AddressHistoryPage, finalizedHeight uint64) rpc.AccountTransactionHistoryResult {
+	records := make([]rpc.AccountTransactionRecordResult, len(page.Records))
+	for index, record := range page.Records {
+		status := "confirmed"
+		finalized := record.BlockHeight > 0 && record.BlockHeight <= finalizedHeight
+		if finalized {
+			status = "finalized"
+		}
+		records[index] = rpc.AccountTransactionRecordResult{
+			Signature:           record.TransactionID,
+			Direction:           string(record.Direction),
+			Kind:                string(record.Kind),
+			Counterparty:        record.Counterparty,
+			AmountLamports:      fmt.Sprintf("%d", record.AmountLamports),
+			BlockHeight:         record.BlockHeight,
+			Slot:                record.Slot,
+			Blockhash:           record.BlockHash,
+			SubmitTimeUnixMilli: record.SubmitTimeUnixMilli,
+			Finalized:           finalized,
+			Status:              status,
+			Location:            "block",
+		}
+	}
+	return rpc.AccountTransactionHistoryResult{
+		Address:    address.String(),
+		Scope:      page.Scope,
+		Records:    records,
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
+	}
+}
+
+func privacyBalanceResult(stateAddress structure.PublicKey, spendAuthority structure.PublicKey, summary blockchain.PrivacyBalanceSummary) rpc.PrivacyBalanceResult {
+	return rpc.PrivacyBalanceResult{
+		StateAddress:       stateAddress.String(),
+		SpendAuthority:     spendAuthority.String(),
+		AvailableLamports:  fmt.Sprintf("%d", summary.AvailableLamports),
+		EscrowLamports:     fmt.Sprintf("%d", summary.EscrowLamports),
+		SpendableNoteCount: summary.SpendableNoteCount,
+		SpentNoteCount:     summary.SpentNoteCount,
+		OwnedNoteCount:     summary.OwnedNoteCount,
+		StateNoteCount:     summary.StateNoteCount,
 	}
 }
 

@@ -154,6 +154,9 @@ func LoadOrCreateLedgerWithConfig(db database.Database, genesis GenesisConfig, c
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureAddressHistoryIndex(db, head); err != nil {
+		return nil, err
+	}
 	return &Ledger{
 		db:                    db,
 		head:                  head,
@@ -283,7 +286,7 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (committedHead Hea
 		UpdatedAtMs:     time.Now().UnixMilli(),
 	}
 	if request.QC != nil {
-		qcHash, err := HashQC(*request.QC)
+		qcHash, err := HashCanonicalQC(*request.QC)
 		if err != nil {
 			return Head{}, err
 		}
@@ -449,7 +452,11 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 	if err := qc.Validate(); err != nil {
 		return Head{}, err
 	}
-	qcHash, err = HashQC(qc)
+	qcHash, err = HashCanonicalQC(qc)
+	if err != nil {
+		return Head{}, err
+	}
+	fullQCHash, err := HashQC(qc)
 	if err != nil {
 		return Head{}, err
 	}
@@ -469,9 +476,10 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 			return Head{}, fmt.Errorf("blockchain: marshal qc: %w", err)
 		}
 		operations := []database.DBOperation{
-			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash), qcBytes),
+			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, fullQCHash), qcBytes),
 		}
 		if promoteHeadQC {
+			operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash), qcBytes))
 			nextHead.QCHash = qcHash
 			nextHead.UpdatedAtMs = time.Now().UnixMilli()
 			headBytes, err := marshalHead(nextHead)
@@ -1315,12 +1323,22 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
 	appendTransactionIndexOps(&operations, transactionIDs, blockHash)
+	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
+		return err
+	}
 	if request.QC != nil {
 		qcBytes, err := request.QC.MarshalBinary()
 		if err != nil {
 			return fmt.Errorf("blockchain: marshal qc: %w", err)
 		}
-		operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, head.QCHash), qcBytes))
+		fullQCHash, err := HashQC(*request.QC)
+		if err != nil {
+			return err
+		}
+		operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, fullQCHash), qcBytes))
+		if fullQCHash != head.QCHash {
+			operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, head.QCHash), qcBytes))
+		}
 	}
 	for _, account := range request.NextState.Accounts {
 		accountBytes, err := account.Account.MarshalBinary()
@@ -1346,6 +1364,9 @@ func (ledger *Ledger) persistImportedSnapshotLocked(request ImportSnapshotReques
 		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), blockHash[:]),
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
+	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
+		return err
+	}
 	if err := appendAccountSnapshotImportOps(ledger.db, &operations, request.State); err != nil {
 		return err
 	}
@@ -1938,7 +1959,7 @@ func (ledger *Ledger) collectReorgPlan(readTx database.ReadTransaction, newTip c
 	cursorHash := newTipHash
 	for {
 		newAncestors[cursorHash] = cursor
-		if cursorHash == ledger.head.BlockHash || cursor.Header.Height == 0 {
+		if cursorHash == ledger.head.BlockHash || cursorHash == ledger.head.FinalizedHash || cursor.Header.Height == 0 {
 			break
 		}
 		parent, err := loadProposalByHash(readTx, cursor.Header.ParentHash)
@@ -2043,6 +2064,9 @@ func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []str
 			delta.RemoveIDs = append(delta.RemoveIDs, transactionID)
 			operations = append(operations, database.NewDeleteOperation(database.TableTxToBlock, []byte(transactionID)))
 		}
+		if err := appendAddressHistoryDeleteOps(&operations, oldBlock, oldHash); err != nil {
+			return nil, delta, err
+		}
 		operations = append(operations, database.NewDeleteOperation(database.TableHeightToHash, uint64Key(oldBlock.Header.Height)))
 	}
 	seenNewTransactionIDs := make(map[string]struct{})
@@ -2071,6 +2095,9 @@ func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []str
 			}
 			delta.Add[transactionID] = newHash
 			operations = append(operations, database.NewUpdateOperation(database.TableTxToBlock, []byte(transactionID), newHash[:]))
+		}
+		if err := appendAddressHistoryIndexOps(&operations, newBlock, newHash); err != nil {
+			return nil, delta, err
 		}
 		heightBytes := uint64Key(newBlock.Header.Height)
 		operations = append(operations, database.NewUpdateOperation(database.TableHeightToHash, heightBytes, newHash[:]))

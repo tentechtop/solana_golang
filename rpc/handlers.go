@@ -12,9 +12,11 @@ const (
 	MethodSendTransaction       = "sendTransaction"
 	MethodGetBlock              = "getBlock"
 	MethodGetTransaction        = "getTransaction"
+	MethodGetAddressTransactions = "getAddressTransactions"
 	MethodTreasuryTransfer      = "treasuryTransfer"
 	MethodTransfer              = "transfer"
 	MethodGetPrivacyState       = "getPrivacyState"
+	MethodGetPrivacyBalance     = "getPrivacyBalance"
 	MethodPrivacyDeposit        = "privacyDeposit"
 	MethodPrivacyDepositToState = "privacyDepositToState"
 	MethodPrivacyWithdraw       = "privacyWithdraw"
@@ -56,8 +58,13 @@ type TransactionLookupBackend interface {
 	GetTransaction(ctx context.Context, signature string) (TransactionDetailResult, error)
 }
 
+type AccountHistoryBackend interface {
+	GetAddressTransactions(ctx context.Context, address string, cursor string, limit int) (AccountTransactionHistoryResult, error)
+}
+
 type PrivacyBackend interface {
 	GetPrivacyState(ctx context.Context, stateAddress string) (PrivacyStateResult, error)
+	GetPrivacyBalance(ctx context.Context, stateAddress string, spendAuthority string) (PrivacyBalanceResult, error)
 	PrivacyDeposit(ctx context.Context, sourceSeed string, stateSeed string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
 	PrivacyDepositToState(ctx context.Context, sourceSeed string, stateAddress string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
 	PrivacyWithdraw(ctx context.Context, authoritySeed string, stateAddress string, destination string, commitment string, nullifier string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
@@ -134,6 +141,29 @@ type TransactionDetailResult struct {
 	Finalized           bool     `json:"finalized"`
 }
 
+type AccountTransactionRecordResult struct {
+	Signature           string `json:"signature"`
+	Direction           string `json:"direction"`
+	Kind                string `json:"kind"`
+	Counterparty        string `json:"counterparty,omitempty"`
+	AmountLamports      string `json:"amount_lamports"`
+	BlockHeight         uint64 `json:"block_height"`
+	Slot                uint64 `json:"slot"`
+	Blockhash           string `json:"blockhash"`
+	SubmitTimeUnixMilli int64  `json:"submit_time_unix_milli"`
+	Finalized           bool   `json:"finalized"`
+	Status              string `json:"status"`
+	Location            string `json:"location"`
+}
+
+type AccountTransactionHistoryResult struct {
+	Address    string                           `json:"address"`
+	Scope      string                           `json:"scope"`
+	Records    []AccountTransactionRecordResult `json:"records"`
+	NextCursor string                           `json:"next_cursor,omitempty"`
+	HasMore    bool                             `json:"has_more"`
+}
+
 type TransactionSubmitResult struct {
 	Signature string `json:"signature"`
 }
@@ -168,6 +198,17 @@ type PrivacyStateResult struct {
 	Version         uint16              `json:"version"`
 	Notes           []PrivacyNoteResult `json:"notes"`
 	SpentNullifiers []string            `json:"spent_nullifiers"`
+}
+
+type PrivacyBalanceResult struct {
+	StateAddress       string `json:"state_address"`
+	SpendAuthority     string `json:"spend_authority"`
+	AvailableLamports  string `json:"available_lamports"`
+	EscrowLamports     string `json:"escrow_lamports"`
+	SpendableNoteCount int    `json:"spendable_note_count"`
+	SpentNoteCount     int    `json:"spent_note_count"`
+	OwnedNoteCount     int    `json:"owned_note_count"`
+	StateNoteCount     int    `json:"state_note_count"`
 }
 
 type ValidatorInfo struct {
@@ -238,9 +279,11 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
+	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
 	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
 	_ = router.Register(MethodTransfer, transferHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
+	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
 	_ = router.Register(MethodPrivacyDeposit, privacyDepositHandler(backend))
 	_ = router.Register(MethodPrivacyDepositToState, privacyDepositToStateHandler(backend))
 	_ = router.Register(MethodPrivacyWithdraw, privacyWithdrawHandler(backend))
@@ -358,6 +401,48 @@ func getTransactionHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
+func getAddressTransactionsHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		accountHistoryBackend, ok := backend.(AccountHistoryBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 1 {
+			return nil, invalidParamsError("getAddressTransactions requires address")
+		}
+		address, rpcError := parseStringParam(values[0], "getAddressTransactions address")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+
+		limit := uint64(20)
+		if len(values) >= 2 {
+			limit, rpcError = parseUint64Param(values[1], "getAddressTransactions limit")
+			if rpcError != nil {
+				return nil, rpcError
+			}
+		}
+
+		cursor := ""
+		if len(values) >= 3 {
+			cursor, rpcError = parseOptionalStringParam(values[2], "getAddressTransactions cursor")
+			if rpcError != nil {
+				return nil, rpcError
+			}
+		}
+
+		result, err := accountHistoryBackend.GetAddressTransactions(ctx, address, cursor, int(limit))
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get address transactions: %v", err))
+		}
+		return result, nil
+	}
+}
+
 func treasuryTransferHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		transferBackend, ok := backend.(TreasuryTransferBackend)
@@ -433,6 +518,35 @@ func getPrivacyStateHandler(backend LedgerBackend) HandlerFunc {
 		result, err := privacyBackend.GetPrivacyState(ctx, stateAddress)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get privacy state: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getPrivacyBalanceHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		privacyBackend, ok := backend.(PrivacyBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 2 {
+			return nil, invalidParamsError("getPrivacyBalance requires state address and spend authority")
+		}
+		stateAddress, rpcError := parseStringParam(values[0], "getPrivacyBalance state address")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		spendAuthority, rpcError := parseStringParam(values[1], "getPrivacyBalance spend authority")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := privacyBackend.GetPrivacyBalance(ctx, stateAddress, spendAuthority)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get privacy balance: %v", err))
 		}
 		return result, nil
 	}
