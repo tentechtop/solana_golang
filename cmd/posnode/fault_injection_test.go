@@ -92,7 +92,6 @@ func TestFaultInjectionOrphanCapacityDropsOverflow(t *testing.T) {
 
 func TestFaultInjectionMissingBlockHeightReturnsNotFound(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
-	node.peerKeyPair = mustRawKeyPair("fault-sync-node")
 	requestPayload, err := json.Marshal(blockHeightRequestEnvelope{Height: node.ledger.Head().Height + 99})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)

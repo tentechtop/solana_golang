@@ -1,0 +1,7 @@
+round=04_blockchain_restart_reorg_finalized
+started_at=2026-06-16T11:50:01.9922542+08:00
+ended_at=2026-06-16T11:50:06.0492052+08:00
+duration_seconds=4.057
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.034s

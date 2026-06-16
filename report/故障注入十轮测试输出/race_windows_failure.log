@@ -1,0 +1,6 @@
+command=go test -race .\... -count 1
+exit_code=1
+environment=Windows PowerShell
+classification=ThreadSanitizer runtime allocation failure before useful race result
+excerpt=ThreadSanitizer failed to allocate bytes, error code: 87
+action=在 Linux 或 macOS 上补跑 go test -race .\...，不能把本次 Windows 结果当作代码竞态结论。

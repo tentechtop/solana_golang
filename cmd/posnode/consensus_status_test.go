@@ -80,7 +80,7 @@ func newConsensusStatusTestNode(t *testing.T) *posNode {
 			StakerAddress:      stakerKeys[index].PublicKey,
 			ValidatorAddress:   validatorKeys[index].PublicKey,
 			ConsensusPublicKey: consensusKeys[index].PublicKey,
-			P2PPeerID:          "peer-consensus-status-" + string(rune('a'+index)),
+			P2PPeerID:          mustRawKeyPair("consensus-status-peer-" + string(rune('a'+index))).peerID,
 			StakeLamports:      stake.MinimumStakeLamports,
 		}
 	}

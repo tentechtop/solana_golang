@@ -1,0 +1,31 @@
+round=09_full_repository_gate
+started_at=2026-06-16T11:50:19.8688589+08:00
+ended_at=2026-06-16T11:50:34.7764767+08:00
+duration_seconds=14.908
+exit_code=0
+--- output ---
+ok  	solana_golang	0.741s
+ok  	solana_golang/architecture	0.728s
+ok  	solana_golang/blockchain	1.993s
+ok  	solana_golang/cmd	2.914s
+ok  	solana_golang/cmd/p2pstress	0.530s
+ok  	solana_golang/cmd/posnode	1.856s
+ok  	solana_golang/codec/borsh	0.530s
+ok  	solana_golang/config	1.588s
+ok  	solana_golang/consensus	1.152s
+ok  	solana_golang/database	2.851s
+ok  	solana_golang/database/leveldb	0.634s
+ok  	solana_golang/database/pebble	2.190s
+ok  	solana_golang/p2p	8.686s
+ok  	solana_golang/p2p/peerstore	2.253s
+ok  	solana_golang/programs/privacy	0.879s
+ok  	solana_golang/programs/stake	0.619s
+?   	solana_golang/programs/system	[no test files]
+?   	solana_golang/programs/vm	[no test files]
+ok  	solana_golang/rpc	1.760s
+ok  	solana_golang/runtime	0.879s
+ok  	solana_golang/schema	0.529s
+ok  	solana_golang/structure	1.648s
+ok  	solana_golang/utils	1.683s
+ok  	solana_golang/vm	0.529s
+ok  	solana_golang/zk	0.879s
