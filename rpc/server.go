@@ -103,7 +103,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Path != "/" {
-		s.serveJSONHTTP(responseWriter, r)
+		responseWriter.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(responseWriter).Encode(errorResponse(nil, methodNotFoundError(r.URL.Path)))
 		return
 	}
 	if r.Method != http.MethodPost {

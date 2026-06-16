@@ -122,6 +122,24 @@ func TestServerWritesStructuredRequestLog(t *testing.T) {
 		t.Fatalf("log line = %q, want method field", logLine)
 	}
 }
+
+func TestServerRejectsNonRootPath(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
+	request := httptest.NewRequest(http.MethodPost, "/health", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}`))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", response.Code, response.Body.String())
+	}
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
+		t.Fatalf("error = %+v, want method not found", decoded.Error)
+	}
+}
+
 func postJSONRPC(t *testing.T, handler http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
