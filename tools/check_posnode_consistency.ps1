@@ -328,9 +328,9 @@ function New-NodeSnapshot {
         Url                    = $Url
         NodeName               = Get-StringProperty -InputObject $status -Name "node_name"
         PeerID                 = Get-StringProperty -InputObject $status -Name "peer_id"
-        HeadHeight             = Get-UInt64Property -InputObject $status -Name "head_height"
-        HeadSlot               = Get-UInt64Property -InputObject $status -Name "head_slot"
-        HeadHash               = Get-StringProperty -InputObject $status -Name "head_hash"
+        HeadHeight             = Get-UInt64Property -InputObject $metrics -Name "head_height"
+        HeadSlot               = Get-UInt64Property -InputObject $metrics -Name "head_slot"
+        HeadHash               = Get-StringProperty -InputObject $metrics -Name "block_hash"
         FinalizedHeight        = Get-UInt64Property -InputObject $status -Name "finalized_height"
         FinalizedHash          = Get-StringProperty -InputObject $status -Name "finalized_hash"
         FinalityDepth          = Get-UInt64Property -InputObject $status -Name "finality_depth"

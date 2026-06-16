@@ -61,6 +61,17 @@ func (host *Host) Peer(peerID string) (Peer, bool) {
 	return peer.Clone(), ok
 }
 
+// PeerSnapshots 返回节点快照列表 + 供 RPC 和监控导出只读 peer 视图。
+func (host *Host) PeerSnapshots() []PeerSnapshot {
+	host.mutex.RLock()
+	defer host.mutex.RUnlock()
+	snapshots := make([]PeerSnapshot, 0, len(host.peers))
+	for _, peer := range host.peers {
+		snapshots = append(snapshots, peer.Snapshot())
+	}
+	return snapshots
+}
+
 // ClosestPeers 查询 KAD 最近节点 + 用于 find-node 协议和连接候选选择。
 func (host *Host) ClosestPeers(targetPeerID string, limit int) ([]Peer, error) {
 	if err := validateKADRoutingTable(host.routingTable); err != nil {

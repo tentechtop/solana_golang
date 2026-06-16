@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"solana_golang/blockchain"
 	"solana_golang/consensus"
 	"solana_golang/p2p"
 	"solana_golang/structure"
@@ -38,6 +39,10 @@ type blockHeightRequestEnvelope struct {
 	Height uint64 `json:"height"`
 }
 
+type blockLocatorRequestEnvelope struct {
+	MaxEntries int `json:"max_entries,omitempty"`
+}
+
 type blockResponseEnvelope struct {
 	Found    bool            `json:"found"`
 	Hash     string          `json:"hash,omitempty"`
@@ -45,16 +50,39 @@ type blockResponseEnvelope struct {
 	Error    string          `json:"error,omitempty"`
 }
 
+type blockLocatorEntryJSON struct {
+	Height uint64 `json:"height"`
+	Hash   string `json:"hash"`
+}
+
+type blockLocatorResponseEnvelope struct {
+	Entries []blockLocatorEntryJSON `json:"entries,omitempty"`
+	Error   string                  `json:"error,omitempty"`
+}
+
+type commonAncestorRequestEnvelope struct {
+	Locator []blockLocatorEntryJSON `json:"locator,omitempty"`
+}
+
+type commonAncestorResponseEnvelope struct {
+	Found    bool                  `json:"found"`
+	Ancestor blockLocatorEntryJSON `json:"ancestor"`
+	Error    string                `json:"error,omitempty"`
+}
+
 type stateSnapshotRequestEnvelope struct {
 	BlockHash string `json:"block_hash"`
 }
 
 type stateSnapshotResponseEnvelope struct {
-	Found     bool                  `json:"found"`
-	BlockHash string                `json:"block_hash,omitempty"`
-	StateRoot string                `json:"state_root,omitempty"`
-	Accounts  []accountSnapshotJSON `json:"accounts,omitempty"`
-	Error     string                `json:"error,omitempty"`
+	Found             bool                  `json:"found"`
+	ChainID           string                `json:"chain_id,omitempty"`
+	ChainIdentityHash string                `json:"chain_identity_hash,omitempty"`
+	GenesisHash       string                `json:"genesis_hash,omitempty"`
+	BlockHash         string                `json:"block_hash,omitempty"`
+	StateRoot         string                `json:"state_root,omitempty"`
+	Accounts          []accountSnapshotJSON `json:"accounts,omitempty"`
+	Error             string                `json:"error,omitempty"`
 }
 
 type accountSnapshotJSON struct {
@@ -63,28 +91,31 @@ type accountSnapshotJSON struct {
 }
 
 type statusResponseEnvelope struct {
-	NodeName        string              `json:"node_name"`
-	PeerID          string              `json:"peer_id"`
-	HeadHeight      uint64              `json:"head_height"`
-	HeadSlot        uint64              `json:"head_slot"`
-	HeadHash        string              `json:"head_hash"`
-	HeadQCHash      string              `json:"head_qc_hash,omitempty"`
-	FinalizedHeight uint64              `json:"finalized_height"`
-	FinalizedHash   string              `json:"finalized_hash"`
-	FinalityDepth   uint64              `json:"finality_depth"`
-	EpochID         uint64              `json:"epoch_id"`
-	MempoolSize     int                 `json:"mempool_size"`
-	ValidatorCount  int                 `json:"validator_count"`
-	KnownPeerCount  int                 `json:"known_peer_count"`
-	P2PSecure       bool                `json:"p2p_secure_session"`
-	P2PInsecure     bool                `json:"p2p_insecure_allowed"`
-	StateRecovery   bool                `json:"state_recovery_enabled"`
-	CurrentLeader   string              `json:"current_leader,omitempty"`
-	UpcomingLeaders []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
-	Turbine         turbinePositionJSON `json:"turbine"`
-	TransactionFast transactionFastJSON `json:"transaction_fast_path"`
-	Consensus       consensusStatusJSON `json:"consensus"`
-	Metrics         nodeMetricsSnapshot `json:"metrics"`
+	ChainID           string              `json:"chain_id"`
+	ChainIdentityHash string              `json:"chain_identity_hash"`
+	GenesisHash       string              `json:"genesis_hash"`
+	NodeName          string              `json:"node_name"`
+	PeerID            string              `json:"peer_id"`
+	HeadHeight        uint64              `json:"head_height"`
+	HeadSlot          uint64              `json:"head_slot"`
+	HeadHash          string              `json:"head_hash"`
+	HeadQCHash        string              `json:"head_qc_hash,omitempty"`
+	FinalizedHeight   uint64              `json:"finalized_height"`
+	FinalizedHash     string              `json:"finalized_hash"`
+	FinalityDepth     uint64              `json:"finality_depth"`
+	EpochID           uint64              `json:"epoch_id"`
+	MempoolSize       int                 `json:"mempool_size"`
+	ValidatorCount    int                 `json:"validator_count"`
+	KnownPeerCount    int                 `json:"known_peer_count"`
+	P2PSecure         bool                `json:"p2p_secure_session"`
+	P2PInsecure       bool                `json:"p2p_insecure_allowed"`
+	StateRecovery     bool                `json:"state_recovery_enabled"`
+	CurrentLeader     string              `json:"current_leader,omitempty"`
+	UpcomingLeaders   []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
+	Turbine           turbinePositionJSON `json:"turbine"`
+	TransactionFast   transactionFastJSON `json:"transaction_fast_path"`
+	Consensus         consensusStatusJSON `json:"consensus"`
+	Metrics           nodeMetricsSnapshot `json:"metrics"`
 }
 
 type leaderSlotJSON struct {
@@ -161,6 +192,32 @@ type posProposalJSON struct {
 	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
 	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
 	LeaderSignature structure.Signature           `json:"leader_signature"`
+}
+
+func encodeBlockLocatorEntries(entries []blockchain.BlockLocatorEntry) []blockLocatorEntryJSON {
+	encoded := make([]blockLocatorEntryJSON, 0, len(entries))
+	for _, entry := range entries {
+		encoded = append(encoded, blockLocatorEntryJSON{
+			Height: entry.Height,
+			Hash:   entry.BlockHash.String(),
+		})
+	}
+	return encoded
+}
+
+func decodeBlockLocatorEntries(entries []blockLocatorEntryJSON) ([]blockchain.BlockLocatorEntry, error) {
+	decoded := make([]blockchain.BlockLocatorEntry, 0, len(entries))
+	for index, entry := range entries {
+		blockHash, err := structure.HashFromBase58(entry.Hash)
+		if err != nil {
+			return nil, fmt.Errorf("posnode: decode locator entry %d: %w", index, err)
+		}
+		decoded = append(decoded, blockchain.BlockLocatorEntry{
+			Height:    entry.Height,
+			BlockHash: blockHash,
+		})
+	}
+	return decoded, nil
 }
 
 func encodeTransactionMessage(transaction structure.Transaction) (p2p.Message, error) {

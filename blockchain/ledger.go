@@ -83,6 +83,38 @@ func (ledger *Ledger) HasCommittedTransaction(transactionID string) (bool, error
 	return exists, nil
 }
 
+// TransactionByID 按交易 ID 反查主链区块 + 钱包详情查询依赖它避免全链扫描。
+func (ledger *Ledger) TransactionByID(transactionID string) (consensus.BlockProposal, structure.Hash, bool, error) {
+	if transactionID == "" {
+		return consensus.BlockProposal{}, structure.Hash{}, false, nil
+	}
+
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return consensus.BlockProposal{}, structure.Hash{}, false, ErrLedgerClosed
+	}
+	if ledger.db == nil {
+		return consensus.BlockProposal{}, structure.Hash{}, false, nil
+	}
+
+	blockHash, exists := ledger.committedTransactions[transactionID]
+	if !exists {
+		return consensus.BlockProposal{}, structure.Hash{}, false, nil
+	}
+
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return consensus.BlockProposal{}, structure.Hash{}, false, fmt.Errorf("blockchain: begin transaction lookup snapshot: %w", err)
+	}
+	defer readTx.Close()
+	proposal, err := loadProposalByHash(readTx, blockHash)
+	if err != nil {
+		return consensus.BlockProposal{}, structure.Hash{}, false, err
+	}
+	return proposal, blockHash, true, nil
+}
+
 // LoadOrCreateLedger 加载已有账本或创建 genesis + 节点重启后不能回到创世状态。
 func LoadOrCreateLedger(db database.Database, genesis GenesisConfig) (*Ledger, error) {
 	return LoadOrCreateLedgerWithConfig(db, genesis, LedgerConfig{})
@@ -403,11 +435,12 @@ func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (decision ForkDeci
 func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, err error) {
 	startedAt := time.Now()
 	var qcHash structure.Hash
+	promoted := false
 	ledger.mutex.Lock()
 	logger := ledger.loggerLocked()
 	savedHead = ledger.head
 	defer func() {
-		logQCSave(logger, qc, qcHash, savedHead, startedAt, err)
+		logQCSave(logger, qc, qcHash, savedHead, promoted, startedAt, err)
 	}()
 	defer ledger.mutex.Unlock()
 	if ledger.closed {
@@ -421,26 +454,48 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 		return Head{}, err
 	}
 	nextHead := ledger.head
-	nextHead.QCHash = qcHash
-	nextHead.UpdatedAtMs = time.Now().UnixMilli()
 	if ledger.db != nil {
+		readTx, err := ledger.db.BeginReadTransaction()
+		if err != nil {
+			return Head{}, fmt.Errorf("blockchain: begin qc snapshot: %w", err)
+		}
+		defer readTx.Close()
+		promoteHeadQC, promoteErr := shouldPromoteHeadQC(readTx, nextHead, qc)
+		if promoteErr != nil {
+			return Head{}, promoteErr
+		}
 		qcBytes, err := qc.MarshalBinary()
 		if err != nil {
 			return Head{}, fmt.Errorf("blockchain: marshal qc: %w", err)
 		}
-		headBytes, err := marshalHead(nextHead)
-		if err != nil {
-			return Head{}, err
-		}
 		operations := []database.DBOperation{
 			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash), qcBytes),
-			database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes),
+		}
+		if promoteHeadQC {
+			nextHead.QCHash = qcHash
+			nextHead.UpdatedAtMs = time.Now().UnixMilli()
+			headBytes, err := marshalHead(nextHead)
+			if err != nil {
+				return Head{}, err
+			}
+			operations = append(operations, database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes))
 		}
 		if err := ledger.db.DataTransaction(operations); err != nil {
 			return Head{}, err
 		}
+		if !promoteHeadQC {
+			return nextHead, nil
+		}
+		promoted = true
+		ledger.head = nextHead
+		savedHead = nextHead
+		return nextHead, nil
 	}
+	nextHead.QCHash = qcHash
+	nextHead.UpdatedAtMs = time.Now().UnixMilli()
+	promoted = true
 	ledger.head = nextHead
+	savedHead = nextHead
 	return nextHead, nil
 }
 
@@ -541,6 +596,76 @@ func readMainChainHashForRewardQC(
 	return hash, true, nil
 }
 
+func readStoredQCByHash(
+	readTx database.ReadTransaction,
+	qcHash structure.Hash,
+) (consensus.QuorumCertificate, bool, error) {
+	if qcHash.IsZero() {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	qcBytes, err := readTx.Get(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash))
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: read qc snapshot: %w", err)
+	}
+	if len(qcBytes) == 0 {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	storedQC, err := consensus.UnmarshalCertificateBinary(qcBytes)
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: unmarshal stored qc: %w", err)
+	}
+	return storedQC, true, nil
+}
+
+func qcOnMainChain(
+	readTx database.ReadTransaction,
+	head Head,
+	qc consensus.QuorumCertificate,
+) (bool, error) {
+	if qc.BlockHeight == 0 || qc.BlockHeight > head.Height {
+		return false, nil
+	}
+	mainChainHash, exists, err := readMainChainHashForRewardQC(
+		readTx,
+		make(map[uint64]structure.Hash),
+		make(map[uint64]struct{}),
+		qc.BlockHeight,
+	)
+	if err != nil || !exists {
+		return false, err
+	}
+	return mainChainHash == qc.BlockHash, nil
+}
+
+func shouldPromoteHeadQC(
+	readTx database.ReadTransaction,
+	head Head,
+	candidate consensus.QuorumCertificate,
+) (bool, error) {
+	candidateOnMainChain, err := qcOnMainChain(readTx, head, candidate)
+	if err != nil {
+		return false, err
+	}
+	if !candidateOnMainChain {
+		return false, nil
+	}
+	current, exists, err := readStoredQCByHash(readTx, head.QCHash)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
+	}
+	currentOnMainChain, err := qcOnMainChain(readTx, head, current)
+	if err != nil {
+		return false, err
+	}
+	if !currentOnMainChain {
+		return true, nil
+	}
+	return isBetterHeadQC(candidate, current, head), nil
+}
+
 // isBetterRewardQC 选择同 slot 最佳 QC + 多阶段聚合时只用最高确认权重生成奖励。
 func isBetterRewardQC(candidate consensus.QuorumCertificate, current consensus.QuorumCertificate) bool {
 	if candidate.ConfirmedStake != current.ConfirmedStake {
@@ -556,6 +681,21 @@ func isBetterRewardQC(candidate consensus.QuorumCertificate, current consensus.Q
 		return candidate.BlockHeight > current.BlockHeight
 	}
 	return candidate.BlockHash.String() < current.BlockHash.String()
+}
+
+func isBetterHeadQC(candidate consensus.QuorumCertificate, current consensus.QuorumCertificate, head Head) bool {
+	if candidate.BlockHeight != current.BlockHeight {
+		return candidate.BlockHeight > current.BlockHeight
+	}
+	if candidate.Slot != current.Slot {
+		return candidate.Slot > current.Slot
+	}
+	candidateMatchesHead := candidate.BlockHash == head.BlockHash
+	currentMatchesHead := current.BlockHash == head.BlockHash
+	if candidateMatchesHead != currentMatchesHead {
+		return candidateMatchesHead
+	}
+	return isBetterRewardQC(candidate, current)
 }
 
 // State 返回账户状态快照 + 调用方不能修改账本内部切片。
@@ -723,6 +863,142 @@ func (ledger *Ledger) BlockByHeight(height uint64) (consensus.BlockProposal, str
 		return consensus.BlockProposal{}, structure.Hash{}, false, err
 	}
 	return proposal, blockHash, true, nil
+}
+
+// MainChainHashAtHeight 读取主链高度索引 + locator 和共同祖先判断只依赖稳定主链视图。
+func (ledger *Ledger) MainChainHashAtHeight(height uint64) (structure.Hash, bool, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return structure.Hash{}, false, ErrLedgerClosed
+	}
+	if ledger.db == nil {
+		if height == ledger.head.Height {
+			return ledger.head.BlockHash, true, nil
+		}
+		if height == ledger.head.FinalizedHeight {
+			return ledger.head.FinalizedHash, true, nil
+		}
+		if height == 0 && ledger.head.FinalizedHeight == 0 {
+			return ledger.head.FinalizedHash, true, nil
+		}
+		return structure.Hash{}, false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: begin main chain hash snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return readMainChainHashAtHeight(readTx, height)
+}
+
+// BlockLocator 返回主链定位点 + 节点先定位共同祖先再拉取连续区块避免直接撞进错误分叉。
+func (ledger *Ledger) BlockLocator(limit int) ([]BlockLocatorEntry, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return nil, ErrLedgerClosed
+	}
+	if limit <= 0 {
+		limit = 32
+	}
+	heights := buildBlockLocatorHeights(ledger.head.Height, ledger.head.FinalizedHeight, limit)
+	if ledger.db == nil {
+		return buildEphemeralBlockLocator(ledger.head, heights), nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("blockchain: begin locator snapshot: %w", err)
+	}
+	defer readTx.Close()
+	entries := make([]BlockLocatorEntry, 0, len(heights))
+	for _, height := range heights {
+		blockHash, found, err := readMainChainHashAtHeight(readTx, height)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		entries = append(entries, BlockLocatorEntry{Height: height, BlockHash: blockHash})
+	}
+	return entries, nil
+}
+
+// FindCommonAncestor 在主链快照内定位共同祖先 + 分叉同步和 proposal 补链必须基于一致读结果。
+func (ledger *Ledger) FindCommonAncestor(locator []BlockLocatorEntry) (Head, bool, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return Head{}, false, ErrLedgerClosed
+	}
+	if len(locator) == 0 {
+		return Head{}, false, nil
+	}
+	if ledger.db == nil {
+		for _, entry := range locator {
+			if entry.Height == ledger.head.Height && entry.BlockHash == ledger.head.BlockHash {
+				return ledger.head, true, nil
+			}
+			if entry.Height == ledger.head.FinalizedHeight && entry.BlockHash == ledger.head.FinalizedHash {
+				return Head{
+					ChainID:   ledger.head.ChainID,
+					Height:    entry.Height,
+					Slot:      0,
+					BlockHash: entry.BlockHash,
+					StateRoot: entry.BlockHash,
+					EpochID:   0,
+				}, true, nil
+			}
+		}
+		return Head{}, false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return Head{}, false, fmt.Errorf("blockchain: begin common ancestor snapshot: %w", err)
+	}
+	defer readTx.Close()
+	bestAncestor := Head{}
+	foundAncestor := false
+	for _, entry := range locator {
+		localHash, found, err := readMainChainHashAtHeight(readTx, entry.Height)
+		if err != nil {
+			return Head{}, false, err
+		}
+		if !found || localHash != entry.BlockHash {
+			continue
+		}
+		ancestor, err := ancestorHeadFromLocatorEntry(readTx, ledger.head, entry)
+		if err != nil {
+			return Head{}, false, err
+		}
+		if !foundAncestor || ancestor.Height > bestAncestor.Height {
+			bestAncestor = ancestor
+			foundAncestor = true
+		}
+	}
+	return bestAncestor, foundAncestor, nil
+}
+
+// BranchResolved 判断候选分支祖先是否齐全 + proposal 落地前可先决定要不要补整段分支。
+func (ledger *Ledger) BranchResolved(blockHash structure.Hash) (bool, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return false, ErrLedgerClosed
+	}
+	if blockHash == ledger.head.BlockHash || blockHash == ledger.head.FinalizedHash {
+		return true, nil
+	}
+	if ledger.db == nil {
+		return false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return false, fmt.Errorf("blockchain: begin branch resolution snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return branchResolvedFromSnapshot(readTx, ledger.head, blockHash)
 }
 
 // StateSnapshotAtBlockHash 读取指定区块状态快照 + state sync 需要先验证根再应用。
@@ -995,6 +1271,7 @@ func logQCSave(
 	qc consensus.QuorumCertificate,
 	qcHash structure.Hash,
 	head Head,
+	promoted bool,
 	startedAt time.Time,
 	err error,
 ) {
@@ -1006,8 +1283,10 @@ func logQCSave(
 		slog.Uint64("confirmed_stake", qc.ConfirmedStake),
 		slog.Uint64("threshold_stake", qc.ThresholdStake),
 		slog.Int("voter_count", len(qc.Voters)),
+		slog.Bool("promoted", promoted),
 		slog.Uint64("head_height", head.Height),
 		slog.String("head_hash", head.BlockHash.String()),
+		slog.String("head_qc_hash", head.QCHash.String()),
 		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
 	}
 	if err != nil {
@@ -1390,6 +1669,130 @@ func loadStateSnapshot(readTx database.ReadTransaction, blockHash structure.Hash
 		accounts = append(accounts, structure.AddressedAccount{Address: address, Account: account})
 	}
 	return consensus.ChainState{Accounts: accounts}, nil
+}
+
+func buildBlockLocatorHeights(headHeight uint64, finalizedHeight uint64, limit int) []uint64 {
+	if limit <= 0 {
+		limit = 32
+	}
+	if limit < 3 {
+		limit = 3
+	}
+	heights := make([]uint64, 0, limit)
+	seen := make(map[uint64]struct{}, limit)
+	addHeight := func(height uint64) {
+		if _, exists := seen[height]; exists {
+			return
+		}
+		heights = append(heights, height)
+		seen[height] = struct{}{}
+	}
+	addHeight(headHeight)
+	cursor := headHeight
+	step := uint64(1)
+	for len(heights) < limit-2 && cursor > 0 {
+		if cursor <= step {
+			addHeight(0)
+			break
+		}
+		cursor -= step
+		addHeight(cursor)
+		if step <= ^uint64(0)/2 {
+			step *= 2
+		}
+	}
+	addHeight(finalizedHeight)
+	addHeight(0)
+	sort.Slice(heights, func(leftIndex int, rightIndex int) bool {
+		return heights[leftIndex] > heights[rightIndex]
+	})
+	return heights
+}
+
+func buildEphemeralBlockLocator(head Head, heights []uint64) []BlockLocatorEntry {
+	entries := make([]BlockLocatorEntry, 0, len(heights))
+	for _, height := range heights {
+		switch {
+		case height == head.Height:
+			entries = append(entries, BlockLocatorEntry{Height: height, BlockHash: head.BlockHash})
+		case height == head.FinalizedHeight:
+			entries = append(entries, BlockLocatorEntry{Height: height, BlockHash: head.FinalizedHash})
+		case height == 0 && head.FinalizedHeight == 0:
+			entries = append(entries, BlockLocatorEntry{Height: 0, BlockHash: head.FinalizedHash})
+		}
+	}
+	return entries
+}
+
+func readMainChainHashAtHeight(readTx database.ReadTransaction, height uint64) (structure.Hash, bool, error) {
+	hashBytes, err := readTx.Get(database.TableHeightToHash, uint64Key(height))
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: read main chain hash: %w", err)
+	}
+	if len(hashBytes) == 0 {
+		return structure.Hash{}, false, nil
+	}
+	hash, err := structure.NewHash(hashBytes)
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: decode main chain hash: %w", err)
+	}
+	return hash, true, nil
+}
+
+func ancestorHeadFromLocatorEntry(readTx database.ReadTransaction, head Head, entry BlockLocatorEntry) (Head, error) {
+	if entry.Height == 0 {
+		return Head{
+			ChainID:   head.ChainID,
+			Height:    0,
+			Slot:      0,
+			BlockHash: entry.BlockHash,
+			StateRoot: entry.BlockHash,
+			EpochID:   0,
+		}, nil
+	}
+	proposal, err := loadProposalByHash(readTx, entry.BlockHash)
+	if err != nil {
+		return Head{}, err
+	}
+	return Head{
+		ChainID:   proposal.Header.ChainID,
+		Height:    proposal.Header.Height,
+		Slot:      proposal.Header.Slot,
+		BlockHash: entry.BlockHash,
+		StateRoot: proposal.Header.StateRoot,
+		EpochID:   proposal.Header.EpochID,
+	}, nil
+}
+
+func branchResolvedFromSnapshot(readTx database.ReadTransaction, head Head, blockHash structure.Hash) (bool, error) {
+	cursorHash := blockHash
+	for {
+		if cursorHash == head.BlockHash || cursorHash == head.FinalizedHash {
+			return true, nil
+		}
+		proposalBytes, err := readTx.Get(database.TableBlock, cursorHash[:])
+		if err != nil {
+			return false, fmt.Errorf("blockchain: read branch block: %w", err)
+		}
+		if len(proposalBytes) == 0 {
+			return false, nil
+		}
+		proposal, err := unmarshalProposal(proposalBytes)
+		if err != nil {
+			return false, err
+		}
+		mainChainHash, found, err := readMainChainHashAtHeight(readTx, proposal.Header.Height)
+		if err != nil {
+			return false, err
+		}
+		if found && mainChainHash == cursorHash {
+			return true, nil
+		}
+		if proposal.Header.Height == 0 || proposal.Header.ParentHash.IsZero() {
+			return false, nil
+		}
+		cursorHash = proposal.Header.ParentHash
+	}
 }
 
 func marshalProposal(proposal consensus.BlockProposal) ([]byte, error) {

@@ -11,4 +11,8 @@ const (
 	ProtocolPoSStatusV1 ProtocolID = 47
 	// ProtocolPoSEvidenceV1 定义作恶证据协议 + slashing 需要先传播可验证证据。
 	ProtocolPoSEvidenceV1 ProtocolID = 48
+	// ProtocolPoSBlockLocatorV1 定义主链定位点协议 + 分叉同步前先定位共同祖先。
+	ProtocolPoSBlockLocatorV1 ProtocolID = 49
+	// ProtocolPoSCommonAncestorV1 定义共同祖先查询协议 + proposal 和 block sync 统一分支起点。
+	ProtocolPoSCommonAncestorV1 ProtocolID = 50
 )

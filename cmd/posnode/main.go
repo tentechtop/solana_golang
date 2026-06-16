@@ -189,6 +189,9 @@ func (node *posNode) start(ctx context.Context) error {
 	}
 	node.logger.Info("posnode started",
 		slog.String("node", node.config.NodeName),
+		slog.String("chain_id", node.config.ChainID),
+		slog.String("chain_identity_hash", node.config.ChainIdentityHash),
+		slog.String("genesis_hash", node.config.GenesisHash),
 		slog.String("peer_id", node.peerKeyPair.peerID),
 		slog.String("staker", node.stakerKeyPair.PublicKey.String()),
 		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
@@ -198,6 +201,7 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.Uint64("finality_depth", node.config.FinalityDepth),
 		slog.Bool("p2p_insecure_allowed", node.config.allowInsecureP2P()),
 		slog.Bool("state_recovery_enabled", !node.config.DisableStateRecovery),
+		slog.String("data_root_path", node.config.DataRootPath),
 		slog.String("data_path", node.config.DataPath),
 	)
 	if node.config.AutoRegister {
@@ -265,6 +269,9 @@ func (node *posNode) openLedger() error {
 		return err
 	}
 	node.logger.Info("posnode ledger ready",
+		slog.String("chain_id", node.config.ChainID),
+		slog.String("chain_identity_hash", node.config.ChainIdentityHash),
+		slog.String("genesis_hash", node.config.GenesisHash),
 		slog.Uint64("height", head.Height),
 		slog.Uint64("slot", head.Slot),
 		slog.String("block_hash", head.BlockHash.String()),
@@ -275,57 +282,7 @@ func (node *posNode) openLedger() error {
 }
 
 func (node *posNode) blockchainGenesisConfig() (blockchain.GenesisConfig, error) {
-	genesis := blockchain.GenesisConfig{
-		ChainID:               node.config.ChainID,
-		InitialSupplyLamports: node.config.Genesis.InitialSupplyLamports,
-		FundedAccounts:        make([]blockchain.GenesisAccount, 0, len(node.config.Genesis.FundedAccounts)),
-		InitialValidators:     make([]blockchain.GenesisValidator, 0, len(node.config.Genesis.InitialValidators)),
-	}
-	if node.config.Genesis.TreasuryAddress != "" {
-		treasuryAddress, err := structure.PublicKeyFromBase58(node.config.Genesis.TreasuryAddress)
-		if err != nil {
-			return blockchain.GenesisConfig{}, fmt.Errorf("posnode: decode genesis treasury address: %w", err)
-		}
-		genesis.TreasuryAddress = treasuryAddress
-	}
-	for _, account := range node.config.Genesis.FundedAccounts {
-		address, err := genesisPublicKeyFromAddressOrSeed(account.Address, account.Seed, "funded account")
-		if err != nil {
-			return blockchain.GenesisConfig{}, err
-		}
-		genesis.FundedAccounts = append(genesis.FundedAccounts, blockchain.GenesisAccount{
-			Address:  address,
-			Lamports: account.Lamports,
-		})
-	}
-	for _, validator := range node.config.Genesis.InitialValidators {
-		stakerAddress, err := genesisPublicKeyFromAddressOrSeed(validator.StakerAddress, validator.StakerSeed, "validator staker")
-		if err != nil {
-			return blockchain.GenesisConfig{}, err
-		}
-		validatorAddress, err := genesisPublicKeyFromAddressOrSeed(validator.ValidatorAddress, validator.ValidatorSeed, "validator account")
-		if err != nil {
-			return blockchain.GenesisConfig{}, err
-		}
-		consensusPublicKey, err := genesisPublicKeyFromAddressOrSeed(validator.ConsensusPublicKey, validator.ConsensusSeed, "validator consensus")
-		if err != nil {
-			return blockchain.GenesisConfig{}, err
-		}
-		blsPublicKey, err := genesisBLSPublicKey(validator.BLSPublicKeyBase64, validator.ConsensusSeed)
-		if err != nil {
-			return blockchain.GenesisConfig{}, err
-		}
-		genesis.InitialValidators = append(genesis.InitialValidators, blockchain.GenesisValidator{
-			StakerAddress:      stakerAddress,
-			ValidatorAddress:   validatorAddress,
-			ConsensusPublicKey: consensusPublicKey,
-			BLSPublicKey:       blsPublicKey,
-			P2PPeerID:          validator.PeerID,
-			StakeLamports:      validator.StakeLamports,
-			CommissionBps:      validator.CommissionBps,
-		})
-	}
-	return genesis, nil
+	return buildBlockchainGenesisConfig(node.config)
 }
 
 func genesisPublicKeyFromAddressOrSeed(addressText string, seedText string, fieldName string) (structure.PublicKey, error) {
@@ -376,6 +333,10 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("posnode: build listen address: %w", err)
 	}
+	advertisedAddresses, err := node.advertisedP2PAddresses()
+	if err != nil {
+		return err
+	}
 	allowInsecureP2P := node.config.allowInsecureP2P()
 	hostConfig := p2p.HostConfig{
 		PeerID:        node.peerKeyPair.peerID,
@@ -389,6 +350,7 @@ func (node *posNode) startP2P(ctx context.Context) error {
 		MaxConnections: 128,
 		Logger:         node.logger,
 	}
+	hostConfig.AdvertisedAddresses = advertisedAddresses
 	if !allowInsecureP2P {
 		hostConfig.EnableSecureSession = true
 		hostConfig.SecureIdentity = node.secureSessionIdentity()
@@ -437,12 +399,32 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	return nil
 }
 
+func (node *posNode) advertisedP2PAddresses() ([]utils.MultiAddress, error) {
+	advertisedIP := strings.TrimSpace(node.config.AdvertisedIP)
+	if advertisedIP == "" {
+		return nil, nil
+	}
+	advertisedPort := node.config.AdvertisedPort
+	if advertisedPort == 0 {
+		advertisedPort = node.config.ListenPort
+	}
+	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, advertisedIP, utils.ProtocolTCP, advertisedPort, node.peerKeyPair.peerID)
+	if err != nil {
+		return nil, fmt.Errorf("posnode: build advertised address: %w", err)
+	}
+	return []utils.MultiAddress{address}, nil
+}
+
 func (node *posNode) secureSessionIdentity() p2p.SecureSessionIdentity {
+	networkID := node.config.P2PNetworkID
+	if strings.TrimSpace(networkID) == "" {
+		networkID = node.config.ChainID
+	}
 	return p2p.SecureSessionIdentity{
 		PeerID:          node.peerKeyPair.peerID,
 		PublicKey:       utils.CloneBytes(node.peerKeyPair.publicKey),
 		PrivateKey:      utils.CloneBytes(node.peerKeyPair.privateKey),
-		NetworkID:       node.config.ChainID,
+		NetworkID:       networkID,
 		SoftwareVersion: posNodeSoftwareVersion,
 	}
 }
@@ -472,12 +454,16 @@ func (node *posNode) registerProtocols() error {
 		{ID: p2p.ProtocolPoSBlockByHeightV1, Name: "/pos/sync/block-by-height/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSStateSnapshotV1, Name: "/pos/sync/state-snapshot/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockLocatorV1, Name: "/pos/sync/block-locator/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSCommonAncestorV1, Name: "/pos/sync/common-ancestor/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 	}
 	resultHandlers := []p2p.ResultProtocolHandler{
 		node.handleBlockByHashRequest,
 		node.handleBlockByHeightRequest,
 		node.handleStateSnapshotRequest,
 		node.handleStatusRequest,
+		node.handleBlockLocatorRequest,
+		node.handleCommonAncestorRequest,
 	}
 	for index, spec := range resultSpecs {
 		if err := node.host.RegisterResultHandler(spec, resultHandlers[index]); err != nil {
@@ -830,6 +816,15 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("tx_count", len(proposal.Transactions)),
 	)
+	if err := node.syncProposalBranch(ctx, message.FromPeerID, proposal); err != nil {
+		node.logger.Warn("posnode proposal branch sync failed",
+			slog.String("from_peer", message.FromPeerID),
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Any("error", err),
+		)
+	}
 	firstSeen := node.markProposalSeen(proposalHash)
 	if err := node.voteForProposal(ctx, proposal); err != nil {
 		return err

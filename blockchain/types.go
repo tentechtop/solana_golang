@@ -76,6 +76,12 @@ type ForkDecision struct {
 	Reason         string
 }
 
+// BlockLocatorEntry 描述主链定位点 + 节点间先定位共同祖先再补齐分叉历史。
+type BlockLocatorEntry struct {
+	Height    uint64
+	BlockHash structure.Hash
+}
+
 type storedProposal struct {
 	Header          consensus.BlockHeader         `json:"header"`
 	Transactions    []string                      `json:"transactions"`

@@ -163,6 +163,72 @@ func TestLedgerRejectsCommittedTransactionReplay(t *testing.T) {
 	}
 }
 
+func TestLedgerTransactionByIDPersistsAcrossReload(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	source := testKeyPair(t, "transaction-lookup-source")
+	destination := testKeyPair(t, "transaction-lookup-destination")
+	transaction, err := NewTransferTransaction(source, destination.PublicKey, 1_000_000, ledger.Head().BlockHash)
+	if err != nil {
+		t.Fatalf("NewTransferTransaction() error = %v", err)
+	}
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+
+	proposal, nextState := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "transaction-lookup")
+	proposal.Transactions = []structure.Transaction{transaction}
+	committedHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	committedProposal, blockHash, found, err := ledger.TransactionByID(transactionID)
+	if err != nil {
+		t.Fatalf("TransactionByID() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("TransactionByID(%s) = not found, want found", transactionID)
+	}
+	if blockHash != committedHead.BlockHash {
+		t.Fatalf("block hash = %s, want %s", blockHash.String(), committedHead.BlockHash.String())
+	}
+	if len(committedProposal.Transactions) != 1 {
+		t.Fatalf("transactions len = %d, want 1", len(committedProposal.Transactions))
+	}
+
+	reloaded, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	reloadedProposal, reloadedBlockHash, found, err := reloaded.TransactionByID(transactionID)
+	if err != nil {
+		t.Fatalf("TransactionByID(after reload) error = %v", err)
+	}
+	if !found {
+		t.Fatalf("TransactionByID(after reload) = not found, want found")
+	}
+	if reloadedBlockHash != committedHead.BlockHash {
+		t.Fatalf("reloaded block hash = %s, want %s", reloadedBlockHash.String(), committedHead.BlockHash.String())
+	}
+	if len(reloadedProposal.Transactions) != 1 {
+		t.Fatalf("reloaded transactions len = %d, want 1", len(reloadedProposal.Transactions))
+	}
+}
+
 func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
@@ -203,6 +269,131 @@ func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
 		if !strings.Contains(logLine, expected) {
 			t.Fatalf("log output = %q, want %s", logLine, expected)
 		}
+	}
+}
+
+func TestBlockLocatorAndCommonAncestorPreferHighestMainChainMatch(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "locator-main-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwoMain, stateTwoMain := testProposalFromHead(t, headOne, stateOne, 2, 2, "locator-main-2")
+	headTwoMain, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwoMain, NextState: stateTwoMain})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	blockThreeMain, stateThreeMain := testProposalFromHead(t, headTwoMain, stateTwoMain, 3, 3, "locator-main-3")
+	headThreeMain, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockThreeMain, NextState: stateThreeMain})
+	if err != nil {
+		t.Fatalf("commit block three: %v", err)
+	}
+	blockTwoFork, stateTwoFork := testProposalFromParent(t, headOne, stateOne, 12, 2, "locator-fork-2")
+	forkTwoHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: blockTwoFork, NextState: stateTwoFork})
+	if err != nil {
+		t.Fatalf("save fork block two: %v", err)
+	}
+	forkTwoHead := Head{
+		ChainID:   blockTwoFork.Header.ChainID,
+		Height:    blockTwoFork.Header.Height,
+		Slot:      blockTwoFork.Header.Slot,
+		BlockHash: forkTwoHash,
+		QCHash:    blockTwoFork.Header.PreviousQCHash,
+		StateRoot: blockTwoFork.Header.StateRoot,
+		EpochID:   blockTwoFork.Header.EpochID,
+	}
+	blockThreeFork, stateThreeFork := testProposalFromParent(t, forkTwoHead, stateTwoFork, 13, 3, "locator-fork-3")
+	forkThreeHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: blockThreeFork, NextState: stateThreeFork})
+	if err != nil {
+		t.Fatalf("save fork block three: %v", err)
+	}
+
+	locator, err := ledger.BlockLocator(8)
+	if err != nil {
+		t.Fatalf("BlockLocator() error = %v", err)
+	}
+	if len(locator) == 0 {
+		t.Fatal("BlockLocator() returned no entries")
+	}
+	if locator[0].Height != headThreeMain.Height || locator[0].BlockHash != headThreeMain.BlockHash {
+		t.Fatalf("locator head = %+v, want height %d hash %s", locator[0], headThreeMain.Height, headThreeMain.BlockHash.String())
+	}
+
+	commonAncestor, found, err := ledger.FindCommonAncestor([]BlockLocatorEntry{
+		{Height: 3, BlockHash: forkThreeHash},
+		{Height: 2, BlockHash: forkTwoHash},
+		{Height: 1, BlockHash: headOne.BlockHash},
+	})
+	if err != nil {
+		t.Fatalf("FindCommonAncestor() error = %v", err)
+	}
+	if !found {
+		t.Fatal("FindCommonAncestor() = not found, want found")
+	}
+	if commonAncestor.Height != 1 || commonAncestor.BlockHash != headOne.BlockHash {
+		t.Fatalf("common ancestor = %+v, want height 1 hash %s", commonAncestor, headOne.BlockHash.String())
+	}
+}
+
+func TestBranchResolvedDetectsMissingAncestor(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "branch-main-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	unresolvedProposal, unresolvedState := testProposalFromParent(t, headOne, stateOne, 22, 2, "branch-unresolved")
+	unresolvedProposal.Header.ParentHash = testHash(t, "branch-missing-parent")
+	unresolvedHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: unresolvedProposal, NextState: unresolvedState})
+	if err != nil {
+		t.Fatalf("save unresolved branch block: %v", err)
+	}
+	resolved, err := ledger.BranchResolved(unresolvedHash)
+	if err != nil {
+		t.Fatalf("BranchResolved(unresolved) error = %v", err)
+	}
+	if resolved {
+		t.Fatal("BranchResolved(unresolved) = true, want false")
+	}
+
+	forkProposal, forkState := testProposalFromParent(t, headOne, stateOne, 12, 2, "branch-resolved")
+	forkHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: forkProposal, NextState: forkState})
+	if err != nil {
+		t.Fatalf("save resolved branch block: %v", err)
+	}
+	resolved, err = ledger.BranchResolved(forkHash)
+	if err != nil {
+		t.Fatalf("BranchResolved(resolved) error = %v", err)
+	}
+	if !resolved {
+		t.Fatal("BranchResolved(resolved) = false, want true")
 	}
 }
 
@@ -261,6 +452,74 @@ func TestRewardQCsUseMainChainBestSlot(t *testing.T) {
 	}
 	if rewardQCs[1].Slot != 2 || rewardQCs[1].BlockHash != headTwo.BlockHash {
 		t.Fatalf("slot 2 reward qc = %+v, want main-chain qc", rewardQCs[1])
+	}
+}
+
+func TestSaveQCPromotesOnlyBestMainChainCertificate(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "saveqc-main-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwoMain, stateTwoMain := testProposalFromHead(t, headOne, stateOne, 2, 2, "saveqc-main-2")
+	headTwoMain, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwoMain, NextState: stateTwoMain})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	blockTwoFork, stateTwoFork := testProposalFromHead(t, headOne, stateOne, 2, 2, "saveqc-fork-2")
+	forkTwoHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: blockTwoFork, NextState: stateTwoFork})
+	if err != nil {
+		t.Fatalf("save fork block: %v", err)
+	}
+
+	bestMainQC := testRewardLedgerQC(2, 2, headTwoMain.BlockHash, 6, []string{"validator-a", "validator-b", "validator-c"}, 10)
+	bestMainHash, err := HashQC(bestMainQC)
+	if err != nil {
+		t.Fatalf("hash best main qc: %v", err)
+	}
+	if _, err := ledger.SaveQC(bestMainQC); err != nil {
+		t.Fatalf("save best main qc: %v", err)
+	}
+	if ledger.Head().QCHash != bestMainHash {
+		t.Fatalf("head qc hash = %s, want %s", ledger.Head().QCHash.String(), bestMainHash.String())
+	}
+
+	worseMainQC := testRewardLedgerQC(2, 2, headTwoMain.BlockHash, 4, []string{"validator-a", "validator-b"}, 1)
+	if _, err := ledger.SaveQC(worseMainQC); err != nil {
+		t.Fatalf("save worse main qc: %v", err)
+	}
+	if ledger.Head().QCHash != bestMainHash {
+		t.Fatalf("head qc hash after worse qc = %s, want %s", ledger.Head().QCHash.String(), bestMainHash.String())
+	}
+
+	sideForkQC := testRewardLedgerQC(2, 2, forkTwoHash, 8, []string{"validator-a", "validator-b", "validator-c", "validator-d"}, 20)
+	if _, err := ledger.SaveQC(sideForkQC); err != nil {
+		t.Fatalf("save side fork qc: %v", err)
+	}
+	if ledger.Head().QCHash != bestMainHash {
+		t.Fatalf("head qc hash after side fork = %s, want %s", ledger.Head().QCHash.String(), bestMainHash.String())
+	}
+
+	reloaded, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if reloaded.Head().QCHash != bestMainHash {
+		t.Fatalf("reloaded head qc hash = %s, want %s", reloaded.Head().QCHash.String(), bestMainHash.String())
 	}
 }
 

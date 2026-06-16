@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
+	"solana_golang/p2p"
 	"solana_golang/rpc"
 	"solana_golang/structure"
 	"solana_golang/utils"
@@ -94,6 +96,47 @@ func (node *posNode) GetBlock(ctx context.Context, slot uint64) (rpc.BlockResult
 		ParentSlot:   proposal.Header.Height - 1,
 		Transactions: transactions,
 	}, nil
+}
+
+func (node *posNode) GetTransaction(ctx context.Context, signature string) (rpc.TransactionDetailResult, error) {
+	_ = ctx
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: transaction signature is empty")
+	}
+
+	mempoolResult, found, err := node.lookupMempoolTransaction(signature)
+	if err != nil {
+		return rpc.TransactionDetailResult{}, err
+	}
+	if found {
+		return mempoolResult, nil
+	}
+
+	proposal, blockHash, found, err := node.ledger.TransactionByID(signature)
+	if err != nil {
+		return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: lookup committed transaction: %w", err)
+	}
+	if !found {
+		return rpc.TransactionDetailResult{
+			Signature: signature,
+			Found:     false,
+			Location:  "unknown",
+			Status:    "not_found",
+		}, nil
+	}
+
+	for _, transaction := range proposal.Transactions {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: decode committed transaction id: %w", err)
+		}
+		if transactionID != signature {
+			continue
+		}
+		return node.committedTransactionResult(signature, transaction, proposal, blockHash), nil
+	}
+	return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: committed transaction index mismatch for %s", signature)
 }
 
 func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error) {
@@ -530,6 +573,26 @@ func (node *posNode) GetNodeStatus(ctx context.Context) (any, error) {
 	return node.statusSnapshot(), nil
 }
 
+// GetPeerNetwork 返回 peer 拓扑视图 + 让钱包区分链上验证者、已解析地址和当前连接。
+func (node *posNode) GetPeerNetwork(ctx context.Context) (rpc.PeerNetworkResult, error) {
+	_ = ctx
+	result := rpc.PeerNetworkResult{LocalPeerID: node.peerKeyPair.peerID}
+	if node.host == nil {
+		return result, nil
+	}
+
+	peerSnapshots := node.host.PeerSnapshots()
+	connectionStates := make(map[string]p2p.ConnectionState, len(peerSnapshots))
+	for _, peerSnapshot := range peerSnapshots {
+		connectionState, ok := node.host.ConnectionState(peerSnapshot.ID)
+		if !ok {
+			continue
+		}
+		connectionStates[peerSnapshot.ID] = connectionState
+	}
+	return buildPeerNetworkResult(node.peerKeyPair.peerID, peerSnapshots, connectionStates), nil
+}
+
 func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 	_ = ctx
 	head := node.ledger.Head()
@@ -543,6 +606,47 @@ func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 		FinalizedHeight: head.FinalizedHeight,
 		MempoolSize:     mempoolSize,
 	}, nil
+}
+
+func (node *posNode) lookupMempoolTransaction(signature string) (rpc.TransactionDetailResult, bool, error) {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+
+	for _, transaction := range node.mempool {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return rpc.TransactionDetailResult{}, false, fmt.Errorf("posnode: decode mempool transaction id: %w", err)
+		}
+		if transactionID != signature {
+			continue
+		}
+		return buildTransactionDetailResult(signature, transaction.Clone(), "mempool", "pending", 0, 0, structure.Hash{}, false), true, nil
+	}
+	return rpc.TransactionDetailResult{}, false, nil
+}
+
+func (node *posNode) committedTransactionResult(
+	signature string,
+	transaction structure.Transaction,
+	proposal consensus.BlockProposal,
+	blockHash structure.Hash,
+) rpc.TransactionDetailResult {
+	head := node.ledger.Head()
+	finalized := proposal.Header.Height <= head.FinalizedHeight
+	status := "confirmed"
+	if finalized {
+		status = "finalized"
+	}
+	return buildTransactionDetailResult(
+		signature,
+		transaction,
+		"block",
+		status,
+		proposal.Header.Height,
+		proposal.Header.Slot,
+		blockHash,
+		finalized,
+	)
 }
 
 func (node *posNode) submitTransaction(ctx context.Context, transaction structure.Transaction, action string, attrs ...slog.Attr) (transactionID string, err error) {
@@ -704,6 +808,106 @@ func privacyNullifierString(note structure.PrivacyNoteRecord) string {
 	return note.SpendNullifier.String()
 }
 
+func buildPeerNetworkResult(
+	localPeerID string,
+	peerSnapshots []p2p.PeerSnapshot,
+	connectionStates map[string]p2p.ConnectionState,
+) rpc.PeerNetworkResult {
+	result := rpc.PeerNetworkResult{
+		LocalPeerID: localPeerID,
+		Peers:       make([]rpc.PeerNetworkPeerResult, 0, len(peerSnapshots)),
+	}
+	for _, peerSnapshot := range peerSnapshots {
+		connectionState, connected := connectionStates[peerSnapshot.ID]
+		result.Peers = append(result.Peers, rpc.PeerNetworkPeerResult{
+			PeerID:                    peerSnapshot.ID,
+			Status:                    string(peerSnapshot.Status),
+			Role:                      string(peerSnapshot.Role),
+			Validator:                 peerSnapshot.Validator,
+			Connected:                 connected,
+			BestAddress:               bestPeerAddress(peerSnapshot, connectionState, connected),
+			AdvertisedAddresses:       stringifyMultiAddresses(peerSnapshot.AdvertisedAddresses),
+			VerifiedAddresses:         stringifyMultiAddresses(peerSnapshot.VerifiedAddresses),
+			PreferredProtocols:        stringifyProtocols(peerSnapshot.PreferredProtocols),
+			LatestSlot:                peerSnapshot.LatestSlot,
+			BlockHeight:               peerSnapshot.BlockHeight,
+			FailureCount:              peerSnapshot.FailureCount,
+			LastError:                 peerSnapshot.LastError,
+			LastSeenUnixMilli:         peerSnapshot.LastSeenUnixMilli,
+			LastConnectedUnixMilli:    peerSnapshot.LastConnectedUnixMilli,
+			LastDisconnectedUnixMilli: peerSnapshot.LastDisconnectedUnixMilli,
+			Connection:                buildPeerConnectionInfo(connectionState, connected),
+		})
+	}
+	sort.Slice(result.Peers, func(leftIndex int, rightIndex int) bool {
+		leftPeer := result.Peers[leftIndex]
+		rightPeer := result.Peers[rightIndex]
+		if leftPeer.Connected != rightPeer.Connected {
+			return leftPeer.Connected
+		}
+		if leftPeer.Validator != rightPeer.Validator {
+			return leftPeer.Validator
+		}
+		if leftPeer.LastConnectedUnixMilli != rightPeer.LastConnectedUnixMilli {
+			return leftPeer.LastConnectedUnixMilli > rightPeer.LastConnectedUnixMilli
+		}
+		return leftPeer.PeerID < rightPeer.PeerID
+	})
+	return result
+}
+
+func buildPeerConnectionInfo(connectionState p2p.ConnectionState, connected bool) *rpc.PeerConnectionInfo {
+	if !connected {
+		return nil
+	}
+	return &rpc.PeerConnectionInfo{
+		Protocol:               string(connectionState.Protocol),
+		RemoteAddress:          connectionState.RemoteAddress,
+		ObservedRemoteAddress:  connectionState.ObservedRemoteAddress,
+		Encrypted:              connectionState.Encrypted,
+		ConnectedAtUnixMilli:   connectionState.ConnectedAtUnixMilli,
+		LastReadUnixMilli:      connectionState.LastReadUnixMilli,
+		LastWriteUnixMilli:     connectionState.LastWriteUnixMilli,
+		LastHeartbeatUnixMilli: connectionState.LastHeartbeatUnixMilli,
+		FailureCount:           connectionState.FailureCount,
+	}
+}
+
+func bestPeerAddress(peerSnapshot p2p.PeerSnapshot, connectionState p2p.ConnectionState, connected bool) string {
+	if len(peerSnapshot.VerifiedAddresses) > 0 {
+		return peerSnapshot.VerifiedAddresses[0].String()
+	}
+	if len(peerSnapshot.AdvertisedAddresses) > 0 {
+		return peerSnapshot.AdvertisedAddresses[0].String()
+	}
+	if connected {
+		return connectionState.RemoteAddress
+	}
+	return ""
+}
+
+func stringifyMultiAddresses(addresses []utils.MultiAddress) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		values = append(values, address.String())
+	}
+	return values
+}
+
+func stringifyProtocols(protocols []utils.MultiAddressProtocol) []string {
+	if len(protocols) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(protocols))
+	for _, protocol := range protocols {
+		values = append(values, string(protocol))
+	}
+	return values
+}
+
 func privacyNoteAmount(state structure.PrivacyState, commitment structure.Hash) (uint64, error) {
 	for _, note := range state.Notes {
 		if note.Commitment == commitment && !note.Spent {
@@ -815,4 +1019,67 @@ func validatorStatusText(status consensus.ValidatorStatus) string {
 	default:
 		return "inactive"
 	}
+}
+
+func buildTransactionDetailResult(
+	signature string,
+	transaction structure.Transaction,
+	location string,
+	status string,
+	blockHeight uint64,
+	slot uint64,
+	blockHash structure.Hash,
+	finalized bool,
+) rpc.TransactionDetailResult {
+	result := rpc.TransactionDetailResult{
+		Signature:           signature,
+		Found:               true,
+		Location:            location,
+		Status:              status,
+		FeeLamports:         transaction.Fee,
+		SubmitTimeUnixMilli: transaction.SubmitTime,
+		InstructionCount:    len(transaction.Instructions),
+		BlockHeight:         blockHeight,
+		Slot:                slot,
+		Finalized:           finalized,
+	}
+
+	sender, err := transaction.Sender()
+	if err == nil {
+		result.Sender = sender.String()
+	}
+	if !transaction.RecentBlockhash.IsZero() {
+		result.RecentBlockhash = transaction.RecentBlockhash.String()
+	}
+	if !blockHash.IsZero() {
+		result.Blockhash = blockHash.String()
+	}
+	result.AccountAddresses = transactionAccountAddresses(transaction.Accounts)
+	result.WritableAddresses = transactionWritableAddresses(transaction.Accounts)
+	return result
+}
+
+func transactionAccountAddresses(accounts []structure.AccountMeta) []string {
+	if len(accounts) == 0 {
+		return nil
+	}
+	addresses := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		addresses = append(addresses, account.PublicKey.String())
+	}
+	return addresses
+}
+
+func transactionWritableAddresses(accounts []structure.AccountMeta) []string {
+	writableAddresses := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if !account.IsWritable {
+			continue
+		}
+		writableAddresses = append(writableAddresses, account.PublicKey.String())
+	}
+	if len(writableAddresses) == 0 {
+		return nil
+	}
+	return writableAddresses
 }

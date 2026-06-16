@@ -116,3 +116,63 @@ func TestFaultInjectionMissingBlockHeightReturnsNotFound(t *testing.T) {
 		t.Fatalf("response envelope = %+v, want not found without error", envelope)
 	}
 }
+
+func TestFaultInjectionBlockLocatorRequestReturnsCurrentHead(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	head := node.ledger.Head()
+	requestPayload, err := json.Marshal(blockLocatorRequestEnvelope{MaxEntries: 8})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	request, err := p2p.NewRequestMessage(mustRawKeyPair("fault-locator-requester").peerID, p2p.ProtocolPoSBlockLocatorV1, requestPayload)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+
+	response, err := node.handleBlockLocatorRequest(context.Background(), request)
+	if err != nil {
+		t.Fatalf("handleBlockLocatorRequest() error = %v", err)
+	}
+	envelope := blockLocatorResponseEnvelope{}
+	if err := json.Unmarshal(response.Payload, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error != "" {
+		t.Fatalf("response error = %s", envelope.Error)
+	}
+	if len(envelope.Entries) == 0 {
+		t.Fatal("locator entries = empty, want current head")
+	}
+	if envelope.Entries[0].Height != head.Height || envelope.Entries[0].Hash != head.BlockHash.String() {
+		t.Fatalf("locator head = %+v, want height %d hash %s", envelope.Entries[0], head.Height, head.BlockHash.String())
+	}
+}
+
+func TestFaultInjectionCommonAncestorRequestMatchesCurrentHead(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	head := node.ledger.Head()
+	locator, err := node.ledger.BlockLocator(defaultBlockLocatorEntries)
+	if err != nil {
+		t.Fatalf("BlockLocator() error = %v", err)
+	}
+	requestPayload, err := json.Marshal(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	request, err := p2p.NewRequestMessage(mustRawKeyPair("fault-ancestor-requester").peerID, p2p.ProtocolPoSCommonAncestorV1, requestPayload)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+
+	response, err := node.handleCommonAncestorRequest(context.Background(), request)
+	if err != nil {
+		t.Fatalf("handleCommonAncestorRequest() error = %v", err)
+	}
+	envelope := commonAncestorResponseEnvelope{}
+	if err := json.Unmarshal(response.Payload, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error != "" || !envelope.Found || envelope.Ancestor.Height != head.Height || envelope.Ancestor.Hash != head.BlockHash.String() {
+		t.Fatalf("common ancestor response = %+v, want current head height %d hash %s", envelope, head.Height, head.BlockHash.String())
+	}
+}

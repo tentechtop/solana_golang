@@ -26,8 +26,11 @@ type nodeConfig struct {
 	Production                    bool                `json:"production"`
 	NodeName                      string              `json:"node_name"`
 	DataPath                      string              `json:"data_path"`
+	DataRootPath                  string              `json:"-"`
 	ListenIP                      string              `json:"listen_ip"`
 	ListenPort                    int                 `json:"listen_port"`
+	AdvertisedIP                  string              `json:"advertised_ip,omitempty"`
+	AdvertisedPort                int                 `json:"advertised_port,omitempty"`
 	RPCEnabled                    bool                `json:"rpc_enabled"`
 	RPCListenIP                   string              `json:"rpc_listen_ip"`
 	RPCPort                       int                 `json:"rpc_port"`
@@ -58,6 +61,9 @@ type nodeConfig struct {
 	TreasuryKeyPath               string              `json:"treasury_key_path,omitempty"`
 	AllowHardcodedTreasury        *bool               `json:"allow_hardcoded_treasury,omitempty"`
 	AutoTransfer                  *autoTransferConfig `json:"auto_transfer,omitempty"`
+	GenesisHash                   string              `json:"-"`
+	ChainIdentityHash             string              `json:"-"`
+	P2PNetworkID                  string              `json:"-"`
 }
 
 type peerConfig struct {
@@ -125,6 +131,12 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	}
 	if strings.TrimSpace(config.ListenIP) == "" {
 		return nodeConfig{}, fmt.Errorf("posnode: listen ip is empty")
+	}
+	if strings.TrimSpace(config.AdvertisedIP) != "" && config.AdvertisedPort == 0 {
+		config.AdvertisedPort = config.ListenPort
+	}
+	if config.AdvertisedPort < 0 || config.AdvertisedPort > 65535 {
+		return nodeConfig{}, fmt.Errorf("posnode: invalid advertised port")
 	}
 	if config.RPCPort != 0 || config.RPCEnabled {
 		config.RPCEnabled = true
@@ -204,7 +216,7 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if !config.hasNodeKeyMaterial() {
 		return nodeConfig{}, fmt.Errorf("posnode: node key material is required")
 	}
-	return config, nil
+	return enrichNodeChainIdentity(config)
 }
 
 func (config nodeConfig) slotDuration() time.Duration {

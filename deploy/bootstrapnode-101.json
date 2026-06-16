@@ -13,37 +13,9 @@
   "dial_interval_millis": 2000,
   "static_peers": [
     {
-      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
-      "ip": "101.35.87.31",
-      "port": 5101,
-      "role": "validator",
-      "capabilities": ["validator", "relay", "state_sync"]
-    },
-    {
-      "peer_id": "Bfc7jv5vEuMBu3uwXbn6zyPSD7D2mWPZ65eK8owskGvZ",
-      "ip": "192.168.181.136",
-      "port": 5101,
-      "role": "validator",
-      "capabilities": ["validator", "relay", "state_sync"]
-    },
-    {
-      "peer_id": "BQNzv1JJmbFkZdFrE6ZYpmFtgWs45j2Caqo6E7232ecQ",
-      "ip": "192.168.181.137",
-      "port": 5101,
-      "role": "validator",
-      "capabilities": ["validator", "relay", "state_sync"]
-    },
-    {
-      "peer_id": "4V6gbmpjwkTwjxQZ9PQ5WLFHEy1Vr8JWHFut4EPpvECn",
-      "ip": "192.168.181.138",
-      "port": 5101,
-      "role": "validator",
-      "capabilities": ["validator", "relay", "state_sync"]
-    },
-    {
-      "peer_id": "A1ja592wjq8bBpUH21ceVZVY5cSR9Yd1Brxv7MqwLams",
-      "ip": "192.168.181.139",
-      "port": 5101,
+      "peer_id": "GVbQfQwJK1M1q1wVV6LnzLq9Nwvu3XSBvsJLBJAC935y",
+      "ip": "192.168.121.225",
+      "port": 5110,
       "role": "validator",
       "capabilities": ["validator", "relay", "state_sync"]
     },

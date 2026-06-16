@@ -85,6 +85,7 @@ func main() {
 	}
 	commands := []string{
 		"systemctl daemon-reload",
+		"if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then firewall-cmd --permanent --add-port=8899/tcp && firewall-cmd --permanent --add-port=5101/tcp && firewall-cmd --reload; else echo 'firewalld not active; skip port open'; fi",
 		"systemctl enable " + shellQuote(serviceName),
 		"systemctl restart " + shellQuote(serviceName),
 		"sleep 2; systemctl --no-pager --full status " + shellQuote(serviceName) + " | head -n 40",

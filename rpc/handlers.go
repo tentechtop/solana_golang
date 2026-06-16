@@ -11,6 +11,7 @@ const (
 	MethodGetAccountType        = "getAccountType"
 	MethodSendTransaction       = "sendTransaction"
 	MethodGetBlock              = "getBlock"
+	MethodGetTransaction        = "getTransaction"
 	MethodTreasuryTransfer      = "treasuryTransfer"
 	MethodTransfer              = "transfer"
 	MethodGetPrivacyState       = "getPrivacyState"
@@ -26,6 +27,7 @@ const (
 	MethodJailValidator         = "jailValidator"
 	MethodGetValidatorSet       = "getValidatorSet"
 	MethodGetNodeStatus         = "getNodeStatus"
+	MethodGetPeerNetwork        = "getPeerNetwork"
 	MethodGetConsensusStatus    = "getConsensusStatus"
 	MethodGetMetrics            = "getMetrics"
 	MethodGetHealth             = "getHealth"
@@ -48,6 +50,10 @@ type TransferBackend interface {
 
 type AccountTypeBackend interface {
 	GetAccountType(ctx context.Context, address string) (AccountTypeResult, error)
+}
+
+type TransactionLookupBackend interface {
+	GetTransaction(ctx context.Context, signature string) (TransactionDetailResult, error)
 }
 
 type PrivacyBackend interface {
@@ -79,6 +85,11 @@ type NodeStatusBackend interface {
 	GetHealth(ctx context.Context) (HealthResult, error)
 }
 
+// PeerNetworkBackend 定义 peer 拓扑后端 + 让钱包区分已发现地址和当前连接。
+type PeerNetworkBackend interface {
+	GetPeerNetwork(ctx context.Context) (PeerNetworkResult, error)
+}
+
 type ConsensusStatusBackend interface {
 	GetConsensusStatus(ctx context.Context) (any, error)
 }
@@ -103,6 +114,24 @@ type BlockResult struct {
 	Blockhash    string `json:"blockhash,omitempty"`
 	ParentSlot   uint64 `json:"parentSlot,omitempty"`
 	Transactions []any  `json:"transactions,omitempty"`
+}
+
+type TransactionDetailResult struct {
+	Signature           string   `json:"signature"`
+	Found               bool     `json:"found"`
+	Location            string   `json:"location"`
+	Status              string   `json:"status"`
+	Sender              string   `json:"sender,omitempty"`
+	RecentBlockhash     string   `json:"recent_blockhash,omitempty"`
+	FeeLamports         uint64   `json:"fee_lamports"`
+	SubmitTimeUnixMilli int64    `json:"submit_time_unix_milli"`
+	AccountAddresses    []string `json:"account_addresses,omitempty"`
+	WritableAddresses   []string `json:"writable_addresses,omitempty"`
+	InstructionCount    int      `json:"instruction_count"`
+	BlockHeight         uint64   `json:"block_height,omitempty"`
+	Slot                uint64   `json:"slot,omitempty"`
+	Blockhash           string   `json:"blockhash,omitempty"`
+	Finalized           bool     `json:"finalized"`
 }
 
 type TransactionSubmitResult struct {
@@ -155,6 +184,46 @@ type ValidatorSetResult struct {
 	Validators []ValidatorInfo `json:"validators"`
 }
 
+// PeerConnectionInfo 保存连接细节 + 让前端展示当前连通性和最近活跃时间。
+type PeerConnectionInfo struct {
+	Protocol               string `json:"protocol,omitempty"`
+	RemoteAddress          string `json:"remote_address,omitempty"`
+	ObservedRemoteAddress  string `json:"observed_remote_address,omitempty"`
+	Encrypted              bool   `json:"encrypted"`
+	ConnectedAtUnixMilli   int64  `json:"connected_at_unix_milli"`
+	LastReadUnixMilli      int64  `json:"last_read_unix_milli"`
+	LastWriteUnixMilli     int64  `json:"last_write_unix_milli"`
+	LastHeartbeatUnixMilli int64  `json:"last_heartbeat_unix_milli"`
+	FailureCount           uint32 `json:"failure_count"`
+}
+
+// PeerNetworkPeerResult 保存单个 peer 状态 + 让前端展示地址解析和连接结果。
+type PeerNetworkPeerResult struct {
+	PeerID                    string              `json:"peer_id"`
+	Status                    string              `json:"status"`
+	Role                      string              `json:"role"`
+	Validator                 bool                `json:"validator"`
+	Connected                 bool                `json:"connected"`
+	BestAddress               string              `json:"best_address,omitempty"`
+	AdvertisedAddresses       []string            `json:"advertised_addresses,omitempty"`
+	VerifiedAddresses         []string            `json:"verified_addresses,omitempty"`
+	PreferredProtocols        []string            `json:"preferred_protocols,omitempty"`
+	LatestSlot                uint64              `json:"latest_slot"`
+	BlockHeight               uint64              `json:"block_height"`
+	FailureCount              uint32              `json:"failure_count"`
+	LastError                 string              `json:"last_error,omitempty"`
+	LastSeenUnixMilli         int64               `json:"last_seen_unix_milli"`
+	LastConnectedUnixMilli    int64               `json:"last_connected_unix_milli"`
+	LastDisconnectedUnixMilli int64               `json:"last_disconnected_unix_milli"`
+	Connection                *PeerConnectionInfo `json:"connection,omitempty"`
+}
+
+// PeerNetworkResult 保存 peer 拓扑结果 + 让前端按本地节点视角分析网络状态。
+type PeerNetworkResult struct {
+	LocalPeerID string                  `json:"local_peer_id"`
+	Peers       []PeerNetworkPeerResult `json:"peers"`
+}
+
 type HealthResult struct {
 	OK              bool   `json:"ok"`
 	HeadHeight      uint64 `json:"head_height"`
@@ -168,6 +237,7 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetAccountType, getAccountTypeHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
+	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
 	_ = router.Register(MethodTransfer, transferHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
@@ -183,6 +253,7 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodJailValidator, jailValidatorHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
 	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetPeerNetwork, getPeerNetworkHandler(backend))
 	_ = router.Register(MethodGetConsensusStatus, getConsensusStatusHandler(backend))
 	_ = router.Register(MethodGetMetrics, getMetricsHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
@@ -257,6 +328,31 @@ func getBlockHandler(backend LedgerBackend) HandlerFunc {
 		result, err := backend.GetBlock(ctx, requestParams.Slot)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get block: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getTransactionHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		transactionBackend, ok := backend.(TransactionLookupBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		values, rpcError := parseParamsArray(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(values) < 1 {
+			return nil, invalidParamsError("getTransaction requires signature")
+		}
+		signature, rpcError := parseStringParam(values[0], "getTransaction signature")
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := transactionBackend.GetTransaction(ctx, signature)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get transaction: %v", err))
 		}
 		return result, nil
 	}
@@ -628,6 +724,23 @@ func getNodeStatusHandler(backend LedgerBackend) HandlerFunc {
 		result, err := statusBackend.GetNodeStatus(ctx)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get node status: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getPeerNetworkHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		peerNetworkBackend, ok := backend.(PeerNetworkBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := peerNetworkBackend.GetPeerNetwork(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get peer network: %v", err))
 		}
 		return result, nil
 	}

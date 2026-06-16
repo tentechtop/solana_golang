@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"solana_golang/blockchain"
@@ -15,6 +16,7 @@ import (
 
 const maxOrphanProposals = 1024
 const maxSyncBlocksPerRound = 32
+const defaultBlockLocatorEntries = 32
 const productionPeerStatusTimeout = 200 * time.Millisecond
 
 func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
@@ -77,14 +79,31 @@ func (node *posNode) handleStateSnapshotRequest(ctx context.Context, message p2p
 		return p2p.Message{}, fmt.Errorf("posnode: decode state snapshot request: %w", err)
 	}
 	state, found, err := node.ledger.StateSnapshotAtBlockHash(blockHash)
-	response := stateSnapshotResponseEnvelope{Found: found, BlockHash: blockHash.String()}
+	response := stateSnapshotResponseEnvelope{
+		Found:             found,
+		ChainID:           node.config.ChainID,
+		ChainIdentityHash: node.config.ChainIdentityHash,
+		GenesisHash:       node.config.GenesisHash,
+		BlockHash:         blockHash.String(),
+	}
 	if err != nil {
 		response.Error = err.Error()
 	}
 	if found && err == nil {
 		response, err = encodeStateSnapshotResponse(blockHash, state)
 		if err != nil {
-			response = stateSnapshotResponseEnvelope{Found: false, BlockHash: blockHash.String(), Error: err.Error()}
+			response = stateSnapshotResponseEnvelope{
+				Found:             false,
+				ChainID:           node.config.ChainID,
+				ChainIdentityHash: node.config.ChainIdentityHash,
+				GenesisHash:       node.config.GenesisHash,
+				BlockHash:         blockHash.String(),
+				Error:             err.Error(),
+			}
+		} else {
+			response.ChainID = node.config.ChainID
+			response.ChainIdentityHash = node.config.ChainIdentityHash
+			response.GenesisHash = node.config.GenesisHash
 		}
 	}
 	return node.newProtocolResponse(message, p2p.ProtocolPoSStateSnapshotV1, response)
@@ -93,6 +112,50 @@ func (node *posNode) handleStateSnapshotRequest(ctx context.Context, message p2p
 func (node *posNode) handleStatusRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
 	return node.newProtocolResponse(message, p2p.ProtocolPoSStatusV1, node.statusSnapshot())
+}
+
+func (node *posNode) handleBlockLocatorRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
+	_ = ctx
+	request := blockLocatorRequestEnvelope{}
+	if len(message.Payload) > 0 {
+		if err := jsonUnmarshal(message.Payload, &request); err != nil {
+			return p2p.Message{}, err
+		}
+	}
+	entries, err := node.ledger.BlockLocator(request.MaxEntries)
+	response := blockLocatorResponseEnvelope{}
+	if err != nil {
+		response.Error = err.Error()
+	} else {
+		response.Entries = encodeBlockLocatorEntries(entries)
+	}
+	return node.newProtocolResponse(message, p2p.ProtocolPoSBlockLocatorV1, response)
+}
+
+func (node *posNode) handleCommonAncestorRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
+	_ = ctx
+	request := commonAncestorRequestEnvelope{}
+	if err := jsonUnmarshal(message.Payload, &request); err != nil {
+		return p2p.Message{}, err
+	}
+	locator, err := decodeBlockLocatorEntries(request.Locator)
+	response := commonAncestorResponseEnvelope{}
+	if err != nil {
+		response.Error = err.Error()
+		return node.newProtocolResponse(message, p2p.ProtocolPoSCommonAncestorV1, response)
+	}
+	ancestor, found, err := node.ledger.FindCommonAncestor(locator)
+	response.Found = found
+	if err != nil {
+		response.Error = err.Error()
+	}
+	if found {
+		response.Ancestor = blockLocatorEntryJSON{
+			Height: ancestor.Height,
+			Hash:   ancestor.BlockHash.String(),
+		}
+	}
+	return node.newProtocolResponse(message, p2p.ProtocolPoSCommonAncestorV1, response)
 }
 
 func (node *posNode) newProtocolResponse(request p2p.Message, protocolID p2p.ProtocolID, value any) (p2p.Message, error) {
@@ -206,6 +269,10 @@ func (node *posNode) requestStateSnapshot(ctx context.Context, peerID string, bl
 	if !envelope.Found {
 		return consensus.ChainState{}, false, nil
 	}
+	if err := validatePeerChainIdentity(node.config, peerID, envelope.ChainID, envelope.ChainIdentityHash, envelope.GenesisHash); err != nil {
+		node.metrics.syncFailures.Add(1)
+		return consensus.ChainState{}, false, err
+	}
 	responseHash, state, err := decodeStateSnapshotResponse(envelope)
 	if err != nil {
 		node.metrics.syncFailures.Add(1)
@@ -233,7 +300,91 @@ func (node *posNode) requestStatus(ctx context.Context, peerID string) (statusRe
 		node.metrics.syncFailures.Add(1)
 		return statusResponseEnvelope{}, err
 	}
+	if err := validatePeerStatusChainIdentity(node.config, peerID, envelope); err != nil {
+		node.metrics.syncFailures.Add(1)
+		return statusResponseEnvelope{}, err
+	}
 	return envelope, nil
+}
+
+func (node *posNode) requestBlockLocator(ctx context.Context, peerID string, maxEntries int) ([]blockchain.BlockLocatorEntry, error) {
+	requestPayload, err := json.Marshal(blockLocatorRequestEnvelope{MaxEntries: maxEntries})
+	if err != nil {
+		return nil, err
+	}
+	request, err := p2p.NewRequestMessage(node.peerKeyPair.peerID, p2p.ProtocolPoSBlockLocatorV1, requestPayload)
+	if err != nil {
+		return nil, err
+	}
+	node.metrics.syncRequests.Add(1)
+	response, err := node.host.Request(ctx, peerID, request)
+	if err != nil {
+		node.metrics.syncFailures.Add(1)
+		return nil, err
+	}
+	envelope := blockLocatorResponseEnvelope{}
+	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+		node.metrics.syncFailures.Add(1)
+		return nil, err
+	}
+	if envelope.Error != "" {
+		return nil, fmt.Errorf("posnode: peer locator response: %s", envelope.Error)
+	}
+	entries, err := decodeBlockLocatorEntries(envelope.Entries)
+	if err != nil {
+		node.metrics.syncFailures.Add(1)
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (node *posNode) requestCommonAncestor(
+	ctx context.Context,
+	peerID string,
+	locator []blockchain.BlockLocatorEntry,
+) (blockchain.Head, bool, error) {
+	requestPayload, err := json.Marshal(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
+	if err != nil {
+		return blockchain.Head{}, false, err
+	}
+	request, err := p2p.NewRequestMessage(node.peerKeyPair.peerID, p2p.ProtocolPoSCommonAncestorV1, requestPayload)
+	if err != nil {
+		return blockchain.Head{}, false, err
+	}
+	node.metrics.syncRequests.Add(1)
+	response, err := node.host.Request(ctx, peerID, request)
+	if err != nil {
+		node.metrics.syncFailures.Add(1)
+		return blockchain.Head{}, false, err
+	}
+	envelope := commonAncestorResponseEnvelope{}
+	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+		node.metrics.syncFailures.Add(1)
+		return blockchain.Head{}, false, err
+	}
+	if envelope.Error != "" {
+		return blockchain.Head{}, false, fmt.Errorf("posnode: peer common ancestor response: %s", envelope.Error)
+	}
+	if !envelope.Found {
+		return blockchain.Head{}, false, nil
+	}
+	blockHash, err := structure.HashFromBase58(envelope.Ancestor.Hash)
+	if err != nil {
+		node.metrics.syncFailures.Add(1)
+		return blockchain.Head{}, false, err
+	}
+	localHash, found, err := node.ledger.MainChainHashAtHeight(envelope.Ancestor.Height)
+	if err != nil {
+		return blockchain.Head{}, false, err
+	}
+	if !found || localHash != blockHash {
+		return blockchain.Head{}, false, fmt.Errorf("posnode: peer %s returned non-local ancestor at height %d", peerID, envelope.Ancestor.Height)
+	}
+	return blockchain.Head{
+		ChainID:   node.config.ChainID,
+		Height:    envelope.Ancestor.Height,
+		BlockHash: blockHash,
+	}, true, nil
 }
 
 func (node *posNode) blockSyncLoop(ctx context.Context) {
@@ -257,7 +408,7 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 			node.logger.Debug("posnode status sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
 			continue
 		}
-		if status.HeadHeight <= localHead.Height {
+		if !peerNeedsBlockSync(localHead, status) {
 			continue
 		}
 		if status.FinalizedHeight > localHead.Height+maxSyncBlocksPerRound {
@@ -271,15 +422,216 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 				localHead = node.ledger.Head()
 			}
 		}
-		if status.HeadHeight <= localHead.Height {
+		localHead = node.ledger.Head()
+		if !peerNeedsBlockSync(localHead, status) {
 			continue
 		}
-		if err := node.syncBlocksFromPeer(ctx, peerID, localHead.Height+1, status.HeadHeight); err != nil {
+		startHeight, err := node.determineSyncStartHeight(ctx, peerID, localHead, status)
+		if err != nil {
+			node.metrics.syncFailures.Add(1)
+			node.logger.Warn("posnode sync start height failed", slog.String("peer_id", peerID), slog.Any("error", err))
+			continue
+		}
+		if startHeight == 0 || startHeight > status.HeadHeight {
+			continue
+		}
+		if err := node.syncBlocksFromPeer(ctx, peerID, startHeight, status.HeadHeight); err != nil {
 			node.metrics.syncFailures.Add(1)
 			node.logger.Warn("posnode block sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
 		}
 		localHead = node.ledger.Head()
 	}
+}
+
+func peerNeedsBlockSync(localHead blockchain.Head, status statusResponseEnvelope) bool {
+	if status.FinalizedHeight > localHead.FinalizedHeight {
+		return true
+	}
+	if status.HeadHeight > localHead.Height {
+		return true
+	}
+	return status.HeadHeight == localHead.Height && status.HeadHash != "" && status.HeadHash != localHead.BlockHash.String()
+}
+
+func validatePeerStatusChainIdentity(config nodeConfig, peerID string, status statusResponseEnvelope) error {
+	return validatePeerChainIdentity(config, peerID, status.ChainID, status.ChainIdentityHash, status.GenesisHash)
+}
+
+func validatePeerChainIdentity(
+	config nodeConfig,
+	peerID string,
+	peerChainID string,
+	peerChainIdentityHash string,
+	peerGenesisHash string,
+) error {
+	if strings.TrimSpace(peerChainIdentityHash) == "" {
+		return fmt.Errorf("posnode: peer %s missing chain identity hash", peerID)
+	}
+	if peerChainIdentityHash != config.ChainIdentityHash {
+		return fmt.Errorf(
+			"posnode: peer %s chain identity mismatch local=%s remote=%s",
+			peerID,
+			config.ChainIdentityHash,
+			peerChainIdentityHash,
+		)
+	}
+	if strings.TrimSpace(peerChainID) != "" && peerChainID != config.ChainID {
+		return fmt.Errorf("posnode: peer %s chain id mismatch local=%s remote=%s", peerID, config.ChainID, peerChainID)
+	}
+	if strings.TrimSpace(peerGenesisHash) != "" && peerGenesisHash != config.GenesisHash {
+		return fmt.Errorf(
+			"posnode: peer %s genesis hash mismatch local=%s remote=%s",
+			peerID,
+			config.GenesisHash,
+			peerGenesisHash,
+		)
+	}
+	return nil
+}
+
+func calculateSyncStartHeightFromAncestor(ancestorHeight uint64) uint64 {
+	if ancestorHeight == 0 {
+		return 1
+	}
+	return ancestorHeight + 1
+}
+
+func (node *posNode) determineSyncStartHeight(
+	ctx context.Context,
+	peerID string,
+	localHead blockchain.Head,
+	status statusResponseEnvelope,
+) (uint64, error) {
+	if !peerNeedsBlockSync(localHead, status) {
+		return 0, nil
+	}
+	locator, err := node.ledger.BlockLocator(defaultBlockLocatorEntries)
+	if err != nil {
+		return 0, err
+	}
+	ancestor, found, err := node.requestCommonAncestor(ctx, peerID, locator)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("posnode: peer %s returned no common ancestor", peerID)
+	}
+	if ancestor.Height < localHead.FinalizedHeight {
+		return 0, fmt.Errorf("posnode: peer %s common ancestor %d below finalized height %d", peerID, ancestor.Height, localHead.FinalizedHeight)
+	}
+	startHeight := calculateSyncStartHeightFromAncestor(ancestor.Height)
+	if ancestor.Height == localHead.Height && ancestor.BlockHash == localHead.BlockHash {
+		return startHeight, nil
+	}
+	node.logger.Info("posnode sync rewound to common ancestor",
+		slog.String("peer_id", peerID),
+		slog.Uint64("local_height", localHead.Height),
+		slog.String("local_hash", localHead.BlockHash.String()),
+		slog.Uint64("ancestor_height", ancestor.Height),
+		slog.String("ancestor_hash", ancestor.BlockHash.String()),
+		slog.Uint64("finalized_height", localHead.FinalizedHeight),
+		slog.String("finalized_hash", localHead.FinalizedHash.String()),
+		slog.Uint64("start_height", startHeight),
+	)
+	return startHeight, nil
+}
+
+func (node *posNode) syncProposalBranch(ctx context.Context, preferredPeerID string, proposal consensus.BlockProposal) error {
+	if node.host == nil || proposal.Header.Height == 0 {
+		return nil
+	}
+	head := node.ledger.Head()
+	if proposal.Header.ParentHash == head.BlockHash {
+		return nil
+	}
+	resolved, err := node.ledger.BranchResolved(proposal.Header.ParentHash)
+	if err != nil {
+		return err
+	}
+	if resolved {
+		return nil
+	}
+	peerIDs := make([]string, 0, len(node.validatorPeerIDsSnapshot(true))+1)
+	if preferredPeerID != "" {
+		peerIDs = append(peerIDs, preferredPeerID)
+	}
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+		if peerID == preferredPeerID {
+			continue
+		}
+		peerIDs = append(peerIDs, peerID)
+	}
+	if len(peerIDs) == 0 {
+		return nil
+	}
+	targetHeight := proposal.Header.Height - 1
+	for _, peerID := range uniquePeerIDs(peerIDs) {
+		startHeight, err := node.determineBranchSyncStartHeight(ctx, peerID, head)
+		if err != nil {
+			node.logger.Debug("posnode proposal branch start height failed",
+				slog.String("peer_id", peerID),
+				slog.Uint64("proposal_height", proposal.Header.Height),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		if startHeight == 0 || startHeight > targetHeight {
+			continue
+		}
+		if err := node.syncBlocksFromPeer(ctx, peerID, startHeight, targetHeight); err != nil {
+			node.logger.Debug("posnode proposal branch sync round failed",
+				slog.String("peer_id", peerID),
+				slog.Uint64("start_height", startHeight),
+				slog.Uint64("target_height", targetHeight),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		resolved, err = node.ledger.BranchResolved(proposal.Header.ParentHash)
+		if err != nil {
+			return err
+		}
+		if resolved {
+			node.logger.Info("posnode proposal branch synced",
+				slog.String("peer_id", peerID),
+				slog.Uint64("proposal_height", proposal.Header.Height),
+				slog.Uint64("proposal_slot", proposal.Header.Slot),
+				slog.String("parent_hash", proposal.Header.ParentHash.String()),
+				slog.Uint64("start_height", startHeight),
+				slog.Uint64("target_height", targetHeight),
+			)
+			return nil
+		}
+	}
+	return fmt.Errorf("posnode: proposal branch unresolved for parent %s", proposal.Header.ParentHash.String())
+}
+
+func (node *posNode) determineBranchSyncStartHeight(
+	ctx context.Context,
+	peerID string,
+	localHead blockchain.Head,
+) (uint64, error) {
+	statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+	_, err := node.requestStatus(statusContext, peerID)
+	cancel()
+	if err != nil {
+		return 0, err
+	}
+	locator, err := node.ledger.BlockLocator(defaultBlockLocatorEntries)
+	if err != nil {
+		return 0, err
+	}
+	ancestor, found, err := node.requestCommonAncestor(ctx, peerID, locator)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("posnode: peer %s returned no branch ancestor", peerID)
+	}
+	if ancestor.Height < localHead.FinalizedHeight {
+		return 0, fmt.Errorf("posnode: peer %s branch ancestor %d below finalized height %d", peerID, ancestor.Height, localHead.FinalizedHeight)
+	}
+	return calculateSyncStartHeightFromAncestor(ancestor.Height), nil
 }
 
 func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint64) bool {
@@ -478,6 +830,13 @@ func (node *posNode) ensureParentAvailable(ctx context.Context, parentHash struc
 		return consensus.ChainState{}, false
 	}
 	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+		statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+		_, statusErr := node.requestStatus(statusContext, peerID)
+		cancel()
+		if statusErr != nil {
+			node.logSyncMiss(peerID, parentHash, statusErr)
+			continue
+		}
 		proposal, foundBlock, blockErr := node.requestBlockByHash(ctx, peerID, parentHash)
 		if blockErr != nil || !foundBlock {
 			node.logSyncMiss(peerID, parentHash, blockErr)
@@ -616,27 +975,30 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 	transactionFastPath := node.transactionFastPathForSlotLocked(startSlot, true)
 	consensusStatus := node.consensusStatusForSlotLocked(startSlot)
 	return statusResponseEnvelope{
-		NodeName:        node.config.NodeName,
-		PeerID:          node.peerKeyPair.peerID,
-		HeadHeight:      head.Height,
-		HeadSlot:        head.Slot,
-		HeadHash:        head.BlockHash.String(),
-		HeadQCHash:      head.QCHash.String(),
-		FinalizedHeight: head.FinalizedHeight,
-		FinalizedHash:   head.FinalizedHash.String(),
-		FinalityDepth:   node.ledger.FinalityDepth(),
-		EpochID:         node.epochSnapshot.EpochID,
-		MempoolSize:     len(node.mempool),
-		ValidatorCount:  len(node.epochSnapshot.Validators),
-		KnownPeerCount:  len(node.knownPeerIDs),
-		P2PSecure:       p2pSecure,
-		P2PInsecure:     node.config.allowInsecureP2P(),
-		StateRecovery:   !node.config.DisableStateRecovery,
-		CurrentLeader:   currentLeader,
-		UpcomingLeaders: node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
-		Turbine:         turbine,
-		TransactionFast: transactionFastPath,
-		Consensus:       consensusStatus,
-		Metrics:         node.metrics.snapshot(),
+		ChainID:           node.config.ChainID,
+		ChainIdentityHash: node.config.ChainIdentityHash,
+		GenesisHash:       node.config.GenesisHash,
+		NodeName:          node.config.NodeName,
+		PeerID:            node.peerKeyPair.peerID,
+		HeadHeight:        head.Height,
+		HeadSlot:          head.Slot,
+		HeadHash:          head.BlockHash.String(),
+		HeadQCHash:        head.QCHash.String(),
+		FinalizedHeight:   head.FinalizedHeight,
+		FinalizedHash:     head.FinalizedHash.String(),
+		FinalityDepth:     node.ledger.FinalityDepth(),
+		EpochID:           node.epochSnapshot.EpochID,
+		MempoolSize:       len(node.mempool),
+		ValidatorCount:    len(node.epochSnapshot.Validators),
+		KnownPeerCount:    len(node.knownPeerIDs),
+		P2PSecure:         p2pSecure,
+		P2PInsecure:       node.config.allowInsecureP2P(),
+		StateRecovery:     !node.config.DisableStateRecovery,
+		CurrentLeader:     currentLeader,
+		UpcomingLeaders:   node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
+		Turbine:           turbine,
+		TransactionFast:   transactionFastPath,
+		Consensus:         consensusStatus,
+		Metrics:           node.metrics.snapshot(),
 	}
 }
