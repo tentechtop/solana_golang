@@ -102,6 +102,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.logHTTPRequest(r, responseWriter.statusCode, startedAt)
 
 	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path != "/" {
+		s.serveJSONHTTP(responseWriter, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		responseWriter.WriteHeader(http.StatusMethodNotAllowed)
 		_ = json.NewEncoder(responseWriter).Encode(errorResponse(nil, ErrInvalidRequest))

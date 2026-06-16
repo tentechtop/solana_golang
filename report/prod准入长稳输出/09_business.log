@@ -1,0 +1,944 @@
+phase=business
+round=9
+minutes=5
+started_at=2026-06-16T12:43:18.3519919+08:00
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:43:18.3565164+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:43:20.3316355+08:00
+duration_seconds=1.975
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.928s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:43:20.3331410+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:43:25.0649078+08:00
+duration_seconds=4.732
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.010s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:43:25.0661094+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:43:29.7099641+08:00
+duration_seconds=4.644
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.089s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:43:29.7114725+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:43:32.2500027+08:00
+duration_seconds=2.539
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.427s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:43:32.2515105+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:43:34.3246987+08:00
+duration_seconds=2.073
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.973s
+ok  	solana_golang/zk	0.728s
+ok  	solana_golang/runtime	0.817s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:43:34.3262746+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:43:35.9959261+08:00
+duration_seconds=1.67
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.592s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:43:35.9979508+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:43:40.7007703+08:00
+duration_seconds=4.703
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.028s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:43:40.7093450+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:43:44.7812466+08:00
+duration_seconds=4.072
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.075s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:43:44.7880892+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:43:47.5070088+08:00
+duration_seconds=2.719
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.501s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:43:47.5167067+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:43:49.5663791+08:00
+duration_seconds=2.05
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.064s
+ok  	solana_golang/zk	0.721s
+ok  	solana_golang/runtime	1.016s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:43:49.5749791+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:43:51.1720200+08:00
+duration_seconds=1.597
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.578s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:43:51.1735325+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:43:55.9188193+08:00
+duration_seconds=4.745
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.035s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:43:55.9213935+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:44:00.1033766+08:00
+duration_seconds=4.182
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.092s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:44:00.1048915+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:44:03.5927677+08:00
+duration_seconds=3.488
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.638s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:44:03.5957970+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:44:05.7201003+08:00
+duration_seconds=2.124
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.012s
+ok  	solana_golang/zk	0.862s
+ok  	solana_golang/runtime	0.970s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:44:05.7216333+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:44:07.8538087+08:00
+duration_seconds=2.132
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	1.002s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:44:07.8553187+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:44:13.2827084+08:00
+duration_seconds=5.427
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.025s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:44:13.2842185+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:44:17.5555874+08:00
+duration_seconds=4.271
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.077s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:44:17.5570993+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:44:20.5577702+08:00
+duration_seconds=3.001
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.755s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:44:20.5606962+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:44:22.5309534+08:00
+duration_seconds=1.97
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.915s
+ok  	solana_golang/zk	0.723s
+ok  	solana_golang/runtime	0.888s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:44:22.5319705+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:44:24.1156352+08:00
+duration_seconds=1.584
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.581s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:44:24.1181475+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:44:28.6358916+08:00
+duration_seconds=4.518
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.038s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:44:28.6374005+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:44:32.8175366+08:00
+duration_seconds=4.18
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.074s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:44:32.8195532+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:44:35.7718316+08:00
+duration_seconds=2.952
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.688s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:44:35.7733531+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:44:38.2050295+08:00
+duration_seconds=2.432
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.887s
+ok  	solana_golang/zk	0.683s
+ok  	solana_golang/runtime	0.850s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:44:38.2065388+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:44:40.6423683+08:00
+duration_seconds=2.436
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.898s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:44:40.6438775+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:44:46.0728995+08:00
+duration_seconds=5.429
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.041s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:44:46.0755070+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:44:50.2121882+08:00
+duration_seconds=4.137
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.129s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:44:50.2210923+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:44:53.0023237+08:00
+duration_seconds=2.781
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.677s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:44:53.0123847+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:44:55.1611583+08:00
+duration_seconds=2.149
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.944s
+ok  	solana_golang/zk	0.894s
+ok  	solana_golang/runtime	0.856s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:44:55.1631726+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:44:57.3628048+08:00
+duration_seconds=2.2
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.723s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:44:57.3653190+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:45:02.5865135+08:00
+duration_seconds=5.221
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.022s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:45:02.5885235+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:45:06.5058147+08:00
+duration_seconds=3.917
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.089s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:45:06.5083266+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:45:09.2939172+08:00
+duration_seconds=2.786
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.373s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:45:09.2959835+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:45:11.4988295+08:00
+duration_seconds=2.203
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.928s
+ok  	solana_golang/zk	0.726s
+ok  	solana_golang/runtime	0.852s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:45:11.5003535+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:45:13.3267747+08:00
+duration_seconds=1.826
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.642s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:45:13.3282821+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:45:18.1625852+08:00
+duration_seconds=4.834
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.010s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:45:18.1646281+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:45:22.3252160+08:00
+duration_seconds=4.161
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.093s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:45:22.3267237+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:45:24.7878601+08:00
+duration_seconds=2.461
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.282s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:45:24.7893663+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:45:26.7487802+08:00
+duration_seconds=1.959
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.939s
+ok  	solana_golang/zk	0.792s
+ok  	solana_golang/runtime	0.880s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:45:26.7574779+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:45:28.3217346+08:00
+duration_seconds=1.564
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.585s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:45:28.3247505+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:45:33.3604242+08:00
+duration_seconds=5.036
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.028s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:45:33.3624377+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:45:37.7431156+08:00
+duration_seconds=4.381
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.067s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:45:37.7441377+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:45:41.0472429+08:00
+duration_seconds=3.303
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	2.091s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:45:41.0487508+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:45:43.0473819+08:00
+duration_seconds=1.999
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.871s
+ok  	solana_golang/zk	0.681s
+ok  	solana_golang/runtime	0.745s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:45:43.0494272+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:45:44.6652485+08:00
+duration_seconds=1.616
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.700s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:45:44.6667777+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:45:49.6203075+08:00
+duration_seconds=4.954
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.000s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:45:49.6218226+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:45:54.1768749+08:00
+duration_seconds=4.555
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.159s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:45:54.1783897+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:45:56.7662176+08:00
+duration_seconds=2.588
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.439s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:45:56.7687386+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:45:58.8114858+08:00
+duration_seconds=2.043
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.929s
+ok  	solana_golang/zk	0.728s
+ok  	solana_golang/runtime	0.859s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:45:58.8145169+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:46:00.4323999+08:00
+duration_seconds=1.618
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.621s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:46:00.4354263+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:46:04.6742092+08:00
+duration_seconds=4.239
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.059s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:46:04.6757203+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:46:08.9936659+08:00
+duration_seconds=4.318
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.083s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:46:09.0018975+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:46:11.5869858+08:00
+duration_seconds=2.585
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.368s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:46:11.5885854+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:46:13.6656044+08:00
+duration_seconds=2.077
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.000s
+ok  	solana_golang/zk	1.000s
+ok  	solana_golang/runtime	0.957s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:46:13.6733050+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:46:15.3061275+08:00
+duration_seconds=1.633
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.574s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:46:15.3076339+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:46:20.9637072+08:00
+duration_seconds=5.656
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.882s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:46:20.9657387+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:46:32.2476692+08:00
+duration_seconds=11.282
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.278s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:46:32.2496853+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:46:35.6772914+08:00
+duration_seconds=3.428
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.761s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:46:35.6793049+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:46:37.8461013+08:00
+duration_seconds=2.167
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.121s
+ok  	solana_golang/zk	1.121s
+ok  	solana_golang/runtime	1.079s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:46:37.8526667+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:46:39.5882288+08:00
+duration_seconds=1.736
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.676s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:46:39.5922702+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:46:44.5782928+08:00
+duration_seconds=4.986
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.180s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:46:44.5798080+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:46:49.0435214+08:00
+duration_seconds=4.464
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.080s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:46:49.0450341+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:46:52.4689687+08:00
+duration_seconds=3.424
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.753s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:46:52.4710633+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:46:54.6209683+08:00
+duration_seconds=2.15
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.226s
+ok  	solana_golang/zk	1.226s
+ok  	solana_golang/runtime	1.180s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:46:54.6224765+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:46:56.3785423+08:00
+duration_seconds=1.756
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.568s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:46:56.3800764+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:47:00.7570255+08:00
+duration_seconds=4.377
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.055s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:47:00.7585339+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:47:05.1164855+08:00
+duration_seconds=4.358
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.069s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:47:05.1179946+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:47:07.9679842+08:00
+duration_seconds=2.85
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.711s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:47:07.9695660+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:47:09.7624633+08:00
+duration_seconds=1.793
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	0.941s
+ok  	solana_golang/zk	0.783s
+ok  	solana_golang/runtime	0.897s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:47:09.7647193+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:47:11.4217496+08:00
+duration_seconds=1.657
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.645s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:47:11.4232602+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:47:16.1109330+08:00
+duration_seconds=4.688
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.182s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:47:16.1124412+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:47:20.7519183+08:00
+duration_seconds=4.639
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.063s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:47:20.7597856+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:47:23.4320737+08:00
+duration_seconds=2.672
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	1.411s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:47:23.4345855+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:47:25.6794451+08:00
+duration_seconds=2.245
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.182s
+ok  	solana_golang/zk	1.182s
+ok  	solana_golang/runtime	1.142s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:47:25.6814776+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:47:27.4602529+08:00
+duration_seconds=1.779
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.723s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:47:27.4617587+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:47:32.3454535+08:00
+duration_seconds=4.884
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.041s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:47:32.3469615+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:47:36.8177121+08:00
+duration_seconds=4.471
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.155s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:47:36.8263150+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:47:40.7456476+08:00
+duration_seconds=3.919
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	2.073s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:47:40.7481555+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:47:42.7917626+08:00
+duration_seconds=2.044
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.053s
+ok  	solana_golang/zk	0.836s
+ok  	solana_golang/runtime	1.011s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:47:42.7932717+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:47:44.8324925+08:00
+duration_seconds=2.039
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	0.725s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:47:44.8340050+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:47:51.2030127+08:00
+duration_seconds=6.369
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.861s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:47:51.2158228+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:47:58.3847769+08:00
+duration_seconds=7.169
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	2.005s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:47:58.3868113+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:48:02.8262253+08:00
+duration_seconds=4.439
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	2.312s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:48:02.8391273+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:48:05.3783059+08:00
+duration_seconds=2.539
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.441s
+ok  	solana_golang/zk	1.029s
+ok  	solana_golang/runtime	1.392s
+
+
+## consensus business stake vote reward
+started_at=2026-06-16T12:48:05.3809007+08:00
+command=go test .\consensus -run TestPoSRealAccountStakeVoteAndBlockFlow|TestValidatorJoinsOnlyAfterRegisterStakeTransaction|TestStageBusiness|TestApplyBlockRewards|TestFaultInjectionLeaderOfflineFormsSkipQC|TestBLS -count 1
+ended_at=2026-06-16T12:48:08.5212569+08:00
+duration_seconds=3.14
+exit_code=0
+--- output ---
+ok  	solana_golang/consensus	1.043s
+
+
+## posnode rpc turbine sync
+started_at=2026-06-16T12:48:08.5232924+08:00
+command=go test .\cmd\posnode -run TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate -count 1
+ended_at=2026-06-16T12:48:16.0035779+08:00
+duration_seconds=7.48
+exit_code=0
+--- output ---
+ok  	solana_golang/cmd/posnode	1.934s
+
+
+## blockchain reorg persistence
+started_at=2026-06-16T12:48:16.0116511+08:00
+command=go test .\blockchain -run TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart -count 1
+ended_at=2026-06-16T12:48:22.8599746+08:00
+duration_seconds=6.848
+exit_code=0
+--- output ---
+ok  	solana_golang/blockchain	1.780s
+
+
+## p2p fault network routing
+started_at=2026-06-16T12:48:22.8625648+08:00
+command=go test .\p2p -run TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer -count 1
+ended_at=2026-06-16T12:48:27.5330156+08:00
+duration_seconds=4.67
+exit_code=0
+--- output ---
+ok  	solana_golang/p2p	2.601s
+
+
+## privacy audit confidential flow
+started_at=2026-06-16T12:48:27.5478895+08:00
+command=go test .\programs\privacy .\zk .\runtime -count 1
+ended_at=2026-06-16T12:48:30.6615855+08:00
+duration_seconds=3.114
+exit_code=0
+--- output ---
+ok  	solana_golang/programs/privacy	1.324s
+ok  	solana_golang/zk	0.977s
+ok  	solana_golang/runtime	1.503s
+
+
+phase_ended_at=2026-06-16T12:48:30.6640990+08:00
+phase_duration_seconds=312.312
+cycles=18

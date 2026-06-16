@@ -1,0 +1,25 @@
+{
+    "StartedAt":  "2026-06-16T12:00:41.7941854+08:00",
+    "EndedAt":  "2026-06-16T12:01:45.7675039+08:00",
+    "DurationSeconds":  63.973,
+    "RoundCount":  1,
+    "RoundMinutes":  1,
+    "StabilityMinutes":  1,
+    "SkipStability":  true,
+    "ExitCode":  0,
+    "Message":  "passed",
+    "Phases":  [
+                   {
+                       "Phase":  "business",
+                       "Round":  1,
+                       "StartedAt":  "2026-06-16T12:00:41.8110208+08:00",
+                       "EndedAt":  "2026-06-16T12:01:45.7572206+08:00",
+                       "DurationSeconds":  63.946,
+                       "TargetMinutes":  1,
+                       "Cycles":  4,
+                       "StepCount":  20,
+                       "OK":  true,
+                       "LogPath":  "F:\\workSpace2029\\solana_golang\\report\\prod准入长稳输出_冒烟\\01_business.log"
+                   }
+               ]
+}
