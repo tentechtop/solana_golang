@@ -326,6 +326,7 @@ func (node *posNode) startP2P(ctx context.Context) error {
 		}
 	}()
 	go node.connectPeersLoop(ctx)
+	go node.bootstrapDiscoveryLoop(ctx)
 	return nil
 }
 
@@ -386,6 +387,70 @@ func (node *posNode) connectPeersLoop(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+func (node *posNode) bootstrapDiscoveryLoop(ctx context.Context) {
+	bootnodes := node.bootstrapAddresses()
+	if len(bootnodes) == 0 {
+		return
+	}
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			node.runBootstrapDiscovery(ctx, bootnodes)
+			timer.Reset(15 * time.Second)
+		}
+	}
+}
+
+func (node *posNode) bootstrapAddresses() []utils.MultiAddress {
+	addresses := make([]utils.MultiAddress, 0, len(node.config.BootstrapPeers))
+	for _, peerConfig := range node.config.BootstrapPeers {
+		if peerConfig.PeerID == node.peerKeyPair.peerID {
+			continue
+		}
+		address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, peerConfig.IP, utils.ProtocolTCP, peerConfig.Port, peerConfig.PeerID)
+		if err != nil {
+			node.logger.Warn("posnode bootstrap address skipped", slog.String("peer_id", peerConfig.PeerID), slog.Any("error", err))
+			continue
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses
+}
+
+func (node *posNode) runBootstrapDiscovery(ctx context.Context, bootnodes []utils.MultiAddress) {
+	summary, err := node.host.Bootstrap(ctx, p2p.BootstrapConfig{
+		Bootnodes:            bootnodes,
+		MinOutboundPeers:     4,
+		QueryLimit:           32,
+		RefreshTargetCount:   8,
+		DialTimeout:          3 * time.Second,
+		StartConnectionLoops: true,
+	})
+	if err != nil {
+		node.logger.Debug("posnode bootstrap discovery failed", slog.Any("error", err))
+	}
+	node.refreshKnownPeersFromHost()
+	node.logger.Debug("posnode bootstrap discovery completed",
+		slog.Int("bootnodes", summary.BootnodeCount),
+		slog.Int("connected_bootnodes", summary.ConnectedBootnodes),
+		slog.Int("discovered_peers", summary.DiscoveredPeers),
+		slog.Int("connected_peers", summary.ConnectedPeers),
+	)
+}
+
+func (node *posNode) refreshKnownPeersFromHost() {
+	for _, snapshot := range node.host.PeerSnapshots() {
+		if snapshot.ID == "" || snapshot.ID == node.peerKeyPair.peerID {
+			continue
+		}
+		node.addKnownPeerID(snapshot.ID)
 	}
 }
 

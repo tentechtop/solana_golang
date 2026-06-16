@@ -247,26 +247,28 @@ func NewKADPeerHint(peer Peer) (KADPeerHint, error) {
 	if err != nil {
 		return KADPeerHint{}, err
 	}
-	if !ok {
-		return KADPeerHint{}, fmt.Errorf("%w: missing signed peer record", ErrInvalidMessage)
-	}
-	encoded, err := record.MarshalBinary()
-	if err != nil {
-		return KADPeerHint{}, err
+	addresses := peerRecordAddressStrings(peer.advertisedAddressList())
+	encoded := []byte(nil)
+	if ok {
+		encoded, err = record.MarshalBinary()
+		if err != nil {
+			return KADPeerHint{}, err
+		}
+		addresses = append([]string(nil), record.Addresses...)
 	}
 	hint := KADPeerHint{
-		PeerID:               record.PeerID,
-		Addresses:            append([]string(nil), record.Addresses...),
+		PeerID:               peer.ID,
+		Addresses:            addresses,
 		SignedRecord:         encoded,
-		Role:                 record.Role,
-		Capabilities:         record.Capabilities,
-		ProtocolVersion:      record.ProtocolVersion,
-		SoftwareVersion:      record.SoftwareVersion,
-		LatestSlot:           record.LatestSlot,
-		BlockHeight:          record.BlockHeight,
-		BestBlockHash:        record.BestBlockHash,
-		Validator:            record.Validator,
-		StakeLamports:        record.StakeLamports,
+		Role:                 peer.Role,
+		Capabilities:         peer.Capabilities,
+		ProtocolVersion:      peer.ProtocolVersion,
+		SoftwareVersion:      peer.SoftwareVersion,
+		LatestSlot:           peer.LatestSlot,
+		BlockHeight:          peer.BlockHeight,
+		BestBlockHash:        peer.BestBlockHash,
+		Validator:            peer.Validator,
+		StakeLamports:        peer.StakeLamports,
 		LastSeenUnixMilli:    peer.LastSeenUnixMilli,
 		LastConnectUnixMilli: peer.LastConnectedUnixMilli,
 	}
@@ -284,13 +286,6 @@ func (hint KADPeerHint) Validate() error {
 	if len(hint.Addresses) == 0 || len(hint.Addresses) > maxKADAddressesPerPeer {
 		return fmt.Errorf("%w: invalid kad peer hint addresses", ErrInvalidMessage)
 	}
-	record, err := UnmarshalSignedPeerRecordBinary(hint.SignedRecord)
-	if err != nil {
-		return err
-	}
-	if record.PeerID != hint.PeerID {
-		return fmt.Errorf("%w: kad signed record id mismatch", ErrInvalidMessage)
-	}
 	for _, rawAddress := range hint.Addresses {
 		address, err := utils.ParseMultiAddress(rawAddress)
 		if err != nil {
@@ -299,6 +294,16 @@ func (hint KADPeerHint) Validate() error {
 		if address.PeerID != hint.PeerID {
 			return fmt.Errorf("%w: kad peer address id mismatch", ErrInvalidMessage)
 		}
+	}
+	if len(hint.SignedRecord) == 0 {
+		return nil
+	}
+	record, err := UnmarshalSignedPeerRecordBinary(hint.SignedRecord)
+	if err != nil {
+		return err
+	}
+	if record.PeerID != hint.PeerID {
+		return fmt.Errorf("%w: kad signed record id mismatch", ErrInvalidMessage)
 	}
 	if len(record.Addresses) != len(hint.Addresses) {
 		return fmt.Errorf("%w: kad signed record address mismatch", ErrInvalidMessage)
@@ -316,6 +321,9 @@ func (hint KADPeerHint) ToPeer() (Peer, error) {
 	if err := hint.Validate(); err != nil {
 		return Peer{}, err
 	}
+	if len(hint.SignedRecord) == 0 {
+		return hint.toUnsignedPeer()
+	}
 	record, err := UnmarshalSignedPeerRecordBinary(hint.SignedRecord)
 	if err != nil {
 		return Peer{}, err
@@ -324,6 +332,33 @@ func (hint KADPeerHint) ToPeer() (Peer, error) {
 	if err != nil {
 		return Peer{}, err
 	}
+	peer.LastSeenUnixMilli = hint.LastSeenUnixMilli
+	peer.LastConnectedUnixMilli = hint.LastConnectUnixMilli
+	return peer, nil
+}
+
+func (hint KADPeerHint) toUnsignedPeer() (Peer, error) {
+	addresses := make([]utils.MultiAddress, 0, len(hint.Addresses))
+	for _, rawAddress := range hint.Addresses {
+		address, err := utils.ParseMultiAddress(rawAddress)
+		if err != nil {
+			return Peer{}, err
+		}
+		addresses = append(addresses, address)
+	}
+	peer, err := NewPeer(hint.PeerID, addresses)
+	if err != nil {
+		return Peer{}, err
+	}
+	peer.Role = normalizePeerRole(hint.Role)
+	peer.Capabilities = hint.Capabilities
+	peer.ProtocolVersion = hint.ProtocolVersion
+	peer.SoftwareVersion = hint.SoftwareVersion
+	peer.LatestSlot = hint.LatestSlot
+	peer.BlockHeight = hint.BlockHeight
+	peer.BestBlockHash = hint.BestBlockHash
+	peer.Validator = hint.Validator
+	peer.StakeLamports = hint.StakeLamports
 	peer.LastSeenUnixMilli = hint.LastSeenUnixMilli
 	peer.LastConnectedUnixMilli = hint.LastConnectUnixMilli
 	return peer, nil

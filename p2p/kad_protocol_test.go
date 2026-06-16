@@ -90,11 +90,19 @@ func TestKADPeerHintRejectsAddressOwnerMismatch(t *testing.T) {
 	}
 }
 
-func TestNewKADPeerHintRejectsUnsignedPeer(t *testing.T) {
+func TestNewKADPeerHintAcceptsUnsignedPeer(t *testing.T) {
 	peer := kadTestPeer(t, 0x48, 4015)
 
-	if _, err := NewKADPeerHint(peer); !errors.Is(err, ErrInvalidMessage) {
-		t.Fatalf("NewKADPeerHint() error = %v, want ErrInvalidMessage", err)
+	hint, err := NewKADPeerHint(peer)
+	if err != nil {
+		t.Fatalf("NewKADPeerHint() error = %v", err)
+	}
+	decodedPeer, err := hint.ToPeer()
+	if err != nil {
+		t.Fatalf("ToPeer() error = %v", err)
+	}
+	if decodedPeer.ID != peer.ID {
+		t.Fatalf("peer ID = %q, want %q", decodedPeer.ID, peer.ID)
 	}
 }
 

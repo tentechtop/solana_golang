@@ -1,0 +1,22 @@
+{
+  "environment": "stage",
+  "production": false,
+  "node_name": "bootstrap-101",
+  "listen_ip": "0.0.0.0",
+  "advertised_ip": "101.35.87.31",
+  "listen_port": 5100,
+  "peer_seed": "bootstrap-101",
+  "allow_insecure_p2p": true,
+  "max_peers": 256,
+  "max_connections": 256,
+  "dial_interval_millis": 2000,
+  "static_peers": [
+    {
+      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+      "ip": "101.35.87.31",
+      "port": 5101,
+      "role": "validator",
+      "capabilities": ["validator", "relay", "state_sync", "dht"]
+    }
+  ]
+}
