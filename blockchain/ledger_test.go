@@ -1,6 +1,9 @@
 package blockchain
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +85,49 @@ func TestLedgerCommitPersistsAndReloads(t *testing.T) {
 	}
 	if reloaded.Head().Height != 1 || reloaded.Head().BlockHash != newHead.BlockHash {
 		t.Fatalf("reloaded head mismatch: %+v != %+v", reloaded.Head(), newHead)
+	}
+}
+
+func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	ledger, err := NewLedgerFromGenesis(nil, testGenesis(t))
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	ledger.SetLogger(logger)
+
+	proposal, nextState := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "log-block")
+	head, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	qc := consensus.QuorumCertificate{
+		Type:               consensus.VoteTypeConfirm,
+		Slot:               proposal.Header.Slot,
+		BlockHeight:        proposal.Header.Height,
+		BlockHash:          head.BlockHash,
+		ThresholdStake:     1,
+		ConfirmedStake:     1,
+		Voters:             []string{"validator-a"},
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	if _, err := ledger.SaveQC(qc); err != nil {
+		t.Fatalf("save qc: %v", err)
+	}
+
+	logLine := logOutput.String()
+	for _, expected := range []string{
+		`"msg":"ledger commit block committed"`,
+		`"msg":"ledger qc saved"`,
+		`"block_hash"`,
+		`"qc_hash"`,
+		`"leader_id"`,
+		`"duration_ms"`,
+	} {
+		if !strings.Contains(logLine, expected) {
+			t.Fatalf("log output = %q, want %s", logLine, expected)
+		}
 	}
 }
 

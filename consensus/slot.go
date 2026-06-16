@@ -114,6 +114,7 @@ const (
 type Vote struct {
 	Type               VoteType
 	Slot               uint64
+	BlockHeight        uint64
 	BlockHash          structure.Hash
 	VoterID            string
 	Stake              uint64
@@ -137,8 +138,14 @@ func (vote Vote) Validate() error {
 	if vote.Type == VoteTypeConfirm && vote.BlockHash.IsZero() {
 		return fmt.Errorf("%w: confirm vote requires block hash", ErrInvalidVote)
 	}
+	if vote.Type == VoteTypeConfirm && vote.BlockHeight == 0 {
+		return fmt.Errorf("%w: confirm vote requires block height", ErrInvalidVote)
+	}
 	if vote.Type == VoteTypeSkip && !vote.BlockHash.IsZero() {
 		return fmt.Errorf("%w: skip vote requires empty block hash", ErrInvalidVote)
+	}
+	if vote.Type == VoteTypeSkip && vote.BlockHeight != 0 {
+		return fmt.Errorf("%w: skip vote requires empty block height", ErrInvalidVote)
 	}
 	return nil
 }
@@ -153,6 +160,7 @@ func (vote Vote) MarshalBinary() ([]byte, error) {
 	writer.WriteUint16(ConsensusCodecVersion)
 	writer.WriteUint8(uint8(vote.Type))
 	writer.WriteUint64(vote.Slot)
+	writer.WriteUint64(vote.BlockHeight)
 	writer.WriteFixedBytes(vote.BlockHash[:])
 	if err := writer.WriteString(vote.VoterID); err != nil {
 		return nil, fmt.Errorf("consensus: marshal voter id: %w", err)
@@ -181,6 +189,10 @@ func UnmarshalVoteBinary(data []byte) (Vote, error) {
 	if err != nil {
 		return Vote{}, fmt.Errorf("consensus: unmarshal vote slot: %w", err)
 	}
+	blockHeight, err := reader.ReadUint64()
+	if err != nil {
+		return Vote{}, fmt.Errorf("consensus: unmarshal vote block height: %w", err)
+	}
 	blockHashBytes, err := reader.ReadFixedBytes(structure.HashSize)
 	if err != nil {
 		return Vote{}, fmt.Errorf("consensus: unmarshal vote block hash: %w", err)
@@ -208,6 +220,7 @@ func UnmarshalVoteBinary(data []byte) (Vote, error) {
 	vote := Vote{
 		Type:               VoteType(voteType),
 		Slot:               slot,
+		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
 		VoterID:            voterID,
 		Stake:              stake,
@@ -245,6 +258,7 @@ func (quorum Quorum) RequiredStake(totalStake uint64) (uint64, error) {
 type QuorumCertificate struct {
 	Type               VoteType
 	Slot               uint64
+	BlockHeight        uint64
 	BlockHash          structure.Hash
 	ThresholdStake     uint64
 	ConfirmedStake     uint64
@@ -260,8 +274,14 @@ func (certificate QuorumCertificate) Validate() error {
 	if certificate.Type == VoteTypeConfirm && certificate.BlockHash.IsZero() {
 		return fmt.Errorf("%w: confirm certificate requires block hash", ErrInvalidCertificate)
 	}
+	if certificate.Type == VoteTypeConfirm && certificate.BlockHeight == 0 {
+		return fmt.Errorf("%w: confirm certificate requires block height", ErrInvalidCertificate)
+	}
 	if certificate.Type == VoteTypeSkip && !certificate.BlockHash.IsZero() {
 		return fmt.Errorf("%w: skip certificate requires empty block hash", ErrInvalidCertificate)
+	}
+	if certificate.Type == VoteTypeSkip && certificate.BlockHeight != 0 {
+		return fmt.Errorf("%w: skip certificate requires empty block height", ErrInvalidCertificate)
 	}
 	if certificate.ThresholdStake == 0 || certificate.ConfirmedStake < certificate.ThresholdStake {
 		return fmt.Errorf("%w: insufficient stake", ErrInvalidCertificate)
@@ -285,6 +305,7 @@ func (certificate QuorumCertificate) MarshalBinary() ([]byte, error) {
 	writer.WriteUint16(ConsensusCodecVersion)
 	writer.WriteUint8(uint8(certificate.Type))
 	writer.WriteUint64(certificate.Slot)
+	writer.WriteUint64(certificate.BlockHeight)
 	writer.WriteFixedBytes(certificate.BlockHash[:])
 	writer.WriteUint64(certificate.ThresholdStake)
 	writer.WriteUint64(certificate.ConfirmedStake)
@@ -373,7 +394,11 @@ func (collector *VoteCollector) AddVote(vote Vote) (QuorumCertificate, bool, err
 
 	key := voteKey{slot: vote.Slot, voteType: vote.Type, blockHash: vote.BlockHash}
 	bucket := collector.bucket(key)
+	if bucket.blockHeight != 0 && bucket.blockHeight != vote.BlockHeight {
+		return QuorumCertificate{}, false, fmt.Errorf("%w: block height mismatch", ErrInvalidVote)
+	}
 	bucket.stake += registeredStake
+	bucket.blockHeight = vote.BlockHeight
 	bucket.voters[vote.VoterID] = struct{}{}
 	if vote.CreatedAtUnixMilli > bucket.createdAtUnixMilli {
 		bucket.createdAtUnixMilli = vote.CreatedAtUnixMilli
@@ -413,6 +438,7 @@ type voterChoiceKey struct {
 }
 
 type voteBucket struct {
+	blockHeight        uint64
 	stake              uint64
 	voters             map[string]struct{}
 	createdAtUnixMilli int64
@@ -437,6 +463,7 @@ func (collector *VoteCollector) certificate(key voteKey, bucket *voteBucket) Quo
 	return QuorumCertificate{
 		Type:               key.voteType,
 		Slot:               key.slot,
+		BlockHeight:        bucket.blockHeight,
 		BlockHash:          key.blockHash,
 		ThresholdStake:     collector.thresholdStake,
 		ConfirmedStake:     bucket.stake,
@@ -453,6 +480,10 @@ func readCertificateFields(reader *borsh.Reader) (QuorumCertificate, error) {
 	slot, err := reader.ReadUint64()
 	if err != nil {
 		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc slot: %w", err)
+	}
+	blockHeight, err := reader.ReadUint64()
+	if err != nil {
+		return QuorumCertificate{}, fmt.Errorf("consensus: unmarshal qc block height: %w", err)
 	}
 	blockHashBytes, err := reader.ReadFixedBytes(structure.HashSize)
 	if err != nil {
@@ -482,6 +513,7 @@ func readCertificateFields(reader *borsh.Reader) (QuorumCertificate, error) {
 	return QuorumCertificate{
 		Type:               VoteType(certificateType),
 		Slot:               slot,
+		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
 		ThresholdStake:     thresholdStake,
 		ConfirmedStake:     confirmedStake,

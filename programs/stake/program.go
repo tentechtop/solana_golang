@@ -1,7 +1,9 @@
 package stake
 
 import (
+	stdcontext "context"
 	"fmt"
+	"log/slog"
 
 	"solana_golang/codec/borsh"
 	"solana_golang/runtime"
@@ -52,15 +54,23 @@ type Instruction struct {
 
 // ValidatorState 描述质押账户数据 + 由共识组合层转换为 consensus.ValidatorState。
 type ValidatorState struct {
-	ConsensusPublicKey structure.PublicKey
-	StakerAccount      structure.PublicKey
-	P2PPeerID          string
-	CommissionBps      uint16
-	ActiveStake        uint64
-	PendingStake       uint64
-	UnlockingStake     uint64
-	UnlockEpoch        uint64
-	Status             ValidatorStatus
+	ConsensusPublicKey  structure.PublicKey
+	StakerAccount       structure.PublicKey
+	P2PPeerID           string
+	CommissionBps       uint16
+	ActiveStake         uint64
+	PendingStake        uint64
+	UnlockingStake      uint64
+	UnlockEpoch         uint64
+	Status              ValidatorStatus
+	VoteCredits         uint64
+	LastVoteSlot        uint64
+	LastRewardedSlot    uint64
+	LastRewardEpoch     uint64
+	RewardLamports      uint64
+	MissedVoteCount     uint64
+	MissedProposalCount uint64
+	JailUntilEpoch      uint64
 }
 
 // NewProgram 创建质押程序 + 由组合层显式注册到 runtime。
@@ -246,6 +256,14 @@ func (state ValidatorState) MarshalBinary() ([]byte, error) {
 	writer.WriteUint64(state.UnlockingStake)
 	writer.WriteUint64(state.UnlockEpoch)
 	writer.WriteUint8(uint8(state.Status))
+	writer.WriteUint64(state.VoteCredits)
+	writer.WriteUint64(state.LastVoteSlot)
+	writer.WriteUint64(state.LastRewardedSlot)
+	writer.WriteUint64(state.LastRewardEpoch)
+	writer.WriteUint64(state.RewardLamports)
+	writer.WriteUint64(state.MissedVoteCount)
+	writer.WriteUint64(state.MissedProposalCount)
+	writer.WriteUint64(state.JailUntilEpoch)
 	return writer.Bytes(), nil
 }
 
@@ -288,9 +306,6 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 	if err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode status: %w", err)
 	}
-	if err := reader.EnsureEOF(); err != nil {
-		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
-	}
 	state := ValidatorState{
 		ConsensusPublicKey: consensusPublicKey,
 		StakerAccount:      stakerAccount,
@@ -301,6 +316,36 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 		UnlockingStake:     unlockingStake,
 		UnlockEpoch:        unlockEpoch,
 		Status:             ValidatorStatus(status),
+	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.VoteCredits, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode vote credits: %w", err)
+	}
+	if state.LastVoteSlot, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode last vote slot: %w", err)
+	}
+	if state.LastRewardedSlot, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode last rewarded slot: %w", err)
+	}
+	if state.LastRewardEpoch, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode last reward epoch: %w", err)
+	}
+	if state.RewardLamports, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode reward lamports: %w", err)
+	}
+	if state.MissedVoteCount, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode missed vote count: %w", err)
+	}
+	if state.MissedProposalCount, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode missed proposal count: %w", err)
+	}
+	if state.JailUntilEpoch, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode jail until epoch: %w", err)
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
 	}
 	return state, state.Validate()
 }
@@ -320,6 +365,9 @@ func (state ValidatorState) Validate() error {
 		return fmt.Errorf("stake: commission exceeds 10000 bps")
 	}
 	if ^uint64(0)-state.ActiveStake < state.PendingStake {
+		return fmt.Errorf("stake: stake overflow")
+	}
+	if ^uint64(0)-state.ActiveStake-state.PendingStake < state.UnlockingStake {
 		return fmt.Errorf("stake: stake overflow")
 	}
 	if state.ActiveStake+state.PendingStake < MinimumStakeLamports && state.Status == ValidatorStatusActive {
@@ -356,7 +404,7 @@ func executeRegisterValidator(instruction Instruction, context runtime.Instructi
 		ActiveStake:        instruction.Amount,
 		Status:             ValidatorStatusActive,
 	}
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("register_validator", validatorAddress, validatorAccount, state, context)
 }
 
 func executeStake(instruction Instruction, context runtime.InstructionContext) error {
@@ -375,7 +423,7 @@ func executeStake(instruction Instruction, context runtime.InstructionContext) e
 	}
 	state.PendingStake += instruction.Amount
 	validatorAccount := context.Accounts[validatorAddress].Clone()
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("stake", validatorAddress, validatorAccount, state, context)
 }
 
 func executeUnstake(instruction Instruction, context runtime.InstructionContext) error {
@@ -389,7 +437,7 @@ func executeUnstake(instruction Instruction, context runtime.InstructionContext)
 	state.ActiveStake -= instruction.Amount
 	state.UnlockingStake += instruction.Amount
 	state.UnlockEpoch = instruction.UnlockEpoch
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("unstake", validatorAddress, validatorAccount, state, context)
 }
 
 func executeWithdrawUnstaked(instruction Instruction, context runtime.InstructionContext) error {
@@ -406,7 +454,7 @@ func executeWithdrawUnstaked(instruction Instruction, context runtime.Instructio
 		return err
 	}
 	validatorAccount := context.Accounts[validatorAddress].Clone()
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("withdraw_unstaked", validatorAddress, validatorAccount, state, context)
 }
 
 func executeExitValidator(context runtime.InstructionContext) error {
@@ -415,7 +463,7 @@ func executeExitValidator(context runtime.InstructionContext) error {
 		return err
 	}
 	state.Status = ValidatorStatusExiting
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("exit_validator", validatorAddress, validatorAccount, state, context)
 }
 
 func executeSlashValidator(instruction Instruction, context runtime.InstructionContext) error {
@@ -430,14 +478,18 @@ func executeSlashValidator(instruction Instruction, context runtime.InstructionC
 	if instruction.Amount > totalStake {
 		return fmt.Errorf("stake: slash exceeds total stake")
 	}
+	if err := validatorAccount.DebitLamports(instruction.Amount, context.RentConfig); err != nil {
+		return fmt.Errorf("stake: burn slashed lamports: %w", err)
+	}
 	remainingSlash := instruction.Amount
 	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
 	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
 	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
 	if state.ActiveStake+state.PendingStake < MinimumStakeLamports {
 		state.Status = ValidatorStatusJailed
+		state.JailUntilEpoch = state.UnlockEpoch
 	}
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	return writeValidatorState("slash_validator", validatorAddress, validatorAccount, state, context)
 }
 
 func executeJailValidator(instruction Instruction, context runtime.InstructionContext) error {
@@ -447,7 +499,8 @@ func executeJailValidator(instruction Instruction, context runtime.InstructionCo
 	}
 	state.Status = ValidatorStatusJailed
 	state.UnlockEpoch = instruction.UnlockEpoch
-	return writeValidatorState(validatorAddress, validatorAccount, state, context)
+	state.JailUntilEpoch = instruction.UnlockEpoch
+	return writeValidatorState("jail_validator", validatorAddress, validatorAccount, state, context)
 }
 
 func subtractStakeBucket(value uint64, remaining uint64) (uint64, uint64) {
@@ -495,7 +548,7 @@ func loadWritableValidator(context runtime.InstructionContext) (structure.Public
 	return stakerAddress, validatorAddress, state, validatorAccount.Clone(), nil
 }
 
-func writeValidatorState(address structure.PublicKey, account structure.Account, state ValidatorState, context runtime.InstructionContext) error {
+func writeValidatorState(action string, address structure.PublicKey, account structure.Account, state ValidatorState, context runtime.InstructionContext) error {
 	data, err := state.MarshalBinary()
 	if err != nil {
 		return err
@@ -505,7 +558,32 @@ func writeValidatorState(address structure.PublicKey, account structure.Account,
 		return err
 	}
 	context.Accounts[address] = account
+	logValidatorStateWrite(action, address, state, context)
 	return nil
+}
+
+func logValidatorStateWrite(action string, address structure.PublicKey, state ValidatorState, context runtime.InstructionContext) {
+	logger := utils.EnsureLogger(context.Logger)
+	logger.LogAttrs(stdcontext.Background(), slog.LevelInfo, "stake validator state written",
+		slog.String("action", action),
+		slog.Uint64("slot", context.CurrentSlot),
+		slog.Int("instruction_index", context.InstructionIndex),
+		slog.String("validator_account", address.String()),
+		slog.String("validator_id", ValidatorIDFromConsensusKey(state.ConsensusPublicKey)),
+		slog.String("consensus_public_key", state.ConsensusPublicKey.String()),
+		slog.String("staker", state.StakerAccount.String()),
+		slog.String("p2p_peer_id", state.P2PPeerID),
+		slog.Int("status", int(state.Status)),
+		slog.Uint64("active_stake", state.ActiveStake),
+		slog.Uint64("pending_stake", state.PendingStake),
+		slog.Uint64("unlocking_stake", state.UnlockingStake),
+		slog.Uint64("unlock_epoch", state.UnlockEpoch),
+		slog.Uint64("jail_until_epoch", state.JailUntilEpoch),
+		slog.Uint64("vote_credits", state.VoteCredits),
+		slog.Uint64("missed_vote_count", state.MissedVoteCount),
+		slog.Uint64("missed_proposal_count", state.MissedProposalCount),
+		slog.Int("commission_bps", int(state.CommissionBps)),
+	)
 }
 
 func validateRegisterInstruction(instruction Instruction) error {

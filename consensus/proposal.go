@@ -27,6 +27,7 @@ type BlockHeader struct {
 	EpochID            uint64
 	TxRoot             structure.Hash
 	ReceiptRoot        structure.Hash
+	RewardRoot         structure.Hash
 	StateRoot          structure.Hash
 	AccountRoot        structure.Hash
 	TimestampUnixMilli int64
@@ -36,6 +37,8 @@ type BlockHeader struct {
 type BlockProposal struct {
 	Header          BlockHeader
 	Transactions    []structure.Transaction
+	RewardQCs       []QuorumCertificate
+	Rewards         []BlockReward
 	LeaderSignature structure.Signature
 }
 
@@ -71,6 +74,7 @@ func (producer BlockProducer) ProduceBlock(
 	nextState := request.ParentState.clone()
 	includedTransactions := make([]structure.Transaction, 0, len(request.Transactions))
 	receipts := make([]structure.Hash, 0, len(request.Transactions))
+	feeDetails := make([]structure.FeeDetails, 0, len(request.Transactions))
 	for transactionIndex, transaction := range request.Transactions {
 		if len(includedTransactions) >= MaxProposalTransactions {
 			break
@@ -84,14 +88,36 @@ func (producer BlockProducer) ProduceBlock(
 		}
 		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
 		includedTransactions = append(includedTransactions, markTransactionConfirmed(transaction))
+		feeDetails = append(feeDetails, result.Execution.FeeDetails)
 		receiptHash, err := hashReceipt(result.Execution)
 		if err != nil {
 			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: hash receipt %d: %w", transactionIndex, err)
 		}
 		receipts = append(receipts, receiptHash)
 	}
+	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
+	if err != nil {
+		return BlockProposal{}, ChainState{}, err
+	}
+	leader, exists := request.EpochSnapshot.ValidatorByID(leaderID)
+	if !exists {
+		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: block leader not in epoch snapshot")
+	}
+	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
+		Slot:          request.Slot,
+		Height:        request.Height,
+		EpochID:       request.EpochSnapshot.EpochID,
+		EpochSnapshot: request.EpochSnapshot,
+		Leader:        leader,
+		FeeDetails:    feeDetails,
+		RewardQCs:     request.RewardQCs,
+		Config:        request.RewardConfig,
+	})
+	if err != nil {
+		return BlockProposal{}, ChainState{}, err
+	}
 
-	header, err := buildProposalHeader(producer.ChainID, request, includedTransactions, receipts, nextState)
+	header, err := buildProposalHeader(producer.ChainID, request, includedTransactions, receipts, rewards, nextState)
 	if err != nil {
 		return BlockProposal{}, ChainState{}, err
 	}
@@ -103,7 +129,13 @@ func (producer BlockProducer) ProduceBlock(
 	if err != nil {
 		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: sign proposal: %w", err)
 	}
-	return BlockProposal{Header: header, Transactions: includedTransactions, LeaderSignature: signature}, nextState, nil
+	return BlockProposal{
+		Header:          header,
+		Transactions:    includedTransactions,
+		RewardQCs:       append([]QuorumCertificate(nil), request.RewardQCs...),
+		Rewards:         append([]BlockReward(nil), rewards...),
+		LeaderSignature: signature,
+	}, nextState, nil
 }
 
 // VerifyProposal 验证提案 + 复算执行结果后返回提案落地后的状态。
@@ -133,6 +165,7 @@ func (verifier ProposalVerifier) VerifyProposal(
 
 	nextState := request.ParentState.clone()
 	receipts := make([]structure.Hash, 0, len(request.Proposal.Transactions))
+	feeDetails := make([]structure.FeeDetails, 0, len(request.Proposal.Transactions))
 	for transactionIndex, transaction := range request.Proposal.Transactions {
 		result, err := verifier.executeVerifyTransaction(contextValue, request, transaction, nextState)
 		if err != nil {
@@ -142,13 +175,27 @@ func (verifier ProposalVerifier) VerifyProposal(
 			return ChainState{}, fmt.Errorf("consensus: proposal contains failed transaction %d", transactionIndex)
 		}
 		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
+		feeDetails = append(feeDetails, result.Execution.FeeDetails)
 		receiptHash, err := hashReceipt(result.Execution)
 		if err != nil {
 			return ChainState{}, fmt.Errorf("consensus: hash receipt %d: %w", transactionIndex, err)
 		}
 		receipts = append(receipts, receiptHash)
 	}
-	if err := verifyProposalRoots(request.Proposal, receipts, nextState); err != nil {
+	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
+		Slot:          request.Proposal.Header.Slot,
+		Height:        request.Proposal.Header.Height,
+		EpochID:       request.EpochSnapshot.EpochID,
+		EpochSnapshot: request.EpochSnapshot,
+		Leader:        request.Leader,
+		FeeDetails:    feeDetails,
+		RewardQCs:     request.Proposal.RewardQCs,
+		Config:        request.RewardConfig,
+	})
+	if err != nil {
+		return ChainState{}, err
+	}
+	if err := verifyProposalRoots(request.Proposal, receipts, rewards, nextState); err != nil {
 		return ChainState{}, err
 	}
 	return nextState, nil
@@ -190,6 +237,7 @@ func (header BlockHeader) SignBytes() ([]byte, error) {
 	encoded = appendUint64ForHash(encoded, header.EpochID)
 	encoded = append(encoded, header.TxRoot[:]...)
 	encoded = append(encoded, header.ReceiptRoot[:]...)
+	encoded = append(encoded, header.RewardRoot[:]...)
 	encoded = append(encoded, header.StateRoot[:]...)
 	encoded = append(encoded, header.AccountRoot[:]...)
 	encoded = appendUint64ForHash(encoded, uint64(header.TimestampUnixMilli))
@@ -207,6 +255,8 @@ type ProduceBlockRequest struct {
 	Transactions   []structure.Transaction
 	BlockhashQueue structure.BlockhashQueue
 	LeaderKeyPair  structure.SolanaKeyPair
+	RewardQCs      []QuorumCertificate
+	RewardConfig   RewardConfig
 }
 
 type VerifyProposalRequest struct {
@@ -217,6 +267,7 @@ type VerifyProposalRequest struct {
 	ParentState    ChainState
 	BlockhashQueue structure.BlockhashQueue
 	Leader         ValidatorState
+	RewardConfig   RewardConfig
 }
 
 func (request ProduceBlockRequest) validate() error {
@@ -290,6 +341,7 @@ func buildProposalHeader(
 	request ProduceBlockRequest,
 	transactions []structure.Transaction,
 	receipts []structure.Hash,
+	rewards []BlockReward,
 	state ChainState,
 ) (BlockHeader, error) {
 	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
@@ -301,6 +353,10 @@ func buildProposalHeader(
 		return BlockHeader{}, err
 	}
 	receiptRoot, err := hashHashList(receipts)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	rewardRoot, err := HashBlockRewards(rewards)
 	if err != nil {
 		return BlockHeader{}, err
 	}
@@ -318,18 +374,23 @@ func buildProposalHeader(
 		EpochID:            request.EpochSnapshot.EpochID,
 		TxRoot:             txRoot,
 		ReceiptRoot:        receiptRoot,
+		RewardRoot:         rewardRoot,
 		StateRoot:          stateRoot,
 		AccountRoot:        stateRoot,
 		TimestampUnixMilli: time.Now().UnixMilli(),
 	}, nil
 }
 
-func verifyProposalRoots(proposal BlockProposal, receipts []structure.Hash, state ChainState) error {
+func verifyProposalRoots(proposal BlockProposal, receipts []structure.Hash, rewards []BlockReward, state ChainState) error {
 	txRoot, err := hashTransactions(proposal.Transactions)
 	if err != nil {
 		return err
 	}
 	receiptRoot, err := hashHashList(receipts)
+	if err != nil {
+		return err
+	}
+	rewardRoot, err := HashBlockRewards(rewards)
 	if err != nil {
 		return err
 	}
@@ -339,6 +400,9 @@ func verifyProposalRoots(proposal BlockProposal, receipts []structure.Hash, stat
 	}
 	if proposal.Header.TxRoot != txRoot || proposal.Header.ReceiptRoot != receiptRoot {
 		return fmt.Errorf("consensus: proposal transaction roots mismatch")
+	}
+	if proposal.Header.RewardRoot != rewardRoot || !EqualBlockRewards(proposal.Rewards, rewards) {
+		return fmt.Errorf("consensus: proposal reward root mismatch")
 	}
 	if proposal.Header.StateRoot != stateRoot || proposal.Header.AccountRoot != stateRoot {
 		return fmt.Errorf("consensus: proposal state root mismatch")

@@ -197,6 +197,7 @@ func testVote(voterID string, stake uint64, blockHash structure.Hash) Vote {
 	return Vote{
 		Type:               VoteTypeConfirm,
 		Slot:               10,
+		BlockHeight:        10,
 		BlockHash:          blockHash,
 		VoterID:            voterID,
 		Stake:              stake,

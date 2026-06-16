@@ -328,6 +328,7 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		ParentState:    parentState,
 		BlockhashQueue: blockhashQueue,
 		Leader:         leader,
+		RewardConfig:   consensus.DefaultRewardConfig(),
 	})
 	if err != nil {
 		return err
@@ -353,6 +354,18 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 	if decision.Reorganized {
 		node.metrics.reorgs.Add(1)
 	}
+	node.logger.Info("posnode synced fork decision",
+		slog.Bool("accepted", decision.Accepted),
+		slog.Bool("reorganized", decision.Reorganized),
+		slog.String("reason", decision.Reason),
+		slog.Uint64("slot", proposal.Header.Slot),
+		slog.Uint64("height", proposal.Header.Height),
+		slog.String("block_hash", proposalHash.String()),
+		slog.String("common_ancestor_hash", decision.CommonAncestor.BlockHash.String()),
+		slog.Uint64("common_ancestor_height", decision.CommonAncestor.Height),
+		slog.Any("old_chain_blocks", hashesToStrings(decision.OldBlocks)),
+		slog.Any("new_chain_blocks", hashesToStrings(decision.NewBlocks)),
+	)
 	if decision.Accepted {
 		node.metrics.proposalsAccepted.Add(1)
 		node.retryOrphanChildren(ctx, proposalHash)

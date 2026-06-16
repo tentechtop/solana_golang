@@ -85,7 +85,11 @@ func run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger, err := utils.LoggerFromEnv()
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(logger)
 	node, err := newPosNode(config, logger)
 	if err != nil {
 		return err
@@ -125,6 +129,7 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("posnode: create executor: %w", err)
 	}
+	executor.Logger = logger
 	node := &posNode{
 		config:           config,
 		logger:           logger,
@@ -203,6 +208,7 @@ func (node *posNode) openLedger() error {
 		return fmt.Errorf("posnode: load blockchain ledger: %w", err)
 	}
 	node.ledger = ledger
+	node.ledger.SetLogger(node.logger)
 	head := ledger.Head()
 	node.blockhashQueue = structure.NewBlockhashQueue(150)
 	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
@@ -448,6 +454,11 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 	}
 	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli())
 	head := node.ledger.Head()
+	rewardQCs, err := node.ledger.RewardQCs(head.FinalizedHeight, consensus.MaxRewardQCsPerBlock)
+	if err != nil {
+		node.logger.Warn("posnode reward qc load failed", slog.Any("error", err))
+		rewardQCs = nil
+	}
 	request := consensus.ProduceBlockRequest{
 		Slot:           slot,
 		Height:         head.Height + 1,
@@ -459,6 +470,8 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		Transactions:   transactions,
 		BlockhashQueue: node.blockhashQueue,
 		LeaderKeyPair:  node.consensusKeyPair,
+		RewardQCs:      rewardQCs,
+		RewardConfig:   consensus.DefaultRewardConfig(),
 	}
 	node.mutex.Unlock()
 	node.deleteMempoolTransactions(removeTransactionIDs)
@@ -486,8 +499,14 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 	node.logger.Info("posnode block proposed",
 		slog.Uint64("slot", slot),
 		slog.Uint64("height", nextHead.Height),
+		slog.String("leader_id", string(proposal.Header.LeaderID)),
+		slog.String("parent_hash", proposal.Header.ParentHash.String()),
 		slog.Int("transactions", len(proposal.Transactions)),
-		slog.String("hash", proposalHash.String()),
+		slog.Any("tx_ids", transactionIDsForLog(proposal.Transactions)),
+		slog.Int("reward_qc_count", len(proposal.RewardQCs)),
+		slog.Int("reward_count", len(proposal.Rewards)),
+		slog.String("block_hash", proposalHash.String()),
+		slog.String("qc_hash", nextHead.QCHash.String()),
 	)
 	node.broadcastProposal(ctx, proposal)
 	node.voteForKnownProposal(ctx, proposal.Header.Slot, proposalHash)
@@ -507,11 +526,19 @@ func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.M
 	_, alreadySeen := node.seenTransactions[transactionID]
 	node.mutex.Unlock()
 	if alreadySeen {
+		node.logger.Debug("posnode transaction duplicate ignored",
+			slog.String("tx_id", transactionID),
+			slog.String("from_peer", message.FromPeerID),
+		)
 		return nil
 	}
 	if err := node.addTransaction(transaction); err != nil {
 		return err
 	}
+	node.logger.Info("posnode transaction received",
+		slog.String("tx_id", transactionID),
+		slog.String("from_peer", message.FromPeerID),
+	)
 	node.broadcastTransaction(ctx, transaction)
 	return nil
 }
@@ -521,6 +548,19 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 	if err != nil {
 		return err
 	}
+	proposalHash, err := proposal.Hash()
+	if err != nil {
+		return err
+	}
+	node.logger.Info("posnode proposal received",
+		slog.Uint64("slot", proposal.Header.Slot),
+		slog.Uint64("height", proposal.Header.Height),
+		slog.String("block_hash", proposalHash.String()),
+		slog.String("parent_hash", proposal.Header.ParentHash.String()),
+		slog.String("leader_id", string(proposal.Header.LeaderID)),
+		slog.String("from_peer", message.FromPeerID),
+		slog.Int("tx_count", len(proposal.Transactions)),
+	)
 	return node.voteForProposal(ctx, proposal)
 }
 
@@ -542,8 +582,20 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		if _, err := node.ledger.SaveQC(qc); err != nil {
 			return err
 		}
+		qcHash, err := hashQC(qc)
+		if err != nil {
+			return err
+		}
 		node.metrics.qcFormed.Add(1)
-		node.logger.Info("posnode qc formed", slog.Uint64("slot", qc.Slot), slog.Uint64("stake", qc.ConfirmedStake))
+		node.logger.Info("posnode qc formed",
+			slog.Uint64("slot", qc.Slot),
+			slog.Uint64("height", qc.BlockHeight),
+			slog.String("block_hash", qc.BlockHash.String()),
+			slog.String("qc_hash", qcHash.String()),
+			slog.Uint64("confirmed_stake", qc.ConfirmedStake),
+			slog.Uint64("threshold_stake", qc.ThresholdStake),
+			slog.Int("voter_count", len(qc.Voters)),
+		)
 		node.broadcastQC(ctx, qc)
 	}
 	return nil
@@ -563,7 +615,14 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	}
 	qcHash := head.QCHash
 	node.metrics.qcReceived.Add(1)
-	node.logger.Info("posnode qc received", slog.Uint64("slot", envelope.QC.Slot), slog.String("qc_hash", qcHash.String()))
+	node.logger.Info("posnode qc received",
+		slog.Uint64("slot", envelope.QC.Slot),
+		slog.Uint64("height", envelope.QC.BlockHeight),
+		slog.String("block_hash", envelope.QC.BlockHash.String()),
+		slog.String("qc_hash", qcHash.String()),
+		slog.Uint64("confirmed_stake", envelope.QC.ConfirmedStake),
+		slog.Int("voter_count", len(envelope.QC.Voters)),
+	)
 	return nil
 }
 
@@ -613,6 +672,7 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		ParentState:    parentState,
 		BlockhashQueue: blockhashQueue,
 		Leader:         leader,
+		RewardConfig:   consensus.DefaultRewardConfig(),
 	}
 
 	verifier := consensus.ProposalVerifier{ChainID: node.config.ChainID, Executor: node.executor}
@@ -648,7 +708,13 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 			slog.Bool("accepted", decision.Accepted),
 			slog.Bool("reorganized", decision.Reorganized),
 			slog.String("reason", decision.Reason),
-			slog.String("hash", proposalHash.String()),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.String("common_ancestor_hash", decision.CommonAncestor.BlockHash.String()),
+			slog.Uint64("common_ancestor_height", decision.CommonAncestor.Height),
+			slog.Any("old_chain_blocks", hashesToStrings(decision.OldBlocks)),
+			slog.Any("new_chain_blocks", hashesToStrings(decision.NewBlocks)),
 		)
 	}
 	if !acceptedProposal {
@@ -673,12 +739,19 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	vote := consensus.Vote{
 		Type:               consensus.VoteTypeConfirm,
 		Slot:               proposal.Header.Slot,
+		BlockHeight:        proposal.Header.Height,
 		BlockHash:          proposalHash,
 		VoterID:            string(validatorID),
 		Stake:              stakeValue,
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
-	node.logger.Info("posnode vote sent", slog.Uint64("slot", vote.Slot), slog.String("voter", vote.VoterID))
+	node.logger.Info("posnode vote sent",
+		slog.Uint64("slot", vote.Slot),
+		slog.Uint64("height", vote.BlockHeight),
+		slog.String("block_hash", vote.BlockHash.String()),
+		slog.String("validator_id", vote.VoterID),
+		slog.Uint64("stake", vote.Stake),
+	)
 	node.metrics.votesSent.Add(1)
 	node.broadcastVote(ctx, vote)
 	return node.handleLocalVote(ctx, vote)
@@ -706,12 +779,19 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 	vote := consensus.Vote{
 		Type:               consensus.VoteTypeConfirm,
 		Slot:               slot,
+		BlockHeight:        node.ledger.Head().Height,
 		BlockHash:          blockHash,
 		VoterID:            string(validatorID),
 		Stake:              stakeValue,
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
-	node.logger.Info("posnode leader self vote sent", slog.Uint64("slot", vote.Slot), slog.String("voter", vote.VoterID))
+	node.logger.Info("posnode leader self vote sent",
+		slog.Uint64("slot", vote.Slot),
+		slog.Uint64("height", vote.BlockHeight),
+		slog.String("block_hash", vote.BlockHash.String()),
+		slog.String("validator_id", vote.VoterID),
+		slog.Uint64("stake", vote.Stake),
+	)
 	node.metrics.votesSent.Add(1)
 	node.broadcastVote(ctx, vote)
 	if err := node.handleLocalVote(ctx, vote); err != nil {
@@ -731,6 +811,15 @@ func (node *posNode) handleLocalVote(ctx context.Context, vote consensus.Vote) e
 func (node *posNode) addTransaction(transaction structure.Transaction) error {
 	if err := transaction.Validate(); err != nil {
 		return err
+	}
+	signatureValid, err := transaction.HasValidSignatures()
+	if err != nil {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: verify transaction signatures: %w", err)
+	}
+	if !signatureValid {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: invalid transaction signature")
 	}
 	transactionID, err := transaction.TxIDString()
 	if err != nil {
@@ -759,14 +848,30 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 	node.mempool = append(node.mempool, transaction)
 	node.sortMempoolLocked()
 	node.metrics.transactionsIn.Add(1)
-	node.logger.Info("posnode transaction accepted", slog.String("tx", transactionID), slog.Int("mempool", len(node.mempool)))
+	node.logger.Info("posnode transaction accepted",
+		slog.String("tx_id", transactionID),
+		slog.Uint64("fee", transaction.Fee),
+		slog.Int64("submit_time", transaction.SubmitTime),
+		slog.Int("mempool_size", len(node.mempool)),
+	)
 	return nil
 }
 
 func (node *posNode) broadcastTransaction(ctx context.Context, transaction structure.Transaction) {
+	transactionID, txIDErr := transaction.TxIDString()
+	if txIDErr != nil {
+		transactionID = ""
+	}
+	if node.host == nil {
+		node.logger.Debug("posnode transaction broadcast skipped",
+			slog.String("tx_id", transactionID),
+			slog.String("reason", "host unavailable"),
+		)
+		return
+	}
 	message, err := encodeTransactionMessage(transaction)
 	if err != nil {
-		node.logger.Error("posnode encode transaction failed", slog.Any("error", err))
+		node.logger.Error("posnode encode transaction failed", slog.String("tx_id", transactionID), slog.Any("error", err))
 		return
 	}
 	preferredPeerIDs, fallbackPeerIDs := node.transactionRouteTargets(ctx)
@@ -782,6 +887,7 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 	}
 	if err := mergeRouteErrors(preferredError, fallbackError); err != nil {
 		node.logger.Warn("posnode broadcast transaction failed",
+			slog.String("tx_id", transactionID),
 			slog.Int("preferred_peers", len(preferredPeerIDs)),
 			slog.Int("fallback_peers", len(fallbackPeerIDs)),
 			slog.Any("error", err),
@@ -789,20 +895,37 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 		return
 	}
 	node.logger.Debug("posnode transaction routed",
+		slog.String("tx_id", transactionID),
 		slog.Int("preferred_peers", len(preferredPeerIDs)),
 		slog.Int("fallback_peers", len(fallbackPeerIDs)),
 	)
 }
 
 func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.BlockProposal) {
+	proposalHash, hashErr := proposal.Hash()
+	if hashErr != nil {
+		proposalHash = structure.Hash{}
+	}
 	message, err := encodeProposalMessage(proposal)
 	if err != nil {
 		node.logger.Error("posnode encode proposal failed", slog.Any("error", err))
 		return
 	}
 	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
-		node.logger.Warn("posnode broadcast proposal failed", slog.Any("error", err))
+		node.logger.Warn("posnode broadcast proposal failed",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Any("error", err),
+		)
+		return
 	}
+	node.logger.Debug("posnode proposal broadcast",
+		slog.Uint64("slot", proposal.Header.Slot),
+		slog.Uint64("height", proposal.Header.Height),
+		slog.String("block_hash", proposalHash.String()),
+		slog.Int("peer_count", len(node.knownPeerIDs)),
+	)
 }
 
 func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
@@ -812,8 +935,22 @@ func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
 		return
 	}
 	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
-		node.logger.Warn("posnode broadcast vote failed", slog.Any("error", err))
+		node.logger.Warn("posnode broadcast vote failed",
+			slog.Uint64("slot", vote.Slot),
+			slog.Uint64("height", vote.BlockHeight),
+			slog.String("block_hash", vote.BlockHash.String()),
+			slog.String("validator_id", vote.VoterID),
+			slog.Any("error", err),
+		)
+		return
 	}
+	node.logger.Debug("posnode vote broadcast",
+		slog.Uint64("slot", vote.Slot),
+		slog.Uint64("height", vote.BlockHeight),
+		slog.String("block_hash", vote.BlockHash.String()),
+		slog.String("validator_id", vote.VoterID),
+		slog.Int("peer_count", len(node.knownPeerIDs)),
+	)
 }
 
 func (node *posNode) verifyVoteEnvelope(envelope voteEnvelope) error {
@@ -838,14 +975,32 @@ func (node *posNode) verifyVoteEnvelope(envelope voteEnvelope) error {
 }
 
 func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertificate) {
+	qcHash, hashErr := hashQC(qc)
+	if hashErr != nil {
+		qcHash = structure.Hash{}
+	}
 	message, err := encodeQCMessage(qc)
 	if err != nil {
 		node.logger.Error("posnode encode qc failed", slog.Any("error", err))
 		return
 	}
 	if err := node.host.Broadcast(ctx, node.knownPeerIDs, message); err != nil {
-		node.logger.Warn("posnode broadcast qc failed", slog.Any("error", err))
+		node.logger.Warn("posnode broadcast qc failed",
+			slog.Uint64("slot", qc.Slot),
+			slog.Uint64("height", qc.BlockHeight),
+			slog.String("block_hash", qc.BlockHash.String()),
+			slog.String("qc_hash", qcHash.String()),
+			slog.Any("error", err),
+		)
+		return
 	}
+	node.logger.Debug("posnode qc broadcast",
+		slog.Uint64("slot", qc.Slot),
+		slog.Uint64("height", qc.BlockHeight),
+		slog.String("block_hash", qc.BlockHash.String()),
+		slog.String("qc_hash", qcHash.String()),
+		slog.Int("peer_count", len(node.knownPeerIDs)),
+	)
 }
 
 func (node *posNode) rebuildEpoch(epochID uint64, startSlot uint64, seed structure.Hash) error {
@@ -941,4 +1096,24 @@ func mustHash(text string) structure.Hash {
 		panic(err)
 	}
 	return hash
+}
+
+func transactionIDsForLog(transactions []structure.Transaction) []string {
+	ids := make([]string, 0, len(transactions))
+	for _, transaction := range transactions {
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			continue
+		}
+		ids = append(ids, transactionID)
+	}
+	return ids
+}
+
+func hashesToStrings(hashes []structure.Hash) []string {
+	values := make([]string, len(hashes))
+	for index, hash := range hashes {
+		values[index] = hash.String()
+	}
+	return values
 }

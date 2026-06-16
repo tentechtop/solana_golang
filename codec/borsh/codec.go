@@ -245,6 +245,14 @@ func (reader *Reader) EnsureEOF() error {
 	return nil
 }
 
+// Remaining 返回剩余字节数 + 兼容旧账户格式时需要先判断是否存在可选字段。
+func (reader *Reader) Remaining() int {
+	if reader == nil || reader.reader == nil {
+		return 0
+	}
+	return reader.reader.Len()
+}
+
 // NewEnvelope 创建 Borsh raw envelope + 数据库存储链上 bytes 时补齐 schema 元信息。
 func NewEnvelope(schemaType string, version uint16, schemaID string, payload []byte) (schema.Envelope, error) {
 	return schema.NewEnvelope(schemaType, version, schema.CodecBorsh, schemaID, payload)

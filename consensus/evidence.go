@@ -60,7 +60,9 @@ func (evidence DoubleVoteEvidence) Validate() error {
 	if evidence.FirstVote.Slot != evidence.SecondVote.Slot {
 		return fmt.Errorf("consensus: votes are not in same slot")
 	}
-	if evidence.FirstVote.Type == evidence.SecondVote.Type && evidence.FirstVote.BlockHash == evidence.SecondVote.BlockHash {
+	if evidence.FirstVote.Type == evidence.SecondVote.Type &&
+		evidence.FirstVote.BlockHeight == evidence.SecondVote.BlockHeight &&
+		evidence.FirstVote.BlockHash == evidence.SecondVote.BlockHash {
 		return fmt.Errorf("consensus: votes are identical")
 	}
 	return nil

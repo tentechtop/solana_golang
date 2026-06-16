@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
@@ -38,7 +40,7 @@ func (node *posNode) SendTransaction(ctx context.Context, encodedTransaction str
 	if err != nil {
 		return "", fmt.Errorf("posnode: unmarshal transaction: %w", err)
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "send_transaction")
 }
 
 func (node *posNode) GetBlock(ctx context.Context, slot uint64) (rpc.BlockResult, error) {
@@ -79,7 +81,10 @@ func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, l
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "treasury_transfer",
+		slog.String("destination", destinationKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
 }
 
 func (node *posNode) Transfer(ctx context.Context, sourceSeed string, destination string, lamports uint64) (string, error) {
@@ -95,7 +100,11 @@ func (node *posNode) Transfer(ctx context.Context, sourceSeed string, destinatio
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "transfer",
+		slog.String("source", source.PublicKey.String()),
+		slog.String("destination", destinationKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
 }
 
 func (node *posNode) RegisterValidator(ctx context.Context, stakerSeed string, validatorSeed string, consensusSeed string, peerID string, stakeLamports uint64) (string, error) {
@@ -115,7 +124,13 @@ func (node *posNode) RegisterValidator(ctx context.Context, stakerSeed string, v
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "register_validator",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorAccount.PublicKey.String()),
+		slog.String("consensus_public_key", consensusKey.PublicKey.String()),
+		slog.String("peer_id", strings.TrimSpace(peerID)),
+		slog.Uint64("stake_lamports", stakeLamports),
+	)
 }
 
 func (node *posNode) Stake(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64) (string, error) {
@@ -131,7 +146,11 @@ func (node *posNode) Stake(ctx context.Context, stakerSeed string, validatorAddr
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "stake",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
 }
 
 func (node *posNode) Unstake(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64, unlockEpoch uint64) (string, error) {
@@ -147,7 +166,12 @@ func (node *posNode) Unstake(ctx context.Context, stakerSeed string, validatorAd
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "unstake",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorKey.String()),
+		slog.Uint64("lamports", lamports),
+		slog.Uint64("unlock_epoch", unlockEpoch),
+	)
 }
 
 func (node *posNode) SlashValidator(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64) (string, error) {
@@ -163,7 +187,11 @@ func (node *posNode) SlashValidator(ctx context.Context, stakerSeed string, vali
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "slash_validator",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
 }
 
 func (node *posNode) JailValidator(ctx context.Context, stakerSeed string, validatorAddress string, jailUntilEpoch uint64) (string, error) {
@@ -179,7 +207,11 @@ func (node *posNode) JailValidator(ctx context.Context, stakerSeed string, valid
 	if err != nil {
 		return "", err
 	}
-	return node.submitTransaction(ctx, transaction)
+	return node.submitTransaction(ctx, transaction, "jail_validator",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorKey.String()),
+		slog.Uint64("jail_until_epoch", jailUntilEpoch),
+	)
 }
 
 func (node *posNode) GetValidatorSet(ctx context.Context) (rpc.ValidatorSetResult, error) {
@@ -224,16 +256,48 @@ func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 	}, nil
 }
 
-func (node *posNode) submitTransaction(ctx context.Context, transaction structure.Transaction) (string, error) {
+func (node *posNode) submitTransaction(ctx context.Context, transaction structure.Transaction, action string, attrs ...slog.Attr) (transactionID string, err error) {
+	startedAt := time.Now()
+	head := node.ledger.Head()
+	defer func() {
+		node.logRPCTransactionSubmit(ctx, action, transactionID, head, startedAt, err, attrs...)
+	}()
 	if err := node.addTransaction(transaction); err != nil {
 		return "", err
 	}
-	transactionID, err := transaction.TxIDString()
+	transactionID, err = transaction.TxIDString()
 	if err != nil {
 		return "", err
 	}
 	node.broadcastTransaction(ctx, transaction)
 	return transactionID, nil
+}
+
+func (node *posNode) logRPCTransactionSubmit(
+	ctx context.Context,
+	action string,
+	transactionID string,
+	head blockchain.Head,
+	startedAt time.Time,
+	err error,
+	attrs ...slog.Attr,
+) {
+	logAttrs := []slog.Attr{
+		slog.String("action", action),
+		slog.String("tx_id", transactionID),
+		slog.Uint64("head_height", head.Height),
+		slog.Uint64("head_slot", head.Slot),
+		slog.String("head_hash", head.BlockHash.String()),
+		slog.String("qc_hash", head.QCHash.String()),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	}
+	logAttrs = append(logAttrs, attrs...)
+	if err != nil {
+		logAttrs = append(logAttrs, slog.Any("error", err))
+		node.logger.LogAttrs(ctx, slog.LevelError, "posnode rpc transaction submit failed", logAttrs...)
+		return
+	}
+	node.logger.LogAttrs(ctx, slog.LevelInfo, "posnode rpc transaction submitted", logAttrs...)
 }
 
 func keyPairFromSeed(seedText string) (structure.SolanaKeyPair, error) {

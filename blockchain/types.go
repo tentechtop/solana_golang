@@ -63,9 +63,11 @@ type ForkDecision struct {
 }
 
 type storedProposal struct {
-	Header          consensus.BlockHeader `json:"header"`
-	Transactions    []string              `json:"transactions"`
-	LeaderSignature string                `json:"leader_signature"`
+	Header          consensus.BlockHeader         `json:"header"`
+	Transactions    []string                      `json:"transactions"`
+	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
+	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
+	LeaderSignature string                        `json:"leader_signature"`
 }
 
 type storedHead struct {

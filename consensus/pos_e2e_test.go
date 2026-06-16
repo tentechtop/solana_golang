@@ -67,7 +67,7 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash proposal: %v", err)
 	}
-	confirmQC := collectQC(t, epochZero, VoteTypeConfirm, 1, proposalHash)
+	confirmQC := collectQC(t, epochZero, VoteTypeConfirm, 1, 1, proposalHash)
 	if confirmQC.ThresholdStake != expectedTwoThirdsThreshold(fixture.stakes) || confirmQC.ConfirmedStake < confirmQC.ThresholdStake {
 		t.Fatalf("confirm qc = %+v, want two thirds threshold", confirmQC)
 	}
@@ -104,7 +104,7 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		t.Fatalf("destination balance was not increased by transfer amount")
 	}
 
-	skipQC := collectQC(t, epochOne, VoteTypeSkip, 34, structure.Hash{})
+	skipQC := collectQC(t, epochOne, VoteTypeSkip, 34, 0, structure.Hash{})
 	if skipQC.Type != VoteTypeSkip || skipQC.ThresholdStake != expectedTwoThirdsThreshold(fixture.stakes) {
 		t.Fatalf("skip qc = %+v, want two thirds threshold", skipQC)
 	}
@@ -127,6 +127,77 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 	evidence := DoubleProposalEvidence{FirstProposal: transferProposal, SecondProposal: emptyProposal}
 	if err := evidence.Validate(nextLeaderKeyPair.PublicKey); err != nil {
 		t.Fatalf("validate double proposal evidence: %v", err)
+	}
+}
+
+func TestValidatorJoinsOnlyAfterRegisterStakeTransaction(t *testing.T) {
+	fixture := newPoSTestFixture(t)
+	executor := newPoSTestExecutor(t)
+	if count := fixture.registeredValidatorCount(t, fixture.state); count != 0 {
+		t.Fatalf("registered validators before transaction = %d, want 0", count)
+	}
+
+	bootstrapSet := fixture.validatorSetFromIndexes(t, 0)
+	seed := mustHashFromText(t, "bootstrap-seed")
+	epochZero := mustEpochSnapshot(t, 0, 1, 32, seed, bootstrapSet)
+	scheduleZero := mustLeaderSchedule(t, epochZero)
+	leaderID, err := scheduleZero.LeaderForSlot(1)
+	if err != nil {
+		t.Fatalf("leader for slot 1: %v", err)
+	}
+	registerInstruction, err := stake.NewRegisterValidatorInstruction(
+		fixture.consensusKeys[1].PublicKey,
+		"peer-join-1",
+		0,
+		fixture.stakes[1],
+	)
+	if err != nil {
+		t.Fatalf("new register instruction: %v", err)
+	}
+	registerTransaction := fixture.signStakeTransaction(t, 1, registerInstruction)
+	producer := BlockProducer{ChainID: "pos-e2e", Executor: executor}
+	proposal, registeredState, err := producer.ProduceBlock(context.Background(), ProduceBlockRequest{
+		Slot:           1,
+		Height:         1,
+		EpochSnapshot:  epochZero,
+		Schedule:       scheduleZero,
+		ParentHash:     mustHashFromText(t, "join-genesis"),
+		PreviousQCHash: mustHashFromText(t, "join-genesis-qc"),
+		ParentState:    fixture.state,
+		Transactions:   []structure.Transaction{registerTransaction},
+		BlockhashQueue: fixture.blockhashQueue,
+		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+	})
+	if err != nil {
+		t.Fatalf("produce register block: %v", err)
+	}
+
+	verifier := ProposalVerifier{ChainID: "pos-e2e", Executor: executor}
+	verifiedState, err := verifier.VerifyProposal(context.Background(), VerifyProposalRequest{
+		Proposal:       proposal,
+		EpochSnapshot:  epochZero,
+		Schedule:       scheduleZero,
+		ParentHash:     mustHashFromText(t, "join-genesis"),
+		ParentState:    fixture.state,
+		BlockhashQueue: fixture.blockhashQueue,
+		Leader:         fixture.validatorByID(t, epochZero, leaderID),
+	})
+	if err != nil {
+		t.Fatalf("verify register block: %v", err)
+	}
+	assertSameStateRoot(t, registeredState, verifiedState)
+
+	joinedSet := fixture.validatorSetFromRegisteredStakeAccounts(t, verifiedState)
+	joinedValidators := joinedSet.Validators()
+	if len(joinedValidators) != 1 {
+		t.Fatalf("joined validator count = %d, want 1", len(joinedValidators))
+	}
+	joinedID := NewValidatorID(fixture.consensusKeys[1].PublicKey)
+	if joinedValidators[0].ValidatorID != joinedID {
+		t.Fatalf("joined validator = %s, want %s", joinedValidators[0].ValidatorID, joinedID)
+	}
+	if joinedValidators[0].StakeLamports != fixture.stakes[1] {
+		t.Fatalf("joined stake = %d, want %d", joinedValidators[0].StakeLamports, fixture.stakes[1])
 	}
 }
 
@@ -187,7 +258,11 @@ func (fixture posTestFixture) initialState(t *testing.T) ChainState {
 		accounts = append(accounts, newTestAccount(t, staker.PublicKey, 2_000_000_000, structure.DefaultBuiltinProgramIDs.System, false, nil))
 	}
 	for _, validator := range fixture.validatorKeys {
-		accounts = append(accounts, newTestAccount(t, validator.PublicKey, 0, structure.DefaultBuiltinProgramIDs.Stake, false, nil))
+		minimumBalance, err := structure.MinimumBalanceForRentExemption(0)
+		if err != nil {
+			t.Fatalf("minimum balance: %v", err)
+		}
+		accounts = append(accounts, newTestAccount(t, validator.PublicKey, minimumBalance, structure.DefaultBuiltinProgramIDs.Stake, false, nil))
 	}
 	accounts = append(accounts, newTestAccount(t, structure.DefaultBuiltinProgramIDs.System, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
 	accounts = append(accounts, newTestAccount(t, structure.DefaultBuiltinProgramIDs.Stake, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
@@ -209,6 +284,25 @@ func (fixture posTestFixture) validatorSetFromGenesis(t *testing.T) ValidatorSet
 	set, err := NewValidatorSet(validators)
 	if err != nil {
 		t.Fatalf("new genesis validator set: %v", err)
+	}
+	return set
+}
+
+func (fixture posTestFixture) validatorSetFromIndexes(t *testing.T, indexes ...int) ValidatorSet {
+	t.Helper()
+	validators := make([]ValidatorState, 0, len(indexes))
+	for _, index := range indexes {
+		validators = append(validators, ValidatorState{
+			AccountAddress:     fixture.validatorKeys[index].PublicKey,
+			ConsensusPublicKey: fixture.consensusKeys[index].PublicKey,
+			P2PPeerID:          fmt.Sprintf("peer-%d", index),
+			StakeLamports:      fixture.stakes[index],
+			Status:             ValidatorStatusActive,
+		})
+	}
+	set, err := NewValidatorSet(validators)
+	if err != nil {
+		t.Fatalf("new indexed validator set: %v", err)
 	}
 	return set
 }
@@ -236,6 +330,50 @@ func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state 
 		t.Fatalf("new stake validator set: %v", err)
 	}
 	return set
+}
+
+func (fixture posTestFixture) validatorSetFromRegisteredStakeAccounts(t *testing.T, state ChainState) ValidatorSet {
+	t.Helper()
+	validators := make([]ValidatorState, 0, len(fixture.validatorKeys))
+	for _, validator := range fixture.validatorKeys {
+		account := mustFindAccount(t, state, validator.PublicKey)
+		if len(account.Account.Data) == 0 {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil {
+			t.Fatalf("decode stake state: %v", err)
+		}
+		validators = append(validators, ValidatorState{
+			AccountAddress:     validator.PublicKey,
+			ConsensusPublicKey: stakeState.ConsensusPublicKey,
+			P2PPeerID:          stakeState.P2PPeerID,
+			StakeLamports:      stakeState.ActiveStake + stakeState.PendingStake,
+			Status:             ValidatorStatusActive,
+			CommissionBps:      stakeState.CommissionBps,
+		})
+	}
+	set, err := NewValidatorSet(validators)
+	if err != nil {
+		t.Fatalf("new registered validator set: %v", err)
+	}
+	return set
+}
+
+func (fixture posTestFixture) registeredValidatorCount(t *testing.T, state ChainState) int {
+	t.Helper()
+	count := 0
+	for _, validator := range fixture.validatorKeys {
+		account := mustFindAccount(t, state, validator.PublicKey)
+		if len(account.Account.Data) == 0 {
+			continue
+		}
+		if _, err := stake.UnmarshalValidatorStateBinary(account.Account.Data); err != nil {
+			t.Fatalf("decode registered validator: %v", err)
+		}
+		count++
+	}
+	return count
 }
 
 func (fixture posTestFixture) registerTransactions(t *testing.T) []structure.Transaction {
@@ -336,7 +474,7 @@ func (fixture posTestFixture) validatorByID(t *testing.T, snapshot EpochSnapshot
 	return validator
 }
 
-func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uint64, blockHash structure.Hash) QuorumCertificate {
+func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uint64, blockHeight uint64, blockHash structure.Hash) QuorumCertificate {
 	t.Helper()
 	collector, err := NewVoteCollector(snapshot.StakeMap(), Quorum{Numerator: 2, Denominator: 3})
 	if err != nil {
@@ -350,6 +488,7 @@ func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uin
 		vote := Vote{
 			Type:               voteType,
 			Slot:               slot,
+			BlockHeight:        blockHeight,
 			BlockHash:          blockHash,
 			VoterID:            string(validator.ValidatorID),
 			Stake:              validator.StakeLamports,

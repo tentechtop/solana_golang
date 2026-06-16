@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"log/slog"
 
 	"solana_golang/structure"
 )
@@ -23,6 +24,7 @@ type TransactionSimulationInput struct {
 	BuiltinPrograms structure.BuiltinProgramIDs
 	Programs        []Program
 	FallbackProgram Program
+	Logger          *slog.Logger
 }
 
 // TransactionSimulator 执行交易模拟 + 只返回写集不直接提交数据库。
@@ -213,6 +215,7 @@ func executeSimulatedInstruction(
 		RentConfig:       input.RentConfig,
 		ComputeBudget:    input.ComputeBudget,
 		BuiltinPrograms:  input.BuiltinPrograms,
+		Logger:           input.Logger,
 	})
 }
 

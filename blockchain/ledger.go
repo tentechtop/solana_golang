@@ -1,8 +1,10 @@
 package blockchain
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"solana_golang/database"
 	"solana_golang/programs/stake"
 	"solana_golang/structure"
+	"solana_golang/utils"
 )
 
 var (
@@ -24,6 +27,7 @@ var (
 type Ledger struct {
 	mutex  sync.RWMutex
 	db     database.Database
+	logger *slog.Logger
 	head   Head
 	state  consensus.ChainState
 	closed bool
@@ -45,6 +49,12 @@ func NewLedgerFromGenesis(db database.Database, genesis GenesisConfig) (*Ledger,
 		}
 	}
 	return ledger, nil
+}
+
+func (ledger *Ledger) SetLogger(logger *slog.Logger) {
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	ledger.logger = utils.EnsureLogger(logger)
 }
 
 // LoadOrCreateLedger 加载已有账本或创建 genesis + 节点重启后不能回到创世状态。
@@ -134,8 +144,14 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 }
 
 // CommitBlock 提交已验证区块 + 区块、账户、索引、QC 和链头必须一起更新。
-func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (Head, error) {
+func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (committedHead Head, err error) {
+	startedAt := time.Now()
+	var blockHash structure.Hash
 	ledger.mutex.Lock()
+	logger := ledger.loggerLocked()
+	defer func() {
+		logCommitBlock(logger, request, blockHash, committedHead, startedAt, err)
+	}()
 	defer ledger.mutex.Unlock()
 	if ledger.closed {
 		return Head{}, ErrLedgerClosed
@@ -143,7 +159,7 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (Head, error) {
 	if err := request.validate(ledger.head); err != nil {
 		return Head{}, err
 	}
-	blockHash, err := request.Proposal.Hash()
+	blockHash, err = request.Proposal.Hash()
 	if err != nil {
 		return Head{}, fmt.Errorf("blockchain: hash proposal: %w", err)
 	}
@@ -190,13 +206,18 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (Head, error) {
 }
 
 // SaveBlockCandidate 保存候选分叉块 + 不改变主链头，供后续裁决重组使用。
-func (ledger *Ledger) SaveBlockCandidate(request CommitBlockRequest) (structure.Hash, error) {
+func (ledger *Ledger) SaveBlockCandidate(request CommitBlockRequest) (blockHash structure.Hash, err error) {
+	startedAt := time.Now()
 	ledger.mutex.Lock()
+	logger := ledger.loggerLocked()
+	defer func() {
+		logBlockCandidate(logger, request, blockHash, startedAt, err)
+	}()
 	defer ledger.mutex.Unlock()
 	if ledger.closed {
 		return structure.Hash{}, ErrLedgerClosed
 	}
-	blockHash, err := request.Proposal.Hash()
+	blockHash, err = request.Proposal.Hash()
 	if err != nil {
 		return structure.Hash{}, fmt.Errorf("blockchain: hash candidate block: %w", err)
 	}
@@ -220,8 +241,18 @@ func (ledger *Ledger) SaveBlockCandidate(request CommitBlockRequest) (structure.
 }
 
 // ReorganizeTo 执行链重组 + 读链视图使用同一个快照，写入一次事务原子提交。
-func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (ForkDecision, error) {
+func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (decision ForkDecision, err error) {
+	startedAt := time.Now()
+	finalizedProtection := false
+	oldHead := Head{}
+	loggedHead := Head{}
 	ledger.mutex.Lock()
+	logger := ledger.loggerLocked()
+	oldHead = ledger.head
+	loggedHead = ledger.head
+	defer func() {
+		logReorg(logger, newTipHash, oldHead, loggedHead, decision, finalizedProtection, startedAt, err)
+	}()
 	defer ledger.mutex.Unlock()
 	if ledger.closed {
 		return ForkDecision{}, ErrLedgerClosed
@@ -248,6 +279,7 @@ func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (ForkDecision, err
 		return ForkDecision{}, err
 	}
 	if commonAncestor.Height < ledger.head.FinalizedHeight {
+		finalizedProtection = true
 		return ForkDecision{}, fmt.Errorf("%w: common ancestor is below finalized height", ErrInvalidCommit)
 	}
 	nextState, err := loadStateSnapshot(readTx, newTipHash)
@@ -288,19 +320,28 @@ func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (ForkDecision, err
 	}
 	ledger.head = nextHead
 	ledger.state = nextState
-	return ForkDecision{
+	loggedHead = nextHead
+	decision = ForkDecision{
 		Accepted:       true,
 		Reorganized:    len(oldBlocks) > 0,
 		CommonAncestor: commonAncestor,
 		OldBlocks:      oldBlocks,
 		NewBlocks:      newBlocks,
 		Reason:         "candidate selected by fork choice",
-	}, nil
+	}
+	return decision, nil
 }
 
 // SaveQC 保存最高 QC + 下一次出块必须引用最新确认凭证。
-func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (Head, error) {
+func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, err error) {
+	startedAt := time.Now()
+	var qcHash structure.Hash
 	ledger.mutex.Lock()
+	logger := ledger.loggerLocked()
+	savedHead = ledger.head
+	defer func() {
+		logQCSave(logger, qc, qcHash, savedHead, startedAt, err)
+	}()
 	defer ledger.mutex.Unlock()
 	if ledger.closed {
 		return Head{}, ErrLedgerClosed
@@ -308,7 +349,7 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (Head, error) {
 	if err := qc.Validate(); err != nil {
 		return Head{}, err
 	}
-	qcHash, err := HashQC(qc)
+	qcHash, err = HashQC(qc)
 	if err != nil {
 		return Head{}, err
 	}
@@ -334,6 +375,53 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (Head, error) {
 	}
 	ledger.head = nextHead
 	return nextHead, nil
+}
+
+// RewardQCs 读取已达到 finalized 高度的 QC + leader 出块时用它们确定性生成投票奖励。
+func (ledger *Ledger) RewardQCs(maxBlockHeight uint64, limit int) ([]consensus.QuorumCertificate, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return nil, ErrLedgerClosed
+	}
+	if ledger.db == nil || maxBlockHeight == 0 || limit <= 0 {
+		return nil, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("blockchain: begin reward qc snapshot: %w", err)
+	}
+	defer readTx.Close()
+	values, err := readTx.PrefixQuery(database.TableChain, qcKeyPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("blockchain: read reward qcs: %w", err)
+	}
+	qcs := make([]consensus.QuorumCertificate, 0, len(values))
+	for _, value := range values {
+		qc, err := consensus.UnmarshalCertificateBinary(value.Value)
+		if err != nil {
+			return nil, err
+		}
+		if qc.Type != consensus.VoteTypeConfirm || qc.BlockHeight == 0 || qc.BlockHeight > maxBlockHeight {
+			continue
+		}
+		qcs = append(qcs, qc)
+	}
+	sort.Slice(qcs, func(leftIndex int, rightIndex int) bool {
+		left := qcs[leftIndex]
+		right := qcs[rightIndex]
+		if left.BlockHeight != right.BlockHeight {
+			return left.BlockHeight < right.BlockHeight
+		}
+		if left.Slot != right.Slot {
+			return left.Slot < right.Slot
+		}
+		return left.BlockHash.String() < right.BlockHash.String()
+	})
+	if len(qcs) > limit {
+		qcs = qcs[:limit]
+	}
+	return qcs, nil
 }
 
 // State 返回账户状态快照 + 调用方不能修改账本内部切片。
@@ -394,12 +482,16 @@ func ValidatorSetFromState(state consensus.ChainState) (consensus.ValidatorSet, 
 			continue
 		}
 		validators = append(validators, consensus.ValidatorState{
-			AccountAddress:     account.Address,
-			ConsensusPublicKey: stakeState.ConsensusPublicKey,
-			P2PPeerID:          stakeState.P2PPeerID,
-			StakeLamports:      stakeState.ActiveStake + stakeState.PendingStake,
-			Status:             consensus.ValidatorStatusActive,
-			CommissionBps:      stakeState.CommissionBps,
+			AccountAddress:      account.Address,
+			ConsensusPublicKey:  stakeState.ConsensusPublicKey,
+			P2PPeerID:           stakeState.P2PPeerID,
+			StakeLamports:       stakeState.ActiveStake + stakeState.PendingStake,
+			Status:              consensus.ValidatorStatusActive,
+			CommissionBps:       stakeState.CommissionBps,
+			LastVotedSlot:       stakeState.LastVoteSlot,
+			MissedProposalCount: stakeState.MissedProposalCount,
+			MissedVoteCount:     stakeState.MissedVoteCount,
+			JailUntilEpoch:      stakeState.JailUntilEpoch,
 		})
 	}
 	return consensus.NewValidatorSet(validators)
@@ -571,6 +663,139 @@ func cloneState(state consensus.ChainState) consensus.ChainState {
 	return consensus.ChainState{Accounts: accounts}
 }
 
+func (ledger *Ledger) loggerLocked() *slog.Logger {
+	return utils.EnsureLogger(ledger.logger)
+}
+
+func logCommitBlock(
+	logger *slog.Logger,
+	request CommitBlockRequest,
+	blockHash structure.Hash,
+	head Head,
+	startedAt time.Time,
+	err error,
+) {
+	attrs := []slog.Attr{
+		slog.String("chain_id", request.Proposal.Header.ChainID),
+		slog.Uint64("slot", request.Proposal.Header.Slot),
+		slog.Uint64("height", request.Proposal.Header.Height),
+		slog.String("block_hash", blockHash.String()),
+		slog.String("parent_hash", request.Proposal.Header.ParentHash.String()),
+		slog.String("leader_id", string(request.Proposal.Header.LeaderID)),
+		slog.Int("tx_count", len(request.Proposal.Transactions)),
+		slog.Int("reward_count", len(request.Proposal.Rewards)),
+		slog.String("qc_hash", head.QCHash.String()),
+		slog.Uint64("finalized_height", head.FinalizedHeight),
+		slog.String("finalized_hash", head.FinalizedHash.String()),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.Any("error", err))
+		logger.LogAttrs(context.Background(), slog.LevelError, "ledger commit block failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "ledger commit block committed", attrs...)
+}
+
+func logBlockCandidate(
+	logger *slog.Logger,
+	request CommitBlockRequest,
+	blockHash structure.Hash,
+	startedAt time.Time,
+	err error,
+) {
+	attrs := []slog.Attr{
+		slog.String("chain_id", request.Proposal.Header.ChainID),
+		slog.Uint64("slot", request.Proposal.Header.Slot),
+		slog.Uint64("height", request.Proposal.Header.Height),
+		slog.String("block_hash", blockHash.String()),
+		slog.String("parent_hash", request.Proposal.Header.ParentHash.String()),
+		slog.String("leader_id", string(request.Proposal.Header.LeaderID)),
+		slog.Int("tx_count", len(request.Proposal.Transactions)),
+		slog.Int("reward_count", len(request.Proposal.Rewards)),
+		slog.String("state_root", request.Proposal.Header.StateRoot.String()),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.Any("error", err))
+		logger.LogAttrs(context.Background(), slog.LevelError, "ledger save block candidate failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "ledger block candidate saved", attrs...)
+}
+
+func logReorg(
+	logger *slog.Logger,
+	newTipHash structure.Hash,
+	oldHead Head,
+	newHead Head,
+	decision ForkDecision,
+	finalizedProtection bool,
+	startedAt time.Time,
+	err error,
+) {
+	attrs := []slog.Attr{
+		slog.String("new_tip_hash", newTipHash.String()),
+		slog.Uint64("old_head_height", oldHead.Height),
+		slog.String("old_head_hash", oldHead.BlockHash.String()),
+		slog.Bool("accepted", decision.Accepted),
+		slog.Bool("reorganized", decision.Reorganized),
+		slog.String("reason", decision.Reason),
+		slog.Bool("finalized_protection", finalizedProtection),
+		slog.Uint64("common_ancestor_height", decision.CommonAncestor.Height),
+		slog.String("common_ancestor_hash", decision.CommonAncestor.BlockHash.String()),
+		slog.Uint64("new_head_height", newHead.Height),
+		slog.String("new_head_hash", newHead.BlockHash.String()),
+		slog.Uint64("finalized_height", newHead.FinalizedHeight),
+		slog.String("finalized_hash", newHead.FinalizedHash.String()),
+		slog.Any("old_chain_blocks", hashesToStrings(decision.OldBlocks)),
+		slog.Any("new_chain_blocks", hashesToStrings(decision.NewBlocks)),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.Any("error", err))
+		logger.LogAttrs(context.Background(), slog.LevelError, "ledger reorg failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "ledger reorg decided", attrs...)
+}
+
+func logQCSave(
+	logger *slog.Logger,
+	qc consensus.QuorumCertificate,
+	qcHash structure.Hash,
+	head Head,
+	startedAt time.Time,
+	err error,
+) {
+	attrs := []slog.Attr{
+		slog.Uint64("slot", qc.Slot),
+		slog.Uint64("height", qc.BlockHeight),
+		slog.String("block_hash", qc.BlockHash.String()),
+		slog.String("qc_hash", qcHash.String()),
+		slog.Uint64("confirmed_stake", qc.ConfirmedStake),
+		slog.Uint64("threshold_stake", qc.ThresholdStake),
+		slog.Int("voter_count", len(qc.Voters)),
+		slog.Uint64("head_height", head.Height),
+		slog.String("head_hash", head.BlockHash.String()),
+		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
+	}
+	if err != nil {
+		attrs = append(attrs, slog.Any("error", err))
+		logger.LogAttrs(context.Background(), slog.LevelError, "ledger save qc failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "ledger qc saved", attrs...)
+}
+
+func hashesToStrings(hashes []structure.Hash) []string {
+	values := make([]string, len(hashes))
+	for index, hash := range hashes {
+		values[index] = hash.String()
+	}
+	return values
+}
+
 func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash structure.Hash, head Head) error {
 	operations, err := ledger.collectBlockStorageOps(request.Proposal, blockHash, request.NextState)
 	if err != nil {
@@ -706,6 +931,8 @@ func marshalProposal(proposal consensus.BlockProposal) ([]byte, error) {
 	payload := storedProposal{
 		Header:          proposal.Header,
 		Transactions:    transactions,
+		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: encodeBytes(proposal.LeaderSignature[:]),
 	}
 	return json.Marshal(payload)
@@ -739,6 +966,8 @@ func unmarshalProposal(data []byte) (consensus.BlockProposal, error) {
 	return consensus.BlockProposal{
 		Header:          payload.Header,
 		Transactions:    transactions,
+		RewardQCs:       append([]consensus.QuorumCertificate(nil), payload.RewardQCs...),
+		Rewards:         append([]consensus.BlockReward(nil), payload.Rewards...),
 		LeaderSignature: signature,
 	}, nil
 }

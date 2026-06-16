@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"log/slog"
 
 	"solana_golang/structure"
 )
@@ -19,6 +20,7 @@ type InstructionContext struct {
 	RentConfig       structure.RentConfig
 	ComputeBudget    structure.ComputeBudgetLimits
 	BuiltinPrograms  structure.BuiltinProgramIDs
+	Logger           *slog.Logger
 }
 
 // Program 定义固定程序接口 + runtime 只依赖接口防止 import 具体 programs 形成循环引用。

@@ -84,9 +84,11 @@ type leaderSlotJSON struct {
 }
 
 type posProposalJSON struct {
-	Header          consensus.BlockHeader `json:"header"`
-	Transactions    []string              `json:"transactions"`
-	LeaderSignature structure.Signature   `json:"leader_signature"`
+	Header          consensus.BlockHeader         `json:"header"`
+	Transactions    []string                      `json:"transactions"`
+	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
+	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
+	LeaderSignature structure.Signature           `json:"leader_signature"`
 }
 
 func encodeTransactionMessage(transaction structure.Transaction) (p2p.Message, error) {
@@ -177,6 +179,8 @@ func proposalToJSON(proposal consensus.BlockProposal) (posProposalJSON, error) {
 	return posProposalJSON{
 		Header:          proposal.Header,
 		Transactions:    transactions,
+		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: proposal.LeaderSignature,
 	}, nil
 }
@@ -197,6 +201,8 @@ func proposalFromJSON(proposal posProposalJSON) (consensus.BlockProposal, error)
 	return consensus.BlockProposal{
 		Header:          proposal.Header,
 		Transactions:    transactions,
+		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: proposal.LeaderSignature,
 	}, nil
 }
