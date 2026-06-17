@@ -400,6 +400,11 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 
 // Validate 校验验证者状态 + 防止非法状态进入 epoch snapshot。
 func (state ValidatorState) Validate() error {
+	return state.validate(true)
+}
+
+// validate 校验验证者核心字段 + 派生权重重算前允许旧快照短暂落后。
+func (state ValidatorState) validate(checkLastEffectiveStake bool) error {
 	if state.ConsensusPublicKey.IsZero() {
 		return fmt.Errorf("stake: consensus public key is empty")
 	}
@@ -429,7 +434,7 @@ func (state ValidatorState) Validate() error {
 		return fmt.Errorf("stake: stake overflow")
 	}
 	totalBondedStake += state.UnlockingStake
-	if state.LastEffectiveStake > totalBondedStake {
+	if checkLastEffectiveStake && state.LastEffectiveStake > totalBondedStake {
 		return fmt.Errorf("stake: effective stake exceeds bonded stake")
 	}
 	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting && state.Status != ValidatorStatusJailed {
@@ -440,7 +445,7 @@ func (state ValidatorState) Validate() error {
 
 // EffectiveStakeAtEpoch 计算 epoch 生效权重 + 避免 pending stake 在当前 epoch 立即影响共识。
 func EffectiveStakeAtEpoch(state ValidatorState, epochID uint64) (uint64, error) {
-	if err := state.Validate(); err != nil {
+	if err := state.validate(false); err != nil {
 		return 0, err
 	}
 	if state.Status == ValidatorStatusJailed && state.JailUntilEpoch > epochID {

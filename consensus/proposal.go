@@ -75,19 +75,25 @@ func (producer BlockProducer) ProduceBlock(
 	includedTransactions := make([]structure.Transaction, 0, len(request.Transactions))
 	receipts := make([]structure.Hash, 0, len(request.Transactions))
 	feeDetails := make([]structure.FeeDetails, 0, len(request.Transactions))
+	processedTransactionIDs := make(map[string]struct{}, len(request.Transactions))
 	for transactionIndex, transaction := range request.Transactions {
 		if len(includedTransactions) >= MaxProposalTransactions {
 			break
 		}
-		result, err := producer.executeTransaction(contextValue, request, transaction, nextState)
+		result, err := producer.executeTransaction(contextValue, request, transaction, nextState, processedTransactionIDs)
 		if err != nil {
 			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: execute transaction %d: %w", transactionIndex, err)
 		}
 		if result.Execution.Status != structure.TransactionStatusConfirmed {
 			continue
 		}
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: transaction id %d: %w", transactionIndex, err)
+		}
+		processedTransactionIDs[transactionID] = struct{}{}
 		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
-		includedTransactions = append(includedTransactions, markTransactionConfirmed(transaction))
+		includedTransactions = append(includedTransactions, markTransactionConfirmed(transaction, result.Execution.FeeDetails.TotalFee))
 		feeDetails = append(feeDetails, result.Execution.FeeDetails)
 		receiptHash, err := hashReceipt(result.Execution)
 		if err != nil {
@@ -166,14 +172,20 @@ func (verifier ProposalVerifier) VerifyProposal(
 	nextState := request.ParentState.clone()
 	receipts := make([]structure.Hash, 0, len(request.Proposal.Transactions))
 	feeDetails := make([]structure.FeeDetails, 0, len(request.Proposal.Transactions))
+	processedTransactionIDs := make(map[string]struct{}, len(request.Proposal.Transactions))
 	for transactionIndex, transaction := range request.Proposal.Transactions {
-		result, err := verifier.executeVerifyTransaction(contextValue, request, transaction, nextState)
+		result, err := verifier.executeVerifyTransaction(contextValue, request, transaction, nextState, processedTransactionIDs)
 		if err != nil {
 			return ChainState{}, fmt.Errorf("consensus: verify transaction %d: %w", transactionIndex, err)
 		}
 		if result.Execution.Status != structure.TransactionStatusConfirmed {
 			return ChainState{}, fmt.Errorf("consensus: proposal contains failed transaction %d", transactionIndex)
 		}
+		transactionID, err := transaction.TxIDString()
+		if err != nil {
+			return ChainState{}, fmt.Errorf("consensus: transaction id %d: %w", transactionIndex, err)
+		}
+		processedTransactionIDs[transactionID] = struct{}{}
 		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
 		feeDetails = append(feeDetails, result.Execution.FeeDetails)
 		receiptHash, err := hashReceipt(result.Execution)
@@ -303,6 +315,7 @@ func (producer BlockProducer) executeTransaction(
 	request ProduceBlockRequest,
 	transaction structure.Transaction,
 	state ChainState,
+	processedTransactionIDs map[string]struct{},
 ) (runtime.TransactionResult, error) {
 	return producer.Executor.ExecuteTransaction(contextValue, runtime.TransactionRequest{
 		ChainID: producer.ChainID,
@@ -315,6 +328,7 @@ func (producer BlockProducer) executeTransaction(
 			BlockhashQueue: request.BlockhashQueue,
 			CurrentSlot:    request.Slot,
 			CurrentEpoch:   request.EpochSnapshot.EpochID,
+			ProcessedTxIDs: processedTransactionIDs,
 		},
 	})
 }
@@ -324,6 +338,7 @@ func (verifier ProposalVerifier) executeVerifyTransaction(
 	request VerifyProposalRequest,
 	transaction structure.Transaction,
 	state ChainState,
+	processedTransactionIDs map[string]struct{},
 ) (runtime.TransactionResult, error) {
 	return verifier.Executor.ExecuteTransaction(contextValue, runtime.TransactionRequest{
 		ChainID: verifier.ChainID,
@@ -336,6 +351,7 @@ func (verifier ProposalVerifier) executeVerifyTransaction(
 			BlockhashQueue: request.BlockhashQueue,
 			CurrentSlot:    request.Proposal.Header.Slot,
 			CurrentEpoch:   request.EpochSnapshot.EpochID,
+			ProcessedTxIDs: processedTransactionIDs,
 		},
 	})
 }
@@ -492,9 +508,10 @@ func hashReceipt(result structure.TransactionExecutionResult) (structure.Hash, e
 	return structure.NewHash(utils.SHA256(encoded))
 }
 
-func markTransactionConfirmed(transaction structure.Transaction) structure.Transaction {
+func markTransactionConfirmed(transaction structure.Transaction, feeLamports uint64) structure.Transaction {
 	nextTransaction := transaction.Clone()
 	nextTransaction.Status = structure.TransactionStatusConfirmed
+	nextTransaction.Fee = feeLamports
 	return nextTransaction
 }
 

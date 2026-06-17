@@ -663,7 +663,7 @@ func (node *posNode) lookupMempoolTransaction(signature string) (rpc.Transaction
 		if transactionID != signature {
 			continue
 		}
-		return buildTransactionDetailResult(signature, transaction.Clone(), "mempool", "pending", 0, 0, structure.Hash{}, false), true, nil
+		return buildTransactionDetailResult(signature, transaction.Clone(), "mempool", "pending", 0, 0, structure.Hash{}, "", false), true, nil
 	}
 	return rpc.TransactionDetailResult{}, false, nil
 }
@@ -688,6 +688,7 @@ func (node *posNode) committedTransactionResult(
 		proposal.Header.Height,
 		proposal.Header.Slot,
 		blockHash,
+		proposalLeaderAddress(proposal),
 		finalized,
 	)
 }
@@ -1117,6 +1118,7 @@ func buildTransactionDetailResult(
 	blockHeight uint64,
 	slot uint64,
 	blockHash structure.Hash,
+	leaderAddress string,
 	finalized bool,
 ) rpc.TransactionDetailResult {
 	result := rpc.TransactionDetailResult{
@@ -1130,6 +1132,17 @@ func buildTransactionDetailResult(
 		BlockHeight:         blockHeight,
 		Slot:                slot,
 		Finalized:           finalized,
+	}
+	feeDetails, err := estimateTransactionFeeDetails(transaction)
+	if err == nil {
+		result.FeeLamports = feeDetails.TotalFee
+		result.BaseFeeLamports = feeDetails.BaseFee
+		result.PrioritizationFeeLamports = feeDetails.PrioritizationFee
+		result.BurnedFeeLamports = feeDetails.BurnedFee
+		result.LeaderFeeLamports = feeDetails.ValidatorFee
+	}
+	if leaderAddress != "" {
+		result.LeaderAddress = leaderAddress
 	}
 
 	sender, err := transaction.Sender()
@@ -1145,6 +1158,19 @@ func buildTransactionDetailResult(
 	result.AccountAddresses = transactionAccountAddresses(transaction.Accounts)
 	result.WritableAddresses = transactionWritableAddresses(transaction.Accounts)
 	return result
+}
+
+func proposalLeaderAddress(proposal consensus.BlockProposal) string {
+	for _, reward := range proposal.Rewards {
+		if reward.Type != consensus.RewardTypeLeaderFee {
+			continue
+		}
+		if reward.AccountAddress.IsZero() {
+			continue
+		}
+		return reward.AccountAddress.String()
+	}
+	return ""
 }
 
 func transactionAccountAddresses(accounts []structure.AccountMeta) []string {

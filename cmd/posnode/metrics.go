@@ -9,6 +9,7 @@ import (
 type nodeMetrics struct {
 	blocksProduced    atomic.Uint64
 	proposalsAccepted atomic.Uint64
+	proposalsRejected atomic.Uint64
 	votesSent         atomic.Uint64
 	qcFormed          atomic.Uint64
 	qcReceived        atomic.Uint64
@@ -25,6 +26,7 @@ type nodeMetrics struct {
 type nodeMetricsSnapshot struct {
 	BlocksProduced    uint64 `json:"blocks_produced"`
 	ProposalsAccepted uint64 `json:"proposals_accepted"`
+	ProposalsRejected uint64 `json:"proposals_rejected"`
 	VotesSent         uint64 `json:"votes_sent"`
 	QCFormed          uint64 `json:"qc_formed"`
 	QCReceived        uint64 `json:"qc_received"`
@@ -78,6 +80,7 @@ func (metrics *nodeMetrics) snapshot() nodeMetricsSnapshot {
 	return nodeMetricsSnapshot{
 		BlocksProduced:    metrics.blocksProduced.Load(),
 		ProposalsAccepted: metrics.proposalsAccepted.Load(),
+		ProposalsRejected: metrics.proposalsRejected.Load(),
 		VotesSent:         metrics.votesSent.Load(),
 		QCFormed:          metrics.qcFormed.Load(),
 		QCReceived:        metrics.qcReceived.Load(),
@@ -100,6 +103,10 @@ func (node *posNode) GetMetrics(ctx context.Context) (any, error) {
 func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
 	node.refreshKnownPeersFromHost()
 	head := node.ledger.Head()
+	qcHeight := uint64(0)
+	if headQC, exists, err := node.ledger.HeadQC(); err == nil && exists {
+		qcHeight = headQC.BlockHeight
+	}
 	counters := node.metrics.snapshot()
 	p2pSecure := false
 	p2pConnections := uint64(0)
@@ -141,10 +148,6 @@ func (node *posNode) metricsSnapshot() nodeOperationalMetrics {
 	}
 	turbine := node.turbinePositionForSlotLocked(currentSlot)
 	transactionFastPath := node.transactionFastPathForSlotLocked(currentSlot, true)
-	qcHeight := uint64(0)
-	if !head.QCHash.IsZero() {
-		qcHeight = head.Height
-	}
 	return nodeOperationalMetrics{
 		NodeName:          node.config.NodeName,
 		PeerID:            node.peerKeyPair.peerID,

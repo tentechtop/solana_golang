@@ -112,6 +112,26 @@ func TestEffectiveStakeKeepsUnlockingUntilDeactivationEpoch(t *testing.T) {
 	}
 }
 
+func TestEffectiveStakeRecomputesAfterStakeReduction(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = 2*MinimumStakeLamports - 1
+	state.LastEffectiveStake = 2 * MinimumStakeLamports
+
+	effectiveStake, err := EffectiveStakeAtEpoch(state, 1)
+	if err != nil {
+		t.Fatalf("EffectiveStakeAtEpoch() error = %v", err)
+	}
+	wantEffectiveStake := 2*MinimumStakeLamports - 1
+	if effectiveStake != wantEffectiveStake {
+		t.Fatalf("effective stake = %d, want %d", effectiveStake, wantEffectiveStake)
+	}
+
+	state.LastEffectiveStake = effectiveStake
+	if err := state.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func testValidatorState(t *testing.T) ValidatorState {
 	t.Helper()
 	return ValidatorState{

@@ -102,8 +102,8 @@ func TestFeeCalculatorSplitsBaseAndPriorityFees(t *testing.T) {
 	if feeDetails.TotalFee != 10002 {
 		t.Fatalf("TotalFee = %d, want 10002", feeDetails.TotalFee)
 	}
-	if feeDetails.BurnedFee != 5000 || feeDetails.ValidatorFee != 5002 {
-		t.Fatalf("fee split burned=%d validator=%d, want 5000 and 5002", feeDetails.BurnedFee, feeDetails.ValidatorFee)
+	if feeDetails.BurnedFee != 0 || feeDetails.ValidatorFee != 10002 {
+		t.Fatalf("fee split burned=%d validator=%d, want 0 and 10002", feeDetails.BurnedFee, feeDetails.ValidatorFee)
 	}
 }
 

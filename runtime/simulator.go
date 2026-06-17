@@ -27,6 +27,7 @@ type TransactionSimulationInput struct {
 	BuiltinPrograms structure.BuiltinProgramIDs
 	Programs        []Program
 	FallbackProgram Program
+	ProcessedTxIDs  map[string]struct{}
 	Logger          *slog.Logger
 }
 
@@ -113,6 +114,17 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 		}
 		result.Status = structure.TransactionStatusFailed
 		result.Error = transactionFailure(structure.TransactionErrorCodeSignatureFailure, message)
+		return structure.LoadedTransaction{}, result, result.Validate()
+	}
+	transactionID, err := input.Transaction.TxIDString()
+	if err != nil {
+		result.Status = structure.TransactionStatusFailed
+		result.Error = transactionFailure(structure.TransactionErrorCodeSignatureFailure, err.Error())
+		return structure.LoadedTransaction{}, result, result.Validate()
+	}
+	if _, exists := input.ProcessedTxIDs[transactionID]; exists {
+		result.Status = structure.TransactionStatusFailed
+		result.Error = transactionFailure(structure.TransactionErrorCodeAlreadyProcessed, "transaction already processed")
 		return structure.LoadedTransaction{}, result, result.Validate()
 	}
 
@@ -255,18 +267,7 @@ func executeSimulatedInstruction(
 	input TransactionSimulationInput,
 	registry ProgramRegistry,
 ) error {
-	return registry.Execute(InstructionContext{
-		InstructionIndex: instructionIndex,
-		Instruction:      instruction,
-		Message:          message,
-		Accounts:         accounts,
-		CurrentSlot:      input.CurrentSlot,
-		CurrentEpoch:     input.CurrentEpoch,
-		RentConfig:       input.RentConfig,
-		ComputeBudget:    input.ComputeBudget,
-		BuiltinPrograms:  input.BuiltinPrograms,
-		Logger:           input.Logger,
-	})
+	return ExecuteInstructionSandbox(instructionIndex, instruction, message, accounts, input, registry)
 }
 
 func debitSimulationFee(feePayer structure.PublicKey, totalFee uint64, accounts map[structure.PublicKey]structure.Account, rentConfig structure.RentConfig) error {

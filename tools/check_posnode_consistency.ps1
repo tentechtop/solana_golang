@@ -339,6 +339,7 @@ function New-NodeSnapshot {
         StateRecovery          = [bool](Get-PropertyValue -InputObject $status -Name "state_recovery_enabled" -Default $false)
         StateRoot              = Get-StringProperty -InputObject $metrics -Name "state_root"
         QCHash                 = Get-StringProperty -InputObject $metrics -Name "qc_hash"
+        QCHeight               = Get-UInt64Property -InputObject $metrics -Name "qc_height"
         CurrentLeader          = Get-StringProperty -InputObject $status -Name "current_leader"
         ConsensusSlot          = Get-UInt64Property -InputObject $consensus -Name "slot"
         ConsensusEpoch         = Get-UInt64Property -InputObject $consensus -Name "epoch_id"
@@ -393,7 +394,10 @@ function Test-SnapshotRound {
     foreach ($group in ($Snapshots | Group-Object HeadHeight)) {
         Add-GroupMismatchErrors -Snapshots @($group.Group) -Property "HeadHash" -Label "head hash at height $($group.Name)" -Errors $errors
         Add-GroupMismatchErrors -Snapshots @($group.Group) -Property "StateRoot" -Label "state root at height $($group.Name)" -Errors $errors
-        Add-GroupMismatchErrors -Snapshots @($group.Group) -Property "QCHash" -Label "qc hash at height $($group.Name)" -Errors $errors
+    }
+
+    foreach ($group in ($Snapshots | Where-Object { $_.QCHeight -gt 0 } | Group-Object QCHeight)) {
+        Add-GroupMismatchErrors -Snapshots @($group.Group) -Property "QCHash" -Label "qc hash at qc height $($group.Name)" -Errors $errors
     }
 
     foreach ($group in ($Snapshots | Group-Object FinalizedHeight)) {

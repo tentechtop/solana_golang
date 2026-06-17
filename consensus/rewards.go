@@ -315,6 +315,9 @@ func settleRewardedValidator(
 	input BlockRewardInput,
 	rewards *[]BlockReward,
 ) error {
+	if err := stake.MatureStakeForEpoch(&stakeState, input.EpochID); err != nil {
+		return fmt.Errorf("consensus: mature rewarded stake: %w", err)
+	}
 	rewardLamports, err := calculateVoteReward(stakeState.VoteCredits, input.Config)
 	if err != nil {
 		return err
@@ -375,6 +378,9 @@ func settleJailedValidator(
 	input BlockRewardInput,
 	rewards *[]BlockReward,
 ) error {
+	if err := stake.MatureStakeForEpoch(&stakeState, input.EpochID); err != nil {
+		return fmt.Errorf("consensus: mature jailed stake: %w", err)
+	}
 	validatorID := string(NewValidatorID(stakeState.ConsensusPublicKey))
 	requestedSlash, err := calculateSlashLamports(stakeState, input.Config)
 	if err != nil {
@@ -390,6 +396,11 @@ func settleJailedValidator(
 	nextStakeState.VoteCredits = 0
 	nextStakeState.MissedVoteCount = 0
 	nextStakeState.LastRewardEpoch = input.EpochID
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(nextStakeState, input.EpochID)
+	if err != nil {
+		return fmt.Errorf("consensus: refresh jailed effective stake: %w", err)
+	}
+	nextStakeState.LastEffectiveStake = effectiveStake
 	if burnedLamports > 0 {
 		*rewards = append(*rewards, BlockReward{
 			Type:           RewardTypeSlash,

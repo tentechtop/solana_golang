@@ -46,6 +46,9 @@ func TestHTTPJSONRPCSubmitsSignedTransaction(t *testing.T) {
 	if len(node.mempool) != 1 {
 		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
 	}
+	if node.mempool[0].Fee != structure.LamportsPerSignature {
+		t.Fatalf("mempool fee = %d, want %d", node.mempool[0].Fee, structure.LamportsPerSignature)
+	}
 	if got := node.metrics.transactionsIn.Load(); got != 1 {
 		t.Fatalf("transactionsIn = %d, want 1", got)
 	}
@@ -110,6 +113,18 @@ func TestHTTPJSONRPCGetTransactionReturnsMempoolDetails(t *testing.T) {
 	}
 	if detail.Sender != source.PublicKey.String() {
 		t.Fatalf("detail sender = %s, want %s", detail.Sender, source.PublicKey.String())
+	}
+	if detail.FeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail fee = %d, want %d", detail.FeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.BaseFeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail base fee = %d, want %d", detail.BaseFeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.LeaderFeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail leader fee = %d, want %d", detail.LeaderFeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.BurnedFeeLamports != 0 {
+		t.Fatalf("detail burned fee = %d, want 0", detail.BurnedFeeLamports)
 	}
 	if detail.InstructionCount != 1 {
 		t.Fatalf("detail instruction count = %d, want 1", detail.InstructionCount)
@@ -184,6 +199,18 @@ func TestHTTPJSONRPCGetTransactionReturnsCommittedBlockDetails(t *testing.T) {
 	}
 	if detail.Blockhash != committedHead.BlockHash.String() {
 		t.Fatalf("detail block hash = %s, want %s", detail.Blockhash, committedHead.BlockHash.String())
+	}
+	if detail.FeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail fee = %d, want %d", detail.FeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.BaseFeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail base fee = %d, want %d", detail.BaseFeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.LeaderFeeLamports != structure.LamportsPerSignature {
+		t.Fatalf("detail leader fee = %d, want %d", detail.LeaderFeeLamports, structure.LamportsPerSignature)
+	}
+	if detail.BurnedFeeLamports != 0 {
+		t.Fatalf("detail burned fee = %d, want 0", detail.BurnedFeeLamports)
 	}
 }
 

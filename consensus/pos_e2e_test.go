@@ -100,6 +100,9 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 	if len(transferProposal.Transactions) != 1 {
 		t.Fatalf("transfer transactions = %d, want 1", len(transferProposal.Transactions))
 	}
+	if transferProposal.Transactions[0].Fee != structure.LamportsPerSignature {
+		t.Fatalf("transfer transaction fee = %d, want %d", transferProposal.Transactions[0].Fee, structure.LamportsPerSignature)
+	}
 	if !accountBalanceIncreased(verifiedState, transferState, fixture.stakerKeys[1].PublicKey, 5_000_000) {
 		t.Fatalf("destination balance was not increased by transfer amount")
 	}

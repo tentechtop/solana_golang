@@ -157,6 +157,7 @@ func newStakeAccount(
 		CommissionBps:      commissionBps,
 		ActiveStake:        lamports,
 		Status:             stake.ValidatorStatusActive,
+		LastEffectiveStake: lamports,
 	}
 	data, err := state.MarshalBinary()
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	privacyprogram "solana_golang/programs/privacy"
 	stakeprogram "solana_golang/programs/stake"
 	systemprogram "solana_golang/programs/system"
+	tokenprogram "solana_golang/programs/token"
 	vmprogram "solana_golang/programs/vm"
 	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
@@ -39,6 +40,8 @@ type SystemInstruction = structure.SystemInstruction
 type TransferParams = structure.TransferParams
 type Transaction = structure.Transaction
 type TransactionExecutionResult = structure.TransactionExecutionResult
+type TokenAccountState = tokenprogram.AccountState
+type TokenMintState = tokenprogram.MintState
 
 const (
 	LamportsPerSignature           = structure.LamportsPerSignature
@@ -85,6 +88,7 @@ func simulateWithDefaultPrograms(t *testing.T, input TransactionSimulationInput)
 	t.Helper()
 	input.Programs = append(input.Programs,
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
+		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
 		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
 		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
 	)

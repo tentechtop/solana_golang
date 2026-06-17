@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"solana_golang/database"
+	"solana_golang/runtime"
 	"solana_golang/structure"
 )
 
@@ -44,7 +45,11 @@ func (node *posNode) loadMempool() error {
 			continue
 		}
 		transaction.SubmitTime = stored.SubmitTime
-		transaction.Fee = stored.Fee
+		transaction, _, err = applyEstimatedTransactionFee(transaction)
+		if err != nil {
+			_ = node.db.Delete(database.TableChain, value.Key)
+			continue
+		}
 		if transaction.IsExpiredWithTTL(nowMillis, node.config.MempoolTransactionTTLMillis) {
 			_ = node.db.Delete(database.TableChain, value.Key)
 			continue
@@ -100,7 +105,7 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 	selected := make([]structure.Transaction, 0, len(node.mempool))
 	remaining := make([]structure.Transaction, 0, len(node.mempool))
 	removeIDs := make([]string, 0)
-	writableLocks := make(map[structure.PublicKey]struct{})
+	accountLocks := runtime.NewAccountLockSet()
 	for _, transaction := range node.mempool {
 		transactionID, err := transaction.TxIDString()
 		if err != nil {
@@ -125,11 +130,19 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 			delete(node.seenTransactions, transactionID)
 			continue
 		}
-		if transactionConflictsWithLocks(transaction, writableLocks) {
+		locked, err := accountLocks.TryLockTransaction(transaction)
+		if err != nil {
+			node.logger.Warn("posnode mempool account lock failed",
+				"tx_id", transactionID,
+				"error", err,
+			)
 			remaining = append(remaining, transaction)
 			continue
 		}
-		lockWritableAccounts(transaction, writableLocks)
+		if !locked {
+			remaining = append(remaining, transaction)
+			continue
+		}
 		selected = append(selected, transaction)
 		removeIDs = append(removeIDs, transactionID)
 		delete(node.seenTransactions, transactionID)
@@ -200,24 +213,4 @@ func mempoolKey(transactionID string) []byte {
 	key = append(key, mempoolKeyPrefix...)
 	key = append(key, []byte(transactionID)...)
 	return key
-}
-
-func transactionConflictsWithLocks(transaction structure.Transaction, locks map[structure.PublicKey]struct{}) bool {
-	for _, account := range transaction.Accounts {
-		if !account.IsWritable {
-			continue
-		}
-		if _, exists := locks[account.PublicKey]; exists {
-			return true
-		}
-	}
-	return false
-}
-
-func lockWritableAccounts(transaction structure.Transaction, locks map[structure.PublicKey]struct{}) {
-	for _, account := range transaction.Accounts {
-		if account.IsWritable {
-			locks[account.PublicKey] = struct{}{}
-		}
-	}
 }

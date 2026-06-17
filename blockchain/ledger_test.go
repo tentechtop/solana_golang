@@ -530,6 +530,58 @@ func TestSaveQCPromotesOnlyBestMainChainCertificate(t *testing.T) {
 	}
 }
 
+func TestCommitBlockAttachesPreviouslyStoredQC(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "attach-qc-main-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 2, 2, "attach-qc-main-2")
+	blockTwoHash, err := blockTwo.Hash()
+	if err != nil {
+		t.Fatalf("hash block two: %v", err)
+	}
+	qc := testRewardLedgerQC(2, 2, blockTwoHash, 6, []string{"validator-a", "validator-b", "validator-c"}, 10)
+	qcHash, err := HashCanonicalQC(qc)
+	if err != nil {
+		t.Fatalf("hash qc: %v", err)
+	}
+	if _, err := ledger.SaveQC(qc); err != nil {
+		t.Fatalf("save future qc: %v", err)
+	}
+	if ledger.Head().QCHash == qcHash {
+		t.Fatalf("future qc promoted before block is on main chain")
+	}
+	headTwo, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwo, NextState: stateTwo})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	if headTwo.QCHash != qcHash {
+		t.Fatalf("head qc hash = %s, want stored qc %s", headTwo.QCHash.String(), qcHash.String())
+	}
+	headQC, exists, err := ledger.HeadQC()
+	if err != nil {
+		t.Fatalf("HeadQC() error = %v", err)
+	}
+	if !exists || headQC.BlockHash != blockTwoHash || headQC.BlockHeight != 2 {
+		t.Fatalf("head qc = %+v exists=%v, want block two qc", headQC, exists)
+	}
+}
+
 func TestLedgerReorganizeToBetterFork(t *testing.T) {
 	db, err := database.NewDatabase(database.DatabaseConfig{
 		Path:   t.TempDir(),

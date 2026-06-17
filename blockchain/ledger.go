@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	chainHeadKey   = []byte("pos/head")
-	qcKeyPrefix    = []byte("qc/")
-	stateKeyPrefix = []byte("state/")
+	chainHeadKey     = []byte("pos/head")
+	qcKeyPrefix      = []byte("qc/")
+	qcBlockKeyPrefix = []byte("qc-block/")
+	stateKeyPrefix   = []byte("state/")
 )
 
 const DefaultFinalityDepth = uint64(2)
@@ -293,6 +294,9 @@ func (ledger *Ledger) CommitBlock(request CommitBlockRequest) (committedHead Hea
 		nextHead.QCHash = qcHash
 	}
 	if ledger.db != nil {
+		if err := ledger.attachBestQCForHeadLocked(nextHead.BlockHash, &nextHead); err != nil {
+			return Head{}, err
+		}
 		if err := ledger.persistCommitLocked(request, blockHash, nextHead, transactionIDs); err != nil {
 			return Head{}, err
 		}
@@ -412,6 +416,9 @@ func (ledger *Ledger) ReorganizeTo(newTipHash structure.Hash) (decision ForkDeci
 		FinalizedHash:   finalizedHash,
 		UpdatedAtMs:     time.Now().UnixMilli(),
 	}
+	if err := attachBestQCForHead(readTx, newTipHash, &nextHead); err != nil {
+		return ForkDecision{}, err
+	}
 	ops, transactionDelta, err := collectReorgOps(readTx, nextHead, oldBlocks, newBlocks, nextState)
 	if err != nil {
 		return ForkDecision{}, err
@@ -467,7 +474,17 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 			return Head{}, fmt.Errorf("blockchain: begin qc snapshot: %w", err)
 		}
 		defer readTx.Close()
-		promoteHeadQC, promoteErr := shouldPromoteHeadQC(readTx, nextHead, qc)
+		bestBlockQC := qc
+		updateBlockQC := true
+		currentBlockQC, blockQCExists, err := readStoredQCByBlockHash(readTx, qc.BlockHash)
+		if err != nil {
+			return Head{}, err
+		}
+		if blockQCExists && !isBetterRewardQC(qc, currentBlockQC) {
+			bestBlockQC = currentBlockQC
+			updateBlockQC = false
+		}
+		promoteHeadQC, promoteErr := shouldPromoteHeadQC(readTx, nextHead, bestBlockQC)
 		if promoteErr != nil {
 			return Head{}, promoteErr
 		}
@@ -478,9 +495,23 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 		operations := []database.DBOperation{
 			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, fullQCHash), qcBytes),
 		}
+		if updateBlockQC {
+			operations = append(operations,
+				database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcBlockKeyPrefix, qc.BlockHash), qcBytes),
+				database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash), qcBytes),
+			)
+		}
 		if promoteHeadQC {
-			operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, qcHash), qcBytes))
-			nextHead.QCHash = qcHash
+			bestQCHash, err := HashCanonicalQC(bestBlockQC)
+			if err != nil {
+				return Head{}, err
+			}
+			bestQCBytes, err := bestBlockQC.MarshalBinary()
+			if err != nil {
+				return Head{}, fmt.Errorf("blockchain: marshal best qc: %w", err)
+			}
+			operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, bestQCHash), bestQCBytes))
+			nextHead.QCHash = bestQCHash
 			nextHead.UpdatedAtMs = time.Now().UnixMilli()
 			headBytes, err := marshalHead(nextHead)
 			if err != nil {
@@ -625,6 +656,55 @@ func readStoredQCByHash(
 	return storedQC, true, nil
 }
 
+func readStoredQCByBlockHash(
+	readTx database.ReadTransaction,
+	blockHash structure.Hash,
+) (consensus.QuorumCertificate, bool, error) {
+	if blockHash.IsZero() {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	qcBytes, err := readTx.Get(database.TableChain, prefixedHashKey(qcBlockKeyPrefix, blockHash))
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: read block qc snapshot: %w", err)
+	}
+	if len(qcBytes) == 0 {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	storedQC, err := consensus.UnmarshalCertificateBinary(qcBytes)
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: unmarshal stored block qc: %w", err)
+	}
+	return storedQC, true, nil
+}
+
+func (ledger *Ledger) attachBestQCForHeadLocked(blockHash structure.Hash, head *Head) error {
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return fmt.Errorf("blockchain: begin head qc attach snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return attachBestQCForHead(readTx, blockHash, head)
+}
+
+func attachBestQCForHead(readTx database.ReadTransaction, blockHash structure.Hash, head *Head) error {
+	bestQC, exists, err := readStoredQCByBlockHash(readTx, blockHash)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if bestQC.BlockHash != blockHash || bestQC.BlockHeight != head.Height {
+		return fmt.Errorf("%w: stored block qc does not match head", ErrInvalidCommit)
+	}
+	qcHash, err := HashCanonicalQC(bestQC)
+	if err != nil {
+		return err
+	}
+	head.QCHash = qcHash
+	return nil
+}
+
 func qcOnMainChain(
 	readTx database.ReadTransaction,
 	head Head,
@@ -718,6 +798,24 @@ func (ledger *Ledger) Head() Head {
 	ledger.mutex.RLock()
 	defer ledger.mutex.RUnlock()
 	return ledger.head
+}
+
+// HeadQC 返回链头引用的确认凭证 + 监控必须使用 QC 自身高度避免把提交高度误认为确认高度。
+func (ledger *Ledger) HeadQC() (consensus.QuorumCertificate, bool, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return consensus.QuorumCertificate{}, false, ErrLedgerClosed
+	}
+	if ledger.db == nil || ledger.head.QCHash.IsZero() {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: begin head qc snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return readStoredQCByHash(readTx, ledger.head.QCHash)
 }
 
 // FinalityDepth 返回不可回滚深度 + 供 RPC 和监控确认所有节点使用一致规则。
@@ -1336,6 +1434,7 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 			return err
 		}
 		operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, fullQCHash), qcBytes))
+		operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcBlockKeyPrefix, request.QC.BlockHash), qcBytes))
 		if fullQCHash != head.QCHash {
 			operations = append(operations, database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, head.QCHash), qcBytes))
 		}

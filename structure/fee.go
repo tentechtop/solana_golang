@@ -8,7 +8,7 @@ const (
 	MaxComputeUnitsPerTransaction  = uint64(1400000)
 	DefaultLoadedAccountsDataSize  = uint64(64 * 1024 * 1024)
 	MicroLamportsPerLamport        = uint64(1000000)
-	DefaultBaseFeeBurnPercent      = uint8(50)
+	DefaultBaseFeeBurnPercent      = uint8(0)
 	DefaultBuiltinInstructionCU    = uint64(3000)
 )
 
@@ -50,7 +50,7 @@ func DefaultComputeBudgetLimits() ComputeBudgetLimits {
 	}
 }
 
-// DefaultFeeCalculator 返回默认费用计算器 + 使用基础签名费和 50% 基础费燃烧。
+// DefaultFeeCalculator 返回默认费用计算器 + 当前私链默认把基础费和优先费全部分配给 leader。
 func DefaultFeeCalculator() FeeCalculator {
 	return FeeCalculator{
 		LamportsPerSignature: LamportsPerSignature,

@@ -7,32 +7,32 @@ import (
 )
 
 const (
-	MethodGetBalance            = "getBalance"
-	MethodGetAccountType        = "getAccountType"
-	MethodSendTransaction       = "sendTransaction"
-	MethodGetBlock              = "getBlock"
-	MethodGetTransaction        = "getTransaction"
+	MethodGetBalance             = "getBalance"
+	MethodGetAccountType         = "getAccountType"
+	MethodSendTransaction        = "sendTransaction"
+	MethodGetBlock               = "getBlock"
+	MethodGetTransaction         = "getTransaction"
 	MethodGetAddressTransactions = "getAddressTransactions"
-	MethodTreasuryTransfer      = "treasuryTransfer"
-	MethodTransfer              = "transfer"
-	MethodGetPrivacyState       = "getPrivacyState"
-	MethodGetPrivacyBalance     = "getPrivacyBalance"
-	MethodPrivacyDeposit        = "privacyDeposit"
-	MethodPrivacyDepositToState = "privacyDepositToState"
-	MethodPrivacyWithdraw       = "privacyWithdraw"
-	MethodPrivacyTransfer       = "privacyTransfer"
-	MethodPrivacyAuthorizeAudit = "privacyAuthorizeAudit"
-	MethodRegisterValidator     = "registerValidator"
-	MethodStake                 = "stake"
-	MethodUnstake               = "unstake"
-	MethodSlashValidator        = "slashValidator"
-	MethodJailValidator         = "jailValidator"
-	MethodGetValidatorSet       = "getValidatorSet"
-	MethodGetNodeStatus         = "getNodeStatus"
-	MethodGetPeerNetwork        = "getPeerNetwork"
-	MethodGetConsensusStatus    = "getConsensusStatus"
-	MethodGetMetrics            = "getMetrics"
-	MethodGetHealth             = "getHealth"
+	MethodTreasuryTransfer       = "treasuryTransfer"
+	MethodTransfer               = "transfer"
+	MethodGetPrivacyState        = "getPrivacyState"
+	MethodGetPrivacyBalance      = "getPrivacyBalance"
+	MethodPrivacyDeposit         = "privacyDeposit"
+	MethodPrivacyDepositToState  = "privacyDepositToState"
+	MethodPrivacyWithdraw        = "privacyWithdraw"
+	MethodPrivacyTransfer        = "privacyTransfer"
+	MethodPrivacyAuthorizeAudit  = "privacyAuthorizeAudit"
+	MethodRegisterValidator      = "registerValidator"
+	MethodStake                  = "stake"
+	MethodUnstake                = "unstake"
+	MethodSlashValidator         = "slashValidator"
+	MethodJailValidator          = "jailValidator"
+	MethodGetValidatorSet        = "getValidatorSet"
+	MethodGetNodeStatus          = "getNodeStatus"
+	MethodGetPeerNetwork         = "getPeerNetwork"
+	MethodGetConsensusStatus     = "getConsensusStatus"
+	MethodGetMetrics             = "getMetrics"
+	MethodGetHealth              = "getHealth"
 )
 
 // LedgerBackend 定义链业务后端 + 让 RPC 层只负责协议转换和参数校验。
@@ -124,21 +124,26 @@ type BlockResult struct {
 }
 
 type TransactionDetailResult struct {
-	Signature           string   `json:"signature"`
-	Found               bool     `json:"found"`
-	Location            string   `json:"location"`
-	Status              string   `json:"status"`
-	Sender              string   `json:"sender,omitempty"`
-	RecentBlockhash     string   `json:"recent_blockhash,omitempty"`
-	FeeLamports         uint64   `json:"fee_lamports"`
-	SubmitTimeUnixMilli int64    `json:"submit_time_unix_milli"`
-	AccountAddresses    []string `json:"account_addresses,omitempty"`
-	WritableAddresses   []string `json:"writable_addresses,omitempty"`
-	InstructionCount    int      `json:"instruction_count"`
-	BlockHeight         uint64   `json:"block_height,omitempty"`
-	Slot                uint64   `json:"slot,omitempty"`
-	Blockhash           string   `json:"blockhash,omitempty"`
-	Finalized           bool     `json:"finalized"`
+	Signature                 string   `json:"signature"`
+	Found                     bool     `json:"found"`
+	Location                  string   `json:"location"`
+	Status                    string   `json:"status"`
+	Sender                    string   `json:"sender,omitempty"`
+	RecentBlockhash           string   `json:"recent_blockhash,omitempty"`
+	FeeLamports               uint64   `json:"fee_lamports"`
+	BaseFeeLamports           uint64   `json:"base_fee_lamports"`
+	PrioritizationFeeLamports uint64   `json:"prioritization_fee_lamports"`
+	BurnedFeeLamports         uint64   `json:"burned_fee_lamports"`
+	LeaderFeeLamports         uint64   `json:"leader_fee_lamports"`
+	LeaderAddress             string   `json:"leader_address,omitempty"`
+	SubmitTimeUnixMilli       int64    `json:"submit_time_unix_milli"`
+	AccountAddresses          []string `json:"account_addresses,omitempty"`
+	WritableAddresses         []string `json:"writable_addresses,omitempty"`
+	InstructionCount          int      `json:"instruction_count"`
+	BlockHeight               uint64   `json:"block_height,omitempty"`
+	Slot                      uint64   `json:"slot,omitempty"`
+	Blockhash                 string   `json:"blockhash,omitempty"`
+	Finalized                 bool     `json:"finalized"`
 }
 
 type AccountTransactionRecordResult struct {

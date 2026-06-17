@@ -2,6 +2,10 @@ package structure
 
 import "fmt"
 
+const (
+	DefaultRentBurnPercent = uint8(50)
+)
+
 // ClockSysvar 描述时钟上下文 + 为程序读取 slot、epoch 和 unix 时间提供状态。
 type ClockSysvar struct {
 	Slot                uint64
@@ -31,7 +35,7 @@ func DefaultRentSysvar() RentSysvar {
 		LamportsPerByteYear:        DefaultRentConfig.LamportsPerByteYear,
 		ExemptionThresholdYears:    DefaultRentConfig.ExemptionThresholdYears,
 		AccountStorageOverheadSize: DefaultRentConfig.AccountStorageOverheadSize,
-		BurnPercent:                DefaultBaseFeeBurnPercent,
+		BurnPercent:                DefaultRentBurnPercent,
 	}
 }
 

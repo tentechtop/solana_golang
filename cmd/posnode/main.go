@@ -20,6 +20,7 @@ import (
 	"solana_golang/programs/privacy"
 	"solana_golang/programs/stake"
 	"solana_golang/programs/system"
+	tokenprogram "solana_golang/programs/token"
 	"solana_golang/rpc"
 	"solana_golang/runtime"
 	"solana_golang/structure"
@@ -131,6 +132,7 @@ func run(configPath string) error {
 func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 	executor, err := runtime.NewFixedExecutor(
 		system.NewProgram(structure.DefaultBuiltinProgramIDs.System),
+		tokenprogram.NewProgram(structure.DefaultBuiltinProgramIDs.Token),
 		stake.NewProgram(structure.DefaultBuiltinProgramIDs.Stake),
 		privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy),
 	)
@@ -671,12 +673,29 @@ func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
 	}
 	isLeader := leaderID == consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
 	node.mutex.Unlock()
+	if isLeader && tick.ShouldSkip {
+		node.logger.Warn("posnode leader slot skipped after deadline",
+			slog.Uint64("slot", tick.Slot),
+			slog.Time("slot_deadline", tick.SlotDeadline),
+			slog.Duration("elapsed", tick.Elapsed),
+		)
+		return
+	}
 	if isLeader {
 		node.produceCurrentSlot(ctx, tick.Slot)
 	}
 }
 
 func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
+	now := time.Now()
+	if node.slotDeadlinePassed(slot, now) {
+		node.logger.Warn("posnode produce skipped after slot deadline",
+			slog.Uint64("slot", slot),
+			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
+			slog.Time("now", now),
+		)
+		return
+	}
 	node.mutex.Lock()
 	if slot <= node.lastProducedSlot {
 		node.mutex.Unlock()
@@ -693,6 +712,15 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 			slog.Uint64("slot", slot),
 			slog.Uint64("local_height", head.Height),
 			slog.String("local_hash", head.BlockHash.String()),
+		)
+		return
+	}
+	now = time.Now()
+	if node.slotDeadlinePassed(slot, now) {
+		node.logger.Warn("posnode produce skipped after sync delay",
+			slog.Uint64("slot", slot),
+			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
+			slog.Time("now", now),
 		)
 		return
 	}
@@ -816,6 +844,22 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("tx_count", len(proposal.Transactions)),
 	)
+	firstSeen := node.markProposalSeen(proposalHash)
+	now := time.Now()
+	if node.slotDeadlinePassed(proposal.Header.Slot, now) {
+		if firstSeen {
+			node.metrics.proposalsRejected.Add(1)
+			node.logger.Warn("posnode proposal rejected after slot deadline",
+				slog.Uint64("slot", proposal.Header.Slot),
+				slog.Uint64("height", proposal.Header.Height),
+				slog.String("block_hash", proposalHash.String()),
+				slog.String("from_peer", message.FromPeerID),
+				slog.Time("slot_deadline", node.slotProductionDeadline(proposal.Header.Slot)),
+				slog.Time("now", now),
+			)
+		}
+		return nil
+	}
 	if err := node.syncProposalBranch(ctx, message.FromPeerID, proposal); err != nil {
 		node.logger.Warn("posnode proposal branch sync failed",
 			slog.String("from_peer", message.FromPeerID),
@@ -825,7 +869,6 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 			slog.Any("error", err),
 		)
 	}
-	firstSeen := node.markProposalSeen(proposalHash)
 	if err := node.voteForProposal(ctx, proposal); err != nil {
 		return err
 	}
@@ -918,6 +961,17 @@ func (node *posNode) handleEvidenceMessage(ctx context.Context, message p2p.Mess
 }
 
 func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.BlockProposal) error {
+	now := time.Now()
+	if node.slotDeadlinePassed(proposal.Header.Slot, now) {
+		node.metrics.proposalsRejected.Add(1)
+		node.logger.Warn("posnode proposal vote rejected after slot deadline",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.Time("slot_deadline", node.slotProductionDeadline(proposal.Header.Slot)),
+			slog.Time("now", now),
+		)
+		return nil
+	}
 	node.mutex.Lock()
 	if proposal.Header.Slot <= node.lastVotedSlot {
 		node.mutex.Unlock()
@@ -1038,6 +1092,16 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 }
 
 func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, blockHash structure.Hash) {
+	now := time.Now()
+	if node.slotDeadlinePassed(slot, now) {
+		node.logger.Warn("posnode leader self vote skipped after slot deadline",
+			slog.Uint64("slot", slot),
+			slog.String("block_hash", blockHash.String()),
+			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
+			slog.Time("now", now),
+		)
+		return
+	}
 	node.mutex.Lock()
 	if slot <= node.lastVotedSlot {
 		node.mutex.Unlock()
@@ -1100,6 +1164,11 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 	if !signatureValid {
 		node.metrics.transactionsDrop.Add(1)
 		return fmt.Errorf("posnode: invalid transaction signature")
+	}
+	transaction, _, err = applyEstimatedTransactionFee(transaction)
+	if err != nil {
+		node.metrics.transactionsDrop.Add(1)
+		return err
 	}
 	transactionID, err := transaction.TxIDString()
 	if err != nil {

@@ -9,6 +9,7 @@ var DefaultBuiltinProgramIDs = BuiltinProgramIDs{
 	NativeLoader:       MustPublicKeyFromBase58("NativeLoader1111111111111111111111111111111"),
 	BPFLoader:          MustPublicKeyFromBase58("BPFLoader2111111111111111111111111111111111"),
 	Vote:               MustPublicKeyFromBase58("Vote111111111111111111111111111111111111111"),
+	Token:              MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
 	Stake:              MustPublicKeyFromBase58("Stake11111111111111111111111111111111111111"),
 	Config:             MustPublicKeyFromBase58("Config1111111111111111111111111111111111111"),
 	Privacy:            PublicKey{0x50, 0x72, 0x69, 0x76, 0x61, 0x63, 0x79, 0x50, 0x72, 0x6f, 0x67, 0x72, 0x61, 0x6d, 0x56, 0x31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
@@ -22,6 +23,7 @@ type BuiltinProgramIDs struct {
 	NativeLoader       PublicKey
 	BPFLoader          PublicKey
 	Vote               PublicKey
+	Token              PublicKey
 	Stake              PublicKey
 	Config             PublicKey
 	Privacy            PublicKey
@@ -44,6 +46,9 @@ func (programIDs BuiltinProgramIDs) Validate() error {
 	if programIDs.Vote.IsZero() {
 		return fmt.Errorf("%w: vote program is empty", ErrInvalidAccount)
 	}
+	if programIDs.Token.IsZero() {
+		return fmt.Errorf("%w: token program is empty", ErrInvalidAccount)
+	}
 	if programIDs.Stake.IsZero() {
 		return fmt.Errorf("%w: stake program is empty", ErrInvalidAccount)
 	}
@@ -64,6 +69,7 @@ func (programIDs BuiltinProgramIDs) IsBuiltinProgram(programID PublicKey) bool {
 		programID == programIDs.NativeLoader ||
 		programID == programIDs.BPFLoader ||
 		programID == programIDs.Vote ||
+		programID == programIDs.Token ||
 		programID == programIDs.Stake ||
 		programID == programIDs.Config ||
 		programID == programIDs.Privacy
