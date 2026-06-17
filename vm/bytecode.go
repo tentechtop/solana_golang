@@ -29,6 +29,9 @@ type BytecodeExecutor struct{}
 
 // Execute 执行字节码 + 所有账户写入都通过 AccountSet 受控接口。
 func (executor BytecodeExecutor) Execute(context *Context, program Program) error {
+	if program.Format == programFormatRegister {
+		return executeRegisterProgram(context, program)
+	}
 	if len(program.Code) == 0 {
 		return fmt.Errorf("%w: empty code", ErrInvalidProgram)
 	}

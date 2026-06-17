@@ -53,6 +53,23 @@ func (set *AccountSet) WriteInstructionData(accountIndex int, offset uint32, ins
 	return set.WriteData(accountIndex, int(offset), instructionData)
 }
 
+// ReadData 读取账户数据 + syscall 只能通过受控账户视图获取数据副本。
+func (set *AccountSet) ReadData(accountIndex int, offset int, length int) ([]byte, error) {
+	if offset < 0 || length < 0 {
+		return nil, fmt.Errorf("%w: negative data range", ErrInvalidAccount)
+	}
+	account, err := set.account(accountIndex)
+	if err != nil {
+		return nil, err
+	}
+	if offset > len(account.Data) || length > len(account.Data)-offset {
+		return nil, fmt.Errorf("%w: data range %d:%d out of bounds", ErrInvalidAccount, offset, offset+length)
+	}
+	value := make([]byte, length)
+	copy(value, account.Data[offset:offset+length])
+	return value, nil
+}
+
 // WriteData 写入账户数据 + 统一执行 writable、owner、executable 和增长限制。
 func (set *AccountSet) WriteData(accountIndex int, offset int, data []byte) error {
 	if offset < 0 {

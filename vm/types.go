@@ -7,12 +7,18 @@ const (
 	DefaultComputeUnitLimit       = 200_000
 	DefaultMaxDataIncreasePerCall = 10 * 1024
 	MaxProgramDataSize            = 1024 * 1024
+	MaxReadOnlyDataSize           = 64 * 1024
 	MaxInstructionDataSize        = 1232
 	MaxReturnDataSize             = 1024
 	MaxLogMessageSize             = 1024
 	MaxSyscallInputSize           = 4096
 	MaxPDASeedCount               = 16
 	MaxPDASeedLength              = 32
+	RegisterInstructionSize       = 16
+	RegisterCount                 = 11
+	RegisterHeapSize              = 64 * 1024
+	RegisterStackSize             = 64 * 1024
+	RegisterMaxMemoryAccessSize   = 4096
 )
 
 // Address 表示 VM 内部地址 + 使用固定 32 字节对齐 Solana 公钥。

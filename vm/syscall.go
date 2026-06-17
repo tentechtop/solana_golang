@@ -23,6 +23,8 @@ const (
 	SyscallInvoke
 	SyscallInvokeSigned
 	SyscallVerifySchnorr
+	SyscallGetAccountData
+	SyscallSetAccountData
 )
 
 // SyscallFunc 执行系统调用 + 输入输出统一使用确定性字节编码。
@@ -69,6 +71,8 @@ func DefaultSyscallRegistry() SyscallRegistry {
 		Syscall{ID: SyscallInvoke, Name: "sol_invoke", Cost: 500, Handler: syscallInvoke},
 		Syscall{ID: SyscallInvokeSigned, Name: "sol_invoke_signed", Cost: 700, Handler: syscallInvokeSigned},
 		Syscall{ID: SyscallVerifySchnorr, Name: "zk_verify_schnorr", Cost: 2_000, Handler: syscallVerifySchnorr},
+		Syscall{ID: SyscallGetAccountData, Name: "sol_get_account_data", Cost: 80, Handler: syscallGetAccountData},
+		Syscall{ID: SyscallSetAccountData, Name: "sol_set_account_data", Cost: 120, Handler: syscallSetAccountData},
 	)
 	if err != nil {
 		return SyscallRegistry{}
@@ -99,6 +103,12 @@ func (registry SyscallRegistry) Invoke(context *Context, syscallID SyscallID, in
 // IsZero 判断 syscall 表是否为空 + 便于 runtime 使用默认表。
 func (registry SyscallRegistry) IsZero() bool {
 	return len(registry.syscalls) == 0
+}
+
+// Exists 判断 syscall 是否注册 + verifier 用白名单拒绝未知宿主能力。
+func (registry SyscallRegistry) Exists(syscallID SyscallID) bool {
+	_, exists := registry.syscalls[syscallID]
+	return exists
 }
 
 func syscallLog(context *Context, input []byte) ([]byte, error) {
@@ -138,6 +148,22 @@ func syscallGetRent(context *Context, _ []byte) ([]byte, error) {
 	writeSyscallUint64(&buffer, context.Invocation.Sysvars.Rent.ExemptionThresholdYears)
 	writeSyscallUint64(&buffer, context.Invocation.Sysvars.Rent.AccountStorageOverheadSize)
 	return buffer.Bytes(), nil
+}
+
+func syscallGetAccountData(context *Context, input []byte) ([]byte, error) {
+	accountIndex, offset, length, err := decodeAccountDataRange(input)
+	if err != nil {
+		return nil, err
+	}
+	return context.Accounts.ReadData(int(accountIndex), int(offset), int(length))
+}
+
+func syscallSetAccountData(context *Context, input []byte) ([]byte, error) {
+	accountIndex, offset, data, err := decodeAccountDataWrite(input)
+	if err != nil {
+		return nil, err
+	}
+	return nil, context.Accounts.WriteData(int(accountIndex), int(offset), data)
 }
 
 func syscallCreateProgramAddress(_ *Context, input []byte) ([]byte, error) {
@@ -264,6 +290,23 @@ func EncodeSchnorrVerifyInput(publicKeyDigest zk.Digest, message []byte, proof [
 	return buffer.Bytes()
 }
 
+func EncodeAccountDataReadInput(accountIndex uint8, offset uint32, length uint32) []byte {
+	buffer := bytes.Buffer{}
+	buffer.WriteByte(accountIndex)
+	writeSyscallUint32(&buffer, offset)
+	writeSyscallUint32(&buffer, length)
+	return buffer.Bytes()
+}
+
+func EncodeAccountDataWriteInput(accountIndex uint8, offset uint32, data []byte) []byte {
+	buffer := bytes.Buffer{}
+	buffer.WriteByte(accountIndex)
+	writeSyscallUint32(&buffer, offset)
+	writeSyscallUint32(&buffer, uint32(len(data)))
+	buffer.Write(data)
+	return buffer.Bytes()
+}
+
 func decodeProgramAddressInput(input []byte) (Address, [][]byte, error) {
 	reader := bytes.NewReader(input)
 	programIDBytes, err := readSyscallFixedBytes(reader, AddressSize)
@@ -299,6 +342,46 @@ func decodeProgramAddressInput(input []byte) (Address, [][]byte, error) {
 		return Address{}, nil, fmt.Errorf("trailing pda input bytes %d", reader.Len())
 	}
 	return programID, seeds, nil
+}
+
+func decodeAccountDataRange(input []byte) (uint8, uint32, uint32, error) {
+	reader := bytes.NewReader(input)
+	accountIndex, err := reader.ReadByte()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	offset, err := readSyscallUint32Value(reader)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	length, err := readSyscallUint32Value(reader)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if reader.Len() != 0 {
+		return 0, 0, 0, fmt.Errorf("trailing account read input bytes %d", reader.Len())
+	}
+	return accountIndex, offset, length, nil
+}
+
+func decodeAccountDataWrite(input []byte) (uint8, uint32, []byte, error) {
+	reader := bytes.NewReader(input)
+	accountIndex, err := reader.ReadByte()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	offset, err := readSyscallUint32Value(reader)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	data, err := readSyscallBytes(reader)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if reader.Len() != 0 {
+		return 0, 0, nil, fmt.Errorf("trailing account write input bytes %d", reader.Len())
+	}
+	return accountIndex, offset, data, nil
 }
 
 func decodeCPIInstruction(input []byte) (CPIInstruction, error) {
@@ -400,6 +483,14 @@ func writeSyscallUint64(buffer *bytes.Buffer, value uint64) {
 	var encoded [8]byte
 	binary.LittleEndian.PutUint64(encoded[:], value)
 	buffer.Write(encoded[:])
+}
+
+func readSyscallUint32Value(reader *bytes.Reader) (uint32, error) {
+	var encoded [4]byte
+	if _, err := reader.Read(encoded[:]); err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(encoded[:]), nil
 }
 
 func readSyscallBytes(reader *bytes.Reader) ([]byte, error) {
