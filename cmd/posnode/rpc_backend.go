@@ -13,7 +13,9 @@ import (
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
 	"solana_golang/p2p"
+	"solana_golang/programs/stake"
 	"solana_golang/rpc"
+	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
@@ -23,6 +25,13 @@ const (
 	protocolAddressPrivacy     byte = 0x01
 	protocolAddressSize             = structure.PublicKeySize + 1
 )
+
+type privacyChangeArtifacts struct {
+	amount        uint64
+	commitment    structure.Hash
+	encryptedNote []byte
+	auditRecords  []structure.PrivacyAuditRecord
+}
 
 func (node *posNode) GetBalance(ctx context.Context, address string) (rpc.BalanceResult, error) {
 	_ = ctx
@@ -263,13 +272,14 @@ func (node *posNode) PrivacyDeposit(ctx context.Context, sourceSeed string, stat
 		return rpc.PrivacyTransactionResult{}, err
 	}
 	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
-		Source:        source,
-		StateAccount:  stateAccount,
-		Amount:        lamports,
-		Commitment:    commitment,
-		EncryptedNote: privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
-		AuditRecords:  auditRecords,
-		CreateState:   !found,
+		Source:         source,
+		StateAccount:   stateAccount,
+		SpendAuthority: source.PublicKey,
+		Amount:         lamports,
+		Commitment:     commitment,
+		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
+		AuditRecords:   auditRecords,
+		CreateState:    !found,
 	}, node.ledger.Head().BlockHash)
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
@@ -312,13 +322,14 @@ func (node *posNode) PrivacyDepositToState(ctx context.Context, sourceSeed strin
 		return rpc.PrivacyTransactionResult{}, err
 	}
 	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
-		Source:        source,
-		StateAccount:  structure.SolanaKeyPair{PublicKey: stateKey},
-		Amount:        lamports,
-		Commitment:    commitment,
-		EncryptedNote: privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
-		AuditRecords:  auditRecords,
-		CreateState:   false,
+		Source:         source,
+		StateAccount:   structure.SolanaKeyPair{PublicKey: stateKey},
+		SpendAuthority: source.PublicKey,
+		Amount:         lamports,
+		Commitment:     commitment,
+		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
+		AuditRecords:   auditRecords,
+		CreateState:    false,
 	}, node.ledger.Head().BlockHash)
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
@@ -326,6 +337,54 @@ func (node *posNode) PrivacyDepositToState(ctx context.Context, sourceSeed strin
 	signature, err := node.submitTransaction(ctx, transaction, "privacy_deposit_to_state",
 		slog.String("source", source.PublicKey.String()),
 		slog.String("privacy_state", stateKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitment.String()}, nil
+}
+
+func (node *posNode) PrivacyDepositToReceiver(ctx context.Context, sourceSeed string, stateAddress string, spendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
+	source, err := keyPairFromSeed(sourceSeed)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	stateKey, spendAuthorityKey, err := node.decodePrivacyReceiver(stateAddress, spendAuthority)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	commitment, err := randomPrivacyHash()
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
+		Version:         structure.PrivacyAuditPayloadVersion,
+		TransactionType: structure.PrivacyInstructionDeposit,
+		Commitment:      commitment,
+		Amount:          lamports,
+		Slot:            node.currentAuditSlot(),
+	})
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
+		Source:         source,
+		StateAccount:   structure.SolanaKeyPair{PublicKey: stateKey},
+		SpendAuthority: spendAuthorityKey,
+		Amount:         lamports,
+		Commitment:     commitment,
+		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
+		AuditRecords:   auditRecords,
+		CreateState:    false,
+	}, node.ledger.Head().BlockHash)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	signature, err := node.submitTransaction(ctx, transaction, "privacy_deposit_to_receiver",
+		slog.String("source", source.PublicKey.String()),
+		slog.String("privacy_state", stateKey.String()),
+		slog.String("spend_authority", spendAuthorityKey.String()),
 		slog.Uint64("lamports", lamports),
 	)
 	if err != nil {
@@ -343,25 +402,55 @@ func (node *posNode) PrivacyWithdraw(ctx context.Context, authoritySeed string, 
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode privacy withdraw destination: %w", err)
 	}
+	sourceState, err := node.loadPrivacyState(stateKey)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	auditSlot := node.currentAuditSlot()
+	changeOutput, err := node.buildPrivacyChangeArtifacts(
+		"withdraw_change",
+		structure.PrivacyInstructionWithdraw,
+		sourceNote.Amount,
+		lamports,
+		commitmentHash,
+		nullifierHash,
+		auditor,
+		auditSecret,
+		expiresAtSlot,
+		auditSlot,
+	)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
 	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:         structure.PrivacyAuditPayloadVersion,
-		TransactionType: structure.PrivacyInstructionWithdraw,
-		Commitment:      commitmentHash,
-		Nullifier:       nullifierHash,
-		Amount:          lamports,
-		Slot:            node.currentAuditSlot(),
+		Version:          structure.PrivacyAuditPayloadVersion,
+		TransactionType:  structure.PrivacyInstructionWithdraw,
+		Commitment:       commitmentHash,
+		Nullifier:        nullifierHash,
+		OutputCommitment: changeOutput.commitment,
+		Amount:           lamports,
+		Slot:             auditSlot,
 	})
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
 	}
 	transaction, err := blockchain.NewPrivacyWithdrawTransaction(blockchain.PrivacyWithdrawTransactionParams{
-		Authority:        authority,
-		StateAddress:     stateKey,
-		Destination:      destinationKey,
-		Amount:           lamports,
-		SourceCommitment: commitmentHash,
-		Nullifier:        nullifierHash,
-		AuditRecords:     auditRecords,
+		Authority:            authority,
+		StateAddress:         stateKey,
+		Destination:          destinationKey,
+		Amount:               lamports,
+		SourceCommitment:     commitmentHash,
+		Nullifier:            nullifierHash,
+		AuditRecords:         auditRecords,
+		ChangeAmount:         changeOutput.amount,
+		ChangeCommitment:     changeOutput.commitment,
+		ChangeSpendAuthority: sourceNote.SpendAuthority,
+		ChangeEncryptedNote:  changeOutput.encryptedNote,
+		ChangeAuditRecords:   changeOutput.auditRecords,
 	}, node.ledger.Head().BlockHash)
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
@@ -374,7 +463,7 @@ func (node *posNode) PrivacyWithdraw(ctx context.Context, authoritySeed string, 
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
 	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitmentHash.String(), Nullifier: nullifierHash.String()}, nil
+	return privacySpendResult(signature, stateKey, commitmentHash, nullifierHash, structure.Hash{}, changeOutput), nil
 }
 
 func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, stateAddress string, commitment string, nullifier string, recipient string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
@@ -386,7 +475,31 @@ func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, 
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode privacy recipient: %w", err)
 	}
+	sourceState, err := node.loadPrivacyState(stateKey)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
 	outputCommitment, err := randomPrivacyHash()
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	auditSlot := node.currentAuditSlot()
+	changeOutput, err := node.buildPrivacyChangeArtifacts(
+		"transfer_change",
+		structure.PrivacyInstructionTransfer,
+		sourceNote.Amount,
+		lamports,
+		commitmentHash,
+		nullifierHash,
+		auditor,
+		auditSecret,
+		expiresAtSlot,
+		auditSlot,
+	)
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
 	}
@@ -397,7 +510,7 @@ func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, 
 		Nullifier:        nullifierHash,
 		OutputCommitment: outputCommitment,
 		Amount:           lamports,
-		Slot:             node.currentAuditSlot(),
+		Slot:             auditSlot,
 	})
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
@@ -412,6 +525,11 @@ func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, 
 		OutputSpendAuthority: recipientKey,
 		OutputEncryptedNote:  privacyNoteBytes("transfer", lamports, outputCommitment, nullifierHash),
 		OutputAuditRecords:   auditRecords,
+		ChangeAmount:         changeOutput.amount,
+		ChangeCommitment:     changeOutput.commitment,
+		ChangeSpendAuthority: sourceNote.SpendAuthority,
+		ChangeEncryptedNote:  changeOutput.encryptedNote,
+		ChangeAuditRecords:   changeOutput.auditRecords,
 	}, node.ledger.Head().BlockHash)
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
@@ -424,7 +542,89 @@ func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, 
 	if err != nil {
 		return rpc.PrivacyTransactionResult{}, err
 	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitmentHash.String(), Nullifier: nullifierHash.String(), OutputCommitment: outputCommitment.String()}, nil
+	return privacySpendResult(signature, stateKey, commitmentHash, nullifierHash, outputCommitment, changeOutput), nil
+}
+
+func (node *posNode) PrivacyTransferToReceiver(ctx context.Context, authoritySeed string, sourceStateAddress string, commitment string, nullifier string, destinationStateAddress string, destinationSpendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
+	authority, sourceStateKey, commitmentHash, nullifierHash, err := parsePrivacySpendInputs(authoritySeed, sourceStateAddress, commitment, nullifier)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	destinationStateKey, destinationSpendAuthorityKey, err := node.decodePrivacyReceiver(destinationStateAddress, destinationSpendAuthority)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	sourceState, err := node.loadPrivacyState(sourceStateKey)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	outputCommitment, err := randomPrivacyHash()
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	auditSlot := node.currentAuditSlot()
+	changeOutput, err := node.buildPrivacyChangeArtifacts(
+		"transfer_change",
+		structure.PrivacyInstructionTransfer,
+		sourceNote.Amount,
+		lamports,
+		commitmentHash,
+		nullifierHash,
+		auditor,
+		auditSecret,
+		expiresAtSlot,
+		auditSlot,
+	)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
+		Version:          structure.PrivacyAuditPayloadVersion,
+		TransactionType:  structure.PrivacyInstructionTransfer,
+		Commitment:       commitmentHash,
+		Nullifier:        nullifierHash,
+		OutputCommitment: outputCommitment,
+		Amount:           lamports,
+		Slot:             auditSlot,
+	})
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	transaction, err := blockchain.NewPrivacyTransferTransaction(blockchain.PrivacyTransferTransactionParams{
+		Authority:            authority,
+		StateAddress:         sourceStateKey,
+		OutputStateAddress:   destinationStateKey,
+		Amount:               lamports,
+		SourceCommitment:     commitmentHash,
+		Nullifier:            nullifierHash,
+		OutputCommitment:     outputCommitment,
+		OutputSpendAuthority: destinationSpendAuthorityKey,
+		OutputEncryptedNote:  privacyNoteBytes("transfer", lamports, outputCommitment, nullifierHash),
+		OutputAuditRecords:   auditRecords,
+		ChangeAmount:         changeOutput.amount,
+		ChangeCommitment:     changeOutput.commitment,
+		ChangeSpendAuthority: sourceNote.SpendAuthority,
+		ChangeEncryptedNote:  changeOutput.encryptedNote,
+		ChangeAuditRecords:   changeOutput.auditRecords,
+	}, node.ledger.Head().BlockHash)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	signature, err := node.submitTransaction(ctx, transaction, "privacy_transfer_to_receiver",
+		slog.String("authority", authority.PublicKey.String()),
+		slog.String("source_privacy_state", sourceStateKey.String()),
+		slog.String("destination_privacy_state", destinationStateKey.String()),
+		slog.String("destination_spend_authority", destinationSpendAuthorityKey.String()),
+		slog.Uint64("lamports", lamports),
+	)
+	if err != nil {
+		return rpc.PrivacyTransactionResult{}, err
+	}
+	return privacySpendResult(signature, destinationStateKey, commitmentHash, nullifierHash, outputCommitment, changeOutput), nil
 }
 
 func (node *posNode) PrivacyAuthorizeAudit(ctx context.Context, authoritySeed string, stateAddress string, commitment string, auditor string, auditSecret string, scope uint8, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
@@ -478,6 +678,52 @@ func (node *posNode) PrivacyAuthorizeAudit(ctx context.Context, authoritySeed st
 	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitmentHash.String()}, nil
 }
 
+func (node *posNode) GetLocalValidatorIdentity(ctx context.Context) (rpc.LocalValidatorIdentityResult, error) {
+	_ = ctx
+	head := node.ledger.Head()
+	recommendedStakeLamports := node.config.StakeLamports
+	if recommendedStakeLamports == 0 {
+		recommendedStakeLamports = stake.MinimumStakeLamports
+	}
+	result := rpc.LocalValidatorIdentityResult{
+		NodeName:                 node.config.NodeName,
+		StakerAddress:            node.stakerKeyPair.PublicKey.String(),
+		ValidatorAddress:         node.validatorKeyPair.PublicKey.String(),
+		ConsensusPublicKey:       node.consensusKeyPair.PublicKey.String(),
+		BLSPublicKey:             utils.Base58Encode(node.blsKeyPair.PublicKey),
+		P2PPeerID:                node.peerKeyPair.peerID,
+		RecommendedStakeLamports: recommendedStakeLamports,
+		Status:                   "not_registered",
+		CurrentEpoch:             head.EpochID,
+	}
+	account, found, err := node.ledger.Account(node.validatorKeyPair.PublicKey)
+	if err != nil {
+		return rpc.LocalValidatorIdentityResult{}, fmt.Errorf("posnode: read local validator account: %w", err)
+	}
+	if !found || account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Data) == 0 {
+		return result, nil
+	}
+	state, err := stake.UnmarshalValidatorStateBinary(account.Data)
+	if err != nil {
+		return rpc.LocalValidatorIdentityResult{}, fmt.Errorf("posnode: decode local validator stake state: %w", err)
+	}
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(state, head.EpochID)
+	if err != nil {
+		return rpc.LocalValidatorIdentityResult{}, fmt.Errorf("posnode: calculate local validator effective stake: %w", err)
+	}
+	result.Registered = true
+	result.StakerAddress = state.StakerAccount.String()
+	result.Status = stakeStatusText(state.Status)
+	result.ActiveStakeLamports = state.ActiveStake
+	result.PendingStakeLamports = state.PendingStake
+	result.UnlockingStakeLamports = state.UnlockingStake
+	result.EffectiveStakeLamports = effectiveStake
+	result.ActivationEpoch = state.ActivationEpoch
+	result.DeactivationEpoch = state.DeactivationEpoch
+	result.CommissionBps = state.CommissionBps
+	return result, nil
+}
+
 func (node *posNode) RegisterValidator(ctx context.Context, stakerSeed string, validatorSeed string, consensusSeed string, peerID string, stakeLamports uint64) (string, error) {
 	staker, err := keyPairFromSeed(stakerSeed)
 	if err != nil {
@@ -508,6 +754,40 @@ func (node *posNode) RegisterValidator(ctx context.Context, stakerSeed string, v
 	)
 }
 
+func (node *posNode) RegisterValidatorIdentity(ctx context.Context, stakerSeed string, validatorAddress string, consensusPublicKey string, blsPublicKey string, peerID string, stakeLamports uint64) (string, error) {
+	staker, err := keyPairFromSeed(stakerSeed)
+	if err != nil {
+		return "", err
+	}
+	validatorKey, err := decodeTransparentPublicKey(validatorAddress, "validator address")
+	if err != nil {
+		return "", fmt.Errorf("posnode: decode validator address: %w", err)
+	}
+	consensusKey, err := decodeTransparentPublicKey(consensusPublicKey, "consensus public key")
+	if err != nil {
+		return "", fmt.Errorf("posnode: decode consensus public key: %w", err)
+	}
+	blsKeyBytes, err := utils.Base58Decode(strings.TrimSpace(blsPublicKey))
+	if err != nil {
+		return "", fmt.Errorf("posnode: decode bls public key: %w", err)
+	}
+	if err := consensus.ValidateBLSPublicKey(blsKeyBytes); err != nil {
+		return "", err
+	}
+	transaction, err := blockchain.NewRegisterValidatorTransactionWithBLS(staker, validatorKey, consensusKey, blsKeyBytes, strings.TrimSpace(peerID), stakeLamports, node.ledger.Head().BlockHash)
+	if err != nil {
+		return "", err
+	}
+	return node.submitTransaction(ctx, transaction, "register_validator_identity",
+		slog.String("staker", staker.PublicKey.String()),
+		slog.String("validator_account", validatorKey.String()),
+		slog.String("consensus_public_key", consensusKey.String()),
+		slog.String("peer_id", strings.TrimSpace(peerID)),
+		slog.Int("bls_public_key_bytes", len(blsKeyBytes)),
+		slog.Uint64("stake_lamports", stakeLamports),
+	)
+}
+
 func (node *posNode) Stake(ctx context.Context, stakerSeed string, validatorAddress string, lamports uint64) (string, error) {
 	staker, err := keyPairFromSeed(stakerSeed)
 	if err != nil {
@@ -516,6 +796,18 @@ func (node *posNode) Stake(ctx context.Context, stakerSeed string, validatorAddr
 	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
+	}
+	state, err := node.loadValidatorStakeState(validatorKey)
+	if err != nil {
+		return "", err
+	}
+	if state.StakerAccount != staker.PublicKey {
+		return "", fmt.Errorf(
+			"posnode: only the validator staker can add stake: current_wallet=%s required_staker=%s validator=%s; 当前实现是验证者自质押追加，普通用户委托质押尚未实现",
+			staker.PublicKey.String(),
+			state.StakerAccount.String(),
+			validatorKey.String(),
+		)
 	}
 	transaction, err := blockchain.NewStakeTransaction(staker, validatorKey, lamports, node.ledger.Head().BlockHash)
 	if err != nil {
@@ -536,6 +828,18 @@ func (node *posNode) Unstake(ctx context.Context, stakerSeed string, validatorAd
 	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
+	}
+	state, err := node.loadValidatorStakeState(validatorKey)
+	if err != nil {
+		return "", err
+	}
+	if state.StakerAccount != staker.PublicKey {
+		return "", fmt.Errorf(
+			"posnode: only the validator staker can unstake: current_wallet=%s required_staker=%s validator=%s",
+			staker.PublicKey.String(),
+			state.StakerAccount.String(),
+			validatorKey.String(),
+		)
 	}
 	transaction, err := blockchain.NewUnstakeTransaction(staker, validatorKey, lamports, unlockEpoch, node.ledger.Head().BlockHash)
 	if err != nil {
@@ -699,15 +1003,142 @@ func (node *posNode) submitTransaction(ctx context.Context, transaction structur
 	defer func() {
 		node.logRPCTransactionSubmit(ctx, action, transactionID, head, startedAt, err, attrs...)
 	}()
-	if err := node.addTransaction(transaction); err != nil {
-		return "", err
-	}
 	transactionID, err = transaction.TxIDString()
 	if err != nil {
 		return "", err
 	}
+	if node.mempoolAlreadyHasTransaction(transactionID) {
+		return transactionID, nil
+	}
+	if err := node.ensureHeadBlockhashAvailable(head); err != nil {
+		return "", err
+	}
+	if err := node.preflightTransaction(ctx, transaction, head); err != nil {
+		node.metrics.transactionsDrop.Add(1)
+		return "", err
+	}
+	if err := node.addTransaction(transaction); err != nil {
+		return "", err
+	}
 	node.broadcastTransaction(ctx, transaction)
 	return transactionID, nil
+}
+
+// preflightTransaction 预执行 RPC 交易 + 避免把必然失败的交易返回成已提交签名。
+func (node *posNode) preflightTransaction(ctx context.Context, transaction structure.Transaction, head blockchain.Head) error {
+	if node.executor == (runtimepkg.FixedExecutor{}) {
+		return nil
+	}
+	state := node.ledger.State()
+	node.mutex.Lock()
+	blockhashQueue := node.blockhashQueue.Clone()
+	pendingTransactions := make([]structure.Transaction, len(node.mempool))
+	copy(pendingTransactions, node.mempool)
+	node.mutex.Unlock()
+
+	processedTransactionIDs := make(map[string]struct{}, len(pendingTransactions)+1)
+	for _, pendingTransaction := range pendingTransactions {
+		result, err := node.executePreflightTransaction(ctx, pendingTransaction, head, state, blockhashQueue, processedTransactionIDs)
+		if err != nil || result.Execution.Status != structure.TransactionStatusConfirmed {
+			continue
+		}
+		pendingTransactionID, err := pendingTransaction.TxIDString()
+		if err == nil {
+			processedTransactionIDs[pendingTransactionID] = struct{}{}
+		}
+		state = applyPreflightWrites(state, result.Execution.WrittenAccounts)
+	}
+
+	result, err := node.executePreflightTransaction(ctx, transaction, head, state, blockhashQueue, processedTransactionIDs)
+	if err != nil {
+		return err
+	}
+	if result.Execution.Status == structure.TransactionStatusConfirmed {
+		return nil
+	}
+	return fmt.Errorf("posnode: preflight transaction failed: %s", transactionExecutionErrorMessage(result.Execution))
+}
+
+func (node *posNode) executePreflightTransaction(
+	ctx context.Context,
+	transaction structure.Transaction,
+	head blockchain.Head,
+	state consensus.ChainState,
+	blockhashQueue structure.BlockhashQueue,
+	processedTransactionIDs map[string]struct{},
+) (runtimepkg.TransactionResult, error) {
+	result, err := node.executor.ExecuteTransaction(ctx, runtimepkg.TransactionRequest{
+		ChainID: node.config.ChainID,
+		Slot:    head.Slot,
+		Epoch:   head.EpochID,
+		Mode:    runtimepkg.ExecutionModeFixedInstruction,
+		Simulation: runtimepkg.TransactionSimulationInput{
+			Transaction:    transaction,
+			Accounts:       state.Accounts,
+			BlockhashQueue: blockhashQueue,
+			CurrentSlot:    head.Slot,
+			CurrentEpoch:   head.EpochID,
+			ProcessedTxIDs: processedTransactionIDs,
+			Logger:         node.logger,
+		},
+	})
+	if err != nil {
+		return runtimepkg.TransactionResult{}, fmt.Errorf("posnode: preflight transaction: %w", err)
+	}
+	return result, nil
+}
+
+func applyPreflightWrites(state consensus.ChainState, writes []structure.AddressedAccount) consensus.ChainState {
+	accountIndexByAddress := make(map[structure.PublicKey]int, len(state.Accounts)+len(writes))
+	nextAccounts := make([]structure.AddressedAccount, len(state.Accounts))
+	for index, account := range state.Accounts {
+		nextAccounts[index] = structure.AddressedAccount{Address: account.Address, Account: account.Account.Clone()}
+		accountIndexByAddress[account.Address] = index
+	}
+	for _, write := range writes {
+		if index, exists := accountIndexByAddress[write.Address]; exists {
+			nextAccounts[index] = structure.AddressedAccount{Address: write.Address, Account: write.Account.Clone()}
+			continue
+		}
+		accountIndexByAddress[write.Address] = len(nextAccounts)
+		nextAccounts = append(nextAccounts, structure.AddressedAccount{Address: write.Address, Account: write.Account.Clone()})
+	}
+	return consensus.ChainState{Accounts: nextAccounts}
+}
+
+func (node *posNode) mempoolAlreadyHasTransaction(transactionID string) bool {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	_, exists := node.seenTransactions[transactionID]
+	return exists
+}
+
+// ensureHeadBlockhashAvailable 补齐链头 blockhash 窗口 + RPC 使用链头哈希构造交易时必须可立即校验。
+func (node *posNode) ensureHeadBlockhashAvailable(head blockchain.Head) error {
+	if head.BlockHash == (structure.Hash{}) {
+		return nil
+	}
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if _, exists := node.blockhashQueue.Find(head.BlockHash); exists {
+		return nil
+	}
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     head.BlockHash,
+		Slot:          head.Slot,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+		TimestampUnix: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("posnode: add head blockhash to queue: %w", err)
+	}
+	return nil
+}
+
+func transactionExecutionErrorMessage(result structure.TransactionExecutionResult) string {
+	if result.Error == nil {
+		return "transaction rejected"
+	}
+	return result.Error.Error()
 }
 
 func (node *posNode) logRPCTransactionSubmit(
@@ -765,6 +1196,42 @@ func (node *posNode) requirePrivacyStateAccount(stateKey structure.PublicKey) er
 	return nil
 }
 
+func (node *posNode) loadValidatorStakeState(validatorKey structure.PublicKey) (stake.ValidatorState, error) {
+	account, found, err := node.ledger.Account(validatorKey)
+	if err != nil {
+		return stake.ValidatorState{}, err
+	}
+	if !found {
+		return stake.ValidatorState{}, fmt.Errorf("posnode: validator account is not registered")
+	}
+	if account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Data) == 0 {
+		return stake.ValidatorState{}, fmt.Errorf("posnode: account is not a validator stake account")
+	}
+	state, err := stake.UnmarshalValidatorStateBinary(account.Data)
+	if err != nil {
+		return stake.ValidatorState{}, fmt.Errorf("posnode: decode validator stake state: %w", err)
+	}
+	return state, nil
+}
+
+func (node *posNode) decodePrivacyReceiver(stateAddress string, spendAuthority string) (structure.PublicKey, structure.PublicKey, error) {
+	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy receiver state")
+	if err != nil {
+		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: decode receiver state: %w", err)
+	}
+	if err := node.requirePrivacyStateAccount(stateKey); err != nil {
+		return structure.PublicKey{}, structure.PublicKey{}, err
+	}
+	spendAuthorityKey, addressType, err := decodeProtocolPublicKey(spendAuthority, "privacy receiver spend authority")
+	if err != nil {
+		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: decode receiver spend authority: %w", err)
+	}
+	if addressType == protocolAddressPrivacy {
+		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: receiver spend authority must be a transparent public key")
+	}
+	return stateKey, spendAuthorityKey, nil
+}
+
 func accountTypeName(owner structure.PublicKey) string {
 	switch owner {
 	case structure.DefaultBuiltinProgramIDs.Privacy:
@@ -794,6 +1261,49 @@ func (node *posNode) buildPrivacyAuditRecords(auditor string, auditSecret string
 		return nil, err
 	}
 	return []structure.PrivacyAuditRecord{record}, nil
+}
+
+func (node *posNode) buildPrivacyChangeArtifacts(
+	kind string,
+	transactionType structure.PrivacyInstructionType,
+	inputAmount uint64,
+	outputAmount uint64,
+	sourceCommitment structure.Hash,
+	nullifier structure.Hash,
+	auditor string,
+	auditSecret string,
+	expiresAtSlot uint64,
+	auditSlot uint64,
+) (privacyChangeArtifacts, error) {
+	if outputAmount > inputAmount {
+		return privacyChangeArtifacts{}, fmt.Errorf("posnode: privacy amount exceeds source note amount: amount=%d source=%d", outputAmount, inputAmount)
+	}
+	changeAmount := inputAmount - outputAmount
+	if changeAmount == 0 {
+		return privacyChangeArtifacts{}, nil
+	}
+	changeCommitment, err := randomPrivacyHash()
+	if err != nil {
+		return privacyChangeArtifacts{}, err
+	}
+	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
+		Version:          structure.PrivacyAuditPayloadVersion,
+		TransactionType:  transactionType,
+		Commitment:       sourceCommitment,
+		Nullifier:        nullifier,
+		OutputCommitment: changeCommitment,
+		Amount:           changeAmount,
+		Slot:             auditSlot,
+	})
+	if err != nil {
+		return privacyChangeArtifacts{}, err
+	}
+	return privacyChangeArtifacts{
+		amount:        changeAmount,
+		commitment:    changeCommitment,
+		encryptedNote: privacyNoteBytes(kind, changeAmount, changeCommitment, nullifier),
+		auditRecords:  auditRecords,
+	}, nil
 }
 
 func (node *posNode) currentAuditSlot() uint64 {
@@ -1005,12 +1515,44 @@ func stringifyProtocols(protocols []utils.MultiAddressProtocol) []string {
 }
 
 func privacyNoteAmount(state structure.PrivacyState, commitment structure.Hash) (uint64, error) {
+	note, err := privacySpendNote(state, commitment)
+	if err != nil {
+		return 0, err
+	}
+	return note.Amount, nil
+}
+
+func privacySpendNote(state structure.PrivacyState, commitment structure.Hash) (structure.PrivacyNoteRecord, error) {
 	for _, note := range state.Notes {
 		if note.Commitment == commitment && !note.Spent {
-			return note.Amount, nil
+			return note, nil
 		}
 	}
-	return 0, fmt.Errorf("posnode: unspent privacy note not found")
+	return structure.PrivacyNoteRecord{}, fmt.Errorf("posnode: unspent privacy note not found")
+}
+
+func privacySpendResult(
+	signature string,
+	privacyState structure.PublicKey,
+	commitment structure.Hash,
+	nullifier structure.Hash,
+	outputCommitment structure.Hash,
+	changeOutput privacyChangeArtifacts,
+) rpc.PrivacyTransactionResult {
+	result := rpc.PrivacyTransactionResult{
+		Signature:    signature,
+		PrivacyState: privacyState.String(),
+		Commitment:   commitment.String(),
+		Nullifier:    nullifier.String(),
+	}
+	if !outputCommitment.IsZero() {
+		result.OutputCommitment = outputCommitment.String()
+	}
+	if changeOutput.amount > 0 {
+		result.ChangeCommitment = changeOutput.commitment.String()
+		result.ChangeLamports = fmt.Sprintf("%d", changeOutput.amount)
+	}
+	return result
 }
 
 func parsePrivacySpendInputs(authoritySeed string, stateAddress string, commitment string, nullifier string) (structure.SolanaKeyPair, structure.PublicKey, structure.Hash, structure.Hash, error) {
@@ -1059,6 +1601,17 @@ func decodeProtocolPublicKey(address string, field string) (structure.PublicKey,
 	}
 	key, err := structure.NewPublicKey(decodedBody[1:])
 	return key, addressType, err
+}
+
+func decodeTransparentPublicKey(address string, field string) (structure.PublicKey, error) {
+	key, addressType, err := decodeProtocolPublicKey(address, field)
+	if err != nil {
+		return structure.PublicKey{}, err
+	}
+	if addressType == protocolAddressPrivacy {
+		return structure.PublicKey{}, fmt.Errorf("%s must be a transparent public key", field)
+	}
+	return key, nil
 }
 
 func protocolAddressPrefix(address string) (byte, string, bool) {
@@ -1111,6 +1664,19 @@ func validatorStatusText(status consensus.ValidatorStatus) string {
 	case consensus.ValidatorStatusJailed:
 		return "jailed"
 	case consensus.ValidatorStatusExiting:
+		return "exiting"
+	default:
+		return "inactive"
+	}
+}
+
+func stakeStatusText(status stake.ValidatorStatus) string {
+	switch status {
+	case stake.ValidatorStatusActive:
+		return "active"
+	case stake.ValidatorStatusJailed:
+		return "jailed"
+	case stake.ValidatorStatusExiting:
 		return "exiting"
 	default:
 		return "inactive"

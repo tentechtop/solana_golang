@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
 	"solana_golang/database"
+	stakeprogram "solana_golang/programs/stake"
 	"solana_golang/rpc"
 	"solana_golang/structure"
 	"solana_golang/utils"
@@ -82,6 +84,28 @@ func TestHTTPJSONRPCRejectsInvalidSignedTransaction(t *testing.T) {
 	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodSendTransaction, []any{encodedTransaction})
 	if response.Error == nil {
 		t.Fatalf("response error = nil, want invalid signature error")
+	}
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
+	}
+	if got := node.metrics.transactionsDrop.Load(); got != 1 {
+		t.Fatalf("transactionsDrop = %d, want 1", got)
+	}
+}
+
+func TestHTTPJSONRPCRejectsPreflightFailedTransaction(t *testing.T) {
+	node, source, destination := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	transaction := newRPCTransferTransaction(t, node, source, destination.PublicKey, 2_000_000_000)
+	encodedTransaction := encodeRPCTransaction(t, transaction)
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodSendTransaction, []any{encodedTransaction})
+	if response.Error == nil {
+		t.Fatal("response error = nil, want preflight failure")
+	}
+	errorData := fmt.Sprint(response.Error.Data)
+	if !strings.Contains(errorData, "preflight transaction failed") {
+		t.Fatalf("error data = %q, want preflight failure", response.Error.Data)
 	}
 	if len(node.mempool) != 0 {
 		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
@@ -400,11 +424,134 @@ func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONRPCPrivacyDepositToReceiverUsesReceiverAuthority(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	receiverState := mustStructureKeyPair("rpc-privacy-receiver-state")
+	receiverAuthority := mustStructureKeyPair("rpc-privacy-receiver-authority")
+	addPrivacyStateAccountToLedger(t, node.ledger, receiverState.PublicKey)
+
+	stateAddress := encodeTestProtocolAddress(protocolAddressPrivacy, receiverState.PublicKey[:], "z")
+	authorityAddress := encodeTestProtocolAddress(protocolAddressTransparent, receiverAuthority.PublicKey[:], "t")
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodPrivacyDepositToReceiver, []any{
+		"rpc-source",
+		stateAddress,
+		authorityAddress,
+		uint64(50_000),
+		"",
+		"",
+		uint64(0),
+	})
+	result := decodePosNodeRPCResult[rpc.PrivacyTransactionResult](t, response)
+	if result.Signature == "" || result.PrivacyState != receiverState.PublicKey.String() {
+		t.Fatalf("result = %+v, want receiver state and signature", result)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	privacyInstruction, err := structure.UnmarshalPrivacyInstructionBinary(node.mempool[0].Instructions[0].Data)
+	if err != nil {
+		t.Fatalf("UnmarshalPrivacyInstructionBinary() error = %v", err)
+	}
+	if privacyInstruction.Deposit.SpendAuthority != receiverAuthority.PublicKey {
+		t.Fatalf("spend authority = %s, want %s", privacyInstruction.Deposit.SpendAuthority.String(), receiverAuthority.PublicKey.String())
+	}
+}
+
+func TestHTTPJSONRPCPrivacyTransferToReceiverBuildsChangeNote(t *testing.T) {
+	node, source, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	sourceState := mustStructureKeyPair("rpc-privacy-source-state")
+	receiverState := mustStructureKeyPair("rpc-privacy-change-receiver-state")
+	receiverAuthority := mustStructureKeyPair("rpc-privacy-change-receiver-authority")
+	sourceCommitment := blockchainTestHash(t, "rpc-privacy-change-source-note")
+	nullifier := blockchainTestHash(t, "rpc-privacy-change-nullifier")
+	addPrivacyStateWithNotesToLedger(t, node.ledger, sourceState.PublicKey, []structure.PrivacyNoteRecord{
+		{
+			Commitment:     sourceCommitment,
+			SpendAuthority: source.PublicKey,
+			Amount:         1000,
+			VMVersion:      structure.PrivacyStateVersion,
+			EncryptedNote:  []byte("source-note"),
+		},
+	}, 1000)
+	addPrivacyStateAccountToLedger(t, node.ledger, receiverState.PublicKey)
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodPrivacyTransferToReceiver, []any{
+		"rpc-source",
+		encodeTestProtocolAddress(protocolAddressPrivacy, sourceState.PublicKey[:], "z"),
+		sourceCommitment.String(),
+		nullifier.String(),
+		encodeTestProtocolAddress(protocolAddressPrivacy, receiverState.PublicKey[:], "z"),
+		encodeTestProtocolAddress(protocolAddressTransparent, receiverAuthority.PublicKey[:], "t"),
+		uint64(250),
+		"",
+		"",
+		uint64(0),
+	})
+	result := decodePosNodeRPCResult[rpc.PrivacyTransactionResult](t, response)
+	if result.Signature == "" || result.ChangeCommitment == "" || result.ChangeLamports != "750" {
+		t.Fatalf("result = %+v, want signature and 750 lamports change", result)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	privacyInstruction, err := structure.UnmarshalPrivacyInstructionBinary(node.mempool[0].Instructions[0].Data)
+	if err != nil {
+		t.Fatalf("UnmarshalPrivacyInstructionBinary() error = %v", err)
+	}
+	if privacyInstruction.Transfer.Amount != 250 || privacyInstruction.Transfer.ChangeAmount != 750 {
+		t.Fatalf("transfer params = %+v, want output 250 and change 750", privacyInstruction.Transfer)
+	}
+	if privacyInstruction.Transfer.ChangeSpendAuthority != source.PublicKey {
+		t.Fatalf("change spend authority = %s, want %s", privacyInstruction.Transfer.ChangeSpendAuthority.String(), source.PublicKey.String())
+	}
+}
+
+func TestHTTPJSONRPCStakeExplainsStakerMismatch(t *testing.T) {
+	node, source, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	validator := mustStructureKeyPair("rpc-stake-mismatch-validator")
+	requiredStaker := mustStructureKeyPair("rpc-stake-mismatch-required-staker")
+	consensusKey := mustStructureKeyPair("rpc-stake-mismatch-consensus")
+	addValidatorStakeAccountToLedger(t, node.ledger, validator.PublicKey, stakeprogram.ValidatorState{
+		ConsensusPublicKey: consensusKey.PublicKey,
+		StakerAccount:      requiredStaker.PublicKey,
+		P2PPeerID:          "rpc-stake-mismatch-peer",
+		Status:             stakeprogram.ValidatorStatusActive,
+		ActiveStake:        stakeprogram.MinimumStakeLamports,
+		ActivationEpoch:    1,
+	})
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodStake, []any{
+		"rpc-source",
+		validator.PublicKey.String(),
+		uint64(stakeprogram.MinimumStakeLamports),
+	})
+	if response.Error == nil {
+		t.Fatal("response error = nil, want staker mismatch")
+	}
+	errorText := fmt.Sprint(response.Error.Data)
+	if !strings.Contains(errorText, "only the validator staker can add stake") {
+		t.Fatalf("error data = %q, want explicit staker mismatch", errorText)
+	}
+	if strings.Contains(errorText, "preflight transaction failed") {
+		t.Fatalf("error data = %q, should fail before preflight", errorText)
+	}
+	if strings.Contains(errorText, source.PublicKey.String()) && !strings.Contains(errorText, requiredStaker.PublicKey.String()) {
+		t.Fatalf("error data = %q, want required staker address", errorText)
+	}
+}
+
 func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.SolanaKeyPair, structure.SolanaKeyPair) {
 	t.Helper()
 	source := mustStructureKeyPair("rpc-source")
 	destination := mustStructureKeyPair("rpc-destination")
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	executor, err := newRuntimeExecutor(logger)
+	if err != nil {
+		t.Fatalf("newRuntimeExecutor() error = %v", err)
+	}
 	ledger, err := blockchain.NewLedgerFromGenesis(nil, blockchain.GenesisConfig{
 		ChainID: "posnode-rpc-e2e",
 		FundedAccounts: []blockchain.GenesisAccount{
@@ -423,9 +570,60 @@ func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.SolanaKeyPair,
 		},
 		logger:           logger,
 		ledger:           ledger,
+		executor:         executor,
+		blockhashQueue:   structure.NewBlockhashQueue(150),
 		seenTransactions: make(map[string]struct{}),
 	}
+	if err := node.ensureHeadBlockhashAvailable(ledger.Head()); err != nil {
+		t.Fatalf("ensureHeadBlockhashAvailable() error = %v", err)
+	}
 	return node, source, destination
+}
+
+func addPrivacyStateAccountToLedger(t *testing.T, ledger *blockchain.Ledger, stateAddress structure.PublicKey) {
+	t.Helper()
+	addPrivacyStateWithNotesToLedger(t, ledger, stateAddress, nil, 0)
+}
+
+func addPrivacyStateWithNotesToLedger(t *testing.T, ledger *blockchain.Ledger, stateAddress structure.PublicKey, notes []structure.PrivacyNoteRecord, escrowLamports uint64) {
+	t.Helper()
+	privacyState := structure.PrivacyState{Version: structure.PrivacyStateVersion, Notes: notes}
+	data, err := privacyState.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(privacy state) error = %v", err)
+	}
+	rentLamports, err := structure.MinimumBalanceForRentExemption(blockchain.PrivacyStateRentReserveBytes)
+	if err != nil {
+		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
+	}
+	account, err := structure.NewAccount(rentLamports+escrowLamports, data, structure.DefaultBuiltinProgramIDs.Privacy, false, 0)
+	if err != nil {
+		t.Fatalf("NewAccount() error = %v", err)
+	}
+	nextState := ledger.State()
+	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{Address: stateAddress, Account: account})
+	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, ledger.Head().Slot+1, ledger.Head().Height+1, "rpc-privacy-state-account")
+	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+}
+
+func addValidatorStakeAccountToLedger(t *testing.T, ledger *blockchain.Ledger, validatorAddress structure.PublicKey, validatorState stakeprogram.ValidatorState) {
+	t.Helper()
+	data, err := validatorState.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(validator state) error = %v", err)
+	}
+	account, err := structure.NewAccount(stakeprogram.MinimumStakeLamports, data, structure.DefaultBuiltinProgramIDs.Stake, false, 0)
+	if err != nil {
+		t.Fatalf("NewAccount(validator stake) error = %v", err)
+	}
+	nextState := ledger.State()
+	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{Address: validatorAddress, Account: account})
+	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, ledger.Head().Slot+1, ledger.Head().Height+1, "rpc-validator-stake-account")
+	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
 }
 
 func newRPCTransferTransaction(t *testing.T, node *posNode, source structure.SolanaKeyPair, destination structure.PublicKey, amount uint64) structure.Transaction {

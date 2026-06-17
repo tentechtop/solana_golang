@@ -265,6 +265,75 @@ func TestTransactionSimulatorWithdrawsPrivateToTransparent(t *testing.T) {
 	}
 }
 
+func TestTransactionSimulatorWithdrawsPrivatePartiallyWithChange(t *testing.T) {
+	authorityKey, authorityPrivateKey := newSimulationSigner(t)
+	destinationKey := newTestPublicKey(120)
+	privacyStateKey := newTestPublicKey(121)
+	blockhash := newTestHash(122)
+	inputAmount := uint64(1000)
+	withdrawAmount := uint64(400)
+	changeAmount := uint64(600)
+	sourceCommitment := newTestHash(123)
+	changeCommitment := newTestHash(124)
+	nullifier := newTestHash(125)
+	stateAccount := privacyStateAccountWithNote(t, privacyStateKey, authorityKey, sourceCommitment, inputAmount)
+	authorityLamports := mustMinimumBalance(t, 0) + LamportsPerSignature + 100
+	destinationLamports := mustMinimumBalance(t, 0)
+
+	instruction, err := NewPrivacyWithdrawInstruction(1, nil, PrivacyWithdrawParams{
+		Amount:               withdrawAmount,
+		SourceCommitment:     sourceCommitment,
+		Nullifier:            nullifier,
+		ChangeAmount:         changeAmount,
+		ChangeCommitment:     changeCommitment,
+		ChangeSpendAuthority: authorityKey,
+		ChangeEncryptedNote:  []byte("withdraw-change"),
+	})
+	instructionData := mustPrivacyInstructionBytes(t, instruction, err)
+	transaction := signedSimulationProgramTransaction(t, DefaultBuiltinProgramIDs.Privacy, []AccountMeta{
+		{PublicKey: authorityKey, IsSigner: true, IsWritable: true},
+		{PublicKey: privacyStateKey, IsSigner: false, IsWritable: true},
+		{PublicKey: destinationKey, IsSigner: false, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	}, []PublicKey{privacyStateKey, destinationKey}, instructionData, blockhash, map[PublicKey][]byte{
+		authorityKey: authorityPrivateKey,
+	})
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction: transaction,
+		Accounts: []AddressedAccount{
+			newSimulationAccount(t, authorityKey, authorityLamports, DefaultBuiltinProgramIDs.System, false),
+			stateAccount,
+			newSimulationAccount(t, destinationKey, destinationLamports, DefaultBuiltinProgramIDs.System, false),
+			newSimulationAccount(t, DefaultBuiltinProgramIDs.Privacy, mustMinimumBalance(t, 0), DefaultBuiltinProgramIDs.NativeLoader, true),
+		},
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 41),
+		CurrentSlot:    41,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+
+	stateWritten := findWrittenAccount(t, result.WrittenAccounts, privacyStateKey)
+	destinationWritten := findWrittenAccount(t, result.WrittenAccounts, destinationKey)
+	state := mustPrivacyStateFromData(t, stateWritten.Data)
+	if stateWritten.Lamports != stateAccount.Account.Lamports-withdrawAmount {
+		t.Fatalf("state lamports = %d, want %d", stateWritten.Lamports, stateAccount.Account.Lamports-withdrawAmount)
+	}
+	if destinationWritten.Lamports != destinationLamports+withdrawAmount {
+		t.Fatalf("destination lamports = %d, want %d", destinationWritten.Lamports, destinationLamports+withdrawAmount)
+	}
+	if len(state.Notes) != 2 || !state.Notes[0].Spent || state.Notes[1].Commitment != changeCommitment {
+		t.Fatalf("privacy notes = %+v, want spent source and change note", state.Notes)
+	}
+	if state.Notes[1].Amount != changeAmount || state.Notes[1].SpendAuthority != authorityKey {
+		t.Fatalf("change note = %+v, want amount %d owned by authority", state.Notes[1], changeAmount)
+	}
+}
+
 func TestTransactionSimulatorTransfersPrivateToPrivate(t *testing.T) {
 	authorityKey, authorityPrivateKey := newSimulationSigner(t)
 	nextAuthorityKey := newTestPublicKey(96)
@@ -330,6 +399,159 @@ func TestTransactionSimulatorTransfersPrivateToPrivate(t *testing.T) {
 	}
 	if len(state.SpentNullifiers) != 1 || state.SpentNullifiers[0] != nullifier {
 		t.Fatalf("spent nullifiers = %+v, want one nullifier", state.SpentNullifiers)
+	}
+}
+
+func TestTransactionSimulatorTransfersPrivatePartiallyToReceiverWithChange(t *testing.T) {
+	authorityKey, authorityPrivateKey := newSimulationSigner(t)
+	receiverAuthorityKey := newTestPublicKey(201)
+	sourceStateKey := newTestPublicKey(202)
+	receiverStateKey := newTestPublicKey(203)
+	blockhash := newTestHash(204)
+	inputAmount := uint64(1000)
+	outputAmount := uint64(250)
+	changeAmount := uint64(750)
+	sourceCommitment := newTestHash(205)
+	nullifier := newTestHash(206)
+	outputCommitment := newTestHash(207)
+	changeCommitment := newTestHash(208)
+	sourceStateAccount := privacyStateAccountWithNote(t, sourceStateKey, authorityKey, sourceCommitment, inputAmount)
+	receiverStateAccount := AddressedAccount{
+		Address: receiverStateKey,
+		Account: mustPrivacyAccountFromState(t, mustMinimumBalance(t, 512), PrivacyState{Version: PrivacyStateVersion}),
+	}
+
+	instruction, err := NewPrivacyTransferInstruction(1, nil, PrivacyTransferParams{
+		Amount:               outputAmount,
+		SourceCommitment:     sourceCommitment,
+		Nullifier:            nullifier,
+		OutputCommitment:     outputCommitment,
+		OutputSpendAuthority: receiverAuthorityKey,
+		OutputEncryptedNote:  []byte("receiver-note"),
+		ChangeAmount:         changeAmount,
+		ChangeCommitment:     changeCommitment,
+		ChangeSpendAuthority: authorityKey,
+		ChangeEncryptedNote:  []byte("transfer-change"),
+	})
+	instructionData := mustPrivacyInstructionBytes(t, instruction, err)
+	transaction := signedSimulationProgramTransaction(t, DefaultBuiltinProgramIDs.Privacy, []AccountMeta{
+		{PublicKey: authorityKey, IsSigner: true, IsWritable: true},
+		{PublicKey: sourceStateKey, IsSigner: false, IsWritable: true},
+		{PublicKey: receiverStateKey, IsSigner: false, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	}, []PublicKey{sourceStateKey, receiverStateKey}, instructionData, blockhash, map[PublicKey][]byte{
+		authorityKey: authorityPrivateKey,
+	})
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction: transaction,
+		Accounts: []AddressedAccount{
+			newSimulationAccount(t, authorityKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
+			sourceStateAccount,
+			receiverStateAccount,
+			newSimulationAccount(t, DefaultBuiltinProgramIDs.Privacy, mustMinimumBalance(t, 0), DefaultBuiltinProgramIDs.NativeLoader, true),
+		},
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 47),
+		CurrentSlot:    47,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+
+	sourceWritten := findWrittenAccount(t, result.WrittenAccounts, sourceStateKey)
+	receiverWritten := findWrittenAccount(t, result.WrittenAccounts, receiverStateKey)
+	sourceState := mustPrivacyStateFromData(t, sourceWritten.Data)
+	receiverState := mustPrivacyStateFromData(t, receiverWritten.Data)
+	if sourceWritten.Lamports != sourceStateAccount.Account.Lamports-outputAmount {
+		t.Fatalf("source state lamports = %d, want %d", sourceWritten.Lamports, sourceStateAccount.Account.Lamports-outputAmount)
+	}
+	if receiverWritten.Lamports != receiverStateAccount.Account.Lamports+outputAmount {
+		t.Fatalf("receiver state lamports = %d, want %d", receiverWritten.Lamports, receiverStateAccount.Account.Lamports+outputAmount)
+	}
+	if len(sourceState.Notes) != 2 || !sourceState.Notes[0].Spent || sourceState.Notes[1].Commitment != changeCommitment {
+		t.Fatalf("source notes = %+v, want spent source and change note", sourceState.Notes)
+	}
+	if sourceState.Notes[1].Amount != changeAmount || sourceState.Notes[1].SpendAuthority != authorityKey {
+		t.Fatalf("change note = %+v, want amount %d owned by authority", sourceState.Notes[1], changeAmount)
+	}
+	if len(receiverState.Notes) != 1 || receiverState.Notes[0].Amount != outputAmount || receiverState.Notes[0].Commitment != outputCommitment {
+		t.Fatalf("receiver notes = %+v, want output note", receiverState.Notes)
+	}
+}
+
+func TestTransactionSimulatorTransfersPrivateToReceiverState(t *testing.T) {
+	authorityKey, authorityPrivateKey := newSimulationSigner(t)
+	receiverAuthorityKey := newTestPublicKey(191)
+	sourceStateKey := newTestPublicKey(192)
+	receiverStateKey := newTestPublicKey(193)
+	blockhash := newTestHash(194)
+	amount := uint64(700)
+	sourceCommitment := newTestHash(195)
+	nullifier := newTestHash(196)
+	outputCommitment := newTestHash(197)
+	sourceStateAccount := privacyStateAccountWithNote(t, sourceStateKey, authorityKey, sourceCommitment, amount)
+	receiverStateAccount := AddressedAccount{
+		Address: receiverStateKey,
+		Account: mustPrivacyAccountFromState(t, mustMinimumBalance(t, 512), PrivacyState{Version: PrivacyStateVersion}),
+	}
+
+	instruction, err := NewPrivacyTransferInstruction(1, nil, PrivacyTransferParams{
+		Amount:               amount,
+		SourceCommitment:     sourceCommitment,
+		Nullifier:            nullifier,
+		OutputCommitment:     outputCommitment,
+		OutputSpendAuthority: receiverAuthorityKey,
+		OutputEncryptedNote:  []byte("receiver-note"),
+	})
+	instructionData := mustPrivacyInstructionBytes(t, instruction, err)
+	transaction := signedSimulationProgramTransaction(t, DefaultBuiltinProgramIDs.Privacy, []AccountMeta{
+		{PublicKey: authorityKey, IsSigner: true, IsWritable: true},
+		{PublicKey: sourceStateKey, IsSigner: false, IsWritable: true},
+		{PublicKey: receiverStateKey, IsSigner: false, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	}, []PublicKey{sourceStateKey, receiverStateKey}, instructionData, blockhash, map[PublicKey][]byte{
+		authorityKey: authorityPrivateKey,
+	})
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction: transaction,
+		Accounts: []AddressedAccount{
+			newSimulationAccount(t, authorityKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
+			sourceStateAccount,
+			receiverStateAccount,
+			newSimulationAccount(t, DefaultBuiltinProgramIDs.Privacy, mustMinimumBalance(t, 0), DefaultBuiltinProgramIDs.NativeLoader, true),
+		},
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 46),
+		CurrentSlot:    46,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+
+	sourceWritten := findWrittenAccount(t, result.WrittenAccounts, sourceStateKey)
+	receiverWritten := findWrittenAccount(t, result.WrittenAccounts, receiverStateKey)
+	sourceState := mustPrivacyStateFromData(t, sourceWritten.Data)
+	receiverState := mustPrivacyStateFromData(t, receiverWritten.Data)
+	if sourceWritten.Lamports != sourceStateAccount.Account.Lamports-amount {
+		t.Fatalf("source state lamports = %d, want %d", sourceWritten.Lamports, sourceStateAccount.Account.Lamports-amount)
+	}
+	if receiverWritten.Lamports != receiverStateAccount.Account.Lamports+amount {
+		t.Fatalf("receiver state lamports = %d, want %d", receiverWritten.Lamports, receiverStateAccount.Account.Lamports+amount)
+	}
+	if len(sourceState.Notes) != 1 || !sourceState.Notes[0].Spent || sourceState.Notes[0].SpendNullifier != nullifier {
+		t.Fatalf("source notes = %+v, want spent source note", sourceState.Notes)
+	}
+	if len(receiverState.Notes) != 1 || receiverState.Notes[0].Commitment != outputCommitment {
+		t.Fatalf("receiver notes = %+v, want output note", receiverState.Notes)
+	}
+	if receiverState.Notes[0].SpendAuthority != receiverAuthorityKey {
+		t.Fatal("receiver spend authority mismatch")
 	}
 }
 
@@ -642,7 +864,13 @@ func mustPrivacyInstructionBytes(t *testing.T, instruction PrivacyInstruction, e
 func mustPrivacyStateFromAccount(t *testing.T, account AddressedAccount) PrivacyState {
 	t.Helper()
 
-	state, err := UnmarshalPrivacyStateBinary(account.Account.Data)
+	return mustPrivacyStateFromData(t, account.Account.Data)
+}
+
+func mustPrivacyStateFromData(t *testing.T, data []byte) PrivacyState {
+	t.Helper()
+
+	state, err := UnmarshalPrivacyStateBinary(data)
 	if err != nil {
 		t.Fatalf("UnmarshalPrivacyStateBinary() error = %v", err)
 	}

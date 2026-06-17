@@ -56,15 +56,20 @@ type PrivacyDepositParams struct {
 	AuditRecords   []PrivacyAuditRecord
 }
 
-// PrivacyWithdrawParams 描述隐私转透明参数 + 用 nullifier 防止同一 note 重复花费。
+// PrivacyWithdrawParams 描述隐私转透明参数 + 可选找零 note 支持部分花费。
 type PrivacyWithdrawParams struct {
-	Amount           uint64
-	SourceCommitment Hash
-	Nullifier        Hash
-	AuditRecords     []PrivacyAuditRecord
+	Amount               uint64
+	SourceCommitment     Hash
+	Nullifier            Hash
+	AuditRecords         []PrivacyAuditRecord
+	ChangeAmount         uint64
+	ChangeCommitment     Hash
+	ChangeSpendAuthority PublicKey
+	ChangeEncryptedNote  []byte
+	ChangeAuditRecords   []PrivacyAuditRecord
 }
 
-// PrivacyTransferParams 描述隐私转隐私参数 + 固定指令先消费旧 note 并创建新 note。
+// PrivacyTransferParams 描述隐私转隐私参数 + 支持输出 note 和找零 note 原子创建。
 type PrivacyTransferParams struct {
 	Amount               uint64
 	SourceCommitment     Hash
@@ -73,6 +78,11 @@ type PrivacyTransferParams struct {
 	OutputSpendAuthority PublicKey
 	OutputEncryptedNote  []byte
 	OutputAuditRecords   []PrivacyAuditRecord
+	ChangeAmount         uint64
+	ChangeCommitment     Hash
+	ChangeSpendAuthority PublicKey
+	ChangeEncryptedNote  []byte
+	ChangeAuditRecords   []PrivacyAuditRecord
 }
 
 // PrivacyAuthorizeAuditParams 描述审计授权参数 + 后续补充授权不需要改动隐私余额。
@@ -131,6 +141,8 @@ func NewPrivacyDepositInstruction(vmVersion uint16, proof []byte, params Privacy
 func NewPrivacyWithdrawInstruction(vmVersion uint16, proof []byte, params PrivacyWithdrawParams) (PrivacyInstruction, error) {
 	clonedParams := params
 	clonedParams.AuditRecords = clonePrivacyAuditRecords(params.AuditRecords)
+	clonedParams.ChangeEncryptedNote = utils.CloneBytes(params.ChangeEncryptedNote)
+	clonedParams.ChangeAuditRecords = clonePrivacyAuditRecords(params.ChangeAuditRecords)
 	instruction := PrivacyInstruction{Type: PrivacyInstructionWithdraw, VMVersion: vmVersion, Proof: utils.CloneBytes(proof), Withdraw: &clonedParams}
 	return instruction, instruction.Validate()
 }
@@ -140,6 +152,8 @@ func NewPrivacyTransferInstruction(vmVersion uint16, proof []byte, params Privac
 	clonedParams := params
 	clonedParams.OutputEncryptedNote = utils.CloneBytes(params.OutputEncryptedNote)
 	clonedParams.OutputAuditRecords = clonePrivacyAuditRecords(params.OutputAuditRecords)
+	clonedParams.ChangeEncryptedNote = utils.CloneBytes(params.ChangeEncryptedNote)
+	clonedParams.ChangeAuditRecords = clonePrivacyAuditRecords(params.ChangeAuditRecords)
 	instruction := PrivacyInstruction{Type: PrivacyInstructionTransfer, VMVersion: vmVersion, Proof: utils.CloneBytes(proof), Transfer: &clonedParams}
 	return instruction, instruction.Validate()
 }
@@ -167,6 +181,14 @@ func BuildPrivacyWithdrawProofMessage(vmVersion uint16, stateAddress PublicKey, 
 	if err != nil {
 		return nil, err
 	}
+	changeEncryptedNoteHash, changeAuditRecordsHash, err := privacyChangeOutputHashes(
+		params.ChangeAmount,
+		params.ChangeEncryptedNote,
+		params.ChangeAuditRecords,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	writer := newPrivacyProofMessageWriter(vmVersion, PrivacyInstructionWithdraw, currentSlot, stateAddress)
 	writer.WriteFixedBytes(destinationAddress[:])
@@ -174,13 +196,26 @@ func BuildPrivacyWithdrawProofMessage(vmVersion uint16, stateAddress PublicKey, 
 	writer.WriteFixedBytes(params.SourceCommitment[:])
 	writer.WriteFixedBytes(params.Nullifier[:])
 	writer.WriteFixedBytes(auditRecordsHash[:])
+	writer.WriteUint64(params.ChangeAmount)
+	writer.WriteFixedBytes(params.ChangeCommitment[:])
+	writer.WriteFixedBytes(params.ChangeSpendAuthority[:])
+	writer.WriteFixedBytes(changeEncryptedNoteHash[:])
+	writer.WriteFixedBytes(changeAuditRecordsHash[:])
 	return writer.Bytes(), nil
 }
 
-// BuildPrivacyTransferProofMessage 构造隐私转隐私证明消息 + 绑定输出和审计授权防止参数替换。
+// BuildPrivacyTransferProofMessage 构造隐私转隐私证明消息 + 默认绑定同一状态账户保持兼容调用。
 func BuildPrivacyTransferProofMessage(vmVersion uint16, stateAddress PublicKey, params PrivacyTransferParams, currentSlot uint64) ([]byte, error) {
+	return BuildPrivacyTransferProofMessageWithOutputState(vmVersion, stateAddress, stateAddress, params, currentSlot)
+}
+
+// BuildPrivacyTransferProofMessageWithOutputState 构造隐私转隐私证明消息 + 绑定输出状态账户防止 note 被重定向。
+func BuildPrivacyTransferProofMessageWithOutputState(vmVersion uint16, stateAddress PublicKey, outputStateAddress PublicKey, params PrivacyTransferParams, currentSlot uint64) ([]byte, error) {
 	if err := validatePrivacyProofMessageHeader(vmVersion, stateAddress, currentSlot); err != nil {
 		return nil, err
+	}
+	if outputStateAddress.IsZero() {
+		return nil, fmt.Errorf("%w: output privacy state address is zero", ErrInvalidPrivacyInstruction)
 	}
 	if err := validatePrivacyTransferParams(&params); err != nil {
 		return nil, err
@@ -193,8 +228,17 @@ func BuildPrivacyTransferProofMessage(vmVersion uint16, stateAddress PublicKey, 
 	if err != nil {
 		return nil, err
 	}
+	changeEncryptedNoteHash, changeAuditRecordsHash, err := privacyChangeOutputHashes(
+		params.ChangeAmount,
+		params.ChangeEncryptedNote,
+		params.ChangeAuditRecords,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	writer := newPrivacyProofMessageWriter(vmVersion, PrivacyInstructionTransfer, currentSlot, stateAddress)
+	writer.WriteFixedBytes(outputStateAddress[:])
 	writer.WriteUint64(params.Amount)
 	writer.WriteFixedBytes(params.SourceCommitment[:])
 	writer.WriteFixedBytes(params.Nullifier[:])
@@ -202,6 +246,11 @@ func BuildPrivacyTransferProofMessage(vmVersion uint16, stateAddress PublicKey, 
 	writer.WriteFixedBytes(params.OutputSpendAuthority[:])
 	writer.WriteFixedBytes(encryptedNoteHash[:])
 	writer.WriteFixedBytes(auditRecordsHash[:])
+	writer.WriteUint64(params.ChangeAmount)
+	writer.WriteFixedBytes(params.ChangeCommitment[:])
+	writer.WriteFixedBytes(params.ChangeSpendAuthority[:])
+	writer.WriteFixedBytes(changeEncryptedNoteHash[:])
+	writer.WriteFixedBytes(changeAuditRecordsHash[:])
 	return writer.Bytes(), nil
 }
 
@@ -391,7 +440,16 @@ func writePrivacyInstructionBody(writer *borsh.Writer, instruction PrivacyInstru
 		writer.WriteUint64(instruction.Withdraw.Amount)
 		writer.WriteFixedBytes(instruction.Withdraw.SourceCommitment[:])
 		writer.WriteFixedBytes(instruction.Withdraw.Nullifier[:])
-		return writePrivacyAuditRecords(writer, instruction.Withdraw.AuditRecords)
+		if err := writePrivacyAuditRecords(writer, instruction.Withdraw.AuditRecords); err != nil {
+			return err
+		}
+		return writePrivacyChangeOutput(writer,
+			instruction.Withdraw.ChangeAmount,
+			instruction.Withdraw.ChangeCommitment,
+			instruction.Withdraw.ChangeSpendAuthority,
+			instruction.Withdraw.ChangeEncryptedNote,
+			instruction.Withdraw.ChangeAuditRecords,
+		)
 	case PrivacyInstructionTransfer:
 		writer.WriteUint64(instruction.Transfer.Amount)
 		writer.WriteFixedBytes(instruction.Transfer.SourceCommitment[:])
@@ -401,7 +459,16 @@ func writePrivacyInstructionBody(writer *borsh.Writer, instruction PrivacyInstru
 		if err := writer.WriteBytes(instruction.Transfer.OutputEncryptedNote); err != nil {
 			return err
 		}
-		return writePrivacyAuditRecords(writer, instruction.Transfer.OutputAuditRecords)
+		if err := writePrivacyAuditRecords(writer, instruction.Transfer.OutputAuditRecords); err != nil {
+			return err
+		}
+		return writePrivacyChangeOutput(writer,
+			instruction.Transfer.ChangeAmount,
+			instruction.Transfer.ChangeCommitment,
+			instruction.Transfer.ChangeSpendAuthority,
+			instruction.Transfer.ChangeEncryptedNote,
+			instruction.Transfer.ChangeAuditRecords,
+		)
 	case PrivacyInstructionAuthorizeAudit:
 		writer.WriteFixedBytes(instruction.AuthorizeAudit.Commitment[:])
 		writer.WriteFixedBytes(instruction.AuthorizeAudit.Auditor[:])
@@ -468,7 +535,21 @@ func readPrivacyWithdrawInstruction(reader *borsh.Reader, vmVersion uint16, proo
 	if err != nil {
 		return PrivacyInstruction{}, err
 	}
-	return NewPrivacyWithdrawInstruction(vmVersion, proof, PrivacyWithdrawParams{Amount: amount, SourceCommitment: sourceCommitment, Nullifier: nullifier, AuditRecords: auditRecords})
+	changeAmount, changeCommitment, changeSpendAuthority, changeEncryptedNote, changeAuditRecords, err := readPrivacyChangeOutput(reader, "withdraw change")
+	if err != nil {
+		return PrivacyInstruction{}, err
+	}
+	return NewPrivacyWithdrawInstruction(vmVersion, proof, PrivacyWithdrawParams{
+		Amount:               amount,
+		SourceCommitment:     sourceCommitment,
+		Nullifier:            nullifier,
+		AuditRecords:         auditRecords,
+		ChangeAmount:         changeAmount,
+		ChangeCommitment:     changeCommitment,
+		ChangeSpendAuthority: changeSpendAuthority,
+		ChangeEncryptedNote:  changeEncryptedNote,
+		ChangeAuditRecords:   changeAuditRecords,
+	})
 }
 
 func readPrivacyTransferInstruction(reader *borsh.Reader, vmVersion uint16, proof []byte) (PrivacyInstruction, error) {
@@ -500,6 +581,10 @@ func readPrivacyTransferInstruction(reader *borsh.Reader, vmVersion uint16, proo
 	if err != nil {
 		return PrivacyInstruction{}, err
 	}
+	changeAmount, changeCommitment, changeSpendAuthority, changeEncryptedNote, changeAuditRecords, err := readPrivacyChangeOutput(reader, "transfer change")
+	if err != nil {
+		return PrivacyInstruction{}, err
+	}
 	return NewPrivacyTransferInstruction(vmVersion, proof, PrivacyTransferParams{
 		Amount:               amount,
 		SourceCommitment:     sourceCommitment,
@@ -508,6 +593,11 @@ func readPrivacyTransferInstruction(reader *borsh.Reader, vmVersion uint16, proo
 		OutputSpendAuthority: outputSpendAuthority,
 		OutputEncryptedNote:  encryptedNote,
 		OutputAuditRecords:   auditRecords,
+		ChangeAmount:         changeAmount,
+		ChangeCommitment:     changeCommitment,
+		ChangeSpendAuthority: changeSpendAuthority,
+		ChangeEncryptedNote:  changeEncryptedNote,
+		ChangeAuditRecords:   changeAuditRecords,
 	})
 }
 
@@ -627,6 +717,65 @@ func readPrivacyNullifiers(reader *borsh.Reader) ([]Hash, error) {
 		nullifiers[nullifierIndex] = nullifier
 	}
 	return nullifiers, nil
+}
+
+func privacyChangeOutputHashes(amount uint64, encryptedNote []byte, auditRecords []PrivacyAuditRecord) (Hash, Hash, error) {
+	if amount == 0 {
+		return Hash{}, Hash{}, nil
+	}
+	encryptedNoteHash, err := NewHash(utils.SHA256(encryptedNote))
+	if err != nil {
+		return Hash{}, Hash{}, err
+	}
+	auditRecordsHash, err := hashPrivacyAuditRecords(auditRecords)
+	if err != nil {
+		return Hash{}, Hash{}, err
+	}
+	return encryptedNoteHash, auditRecordsHash, nil
+}
+
+func writePrivacyChangeOutput(
+	writer *borsh.Writer,
+	amount uint64,
+	commitment Hash,
+	spendAuthority PublicKey,
+	encryptedNote []byte,
+	auditRecords []PrivacyAuditRecord,
+) error {
+	writer.WriteUint64(amount)
+	writer.WriteFixedBytes(commitment[:])
+	writer.WriteFixedBytes(spendAuthority[:])
+	if err := writer.WriteBytes(encryptedNote); err != nil {
+		return err
+	}
+	return writePrivacyAuditRecords(writer, auditRecords)
+}
+
+func readPrivacyChangeOutput(reader *borsh.Reader, field string) (uint64, Hash, PublicKey, []byte, []PrivacyAuditRecord, error) {
+	if reader.Remaining() == 0 {
+		return 0, Hash{}, PublicKey{}, nil, nil, nil
+	}
+	amount, err := reader.ReadUint64()
+	if err != nil {
+		return 0, Hash{}, PublicKey{}, nil, nil, fmt.Errorf("structure: decode %s amount: %w", field, err)
+	}
+	commitment, err := readPrivacyHash(reader, field+" commitment")
+	if err != nil {
+		return 0, Hash{}, PublicKey{}, nil, nil, err
+	}
+	spendAuthority, err := readPrivacyPublicKey(reader, field+" spend authority")
+	if err != nil {
+		return 0, Hash{}, PublicKey{}, nil, nil, err
+	}
+	encryptedNote, err := reader.ReadBytes()
+	if err != nil {
+		return 0, Hash{}, PublicKey{}, nil, nil, fmt.Errorf("structure: decode %s encrypted note: %w", field, err)
+	}
+	auditRecords, err := readPrivacyAuditRecords(reader)
+	if err != nil {
+		return 0, Hash{}, PublicKey{}, nil, nil, err
+	}
+	return amount, commitment, spendAuthority, encryptedNote, auditRecords, nil
 }
 
 func writePrivacyAuditRecords(writer *borsh.Writer, records []PrivacyAuditRecord) error {
@@ -790,7 +939,16 @@ func validatePrivacyWithdrawParams(params *PrivacyWithdrawParams) error {
 	if params.SourceCommitment.IsZero() || params.Nullifier.IsZero() {
 		return fmt.Errorf("%w: withdraw commitment or nullifier is zero", ErrInvalidPrivacyInstruction)
 	}
-	return validatePrivacyAuditRecords(params.AuditRecords)
+	if err := validatePrivacyAuditRecords(params.AuditRecords); err != nil {
+		return err
+	}
+	return validatePrivacyChangeOutput(
+		params.ChangeAmount,
+		params.ChangeCommitment,
+		params.ChangeSpendAuthority,
+		params.ChangeEncryptedNote,
+		params.ChangeAuditRecords,
+	)
 }
 
 func validatePrivacyTransferParams(params *PrivacyTransferParams) error {
@@ -809,7 +967,41 @@ func validatePrivacyTransferParams(params *PrivacyTransferParams) error {
 	if err := validateEncryptedNote(params.OutputEncryptedNote); err != nil {
 		return err
 	}
-	return validatePrivacyAuditRecords(params.OutputAuditRecords)
+	if params.ChangeAmount > 0 && params.OutputCommitment == params.ChangeCommitment {
+		return fmt.Errorf("%w: transfer output and change commitment must differ", ErrInvalidPrivacyInstruction)
+	}
+	if err := validatePrivacyAuditRecords(params.OutputAuditRecords); err != nil {
+		return err
+	}
+	return validatePrivacyChangeOutput(
+		params.ChangeAmount,
+		params.ChangeCommitment,
+		params.ChangeSpendAuthority,
+		params.ChangeEncryptedNote,
+		params.ChangeAuditRecords,
+	)
+}
+
+func validatePrivacyChangeOutput(
+	amount uint64,
+	commitment Hash,
+	spendAuthority PublicKey,
+	encryptedNote []byte,
+	auditRecords []PrivacyAuditRecord,
+) error {
+	if amount == 0 {
+		if !commitment.IsZero() || !spendAuthority.IsZero() || len(encryptedNote) > 0 || len(auditRecords) > 0 {
+			return fmt.Errorf("%w: zero change amount has change output data", ErrInvalidPrivacyInstruction)
+		}
+		return nil
+	}
+	if commitment.IsZero() || spendAuthority.IsZero() {
+		return fmt.Errorf("%w: change commitment or spend authority is zero", ErrInvalidPrivacyInstruction)
+	}
+	if err := validateEncryptedNote(encryptedNote); err != nil {
+		return err
+	}
+	return validatePrivacyAuditRecords(auditRecords)
 }
 
 func validatePrivacyAuthorizeAuditParams(params *PrivacyAuthorizeAuditParams) error {

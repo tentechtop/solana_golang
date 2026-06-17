@@ -2,6 +2,7 @@ package privacy
 
 import (
 	"fmt"
+	"math"
 
 	"solana_golang/runtime"
 	"solana_golang/structure"
@@ -92,11 +93,22 @@ func executeWithdraw(programID structure.PublicKey, instruction structure.Privac
 	if err := validateAuditRecordsForSlot(instruction.Withdraw.AuditRecords, context.CurrentSlot); err != nil {
 		return err
 	}
+	if err := validateAuditRecordsForSlot(instruction.Withdraw.ChangeAuditRecords, context.CurrentSlot); err != nil {
+		return err
+	}
 	proofMessage, err := structure.BuildPrivacyWithdrawProofMessage(instruction.VMVersion, stateAddress, destinationAddress, *instruction.Withdraw, context.CurrentSlot)
 	if err != nil {
 		return err
 	}
-	if err := consumeNote(&state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.Nullifier, instruction.Withdraw.Amount, context, instruction.Proof, proofMessage); err != nil {
+	inputAmount, err := privacySpendInputAmount(instruction.Withdraw.Amount, instruction.Withdraw.ChangeAmount)
+	if err != nil {
+		return err
+	}
+	sourceNote, err := consumeNote(&state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.Nullifier, inputAmount, context, instruction.Proof, proofMessage)
+	if err != nil {
+		return err
+	}
+	if err := appendWithdrawChangeNote(&state, instruction, sourceNote); err != nil {
 		return err
 	}
 	if err := appendAuditRecords(&state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.AuditRecords); err != nil {
@@ -113,32 +125,143 @@ func executeTransfer(programID structure.PublicKey, instruction structure.Privac
 		return fmt.Errorf("%w: private transfer requires privacy state", structure.ErrInvalidPrivacyInstruction)
 	}
 	stateAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
-	state, stateAccount, err := loadStateAccount(programID, stateAddress, context.Accounts)
+	outputStateAddress := privacyTransferOutputStateAddress(stateAddress, context)
+	sourceState, sourceStateAccount, err := loadStateAccount(programID, stateAddress, context.Accounts)
 	if err != nil {
 		return err
 	}
-	if findNote(state, instruction.Transfer.OutputCommitment) >= 0 {
-		return fmt.Errorf("%w: duplicate output commitment", structure.ErrInvalidPrivacyInstruction)
+	outputState := structure.PrivacyState{}
+	outputStateAccount := structure.Account{}
+	if outputStateAddress != stateAddress {
+		outputState, outputStateAccount, err = loadStateAccount(programID, outputStateAddress, context.Accounts)
+		if err != nil {
+			return err
+		}
+	} else {
+		outputState = sourceState
+	}
+	if err := validateTransferOutput(sourceState, outputState, instruction); err != nil {
+		return err
 	}
 	if err := validateAuditRecordsForSlot(instruction.Transfer.OutputAuditRecords, context.CurrentSlot); err != nil {
 		return err
 	}
-	proofMessage, err := structure.BuildPrivacyTransferProofMessage(instruction.VMVersion, stateAddress, *instruction.Transfer, context.CurrentSlot)
+	if err := validateAuditRecordsForSlot(instruction.Transfer.ChangeAuditRecords, context.CurrentSlot); err != nil {
+		return err
+	}
+	proofMessage, err := structure.BuildPrivacyTransferProofMessageWithOutputState(instruction.VMVersion, stateAddress, outputStateAddress, *instruction.Transfer, context.CurrentSlot)
 	if err != nil {
 		return err
 	}
-	if err := consumeNote(&state, instruction.Transfer.SourceCommitment, instruction.Transfer.Nullifier, instruction.Transfer.Amount, context, instruction.Proof, proofMessage); err != nil {
+	inputAmount, err := privacySpendInputAmount(instruction.Transfer.Amount, instruction.Transfer.ChangeAmount)
+	if err != nil {
 		return err
 	}
-	state.Notes = append(state.Notes, structure.PrivacyNoteRecord{
+	sourceNote, err := consumeNote(&sourceState, instruction.Transfer.SourceCommitment, instruction.Transfer.Nullifier, inputAmount, context, instruction.Proof, proofMessage)
+	if err != nil {
+		return err
+	}
+	outputNote := privacyOutputNote(instruction)
+	if outputStateAddress == stateAddress {
+		sourceState.Notes = append(sourceState.Notes, outputNote)
+		if err := appendTransferChangeNote(&sourceState, instruction, sourceNote); err != nil {
+			return err
+		}
+		return storeStateAccount(stateAddress, sourceStateAccount, sourceState, context)
+	}
+	if err := appendTransferChangeNote(&sourceState, instruction, sourceNote); err != nil {
+		return err
+	}
+	outputState.Notes = append(outputState.Notes, outputNote)
+	if err := storeStateAccount(stateAddress, sourceStateAccount, sourceState, context); err != nil {
+		return err
+	}
+	if err := storeStateAccount(outputStateAddress, outputStateAccount, outputState, context); err != nil {
+		return err
+	}
+	return runtime.TransferLamports(stateAddress, outputStateAddress, instruction.Transfer.Amount, context.Accounts, context.RentConfig)
+}
+
+func privacySpendInputAmount(amount uint64, changeAmount uint64) (uint64, error) {
+	if amount > math.MaxUint64-changeAmount {
+		return 0, fmt.Errorf("%w: privacy spend amount overflow", structure.ErrInvalidPrivacyInstruction)
+	}
+	return amount + changeAmount, nil
+}
+
+func privacyOutputNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
 		Commitment:     instruction.Transfer.OutputCommitment,
 		SpendAuthority: instruction.Transfer.OutputSpendAuthority,
 		Amount:         instruction.Transfer.Amount,
 		VMVersion:      instruction.VMVersion,
 		EncryptedNote:  utils.CloneBytes(instruction.Transfer.OutputEncryptedNote),
 		AuditRecords:   cloneAuditRecords(instruction.Transfer.OutputAuditRecords),
-	})
-	return storeStateAccount(stateAddress, stateAccount, state, context)
+	}
+}
+
+func appendWithdrawChangeNote(state *structure.PrivacyState, instruction structure.PrivacyInstruction, sourceNote structure.PrivacyNoteRecord) error {
+	if instruction.Withdraw.ChangeAmount == 0 {
+		return nil
+	}
+	return appendChangeNote(state, privacyWithdrawChangeNote(instruction), sourceNote)
+}
+
+func appendTransferChangeNote(state *structure.PrivacyState, instruction structure.PrivacyInstruction, sourceNote structure.PrivacyNoteRecord) error {
+	if instruction.Transfer.ChangeAmount == 0 {
+		return nil
+	}
+	return appendChangeNote(state, privacyTransferChangeNote(instruction), sourceNote)
+}
+
+func appendChangeNote(state *structure.PrivacyState, changeNote structure.PrivacyNoteRecord, sourceNote structure.PrivacyNoteRecord) error {
+	if changeNote.SpendAuthority != sourceNote.SpendAuthority {
+		return fmt.Errorf("%w: change spend authority must match source note", structure.ErrInvalidPrivacyInstruction)
+	}
+	if findNote(*state, changeNote.Commitment) >= 0 {
+		return fmt.Errorf("%w: duplicate change commitment", structure.ErrInvalidPrivacyInstruction)
+	}
+	state.Notes = append(state.Notes, changeNote)
+	return nil
+}
+
+func privacyWithdrawChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
+		Commitment:     instruction.Withdraw.ChangeCommitment,
+		SpendAuthority: instruction.Withdraw.ChangeSpendAuthority,
+		Amount:         instruction.Withdraw.ChangeAmount,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Withdraw.ChangeEncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Withdraw.ChangeAuditRecords),
+	}
+}
+
+func privacyTransferChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
+		Commitment:     instruction.Transfer.ChangeCommitment,
+		SpendAuthority: instruction.Transfer.ChangeSpendAuthority,
+		Amount:         instruction.Transfer.ChangeAmount,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Transfer.ChangeEncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Transfer.ChangeAuditRecords),
+	}
+}
+
+func privacyTransferOutputStateAddress(sourceStateAddress structure.PublicKey, context runtime.InstructionContext) structure.PublicKey {
+	if len(context.Instruction.AccountIndexes) < 2 {
+		return sourceStateAddress
+	}
+	return context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
+}
+
+func validateTransferOutput(sourceState structure.PrivacyState, outputState structure.PrivacyState, instruction structure.PrivacyInstruction) error {
+	if findNote(sourceState, instruction.Transfer.OutputCommitment) >= 0 || findNote(outputState, instruction.Transfer.OutputCommitment) >= 0 {
+		return fmt.Errorf("%w: duplicate output commitment", structure.ErrInvalidPrivacyInstruction)
+	}
+	if instruction.Transfer.ChangeAmount > 0 && (findNote(sourceState, instruction.Transfer.ChangeCommitment) >= 0 || findNote(outputState, instruction.Transfer.ChangeCommitment) >= 0) {
+		return fmt.Errorf("%w: duplicate change commitment", structure.ErrInvalidPrivacyInstruction)
+	}
+	return nil
 }
 
 func executeAuthorizeAudit(programID structure.PublicKey, instruction structure.PrivacyInstruction, context runtime.InstructionContext) error {
@@ -218,32 +341,32 @@ func consumeNote(
 	context runtime.InstructionContext,
 	proof []byte,
 	proofMessage []byte,
-) error {
+) (structure.PrivacyNoteRecord, error) {
 	if context.CurrentSlot == 0 {
-		return fmt.Errorf("%w: spend slot cannot be zero", structure.ErrInvalidPrivacyInstruction)
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: spend slot cannot be zero", structure.ErrInvalidPrivacyInstruction)
 	}
 	if hasNullifier(*state, nullifier) {
-		return fmt.Errorf("%w: nullifier already spent", structure.ErrInvalidPrivacyInstruction)
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: nullifier already spent", structure.ErrInvalidPrivacyInstruction)
 	}
 	noteIndex := findNote(*state, commitment)
 	if noteIndex < 0 {
-		return fmt.Errorf("%w: source commitment not found", structure.ErrInvalidPrivacyInstruction)
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: source commitment not found", structure.ErrInvalidPrivacyInstruction)
 	}
 	note := state.Notes[noteIndex]
 	if note.Spent {
-		return fmt.Errorf("%w: source commitment already spent", structure.ErrInvalidPrivacyInstruction)
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: source commitment already spent", structure.ErrInvalidPrivacyInstruction)
 	}
 	if note.Amount != amount {
-		return fmt.Errorf("%w: privacy amount mismatch", structure.ErrInvalidPrivacyInstruction)
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: privacy amount mismatch", structure.ErrInvalidPrivacyInstruction)
 	}
 	if err := validateSpendAuthorization(note.SpendAuthority, context.Message, proof, proofMessage); err != nil {
-		return err
+		return structure.PrivacyNoteRecord{}, err
 	}
 	state.Notes[noteIndex].Spent = true
 	state.Notes[noteIndex].SpentSlot = context.CurrentSlot
 	state.Notes[noteIndex].SpendNullifier = nullifier
 	state.SpentNullifiers = append(state.SpentNullifiers, nullifier)
-	return nil
+	return note, nil
 }
 
 func validateSpendAuthorization(spendAuthority structure.PublicKey, message structure.ResolvedMessage, proof []byte, proofMessage []byte) error {

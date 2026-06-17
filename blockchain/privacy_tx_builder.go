@@ -10,28 +10,35 @@ import (
 const PrivacyStateRentReserveBytes = 4096
 
 type PrivacyDepositTransactionParams struct {
-	Source        structure.SolanaKeyPair
-	StateAccount  structure.SolanaKeyPair
-	Amount        uint64
-	Commitment    structure.Hash
-	EncryptedNote []byte
-	AuditRecords  []structure.PrivacyAuditRecord
-	CreateState   bool
+	Source         structure.SolanaKeyPair
+	StateAccount   structure.SolanaKeyPair
+	SpendAuthority structure.PublicKey
+	Amount         uint64
+	Commitment     structure.Hash
+	EncryptedNote  []byte
+	AuditRecords   []structure.PrivacyAuditRecord
+	CreateState    bool
 }
 
 type PrivacyWithdrawTransactionParams struct {
-	Authority        structure.SolanaKeyPair
-	StateAddress     structure.PublicKey
-	Destination      structure.PublicKey
-	Amount           uint64
-	SourceCommitment structure.Hash
-	Nullifier        structure.Hash
-	AuditRecords     []structure.PrivacyAuditRecord
+	Authority            structure.SolanaKeyPair
+	StateAddress         structure.PublicKey
+	Destination          structure.PublicKey
+	Amount               uint64
+	SourceCommitment     structure.Hash
+	Nullifier            structure.Hash
+	AuditRecords         []structure.PrivacyAuditRecord
+	ChangeAmount         uint64
+	ChangeCommitment     structure.Hash
+	ChangeSpendAuthority structure.PublicKey
+	ChangeEncryptedNote  []byte
+	ChangeAuditRecords   []structure.PrivacyAuditRecord
 }
 
 type PrivacyTransferTransactionParams struct {
 	Authority            structure.SolanaKeyPair
 	StateAddress         structure.PublicKey
+	OutputStateAddress   structure.PublicKey
 	Amount               uint64
 	SourceCommitment     structure.Hash
 	Nullifier            structure.Hash
@@ -39,6 +46,11 @@ type PrivacyTransferTransactionParams struct {
 	OutputSpendAuthority structure.PublicKey
 	OutputEncryptedNote  []byte
 	OutputAuditRecords   []structure.PrivacyAuditRecord
+	ChangeAmount         uint64
+	ChangeCommitment     structure.Hash
+	ChangeSpendAuthority structure.PublicKey
+	ChangeEncryptedNote  []byte
+	ChangeAuditRecords   []structure.PrivacyAuditRecord
 }
 
 type PrivacyAuthorizeAuditTransactionParams struct {
@@ -53,10 +65,14 @@ type PrivacyAuthorizeAuditTransactionParams struct {
 
 // NewPrivacyDepositTransaction 构造透明转隐私交易 + 首次使用时原子创建隐私状态账户避免半初始化。
 func NewPrivacyDepositTransaction(params PrivacyDepositTransactionParams, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	spendAuthority := params.SpendAuthority
+	if spendAuthority.IsZero() {
+		spendAuthority = params.Source.PublicKey
+	}
 	instruction, err := structure.NewPrivacyDepositInstruction(structure.PrivacyStateVersion, nil, structure.PrivacyDepositParams{
 		Amount:         params.Amount,
 		Commitment:     params.Commitment,
-		SpendAuthority: params.Source.PublicKey,
+		SpendAuthority: spendAuthority,
 		EncryptedNote:  params.EncryptedNote,
 		AuditRecords:   params.AuditRecords,
 	})
@@ -82,10 +98,15 @@ func NewPrivacyDepositTransaction(params PrivacyDepositTransactionParams, recent
 // NewPrivacyWithdrawTransaction 构造隐私转透明交易 + 花费授权由持有 note 的签名账户完成。
 func NewPrivacyWithdrawTransaction(params PrivacyWithdrawTransactionParams, recentBlockhash structure.Hash) (structure.Transaction, error) {
 	instruction, err := structure.NewPrivacyWithdrawInstruction(structure.PrivacyStateVersion, nil, structure.PrivacyWithdrawParams{
-		Amount:           params.Amount,
-		SourceCommitment: params.SourceCommitment,
-		Nullifier:        params.Nullifier,
-		AuditRecords:     params.AuditRecords,
+		Amount:               params.Amount,
+		SourceCommitment:     params.SourceCommitment,
+		Nullifier:            params.Nullifier,
+		AuditRecords:         params.AuditRecords,
+		ChangeAmount:         params.ChangeAmount,
+		ChangeCommitment:     params.ChangeCommitment,
+		ChangeSpendAuthority: params.ChangeSpendAuthority,
+		ChangeEncryptedNote:  params.ChangeEncryptedNote,
+		ChangeAuditRecords:   params.ChangeAuditRecords,
 	})
 	if err != nil {
 		return structure.Transaction{}, err
@@ -107,7 +128,7 @@ func NewPrivacyWithdrawTransaction(params PrivacyWithdrawTransactionParams, rece
 	return signPrivacyTransaction(accounts, instructions, recentBlockhash, map[structure.PublicKey][]byte{params.Authority.PublicKey: params.Authority.PrivateKey})
 }
 
-// NewPrivacyTransferTransaction 构造隐私转隐私交易 + 消耗旧 note 并在同一状态账户中生成新 note。
+// NewPrivacyTransferTransaction 构造隐私转隐私交易 + 支持跨状态账户移动 note 与托管余额。
 func NewPrivacyTransferTransaction(params PrivacyTransferTransactionParams, recentBlockhash structure.Hash) (structure.Transaction, error) {
 	instruction, err := structure.NewPrivacyTransferInstruction(structure.PrivacyStateVersion, nil, structure.PrivacyTransferParams{
 		Amount:               params.Amount,
@@ -117,6 +138,11 @@ func NewPrivacyTransferTransaction(params PrivacyTransferTransactionParams, rece
 		OutputSpendAuthority: params.OutputSpendAuthority,
 		OutputEncryptedNote:  params.OutputEncryptedNote,
 		OutputAuditRecords:   params.OutputAuditRecords,
+		ChangeAmount:         params.ChangeAmount,
+		ChangeCommitment:     params.ChangeCommitment,
+		ChangeSpendAuthority: params.ChangeSpendAuthority,
+		ChangeEncryptedNote:  params.ChangeEncryptedNote,
+		ChangeAuditRecords:   params.ChangeAuditRecords,
 	})
 	if err != nil {
 		return structure.Transaction{}, err
@@ -125,12 +151,12 @@ func NewPrivacyTransferTransaction(params PrivacyTransferTransactionParams, rece
 	if err != nil {
 		return structure.Transaction{}, fmt.Errorf("blockchain: marshal privacy transfer: %w", err)
 	}
-	accounts := []structure.AccountMeta{
-		{PublicKey: params.Authority.PublicKey, IsSigner: true, IsWritable: true},
-		{PublicKey: params.StateAddress, IsSigner: false, IsWritable: true},
-		{PublicKey: structure.DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	outputStateAddress := params.OutputStateAddress
+	if outputStateAddress.IsZero() {
+		outputStateAddress = params.StateAddress
 	}
-	instructions, err := compilePrivacyInstruction(accounts, []structure.PublicKey{params.StateAddress}, data)
+	accounts, instructionAccounts := privacyTransferAccounts(params.Authority.PublicKey, params.StateAddress, outputStateAddress)
+	instructions, err := compilePrivacyInstruction(accounts, instructionAccounts, data)
 	if err != nil {
 		return structure.Transaction{}, err
 	}
@@ -179,6 +205,22 @@ func privacyDepositAccounts(params PrivacyDepositTransactionParams) []structure.
 		{PublicKey: structure.DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
 		{PublicKey: structure.DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
 	}
+}
+
+func privacyTransferAccounts(authorityAddress structure.PublicKey, sourceStateAddress structure.PublicKey, outputStateAddress structure.PublicKey) ([]structure.AccountMeta, []structure.PublicKey) {
+	if outputStateAddress == sourceStateAddress {
+		return []structure.AccountMeta{
+			{PublicKey: authorityAddress, IsSigner: true, IsWritable: true},
+			{PublicKey: sourceStateAddress, IsSigner: false, IsWritable: true},
+			{PublicKey: structure.DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+		}, []structure.PublicKey{sourceStateAddress}
+	}
+	return []structure.AccountMeta{
+		{PublicKey: authorityAddress, IsSigner: true, IsWritable: true},
+		{PublicKey: sourceStateAddress, IsSigner: false, IsWritable: true},
+		{PublicKey: outputStateAddress, IsSigner: false, IsWritable: true},
+		{PublicKey: structure.DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	}, []structure.PublicKey{sourceStateAddress, outputStateAddress}
 }
 
 func privacyDepositInstructions(params PrivacyDepositTransactionParams, accounts []structure.AccountMeta, privacyData []byte) ([]structure.CompiledInstruction, error) {
