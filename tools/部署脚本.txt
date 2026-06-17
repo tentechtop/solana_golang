@@ -6,3 +6,49 @@ powershell -ExecutionPolicy Bypass -File .\tools\redeploy_posnode_cluster.ps1 -S
 
 # 明确重置链数据，默认不会删数据
 powershell -ExecutionPolicy Bypass -File .\tools\redeploy_posnode_cluster.ps1 -ResetData
+
+
+
+
+可以，已经给你落好了。
+
+文件：
+- 脚本：[scripts/install-android-release.ps1](F:\workSpace2029\poswallet\scripts\install-android-release.ps1)
+- 命令入口：[package.json](F:\workSpace2029\poswallet\package.json)
+
+你以后直接执行这条就行：
+
+```powershell
+npm run android:install:release
+```
+
+等价的原生命令是：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-android-release.ps1
+```
+
+如果有多个手机，指定设备：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-android-release.ps1 -DeviceId 11785d69
+```
+
+如果只想安装，不想自动拉起：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-android-release.ps1 -SkipLaunch
+```
+
+这个脚本会自动做几件事：
+- 检查 `adb` 是否可用
+- 检查已连接设备
+- 自动执行 `android\gradlew.bat installRelease`
+- 安装完成后自动拉起 `com.poswallet.mobile`
+
+我已经实际跑通了一遍，当前脚本可用。
+剩余只有两个非阻塞警告，不影响安装：
+- `NODE_ENV` 未显式设置
+- Gradle deprecated 警告
+
+自查结论：脚本功能闭环已验证，没有阻断问题。唯一还可以后续优化的是控制台中文输出编码，目前个别中文日志在某些终端里会乱码，但不影响执行。
