@@ -1,0 +1,8 @@
+# 只看三节点状态，不部署
+powershell -ExecutionPolicy Bypass -File .\tools\redeploy_posnode_cluster.ps1 -HealthOnly
+
+# 只部署本机
+powershell -ExecutionPolicy Bypass -File .\tools\redeploy_posnode_cluster.ps1 -SkipLinux -SkipMac
+
+# 明确重置链数据，默认不会删数据
+powershell -ExecutionPolicy Bypass -File .\tools\redeploy_posnode_cluster.ps1 -ResetData
