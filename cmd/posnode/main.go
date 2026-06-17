@@ -52,6 +52,7 @@ type posNode struct {
 	mempool           []structure.Transaction
 	seenTransactions  map[string]struct{}
 	seenProposals     map[string]struct{}
+	seenQCs           map[string]uint64
 	pendingEvidence   []consensus.SlashingEvidence
 	seenEvidence      map[string]struct{}
 	proposalChoices   map[string]consensus.BlockProposal
@@ -170,6 +171,7 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		blsKeyPair:        blsKeyPair,
 		seenTransactions:  make(map[string]struct{}),
 		seenProposals:     make(map[string]struct{}),
+		seenQCs:           make(map[string]uint64),
 		seenEvidence:      make(map[string]struct{}),
 		proposalChoices:   make(map[string]consensus.BlockProposal),
 		signedVoteChoices: make(map[string]consensus.SignedVote),
@@ -476,7 +478,7 @@ func registerPrograms(executor *runtime.FixedExecutor) error {
 
 func (node *posNode) registerProtocols() error {
 	specs := []p2p.ProtocolSpec{
-		{ID: p2p.ProtocolPoSTransactionV1, Name: "/pos/transaction/1.0.0", Priority: p2p.MessagePriorityNormal, Class: p2p.ProtocolClassData},
+		{ID: p2p.ProtocolPoSTransactionV1, Name: "/pos/transaction/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 		{ID: p2p.ProtocolPoSProposalV1, Name: "/pos/proposal/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 		{ID: p2p.ProtocolPoSVoteV1, Name: "/pos/vote/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
 		{ID: p2p.ProtocolPoSQCV1, Name: "/pos/qc/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
@@ -495,12 +497,12 @@ func (node *posNode) registerProtocols() error {
 		}
 	}
 	resultSpecs := []p2p.ProtocolSpec{
-		{ID: p2p.ProtocolPoSBlockByHashV1, Name: "/pos/sync/block-by-hash/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
-		{ID: p2p.ProtocolPoSBlockByHeightV1, Name: "/pos/sync/block-by-height/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockByHashV1, Name: "/pos/sync/block-by-hash/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockByHeightV1, Name: "/pos/sync/block-by-height/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSStateSnapshotV1, Name: "/pos/sync/state-snapshot/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
-		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
-		{ID: p2p.ProtocolPoSBlockLocatorV1, Name: "/pos/sync/block-locator/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
-		{ID: p2p.ProtocolPoSCommonAncestorV1, Name: "/pos/sync/common-ancestor/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockLocatorV1, Name: "/pos/sync/block-locator/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSCommonAncestorV1, Name: "/pos/sync/common-ancestor/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 	}
 	resultHandlers := []p2p.ResultProtocolHandler{
 		node.handleBlockByHashRequest,
@@ -676,12 +678,12 @@ func (node *posNode) currentWallSlot() uint64 {
 
 func (node *posNode) slotLoop(ctx context.Context) {
 	startedAt := node.config.genesisStartTime()
-	clock, err := consensus.NewSlotClock(startedAt, 1, node.config.slotDuration(), node.config.slotDuration()*7/10)
+	clock, err := consensus.NewSlotClock(startedAt, 1, node.config.slotDuration(), node.slotSkipTimeout())
 	if err != nil {
 		node.logger.Error("posnode slot clock failed", slog.Any("error", err))
 		return
 	}
-	ticker := time.NewTicker(node.config.slotDuration() / 2)
+	ticker := time.NewTicker(node.slotTickInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -777,7 +779,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.mutex.Unlock()
 		return
 	}
-	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli())
+	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), slot)
 	rewardQCs, err := node.ledger.RewardQCs(head.FinalizedHeight, consensus.MaxRewardQCsPerBlock)
 	if err != nil {
 		node.logger.Warn("posnode reward qc load failed", slog.Any("error", err))
@@ -953,6 +955,9 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		if _, err := node.ledger.SaveQC(qc); err != nil {
 			return err
 		}
+		if !node.markQCSeen(qc) {
+			return nil
+		}
 		qcHash, err := hashQC(qc)
 		if err != nil {
 			return err
@@ -967,7 +972,7 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 			slog.Uint64("threshold_stake", qc.ThresholdStake),
 			slog.Int("voter_count", len(qc.Voters)),
 		)
-		node.broadcastQC(ctx, qc)
+		node.broadcastQC(ctx, qc, "")
 	}
 	return nil
 }
@@ -980,9 +985,15 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	if err := node.verifyQuorumCertificate(envelope.QC); err != nil {
 		return err
 	}
+	if node.hasQCSeen(envelope.QC) {
+		return nil
+	}
 	head, err := node.ledger.SaveQC(envelope.QC)
 	if err != nil {
 		return err
+	}
+	if !node.markQCSeen(envelope.QC) {
+		return nil
 	}
 	qcHash := head.QCHash
 	node.metrics.qcReceived.Add(1)
@@ -994,6 +1005,7 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 		slog.Uint64("confirmed_stake", envelope.QC.ConfirmedStake),
 		slog.Int("voter_count", len(envelope.QC.Voters)),
 	)
+	node.broadcastQC(ctx, envelope.QC, message.FromPeerID)
 	return nil
 }
 
@@ -1261,6 +1273,14 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 		node.metrics.transactionsDrop.Add(1)
 		return fmt.Errorf("posnode: transaction expired")
 	}
+	currentSlot := uint64(0)
+	if node.ledger != nil {
+		currentSlot = node.ledger.Head().Slot
+	}
+	if !node.transactionRecentBlockhashValidLocked(transaction, currentSlot) {
+		node.metrics.transactionsDrop.Add(1)
+		return fmt.Errorf("posnode: recent blockhash is not valid")
+	}
 	if err := node.persistMempoolTransaction(transactionID, transaction); err != nil {
 		return err
 	}
@@ -1462,7 +1482,7 @@ func (node *posNode) verifyQuorumCertificate(qc consensus.QuorumCertificate) err
 	)
 }
 
-func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertificate) {
+func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertificate, excludedPeerID string) {
 	qcHash, hashErr := hashQC(qc)
 	if hashErr != nil {
 		qcHash = structure.Hash{}
@@ -1473,7 +1493,17 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		return
 	}
 	peerIDs := node.validatorPeerIDsSnapshot(true)
-	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
+	targets := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if peerID == "" || peerID == excludedPeerID {
+			continue
+		}
+		targets = append(targets, peerID)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	if err := node.host.Broadcast(ctx, targets, message); err != nil {
 		node.logger.Warn("posnode broadcast qc failed",
 			slog.Uint64("slot", qc.Slot),
 			slog.Uint64("height", qc.BlockHeight),
@@ -1488,7 +1518,7 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		slog.Uint64("height", qc.BlockHeight),
 		slog.String("block_hash", qc.BlockHash.String()),
 		slog.String("qc_hash", qcHash.String()),
-		slog.Int("peer_count", len(peerIDs)),
+		slog.Int("peer_count", len(targets)),
 	)
 }
 

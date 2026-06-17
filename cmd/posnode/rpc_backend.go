@@ -921,7 +921,7 @@ func buildPeerNetworkResult(
 			LatestSlot:                peerSnapshot.LatestSlot,
 			BlockHeight:               peerSnapshot.BlockHeight,
 			FailureCount:              peerSnapshot.FailureCount,
-			LastError:                 peerSnapshot.LastError,
+			LastError:                 visiblePeerLastError(peerSnapshot, connected),
 			LastSeenUnixMilli:         peerSnapshot.LastSeenUnixMilli,
 			LastConnectedUnixMilli:    peerSnapshot.LastConnectedUnixMilli,
 			LastDisconnectedUnixMilli: peerSnapshot.LastDisconnectedUnixMilli,
@@ -943,6 +943,13 @@ func buildPeerNetworkResult(
 		return leftPeer.PeerID < rightPeer.PeerID
 	})
 	return result
+}
+
+func visiblePeerLastError(peerSnapshot p2p.PeerSnapshot, connected bool) string {
+	if connected {
+		return ""
+	}
+	return peerSnapshot.LastError
 }
 
 func buildPeerConnectionInfo(connectionState p2p.ConnectionState, connected bool) *rpc.PeerConnectionInfo {

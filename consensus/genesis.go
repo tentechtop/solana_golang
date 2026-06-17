@@ -4,30 +4,25 @@ import (
 	"fmt"
 
 	"solana_golang/structure"
-	"solana_golang/utils"
 )
 
 const (
-	// HardcodedGenesisTreasurySeed 固定创世资金账户 + 私链冷启动需要稳定资金来源。
-	HardcodedGenesisTreasurySeed = "solana-golang-hardcoded-genesis-treasury-v1"
+	// HardcodedGenesisTreasuryPublicKeyBase58 固定创世资金公钥 + 共识只能依赖公开身份避免私钥进入代码。
+	HardcodedGenesisTreasuryPublicKeyBase58 = "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9"
 	// DefaultGenesisSupplyLamports 固定创世总供应 + 本地 PoS 网络使用 10 亿代币按 9 位精度计数。
 	DefaultGenesisSupplyLamports = uint64(1_000_000_000_000_000_000)
 )
 
-// HardcodedGenesisTreasuryKeyPair 返回固定创世资金密钥 + 多节点必须推导出同一账户地址。
+// HardcodedGenesisTreasuryKeyPair 拒绝返回私钥 + 共识层不允许内置可签名密钥材料。
 func HardcodedGenesisTreasuryKeyPair() (structure.SolanaKeyPair, error) {
-	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(HardcodedGenesisTreasurySeed)))
-	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("consensus: build genesis treasury key: %w", err)
-	}
-	return keyPair, nil
+	return structure.SolanaKeyPair{}, fmt.Errorf("consensus: genesis treasury private key is not embedded; configure local keystore")
 }
 
 // HardcodedGenesisTreasuryPublicKey 返回固定创世资金地址 + 配置和 RPC 可直接展示该账户。
 func HardcodedGenesisTreasuryPublicKey() (structure.PublicKey, error) {
-	keyPair, err := HardcodedGenesisTreasuryKeyPair()
+	publicKey, err := structure.PublicKeyFromBase58(HardcodedGenesisTreasuryPublicKeyBase58)
 	if err != nil {
-		return structure.PublicKey{}, err
+		return structure.PublicKey{}, fmt.Errorf("consensus: decode genesis treasury public key: %w", err)
 	}
-	return keyPair.PublicKey, nil
+	return publicKey, nil
 }

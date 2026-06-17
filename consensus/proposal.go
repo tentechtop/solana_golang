@@ -463,6 +463,9 @@ func (state ChainState) applyWrites(writes []structure.AddressedAccount) ChainSt
 	}
 	for _, write := range writes {
 		index, exists := accountIndexByAddress[write.Address]
+		if !exists && isBuiltinProgramPlaceholder(write) {
+			continue
+		}
 		if exists {
 			nextState.Accounts[index] = structure.AddressedAccount{Address: write.Address, Account: write.Account.Clone()}
 			continue
@@ -471,6 +474,14 @@ func (state ChainState) applyWrites(writes []structure.AddressedAccount) ChainSt
 		nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{Address: write.Address, Account: write.Account.Clone()})
 	}
 	return nextState
+}
+
+func isBuiltinProgramPlaceholder(account structure.AddressedAccount) bool {
+	return structure.DefaultBuiltinProgramIDs.IsBuiltinProgram(account.Address) &&
+		account.Account.Lamports == 0 &&
+		len(account.Account.Data) == 0 &&
+		!account.Account.Executable &&
+		account.Account.Owner == structure.DefaultBuiltinProgramIDs.NativeLoader
 }
 
 // RootHash 计算账户状态根 + 地址排序保证跨节点可复算。

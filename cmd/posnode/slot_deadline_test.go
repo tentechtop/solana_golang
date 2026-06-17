@@ -17,12 +17,49 @@ func TestSlotDeadlinePassedUsesSharedBoundary(t *testing.T) {
 		},
 	}
 
-	deadline := startedAt.Add(2 * time.Second).Add(700 * time.Millisecond)
+	deadline := startedAt.Add(2 * time.Second).Add(900 * time.Millisecond)
 	if node.slotDeadlinePassed(3, deadline.Add(-time.Nanosecond)) {
 		t.Fatal("slotDeadlinePassed() before deadline = true, want false")
 	}
 	if !node.slotDeadlinePassed(3, deadline) {
 		t.Fatal("slotDeadlinePassed() at deadline = false, want true")
+	}
+}
+
+func TestSlotSkipTimeoutUsesNinetyPercentWindow(t *testing.T) {
+	node := &posNode{config: nodeConfig{SlotMillis: 400}}
+
+	if got := node.slotSkipTimeout(); got != 360*time.Millisecond {
+		t.Fatalf("slotSkipTimeout() = %s, want 360ms", got)
+	}
+}
+
+func TestSlotTickIntervalBoundsShortAndLongSlots(t *testing.T) {
+	shortSlotNode := &posNode{config: nodeConfig{SlotMillis: 400}}
+	if got := shortSlotNode.slotTickInterval(); got != 100*time.Millisecond {
+		t.Fatalf("short slot tick interval = %s, want 100ms", got)
+	}
+
+	longSlotNode := &posNode{config: nodeConfig{SlotMillis: 5000}}
+	if got := longSlotNode.slotTickInterval(); got != 500*time.Millisecond {
+		t.Fatalf("long slot tick interval = %s, want 500ms", got)
+	}
+}
+
+func TestPeerStatusTimeoutUsesControlPlaneBounds(t *testing.T) {
+	shortSlotNode := &posNode{config: nodeConfig{SlotMillis: 400}}
+	if got := shortSlotNode.peerStatusTimeout(); got != 1200*time.Millisecond {
+		t.Fatalf("short slot peer status timeout = %s, want 1.2s", got)
+	}
+
+	veryShortSlotNode := &posNode{config: nodeConfig{SlotMillis: 100}}
+	if got := veryShortSlotNode.peerStatusTimeout(); got != time.Second {
+		t.Fatalf("very short slot peer status timeout = %s, want 1s", got)
+	}
+
+	longSlotNode := &posNode{config: nodeConfig{SlotMillis: 3000}}
+	if got := longSlotNode.peerStatusTimeout(); got != 5*time.Second {
+		t.Fatalf("long slot peer status timeout = %s, want 5s", got)
 	}
 }
 

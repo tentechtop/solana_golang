@@ -100,7 +100,7 @@ func (node *posNode) deleteMempoolTransactions(transactionIDs []string) {
 	}
 }
 
-func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structure.Transaction, []string) {
+func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64, currentSlot uint64) ([]structure.Transaction, []string) {
 	node.sortMempoolLocked()
 	selected := make([]structure.Transaction, 0, len(node.mempool))
 	remaining := make([]structure.Transaction, 0, len(node.mempool))
@@ -114,6 +114,18 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 		if transaction.IsExpiredWithTTL(nowMillis, node.config.MempoolTransactionTTLMillis) {
 			removeIDs = append(removeIDs, transactionID)
 			delete(node.seenTransactions, transactionID)
+			continue
+		}
+		if !node.transactionRecentBlockhashValidLocked(transaction, currentSlot) {
+			removeIDs = append(removeIDs, transactionID)
+			delete(node.seenTransactions, transactionID)
+			node.metrics.transactionsDrop.Add(1)
+			node.logger.Warn("posnode mempool transaction dropped",
+				"tx_id", transactionID,
+				"reason", "recent blockhash is not valid",
+				"recent_blockhash", transaction.RecentBlockhash.String(),
+				"current_slot", currentSlot,
+			)
 			continue
 		}
 		committed, err := node.transactionAlreadyCommitted(transactionID)
@@ -144,11 +156,17 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64) ([]structu
 			continue
 		}
 		selected = append(selected, transaction)
-		removeIDs = append(removeIDs, transactionID)
-		delete(node.seenTransactions, transactionID)
+		remaining = append(remaining, transaction)
 	}
 	node.mempool = remaining
 	return selected, removeIDs
+}
+
+func (node *posNode) transactionRecentBlockhashValidLocked(transaction structure.Transaction, currentSlot uint64) bool {
+	if len(node.blockhashQueue.Entries) == 0 {
+		return true
+	}
+	return node.blockhashQueue.IsRecent(transaction.RecentBlockhash, currentSlot)
 }
 
 func (node *posNode) transactionAlreadyCommitted(transactionID string) (bool, error) {

@@ -17,7 +17,11 @@ import (
 const maxOrphanProposals = 1024
 const maxSyncBlocksPerRound = 32
 const defaultBlockLocatorEntries = 32
-const productionPeerStatusTimeout = 200 * time.Millisecond
+const (
+	peerStatusTimeoutSlotMultiplier = 3
+	minPeerStatusTimeout            = time.Second
+	maxPeerStatusTimeout            = 5 * time.Second
+)
 
 func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
@@ -611,7 +615,7 @@ func (node *posNode) determineBranchSyncStartHeight(
 	peerID string,
 	localHead blockchain.Head,
 ) (uint64, error) {
-	statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+	statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
 	_, err := node.requestStatus(statusContext, peerID)
 	cancel()
 	if err != nil {
@@ -639,7 +643,7 @@ func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint
 		return false
 	}
 	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
-		statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+		statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
 		status, err := node.requestStatus(statusContext, peerID)
 		cancel()
 		if err != nil {
@@ -835,7 +839,7 @@ func (node *posNode) ensureParentAvailable(ctx context.Context, parentHash struc
 		return consensus.ChainState{}, false
 	}
 	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
-		statusContext, cancel := context.WithTimeout(ctx, productionPeerStatusTimeout)
+		statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
 		_, statusErr := node.requestStatus(statusContext, peerID)
 		cancel()
 		if statusErr != nil {

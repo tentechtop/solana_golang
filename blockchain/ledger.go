@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	chainHeadKey     = []byte("pos/head")
-	qcKeyPrefix      = []byte("qc/")
-	qcBlockKeyPrefix = []byte("qc-block/")
-	stateKeyPrefix   = []byte("state/")
+	chainHeadKey        = []byte("pos/head")
+	qcKeyPrefix         = []byte("qc/")
+	qcBlockKeyPrefix    = []byte("qc-block/")
+	rewardedQCKeyPrefix = []byte("rewarded-qc-slot/")
+	stateKeyPrefix      = []byte("state/")
 )
 
 const DefaultFinalityDepth = uint64(2)
@@ -178,14 +179,17 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 
 	treasuryAddress := genesis.TreasuryAddress
 	if treasuryAddress.IsZero() {
-		treasuryKeyPair, err := consensus.HardcodedGenesisTreasuryKeyPair()
+		defaultTreasuryAddress, err := consensus.HardcodedGenesisTreasuryPublicKey()
 		if err != nil {
 			return consensus.ChainState{}, Head{}, err
 		}
-		treasuryAddress = treasuryKeyPair.PublicKey
+		treasuryAddress = defaultTreasuryAddress
 	}
-	accounts := make([]structure.AddressedAccount, 0, len(genesis.FundedAccounts)+len(genesis.InitialValidators)+3)
+	accounts := make([]structure.AddressedAccount, 0, len(genesis.FundedAccounts)+len(genesis.InitialValidators)*2+3)
 	treasuryLamports := genesis.InitialSupplyLamports
+	rewardReceiverAccounts := map[structure.PublicKey]struct{}{
+		treasuryAddress: {},
+	}
 	for _, fundedAccount := range genesis.FundedAccounts {
 		if fundedAccount.Lamports == 0 {
 			return consensus.ChainState{}, Head{}, fmt.Errorf("%w: funded account has zero lamports", ErrInvalidGenesis)
@@ -195,6 +199,25 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		}
 		treasuryLamports -= fundedAccount.Lamports
 		accounts = append(accounts, mustAccount(fundedAccount.Address, fundedAccount.Lamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
+		rewardReceiverAccounts[fundedAccount.Address] = struct{}{}
+	}
+	stakerRentLamports, err := structure.MinimumBalanceForRentExemption(0)
+	if err != nil {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("blockchain: calculate genesis staker rent: %w", err)
+	}
+	for _, validator := range genesis.InitialValidators {
+		if validator.StakerAddress == validator.ValidatorAddress {
+			continue
+		}
+		if _, exists := rewardReceiverAccounts[validator.StakerAddress]; exists {
+			continue
+		}
+		if treasuryLamports < stakerRentLamports {
+			return consensus.ChainState{}, Head{}, fmt.Errorf("%w: validator staker rent exceeds supply", ErrInvalidGenesis)
+		}
+		treasuryLamports -= stakerRentLamports
+		accounts = append(accounts, mustAccount(validator.StakerAddress, stakerRentLamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
+		rewardReceiverAccounts[validator.StakerAddress] = struct{}{}
 	}
 	for _, validator := range genesis.InitialValidators {
 		validatorLamports := validator.StakeLamports + 10_000_000
@@ -575,6 +598,13 @@ func (ledger *Ledger) RewardQCs(maxBlockHeight uint64, limit int) ([]consensus.Q
 		if !exists || mainChainHash != qc.BlockHash {
 			continue
 		}
+		rewarded, err := rewardQCAlreadyMarked(readTx, qc.Slot)
+		if err != nil {
+			return nil, err
+		}
+		if rewarded {
+			continue
+		}
 		currentQC, exists := bestQCsBySlot[qc.Slot]
 		if !exists || isBetterRewardQC(qc, currentQC) {
 			bestQCsBySlot[qc.Slot] = qc
@@ -604,6 +634,15 @@ func (ledger *Ledger) RewardQCs(maxBlockHeight uint64, limit int) ([]consensus.Q
 // isRewardCandidateQC 过滤奖励候选 QC + 只允许已 finalized 范围内的确认票参与奖励。
 func isRewardCandidateQC(qc consensus.QuorumCertificate, maxBlockHeight uint64) bool {
 	return qc.Type == consensus.VoteTypeConfirm && qc.BlockHeight > 0 && qc.BlockHeight <= maxBlockHeight
+}
+
+// rewardQCAlreadyMarked 查询奖励索引 + 防止同一 slot 的投票奖励被重复打包。
+func rewardQCAlreadyMarked(readTx database.ReadTransaction, slot uint64) (bool, error) {
+	value, err := readTx.Get(database.TableChain, rewardedQCSlotKey(slot))
+	if err != nil {
+		return false, fmt.Errorf("blockchain: read rewarded qc slot: %w", err)
+	}
+	return len(value) > 0, nil
 }
 
 // readMainChainHashForRewardQC 读取主链高度索引 + 奖励只能基于当前主链区块防止侧链污染。
@@ -1427,6 +1466,9 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
 		return err
 	}
+	if err := appendRewardQCIndexOps(&operations, request.Proposal, blockHash); err != nil {
+		return err
+	}
 	if request.QC != nil {
 		qcBytes, err := request.QC.MarshalBinary()
 		if err != nil {
@@ -1467,6 +1509,9 @@ func (ledger *Ledger) persistImportedSnapshotLocked(request ImportSnapshotReques
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
 	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
+		return err
+	}
+	if err := appendRewardQCIndexOps(&operations, request.Proposal, blockHash); err != nil {
 		return err
 	}
 	if err := appendAccountSnapshotImportOps(ledger.db, &operations, request.State); err != nil {
@@ -1550,6 +1595,44 @@ func appendTransactionIndexOps(operations *[]database.DBOperation, transactionID
 	for _, transactionID := range transactionIDs {
 		*operations = append(*operations, database.NewUpdateOperation(database.TableTxToBlock, []byte(transactionID), blockHash[:]))
 	}
+}
+
+// appendRewardQCIndexOps 标记已结算投票 QC + 防止 leader 后续重复打包历史奖励。
+func appendRewardQCIndexOps(operations *[]database.DBOperation, proposal consensus.BlockProposal, blockHash structure.Hash) error {
+	seenSlots := make(map[uint64]struct{}, len(proposal.RewardQCs))
+	for _, qc := range proposal.RewardQCs {
+		if err := validateRewardQCIndexItem(qc, seenSlots); err != nil {
+			return err
+		}
+		*operations = append(*operations, database.NewUpdateOperation(database.TableChain, rewardedQCSlotKey(qc.Slot), blockHash[:]))
+	}
+	return nil
+}
+
+// appendRewardQCDeleteOps 删除回滚块奖励索引 + 让重组后的新主链可重新结算合法 QC。
+func appendRewardQCDeleteOps(operations *[]database.DBOperation, proposal consensus.BlockProposal) error {
+	seenSlots := make(map[uint64]struct{}, len(proposal.RewardQCs))
+	for _, qc := range proposal.RewardQCs {
+		if err := validateRewardQCIndexItem(qc, seenSlots); err != nil {
+			return err
+		}
+		*operations = append(*operations, database.NewDeleteOperation(database.TableChain, rewardedQCSlotKey(qc.Slot)))
+	}
+	return nil
+}
+
+func validateRewardQCIndexItem(qc consensus.QuorumCertificate, seenSlots map[uint64]struct{}) error {
+	if err := qc.Validate(); err != nil {
+		return fmt.Errorf("blockchain: validate reward qc index: %w", err)
+	}
+	if qc.Type != consensus.VoteTypeConfirm || qc.BlockHeight == 0 {
+		return fmt.Errorf("%w: invalid reward qc index item", ErrInvalidCommit)
+	}
+	if _, exists := seenSlots[qc.Slot]; exists {
+		return fmt.Errorf("%w: duplicate reward qc slot %d", ErrInvalidCommit, qc.Slot)
+	}
+	seenSlots[qc.Slot] = struct{}{}
+	return nil
 }
 
 func (ledger *Ledger) rejectCommittedTransactionIDsLocked(transactionIDs []string) error {
@@ -2171,6 +2254,9 @@ func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []str
 		if err := appendAddressHistoryDeleteOps(&operations, oldBlock, oldHash); err != nil {
 			return nil, delta, err
 		}
+		if err := appendRewardQCDeleteOps(&operations, oldBlock); err != nil {
+			return nil, delta, err
+		}
 		operations = append(operations, database.NewDeleteOperation(database.TableHeightToHash, uint64Key(oldBlock.Header.Height)))
 	}
 	seenNewTransactionIDs := make(map[string]struct{})
@@ -2201,6 +2287,9 @@ func collectReorgOps(readTx database.ReadTransaction, head Head, oldBlocks []str
 			operations = append(operations, database.NewUpdateOperation(database.TableTxToBlock, []byte(transactionID), newHash[:]))
 		}
 		if err := appendAddressHistoryIndexOps(&operations, newBlock, newHash); err != nil {
+			return nil, delta, err
+		}
+		if err := appendRewardQCIndexOps(&operations, newBlock, newHash); err != nil {
 			return nil, delta, err
 		}
 		heightBytes := uint64Key(newBlock.Header.Height)
@@ -2320,6 +2409,13 @@ func stateBlockPrefix(hash structure.Hash) []byte {
 func stateAccountKey(hash structure.Hash, address structure.PublicKey) []byte {
 	key := stateBlockPrefix(hash)
 	key = append(key, address[:]...)
+	return key
+}
+
+func rewardedQCSlotKey(slot uint64) []byte {
+	key := make([]byte, 0, len(rewardedQCKeyPrefix)+8)
+	key = append(key, rewardedQCKeyPrefix...)
+	key = append(key, uint64Key(slot)...)
 	return key
 }
 

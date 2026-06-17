@@ -11,19 +11,20 @@ import (
 )
 
 const (
-	DefaultRewardFinalityDepth         = uint64(2)
-	DefaultVoteRewardLamportsPerCredit = uint64(1000)
-	DefaultMaxVoteRewardDelaySlots     = uint64(64)
-	DefaultMissedVoteJailThreshold     = uint64(16)
-	DefaultMissedVoteJailEpochs        = uint64(1)
-	DefaultMissedProposalJailThreshold = uint64(8)
-	DefaultMissedProposalJailEpochs    = uint64(1)
-	DefaultMaliciousSlashBasisPoints   = uint16(500)
-	DefaultMaliciousJailEpochs         = uint64(4)
-	MaxRewardQCsPerBlock               = 128
-	MaxSlashingEvidencePerBlock        = 128
-	MaxBlockRewards                    = 8192
-	rewardBasisPointsDenominator       = uint64(10000)
+	DefaultRewardFinalityDepth                     = uint64(2)
+	DefaultVoteRewardLamportsPerCredit             = uint64(1000)
+	DefaultMaxVoteRewardDelaySlots                 = uint64(64)
+	DefaultMissedVoteJailThreshold                 = uint64(16)
+	DefaultMissedVoteJailEpochs                    = uint64(1)
+	DefaultMissedProposalJailThreshold             = uint64(8)
+	DefaultMissedProposalJailEpochs                = uint64(1)
+	DefaultMinActiveValidatorsAfterPerformanceJail = uint64(3)
+	DefaultMaliciousSlashBasisPoints               = uint16(500)
+	DefaultMaliciousJailEpochs                     = uint64(4)
+	MaxRewardQCsPerBlock                           = 128
+	MaxSlashingEvidencePerBlock                    = 128
+	MaxBlockRewards                                = 8192
+	rewardBasisPointsDenominator                   = uint64(10000)
 )
 
 type RewardType uint8
@@ -40,15 +41,16 @@ const (
 
 // RewardConfig 描述奖励参数 + 所有节点必须使用同一配置才能得到一致 state root。
 type RewardConfig struct {
-	FinalityDepth               uint64
-	VoteRewardLamportsPerCredit uint64
-	MaxVoteRewardDelaySlots     uint64
-	MissedVoteJailThreshold     uint64
-	MissedVoteJailEpochs        uint64
-	MissedProposalJailThreshold uint64
-	MissedProposalJailEpochs    uint64
-	MaliciousSlashBasisPoints   uint16
-	MaliciousJailEpochs         uint64
+	FinalityDepth                           uint64
+	VoteRewardLamportsPerCredit             uint64
+	MaxVoteRewardDelaySlots                 uint64
+	MissedVoteJailThreshold                 uint64
+	MissedVoteJailEpochs                    uint64
+	MissedProposalJailThreshold             uint64
+	MissedProposalJailEpochs                uint64
+	MinActiveValidatorsAfterPerformanceJail uint64
+	MaliciousSlashBasisPoints               uint16
+	MaliciousJailEpochs                     uint64
 }
 
 // BlockReward 描述区块奖励事件 + 进入 reward root 防止 leader 私自多发或漏发。
@@ -87,15 +89,16 @@ type stakeAccountEntry struct {
 // DefaultRewardConfig 返回默认奖励策略 + 兼顾本地测试网可见收益和确定性惩罚。
 func DefaultRewardConfig() RewardConfig {
 	return RewardConfig{
-		FinalityDepth:               DefaultRewardFinalityDepth,
-		VoteRewardLamportsPerCredit: DefaultVoteRewardLamportsPerCredit,
-		MaxVoteRewardDelaySlots:     DefaultMaxVoteRewardDelaySlots,
-		MissedVoteJailThreshold:     DefaultMissedVoteJailThreshold,
-		MissedVoteJailEpochs:        DefaultMissedVoteJailEpochs,
-		MissedProposalJailThreshold: DefaultMissedProposalJailThreshold,
-		MissedProposalJailEpochs:    DefaultMissedProposalJailEpochs,
-		MaliciousSlashBasisPoints:   DefaultMaliciousSlashBasisPoints,
-		MaliciousJailEpochs:         DefaultMaliciousJailEpochs,
+		FinalityDepth:                           DefaultRewardFinalityDepth,
+		VoteRewardLamportsPerCredit:             DefaultVoteRewardLamportsPerCredit,
+		MaxVoteRewardDelaySlots:                 DefaultMaxVoteRewardDelaySlots,
+		MissedVoteJailThreshold:                 DefaultMissedVoteJailThreshold,
+		MissedVoteJailEpochs:                    DefaultMissedVoteJailEpochs,
+		MissedProposalJailThreshold:             DefaultMissedProposalJailThreshold,
+		MissedProposalJailEpochs:                DefaultMissedProposalJailEpochs,
+		MinActiveValidatorsAfterPerformanceJail: DefaultMinActiveValidatorsAfterPerformanceJail,
+		MaliciousSlashBasisPoints:               DefaultMaliciousSlashBasisPoints,
+		MaliciousJailEpochs:                     DefaultMaliciousJailEpochs,
 	}
 }
 
@@ -184,6 +187,9 @@ func (input BlockRewardInput) normalize() BlockRewardInput {
 	}
 	if input.Config.MissedProposalJailEpochs == 0 {
 		input.Config.MissedProposalJailEpochs = DefaultMissedProposalJailEpochs
+	}
+	if input.Config.MinActiveValidatorsAfterPerformanceJail == 0 {
+		input.Config.MinActiveValidatorsAfterPerformanceJail = DefaultMinActiveValidatorsAfterPerformanceJail
 	}
 	if input.Config.MaliciousSlashBasisPoints == 0 {
 		input.Config.MaliciousSlashBasisPoints = DefaultMaliciousSlashBasisPoints
@@ -537,6 +543,10 @@ func applyEpochRewardSettlement(
 	if input.EpochID == 0 {
 		return nil
 	}
+	activeValidatorCount, err := countActivePerformanceValidators(*state, accountIndexByAddress, input.EpochID)
+	if err != nil {
+		return err
+	}
 	for _, entry := range sortedStakeAccountEntries(*state) {
 		stakeState, account, _, err := loadStakeStateByAddress(*state, accountIndexByAddress, entry.Address)
 		if err != nil {
@@ -545,10 +555,12 @@ func applyEpochRewardSettlement(
 		if stakeState.LastRewardEpoch >= input.EpochID {
 			continue
 		}
-		if shouldJailForMissedPerformance(stakeState, input.Config) {
+		if shouldJailForMissedPerformance(stakeState, input.Config) &&
+			activeValidatorCount > input.Config.MinActiveValidatorsAfterPerformanceJail {
 			if err := settleJailedValidator(state, entry, account, stakeState, input, rewards); err != nil {
 				return err
 			}
+			activeValidatorCount--
 			continue
 		}
 		if err := settleRewardedValidator(state, accountIndexByAddress, entry, account, stakeState, input, rewards); err != nil {
@@ -556,6 +568,28 @@ func applyEpochRewardSettlement(
 		}
 	}
 	return nil
+}
+
+func countActivePerformanceValidators(state ChainState, accountIndexByAddress map[structure.PublicKey]int, epochID uint64) (uint64, error) {
+	var activeValidatorCount uint64
+	for _, entry := range sortedStakeAccountEntries(state) {
+		stakeState, _, _, err := loadStakeStateByAddress(state, accountIndexByAddress, entry.Address)
+		if err != nil {
+			return 0, err
+		}
+		if stakeState.Status != stake.ValidatorStatusActive {
+			continue
+		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+		if err != nil {
+			return 0, fmt.Errorf("consensus: count active performance validators: %w", err)
+		}
+		if effectiveStake == 0 {
+			continue
+		}
+		activeValidatorCount++
+	}
+	return activeValidatorCount, nil
 }
 
 func settleRewardedValidator(

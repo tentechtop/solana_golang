@@ -96,6 +96,9 @@ func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 		EpochSnapshot: snapshot,
 		Leader:        validators[voterIndex],
 		RewardQCs:     qcs,
+		Config: RewardConfig{
+			MinActiveValidatorsAfterPerformanceJail: 1,
+		},
 	})
 	if err != nil {
 		t.Fatalf("ApplyBlockRewards() error = %v", err)

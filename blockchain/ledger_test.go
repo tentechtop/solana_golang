@@ -37,6 +37,39 @@ func TestBuildGenesisStateCreatesTreasuryAndValidators(t *testing.T) {
 	}
 }
 
+func TestBuildGenesisStateCreatesInitialValidatorStakerRewardAccount(t *testing.T) {
+	staker := testKeyPair(t, "genesis-unfunded-staker")
+	validator := testKeyPair(t, "genesis-validator")
+	consensusKey := testKeyPair(t, "genesis-consensus")
+	genesis := GenesisConfig{
+		ChainID:               "test-genesis-staker",
+		InitialSupplyLamports: consensus.DefaultGenesisSupplyLamports,
+		InitialValidators: []GenesisValidator{{
+			StakerAddress:      staker.PublicKey,
+			ValidatorAddress:   validator.PublicKey,
+			ConsensusPublicKey: consensusKey.PublicKey,
+			P2PPeerID:          testPeerID(t, "genesis-peer"),
+			StakeLamports:      stake.MinimumStakeLamports,
+		}},
+	}
+
+	state, _, err := BuildGenesisState(genesis)
+	if err != nil {
+		t.Fatalf("BuildGenesisState() error = %v", err)
+	}
+	stakerAccount := findAccount(t, state, staker.PublicKey)
+	minimumLamports, err := structure.MinimumBalanceForRentExemption(0)
+	if err != nil {
+		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
+	}
+	if stakerAccount.Account.Owner != structure.DefaultBuiltinProgramIDs.System {
+		t.Fatalf("staker owner = %s, want system", stakerAccount.Account.Owner.String())
+	}
+	if stakerAccount.Account.Lamports != minimumLamports {
+		t.Fatalf("staker lamports = %d, want %d", stakerAccount.Account.Lamports, minimumLamports)
+	}
+}
+
 func TestLedgerCommitPersistsAndReloads(t *testing.T) {
 	db, err := database.NewDatabase(database.DatabaseConfig{
 		Path:   t.TempDir(),
@@ -452,6 +485,125 @@ func TestRewardQCsUseMainChainBestSlot(t *testing.T) {
 	}
 	if rewardQCs[1].Slot != 2 || rewardQCs[1].BlockHash != headTwo.BlockHash {
 		t.Fatalf("slot 2 reward qc = %+v, want main-chain qc", rewardQCs[1])
+	}
+}
+
+func TestRewardQCsSkipAlreadyRewardedSlot(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "reward-skip-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 2, 2, "reward-skip-2")
+	headTwo, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwo, NextState: stateTwo})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	slotOneQC := testRewardLedgerQC(1, 1, headOne.BlockHash, 2, []string{"validator-a", "validator-b"}, 1)
+	slotTwoQC := testRewardLedgerQC(2, 2, headTwo.BlockHash, 2, []string{"validator-a", "validator-b"}, 2)
+	for _, qc := range []consensus.QuorumCertificate{slotOneQC, slotTwoQC} {
+		if _, err := ledger.SaveQC(qc); err != nil {
+			t.Fatalf("save qc slot %d: %v", qc.Slot, err)
+		}
+	}
+	rewardBlock, rewardState := testProposalFromHead(t, headTwo, stateTwo, 3, 3, "reward-skip-3")
+	rewardBlock.RewardQCs = []consensus.QuorumCertificate{slotOneQC}
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: rewardBlock, NextState: rewardState}); err != nil {
+		t.Fatalf("commit reward block: %v", err)
+	}
+
+	rewardQCs, err := ledger.RewardQCs(2, 10)
+	if err != nil {
+		t.Fatalf("RewardQCs() error = %v", err)
+	}
+	if len(rewardQCs) != 1 || rewardQCs[0].Slot != 2 {
+		t.Fatalf("RewardQCs() = %+v, want only slot 2", rewardQCs)
+	}
+}
+
+func TestRewardQCIndexRollsBackOnReorg(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	blockOne, stateOne := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "reward-reorg-1")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 2, 2, "reward-reorg-2")
+	headTwo, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwo, NextState: stateTwo})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	slotOneQC := testRewardLedgerQC(1, 1, headOne.BlockHash, 2, []string{"validator-a", "validator-b"}, 1)
+	if _, err := ledger.SaveQC(slotOneQC); err != nil {
+		t.Fatalf("save slot one qc: %v", err)
+	}
+	oldRewardBlock, oldRewardState := testProposalFromHead(t, headTwo, stateTwo, 3, 3, "reward-reorg-old-3")
+	oldRewardBlock.RewardQCs = []consensus.QuorumCertificate{slotOneQC}
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: oldRewardBlock, NextState: oldRewardState}); err != nil {
+		t.Fatalf("commit old reward block: %v", err)
+	}
+	if rewardQCs, err := ledger.RewardQCs(1, 10); err != nil || len(rewardQCs) != 0 {
+		t.Fatalf("RewardQCs() after reward = %+v err=%v, want none", rewardQCs, err)
+	}
+
+	forkThree, forkState := testProposalFromParent(t, headTwo, stateTwo, 13, 3, "reward-reorg-new-3")
+	forkThreeHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: forkThree, NextState: forkState})
+	if err != nil {
+		t.Fatalf("save fork three: %v", err)
+	}
+	forkFour, forkState := testProposalFromParent(t, Head{
+		ChainID:   forkThree.Header.ChainID,
+		Height:    forkThree.Header.Height,
+		Slot:      forkThree.Header.Slot,
+		BlockHash: forkThreeHash,
+		QCHash:    headTwo.QCHash,
+		EpochID:   forkThree.Header.EpochID,
+	}, forkState, 14, 4, "reward-reorg-new-4")
+	forkFourHash, err := ledger.SaveBlockCandidate(CommitBlockRequest{Proposal: forkFour, NextState: forkState})
+	if err != nil {
+		t.Fatalf("save fork four: %v", err)
+	}
+	decision, err := ledger.ReorganizeTo(forkFourHash)
+	if err != nil {
+		t.Fatalf("reorganize: %v", err)
+	}
+	if !decision.Accepted || !decision.Reorganized {
+		t.Fatalf("decision = %+v, want accepted reorg", decision)
+	}
+
+	rewardQCs, err := ledger.RewardQCs(1, 10)
+	if err != nil {
+		t.Fatalf("RewardQCs() error = %v", err)
+	}
+	if len(rewardQCs) != 1 || rewardQCs[0].Slot != 1 {
+		t.Fatalf("RewardQCs() after reorg = %+v, want slot 1 restored", rewardQCs)
 	}
 }
 

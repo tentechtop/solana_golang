@@ -127,12 +127,21 @@ func TestPeerStateTransitions(t *testing.T) {
 	if peer.FailureCount != 1 {
 		t.Fatalf("FailureCount = %d, want 1", peer.FailureCount)
 	}
+	if peer.LastError == "" {
+		t.Fatal("LastError is empty, want recorded dial error")
+	}
 	peer.MarkConnected()
 	if peer.Status != PeerStatusConnected {
 		t.Fatalf("Status = %q, want connected", peer.Status)
 	}
 	if peer.FailureCount != 0 {
 		t.Fatalf("FailureCount = %d, want 0", peer.FailureCount)
+	}
+	if peer.LastError != "" {
+		t.Fatalf("LastError = %q, want empty after connected", peer.LastError)
+	}
+	if peer.LastErrorUnixMilli != 0 {
+		t.Fatalf("LastErrorUnixMilli = %d, want 0 after connected", peer.LastErrorUnixMilli)
 	}
 	peer.MarkDisconnected()
 	if peer.Status != PeerStatusDisconnected {

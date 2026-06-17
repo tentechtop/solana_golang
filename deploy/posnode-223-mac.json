@@ -17,16 +17,17 @@
     "validator_seed":  "validator-223",
     "consensus_seed":  "consensus-223",
     "stake_lamports":  10000000,
-    "slot_millis":  1000,
-    "genesis_start_unix_millis":  1781616554091,
+    "slot_millis":  400,
+    "genesis_start_unix_millis":  1781667404022,
     "epoch_slots":  600,
     "finality_depth":  2,
     "turbine_fanout":  2,
     "auto_register":  false,
     "mempool_max_transactions":  5000,
-    "mempool_transaction_ttl_millis":  60000,
+    "mempool_transaction_ttl_millis":  180000,
     "transaction_leader_forward_slots":  4,
     "transaction_forward_validators":  true,
+    "treasury_key_path":  "/Users/mac/solana_golang/config/genesis-access-treasury.json",
     "bootstrap_peers":  [
                             {
                                 "peer_id":  "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
@@ -37,18 +38,11 @@
                         ],
     "genesis":  {
                     "initial_supply_lamports":  1001000000060000000,
+                    "treasury_address":  "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9",
                     "funded_accounts":  [
                                             {
-                                                "seed":  "staker-101",
-                                                "lamports":  100000000000000000
-                                            },
-                                            {
-                                                "seed":  "staker-223",
-                                                "lamports":  450000000000000000
-                                            },
-                                            {
-                                                "seed":  "staker-local-win",
-                                                "lamports":  450000000000000000
+                                                "seed":  "genesis local staker win treasury validator test wallet access phrase backup seed",
+                                                "lamports":  1000000
                                             }
                                         ],
                     "initial_validators":  [

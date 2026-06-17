@@ -12,6 +12,7 @@ const (
 	SimulationLogInstructionSuccess       = "instruction success"
 	SimulationLogTransactionSuccess       = "transaction success"
 	stakeInstructionRegisterValidatorType = uint32(0)
+	privacyInstructionDepositType         = uint32(0)
 )
 
 // TransactionSimulationInput 描述交易模拟输入 + runtime 使用内存账户快照替代数据库读写。
@@ -199,6 +200,7 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 
 // addMissingAccountPlaceholders 补齐可创建账户占位 + 指令执行前必须先完成账户加载。
 func addMissingAccountPlaceholders(message structure.ResolvedMessage, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {
+	addMissingBuiltinProgramPlaceholders(message, accounts, builtinPrograms)
 	for _, instruction := range message.Instructions {
 		if int(instruction.ProgramIDIndex) >= len(message.AccountKeys) {
 			continue
@@ -210,7 +212,27 @@ func addMissingAccountPlaceholders(message structure.ResolvedMessage, accounts m
 		}
 		if programID == builtinPrograms.Stake {
 			addMissingStakeAccountPlaceholder(instruction, message, accounts, builtinPrograms)
+			continue
 		}
+		if programID == builtinPrograms.Privacy {
+			addMissingPrivacyStatePlaceholder(instruction, message, accounts, builtinPrograms)
+		}
+	}
+}
+
+func addMissingBuiltinProgramPlaceholders(
+	message structure.ResolvedMessage,
+	accounts map[structure.PublicKey]structure.Account,
+	builtinPrograms structure.BuiltinProgramIDs,
+) {
+	for _, accountKey := range message.AccountKeys {
+		if !builtinPrograms.IsBuiltinProgram(accountKey) {
+			continue
+		}
+		if _, exists := accounts[accountKey]; exists {
+			continue
+		}
+		accounts[accountKey] = structure.Account{Owner: builtinPrograms.NativeLoader}
 	}
 }
 
@@ -255,6 +277,25 @@ func isStakeRegisterValidatorInstruction(data []byte) bool {
 		return false
 	}
 	return binary.LittleEndian.Uint32(data[:4]) == stakeInstructionRegisterValidatorType
+}
+
+func addMissingPrivacyStatePlaceholder(
+	instruction structure.CompiledInstruction,
+	message structure.ResolvedMessage,
+	accounts map[structure.PublicKey]structure.Account,
+	builtinPrograms structure.BuiltinProgramIDs,
+) {
+	if len(instruction.AccountIndexes) < 2 || !isPrivacyDepositInstruction(instruction.Data) {
+		return
+	}
+	addMissingWritableSystemAccount(message.AccountKeys[instruction.AccountIndexes[1]], accounts, builtinPrograms)
+}
+
+func isPrivacyDepositInstruction(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	return binary.LittleEndian.Uint32(data[:4]) == privacyInstructionDepositType
 }
 
 func addMissingWritableSystemAccount(address structure.PublicKey, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {

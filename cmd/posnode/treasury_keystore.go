@@ -9,7 +9,6 @@ import (
 	goruntime "runtime"
 	"strings"
 
-	"solana_golang/consensus"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
@@ -34,17 +33,7 @@ func (node *posNode) treasuryKeyPair() (structure.SolanaKeyPair, string, error) 
 		}
 		return keyPair, "keystore", nil
 	}
-	if !node.config.allowHardcodedTreasury() {
-		return structure.SolanaKeyPair{}, "", fmt.Errorf("posnode: treasury keystore is required")
-	}
-	keyPair, err := consensus.HardcodedGenesisTreasuryKeyPair()
-	if err != nil {
-		return structure.SolanaKeyPair{}, "", err
-	}
-	if err := node.validateTreasuryKeyPair(keyPair); err != nil {
-		return structure.SolanaKeyPair{}, "", err
-	}
-	return keyPair, "hardcoded_testnet", nil
+	return structure.SolanaKeyPair{}, "", fmt.Errorf("posnode: treasury keystore is required; consensus only embeds the public key")
 }
 
 func (node *posNode) validateTreasuryKeyPair(keyPair structure.SolanaKeyPair) error {

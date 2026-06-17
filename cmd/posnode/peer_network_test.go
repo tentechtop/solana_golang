@@ -20,6 +20,7 @@ func TestBuildPeerNetworkResultMarksConnectedValidator(t *testing.T) {
 		VerifiedAddresses:      []utils.MultiAddress{verifiedAddress},
 		PreferredProtocols:     []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP},
 		LastConnectedUnixMilli: 200,
+		LastError:              "stale dial timeout",
 	}
 	connectionState := p2p.ConnectionState{
 		Protocol:              utils.ProtocolQUIC,
@@ -70,6 +71,9 @@ func TestBuildPeerNetworkResultMarksConnectedValidator(t *testing.T) {
 	}
 	if connectedPeer.Connection.Protocol != string(utils.ProtocolQUIC) {
 		t.Fatalf("Connection.Protocol = %q, want %q", connectedPeer.Connection.Protocol, utils.ProtocolQUIC)
+	}
+	if connectedPeer.LastError != "" {
+		t.Fatalf("connected LastError = %q, want empty", connectedPeer.LastError)
 	}
 
 	disconnectedPeer := result.Peers[1]

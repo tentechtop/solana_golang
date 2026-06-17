@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"solana_golang/structure"
@@ -28,11 +29,14 @@ func TestLoadTreasuryKeyPairFromSeedKeystore(t *testing.T) {
 	}
 }
 
-func TestTreasuryKeyPairRejectsHardcodedWhenDisabled(t *testing.T) {
-	allowHardcoded := false
+func TestTreasuryKeyPairRequiresKeystore(t *testing.T) {
+	allowHardcoded := true
 	node := &posNode{config: nodeConfig{AllowHardcodedTreasury: &allowHardcoded}}
 	_, _, err := node.treasuryKeyPair()
 	if err == nil {
-		t.Fatal("treasuryKeyPair() error = nil, want disabled hardcoded error")
+		t.Fatal("treasuryKeyPair() error = nil, want required keystore error")
+	}
+	if !strings.Contains(err.Error(), "treasury keystore is required") {
+		t.Fatalf("treasuryKeyPair() error = %v, want required keystore error", err)
 	}
 }

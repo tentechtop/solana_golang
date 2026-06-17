@@ -86,7 +86,7 @@ func TestSelectMempoolTransactionsRemovesExpiredSeenID(t *testing.T) {
 
 	node.mempool = append(node.mempool, transaction)
 	node.seenTransactions[transactionID] = struct{}{}
-	selected, removed := node.selectMempoolTransactionsLocked(time.Now().Add(time.Minute).UnixMilli())
+	selected, removed := node.selectMempoolTransactionsLocked(time.Now().Add(time.Minute).UnixMilli(), 1)
 	if len(selected) != 0 {
 		t.Fatalf("selected = %d, want 0", len(selected))
 	}
@@ -95,6 +95,95 @@ func TestSelectMempoolTransactionsRemovesExpiredSeenID(t *testing.T) {
 	}
 	if _, exists := node.seenTransactions[transactionID]; exists {
 		t.Fatal("expired transaction id still marked as seen")
+	}
+}
+
+func TestSelectMempoolTransactionsRetainsSelectedUntilCommit(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	transaction := newMempoolTransfer(t, "selected-source", "selected-destination", 100)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+
+	node.mempool = append(node.mempool, transaction)
+	node.seenTransactions[transactionID] = struct{}{}
+	selected, removed := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), 1)
+	if len(selected) != 1 {
+		t.Fatalf("selected = %d, want 1", len(selected))
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %+v, want empty", removed)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	if _, exists := node.seenTransactions[transactionID]; !exists {
+		t.Fatal("selected transaction id was removed before commit")
+	}
+
+	node.removeCommittedMempoolTransactions(selected)
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size after commit = %d, want 0", len(node.mempool))
+	}
+	if _, exists := node.seenTransactions[transactionID]; exists {
+		t.Fatal("committed transaction id still marked as seen")
+	}
+}
+
+func TestSelectMempoolTransactionsDropsInvalidRecentBlockhash(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	validBlockhash := mustHash("valid-mempool-blockhash")
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     validBlockhash,
+		Slot:          10,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+	}); err != nil {
+		t.Fatalf("add valid blockhash: %v", err)
+	}
+	transaction := newMempoolTransfer(t, "stale-blockhash-source", "stale-blockhash-destination", 100)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.mempool = append(node.mempool, transaction)
+	node.seenTransactions[transactionID] = struct{}{}
+
+	selected, removed := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), 10)
+	if len(selected) != 0 {
+		t.Fatalf("selected = %d, want 0", len(selected))
+	}
+	if len(removed) != 1 || removed[0] != transactionID {
+		t.Fatalf("removed = %+v, want %s", removed, transactionID)
+	}
+	if _, exists := node.seenTransactions[transactionID]; exists {
+		t.Fatal("invalid recent blockhash transaction id still marked as seen")
+	}
+	if got := node.metrics.transactionsDrop.Load(); got != 1 {
+		t.Fatalf("transactionsDrop = %d, want 1", got)
+	}
+}
+
+func TestAddTransactionRejectsInvalidRecentBlockhash(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	validBlockhash := mustHash("rpc-valid-blockhash")
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     validBlockhash,
+		Slot:          7,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+	}); err != nil {
+		t.Fatalf("add valid blockhash: %v", err)
+	}
+	transaction := newMempoolTransfer(t, "rpc-stale-blockhash-source", "rpc-stale-blockhash-destination", 100)
+
+	if err := node.addTransaction(transaction); err == nil {
+		t.Fatal("addTransaction() error = nil, want invalid recent blockhash")
+	}
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
+	}
+	if got := node.metrics.transactionsDrop.Load(); got != 1 {
+		t.Fatalf("transactionsDrop = %d, want 1", got)
 	}
 }
 

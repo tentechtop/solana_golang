@@ -205,13 +205,15 @@ func (peer *Peer) AddVerifiedAddress(address utils.MultiAddress) {
 	peer.VerifiedAddresses = appendUniqueAddress(peer.VerifiedAddresses, address)
 }
 
-// MarkConnected 标记已连接 + 刷新活跃时间并清理连续失败计数。
+// MarkConnected 标记已连接 + 刷新活跃时间并清理历史拨号失败。
 func (peer *Peer) MarkConnected() {
 	now := time.Now().UnixMilli()
 	peer.Status = PeerStatusConnected
 	peer.LastSeenUnixMilli = now
 	peer.LastConnectedUnixMilli = now
 	peer.FailureCount = 0
+	peer.LastError = ""
+	peer.LastErrorUnixMilli = 0
 }
 
 // MarkDisconnected 标记已断开 + 保留最后断开时间用于退避策略。

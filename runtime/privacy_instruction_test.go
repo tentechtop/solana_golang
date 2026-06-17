@@ -64,6 +64,85 @@ func TestTransactionSimulatorDepositsTransparentToPrivate(t *testing.T) {
 	}
 }
 
+func TestTransactionSimulatorCreatesPrivacyStateAndDepositsInSameTransaction(t *testing.T) {
+	sourceKey, sourcePrivateKey := newSimulationSigner(t)
+	stateKey, statePrivateKey := newSimulationSigner(t)
+	blockhash := newTestHash(184)
+	amount := uint64(1000)
+	stateRentLamports := mustMinimumBalance(t, 4096)
+	sourceLamports := mustMinimumBalance(t, 0) + LamportsPerSignature*2 + stateRentLamports + amount + 100
+	commitment := newTestHash(185)
+	accounts := []AccountMeta{
+		{PublicKey: sourceKey, IsSigner: true, IsWritable: true},
+		{PublicKey: stateKey, IsSigner: true, IsWritable: true},
+		{PublicKey: DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
+		{PublicKey: DefaultBuiltinProgramIDs.Privacy, IsSigner: false, IsWritable: false},
+	}
+	accountIndexByKey, err := AccountIndexMap(accounts)
+	if err != nil {
+		t.Fatalf("AccountIndexMap() error = %v", err)
+	}
+	createInstruction, err := NewCreateAccountInstruction(CreateAccountParams{
+		Lamports: stateRentLamports,
+		Space:    4096,
+		Owner:    DefaultBuiltinProgramIDs.Privacy,
+	})
+	createData := mustSystemInstructionBytes(t, createInstruction, err)
+	compiledCreate, err := CompileInstruction(DefaultBuiltinProgramIDs.System, []PublicKey{sourceKey, stateKey}, createData, accountIndexByKey)
+	if err != nil {
+		t.Fatalf("CompileInstruction(create) error = %v", err)
+	}
+	depositInstruction, err := NewPrivacyDepositInstruction(PrivacyStateVersion, nil, PrivacyDepositParams{
+		Amount:         amount,
+		Commitment:     commitment,
+		SpendAuthority: sourceKey,
+		EncryptedNote:  []byte("created-state-note"),
+	})
+	depositData := mustPrivacyInstructionBytes(t, depositInstruction, err)
+	compiledDeposit, err := CompileInstruction(DefaultBuiltinProgramIDs.Privacy, []PublicKey{sourceKey, stateKey}, depositData, accountIndexByKey)
+	if err != nil {
+		t.Fatalf("CompileInstruction(deposit) error = %v", err)
+	}
+	transaction := Transaction{
+		Accounts:        accounts,
+		Instructions:    []CompiledInstruction{compiledCreate, compiledDeposit},
+		RecentBlockhash: blockhash,
+	}
+	signedTransaction, err := transaction.Sign(map[PublicKey][]byte{
+		sourceKey: sourcePrivateKey,
+		stateKey:  statePrivateKey,
+	})
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+
+	result, err := simulateWithDefaultPrograms(t, TransactionSimulationInput{
+		Transaction: signedTransaction,
+		Accounts: []AddressedAccount{
+			newSimulationAccount(t, sourceKey, sourceLamports, DefaultBuiltinProgramIDs.System, false),
+		},
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 184),
+		CurrentSlot:    184,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed: %v", result.Status, result.Error)
+	}
+	stateWritten := findWrittenAccount(t, result.WrittenAccounts, stateKey)
+	if stateWritten.Lamports != stateRentLamports+amount {
+		t.Fatalf("state lamports = %d, want %d", stateWritten.Lamports, stateRentLamports+amount)
+	}
+	state, err := UnmarshalPrivacyStateBinary(stateWritten.Data)
+	if err != nil {
+		t.Fatalf("UnmarshalPrivacyStateBinary() error = %v", err)
+	}
+	if len(state.Notes) != 1 || state.Notes[0].Commitment != commitment || state.Notes[0].Amount != amount {
+		t.Fatalf("privacy notes = %+v, want created deposit note", state.Notes)
+	}
+}
+
 func TestTransactionSimulatorSameAccountSendsTransparentAndPrivateTransactions(t *testing.T) {
 	sourceKey, sourcePrivateKey := newSimulationSigner(t)
 	destinationKey := newTestPublicKey(85)
