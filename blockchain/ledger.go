@@ -886,6 +886,9 @@ func ValidatorSetFromStateAtEpoch(state consensus.ChainState, epochID uint64) (c
 			continue
 		}
 		status := consensus.ValidatorStatusActive
+		if stakeState.Status == stake.ValidatorStatusJailed && stakeState.JailUntilEpoch > epochID {
+			status = consensus.ValidatorStatusJailed
+		}
 		if stakeState.Status == stake.ValidatorStatusExiting && stakeState.DeactivationEpoch <= epochID {
 			status = consensus.ValidatorStatusExiting
 		}
@@ -1928,6 +1931,7 @@ func marshalProposal(proposal consensus.BlockProposal) ([]byte, error) {
 		Header:          proposal.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: encodeBytes(proposal.LeaderSignature[:]),
 	}
@@ -1963,6 +1967,7 @@ func unmarshalProposal(data []byte) (consensus.BlockProposal, error) {
 		Header:          payload.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), payload.RewardQCs...),
+		Evidence:        append([]consensus.SlashingEvidence(nil), payload.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), payload.Rewards...),
 		LeaderSignature: signature,
 	}, nil

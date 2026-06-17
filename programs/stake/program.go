@@ -77,6 +77,7 @@ type ValidatorState struct {
 	ActivationEpoch     uint64
 	DeactivationEpoch   uint64
 	LastEffectiveStake  uint64
+	LastSlashedSlot     uint64
 }
 
 // NewProgram 创建质押程序 + 由组合层显式注册到 runtime。
@@ -294,6 +295,7 @@ func (state ValidatorState) MarshalBinary() ([]byte, error) {
 	if err := writer.WriteBytes(state.BLSPublicKey); err != nil {
 		return nil, fmt.Errorf("stake: encode validator bls public key: %w", err)
 	}
+	writer.WriteUint64(state.LastSlashedSlot)
 	return writer.Bytes(), nil
 }
 
@@ -391,6 +393,12 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 	}
 	if state.BLSPublicKey, err = reader.ReadBytes(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode validator bls public key: %w", err)
+	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.LastSlashedSlot, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode last slashed slot: %w", err)
 	}
 	if err := reader.EnsureEOF(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
@@ -752,6 +760,7 @@ func logValidatorStateWrite(action string, address structure.PublicKey, state Va
 		slog.Uint64("vote_credits", state.VoteCredits),
 		slog.Uint64("missed_vote_count", state.MissedVoteCount),
 		slog.Uint64("missed_proposal_count", state.MissedProposalCount),
+		slog.Uint64("last_slashed_slot", state.LastSlashedSlot),
 		slog.Int("commission_bps", int(state.CommissionBps)),
 	)
 }

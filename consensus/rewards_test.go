@@ -78,7 +78,7 @@ func TestApplyBlockRewardsSettlesVoteCreditsAtEpochBoundary(t *testing.T) {
 	}
 }
 
-func TestApplyBlockRewardsJailsAndSlashesMissedVotes(t *testing.T) {
+func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 	state, snapshot, validators := newRewardTestState(t, []uint64{90, 10}, []uint16{0, 0})
 	voterIndex := highestStakeValidatorIndex(snapshot)
 	missedIndex := lowestStakeValidatorIndex(snapshot)
@@ -105,6 +105,138 @@ func TestApplyBlockRewardsJailsAndSlashesMissedVotes(t *testing.T) {
 		t.Fatalf("jailed state = %+v", jailedState)
 	}
 	after := mustFindAccount(t, nextState, validators[missedIndex].AccountAddress).Account.Lamports
+	if after != before {
+		t.Fatalf("validator lamports changed on missed votes: before=%d after=%d", before, after)
+	}
+	if containsRewardType(rewards, RewardTypeSlash) || !containsRewardType(rewards, RewardTypeJail) {
+		t.Fatalf("rewards = %+v, want jail without slash", rewards)
+	}
+}
+
+func TestApplyBlockRewardsRecordsMissedLeaderProposals(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{50, 50}, []uint16{0, 0})
+	schedule, err := NewLeaderSchedule(snapshot)
+	if err != nil {
+		t.Fatalf("NewLeaderSchedule() error = %v", err)
+	}
+	expectedMisses := make(map[structure.PublicKey]uint64)
+	for slot := uint64(3); slot < 5; slot++ {
+		leaderID, err := schedule.LeaderForSlot(slot)
+		if err != nil {
+			t.Fatalf("LeaderForSlot(%d) error = %v", slot, err)
+		}
+		leader, exists := snapshot.ValidatorByID(leaderID)
+		if !exists {
+			t.Fatalf("leader %s missing", leaderID)
+		}
+		expectedMisses[leader.AccountAddress]++
+	}
+
+	nextState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          5,
+		ParentSlot:    2,
+		Height:        5,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Schedule:      schedule,
+		Leader:        validators[0],
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	for address, expected := range expectedMisses {
+		stakeState := mustStakeState(t, nextState, address)
+		if stakeState.MissedProposalCount != expected {
+			t.Fatalf("missed proposals for %s = %d, want %d", address.String(), stakeState.MissedProposalCount, expected)
+		}
+	}
+	if countRewardType(rewards, RewardTypeMissedProposal) != 2 {
+		t.Fatalf("rewards = %+v, want 2 missed proposal events", rewards)
+	}
+}
+
+func TestApplyBlockRewardsSettlesVoteCreditsWithMissedProposalPenalty(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{70, 30}, []uint16{0, 0})
+	validatorIndex := highestStakeValidatorIndex(snapshot)
+	validatorState := mustStakeState(t, state, validators[validatorIndex].AccountAddress)
+	validatorState.VoteCredits = 5
+	validatorState.MissedProposalCount = 2
+	state = replaceStakeState(t, state, validators[validatorIndex].AccountAddress, validatorState)
+	stakerBefore := mustFindAccount(t, state, validatorState.StakerAccount).Account.Lamports
+
+	settledState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          65,
+		Height:        65,
+		EpochID:       1,
+		EpochSnapshot: snapshot,
+		Leader:        validators[validatorIndex],
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	settledValidator := mustStakeState(t, settledState, validators[validatorIndex].AccountAddress)
+	if settledValidator.VoteCredits != 0 || settledValidator.MissedProposalCount != 0 {
+		t.Fatalf("settled validator = %+v", settledValidator)
+	}
+	stakerAfter := mustFindAccount(t, settledState, validatorState.StakerAccount).Account.Lamports
+	if stakerAfter != stakerBefore+3*DefaultVoteRewardLamportsPerCredit {
+		t.Fatalf("staker reward = %d, want %d", stakerAfter-stakerBefore, 3*DefaultVoteRewardLamportsPerCredit)
+	}
+	payout := firstRewardType(rewards, RewardTypeVotePayout)
+	if payout.Credits != 3 {
+		t.Fatalf("payout credits = %d, want 3", payout.Credits)
+	}
+}
+
+func TestApplyBlockRewardsSlashesSignedDoubleVoteEvidence(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{90, 10}, []uint16{0, 0})
+	slashedIndex := highestStakeValidatorIndex(snapshot)
+	consensusKey := rewardConsensusKeyForValidator(t, validators[slashedIndex], len(validators))
+	evidenceSlot := uint64(7)
+	evidence := SlashingEvidence{
+		Type: SlashingEvidenceTypeDoubleVote,
+		DoubleVote: &SignedDoubleVoteEvidence{
+			FirstVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        7,
+				BlockHash:          mustHashFromTestText("double-vote-a"),
+				VoterID:            string(validators[slashedIndex].ValidatorID),
+				Stake:              validators[slashedIndex].StakeLamports,
+				CreatedAtUnixMilli: 1710000000001,
+			}),
+			SecondVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        7,
+				BlockHash:          mustHashFromTestText("double-vote-b"),
+				VoterID:            string(validators[slashedIndex].ValidatorID),
+				Stake:              validators[slashedIndex].StakeLamports,
+				CreatedAtUnixMilli: 1710000000002,
+			}),
+		},
+	}
+	before := mustFindAccount(t, state, validators[slashedIndex].AccountAddress).Account.Lamports
+
+	nextState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          8,
+		Height:        8,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[lowestStakeValidatorIndex(snapshot)],
+		Evidence:      []SlashingEvidence{evidence},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	slashedState := mustStakeState(t, nextState, validators[slashedIndex].AccountAddress)
+	if slashedState.Status != stake.ValidatorStatusJailed || slashedState.JailUntilEpoch != DefaultMaliciousJailEpochs {
+		t.Fatalf("slashed state = %+v", slashedState)
+	}
+	if slashedState.LastSlashedSlot != evidenceSlot {
+		t.Fatalf("last slashed slot = %d, want %d", slashedState.LastSlashedSlot, evidenceSlot)
+	}
+	after := mustFindAccount(t, nextState, validators[slashedIndex].AccountAddress).Account.Lamports
 	if after >= before {
 		t.Fatalf("validator was not slashed: before=%d after=%d", before, after)
 	}
@@ -205,6 +337,64 @@ func mustStakeState(t *testing.T, state ChainState, address structure.PublicKey)
 	return stakeState
 }
 
+func replaceStakeState(
+	t *testing.T,
+	state ChainState,
+	address structure.PublicKey,
+	stakeState stake.ValidatorState,
+) ChainState {
+	t.Helper()
+	data, err := stakeState.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal stake state: %v", err)
+	}
+	nextState := state.clone()
+	for index, account := range nextState.Accounts {
+		if account.Address != address {
+			continue
+		}
+		nextAccount := account.Account.Clone()
+		nextAccount.Data = append([]byte(nil), data...)
+		nextState.Accounts[index] = structure.AddressedAccount{Address: address, Account: nextAccount}
+		return nextState
+	}
+	t.Fatalf("stake account %s not found", address.String())
+	return ChainState{}
+}
+
+func signedTestVote(t *testing.T, keyPair structure.SolanaKeyPair, vote Vote) SignedVote {
+	t.Helper()
+	voteBytes, err := vote.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal vote: %v", err)
+	}
+	signature, err := keyPair.Sign(voteBytes)
+	if err != nil {
+		t.Fatalf("sign vote: %v", err)
+	}
+	return SignedVote{
+		Vote:      vote,
+		PublicKey: keyPair.PublicKey,
+		Signature: signature,
+	}
+}
+
+func rewardConsensusKeyForValidator(
+	t *testing.T,
+	validator ValidatorState,
+	validatorCount int,
+) structure.SolanaKeyPair {
+	t.Helper()
+	for index := 0; index < validatorCount; index++ {
+		keyPair := mustKeyPair(t, "reward-consensus-"+string(rune('a'+index)))
+		if keyPair.PublicKey == validator.ConsensusPublicKey {
+			return keyPair
+		}
+	}
+	t.Fatalf("consensus key for validator %s not found", validator.ValidatorID)
+	return structure.SolanaKeyPair{}
+}
+
 func containsRewardType(rewards []BlockReward, rewardType RewardType) bool {
 	for _, reward := range rewards {
 		if reward.Type == rewardType {
@@ -212,6 +402,25 @@ func containsRewardType(rewards []BlockReward, rewardType RewardType) bool {
 		}
 	}
 	return false
+}
+
+func countRewardType(rewards []BlockReward, rewardType RewardType) int {
+	count := 0
+	for _, reward := range rewards {
+		if reward.Type == rewardType {
+			count++
+		}
+	}
+	return count
+}
+
+func firstRewardType(rewards []BlockReward, rewardType RewardType) BlockReward {
+	for _, reward := range rewards {
+		if reward.Type == rewardType {
+			return reward
+		}
+	}
+	return BlockReward{}
 }
 
 func highestStakeValidatorIndex(snapshot EpochSnapshot) int {

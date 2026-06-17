@@ -34,33 +34,37 @@ const (
 )
 
 type posNode struct {
-	mutex            sync.Mutex
-	config           nodeConfig
-	logger           *slog.Logger
-	startedAt        time.Time
-	host             *p2p.Host
-	rpcServer        *rpc.Server
-	db               database.Database
-	ledger           *blockchain.Ledger
-	executor         runtime.FixedExecutor
-	peerKeyPair      rawKeyPair
-	stakerKeyPair    structure.SolanaKeyPair
-	validatorKeyPair structure.SolanaKeyPair
-	consensusKeyPair structure.SolanaKeyPair
-	blsKeyPair       consensus.BLSKeyPair
-	blockhashQueue   structure.BlockhashQueue
-	mempool          []structure.Transaction
-	seenTransactions map[string]struct{}
-	seenProposals    map[string]struct{}
-	orphanProposals  map[structure.Hash][]consensus.BlockProposal
-	epochSnapshot    consensus.EpochSnapshot
-	leaderSchedule   consensus.LeaderSchedule
-	voteCollector    *consensus.VoteCollector
-	metrics          nodeMetrics
-	lastProducedSlot uint64
-	lastVotedSlot    uint64
-	registeredSelf   bool
-	knownPeerIDs     []string
+	mutex             sync.Mutex
+	config            nodeConfig
+	logger            *slog.Logger
+	startedAt         time.Time
+	host              *p2p.Host
+	rpcServer         *rpc.Server
+	db                database.Database
+	ledger            *blockchain.Ledger
+	executor          runtime.FixedExecutor
+	peerKeyPair       rawKeyPair
+	stakerKeyPair     structure.SolanaKeyPair
+	validatorKeyPair  structure.SolanaKeyPair
+	consensusKeyPair  structure.SolanaKeyPair
+	blsKeyPair        consensus.BLSKeyPair
+	blockhashQueue    structure.BlockhashQueue
+	mempool           []structure.Transaction
+	seenTransactions  map[string]struct{}
+	seenProposals     map[string]struct{}
+	pendingEvidence   []consensus.SlashingEvidence
+	seenEvidence      map[string]struct{}
+	proposalChoices   map[string]consensus.BlockProposal
+	signedVoteChoices map[string]consensus.SignedVote
+	orphanProposals   map[structure.Hash][]consensus.BlockProposal
+	epochSnapshot     consensus.EpochSnapshot
+	leaderSchedule    consensus.LeaderSchedule
+	voteCollector     *consensus.VoteCollector
+	metrics           nodeMetrics
+	lastProducedSlot  uint64
+	lastVotedSlot     uint64
+	registeredSelf    bool
+	knownPeerIDs      []string
 }
 
 type rawKeyPair struct {
@@ -130,16 +134,10 @@ func run(configPath string) error {
 }
 
 func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
-	executor, err := runtime.NewFixedExecutor(
-		system.NewProgram(structure.DefaultBuiltinProgramIDs.System),
-		tokenprogram.NewProgram(structure.DefaultBuiltinProgramIDs.Token),
-		stake.NewProgram(structure.DefaultBuiltinProgramIDs.Stake),
-		privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy),
-	)
+	executor, err := newRuntimeExecutor(logger)
 	if err != nil {
 		return nil, fmt.Errorf("posnode: create executor: %w", err)
 	}
-	executor.Logger = logger
 	peerKeyPair, err := loadRawKeyPair(config.PeerSeed, config.PeerKeyPath, config, "peer")
 	if err != nil {
 		return nil, err
@@ -161,18 +159,21 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		return nil, err
 	}
 	node := &posNode{
-		config:           config,
-		logger:           logger,
-		startedAt:        time.Now(),
-		executor:         executor,
-		peerKeyPair:      peerKeyPair,
-		stakerKeyPair:    stakerKeyPair,
-		validatorKeyPair: validatorKeyPair,
-		consensusKeyPair: consensusKeyPair,
-		blsKeyPair:       blsKeyPair,
-		seenTransactions: make(map[string]struct{}),
-		seenProposals:    make(map[string]struct{}),
-		orphanProposals:  make(map[structure.Hash][]consensus.BlockProposal),
+		config:            config,
+		logger:            logger,
+		startedAt:         time.Now(),
+		executor:          executor,
+		peerKeyPair:       peerKeyPair,
+		stakerKeyPair:     stakerKeyPair,
+		validatorKeyPair:  validatorKeyPair,
+		consensusKeyPair:  consensusKeyPair,
+		blsKeyPair:        blsKeyPair,
+		seenTransactions:  make(map[string]struct{}),
+		seenProposals:     make(map[string]struct{}),
+		seenEvidence:      make(map[string]struct{}),
+		proposalChoices:   make(map[string]consensus.BlockProposal),
+		signedVoteChoices: make(map[string]consensus.SignedVote),
+		orphanProposals:   make(map[structure.Hash][]consensus.BlockProposal),
 	}
 	if err := node.openLedger(); err != nil {
 		return nil, err
@@ -429,6 +430,48 @@ func (node *posNode) secureSessionIdentity() p2p.SecureSessionIdentity {
 		NetworkID:       networkID,
 		SoftwareVersion: posNodeSoftwareVersion,
 	}
+}
+
+type programRegistration struct {
+	spec    runtime.ProgramSpec
+	handler runtime.ProgramHandler
+}
+
+func newRuntimeExecutor(logger *slog.Logger) (runtime.FixedExecutor, error) {
+	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
+	executor.Logger = logger
+	if err := registerPrograms(&executor); err != nil {
+		return runtime.FixedExecutor{}, err
+	}
+	return executor, nil
+}
+
+// registerPrograms 注册链上程序处理器 + 对齐 p2p 协议注册模式降低新增程序改动面。
+func registerPrograms(executor *runtime.FixedExecutor) error {
+	registrations := []programRegistration{
+		{
+			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.System, Name: "system"},
+			handler: system.NewProgram(structure.DefaultBuiltinProgramIDs.System).Execute,
+		},
+		{
+			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Token, Name: "token"},
+			handler: tokenprogram.NewProgram(structure.DefaultBuiltinProgramIDs.Token).Execute,
+		},
+		{
+			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Stake, Name: "stake"},
+			handler: stake.NewProgram(structure.DefaultBuiltinProgramIDs.Stake).Execute,
+		},
+		{
+			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Privacy, Name: "privacy"},
+			handler: privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy).Execute,
+		},
+	}
+	for _, registration := range registrations {
+		if err := executor.RegisterProgramHandler(registration.spec, registration.handler); err != nil {
+			return fmt.Errorf("posnode: register program %s: %w", registration.spec.Name, err)
+		}
+	}
+	return nil
 }
 
 func (node *posNode) registerProtocols() error {
@@ -740,8 +783,10 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Warn("posnode reward qc load failed", slog.Any("error", err))
 		rewardQCs = nil
 	}
+	evidence := node.pendingEvidenceSnapshotLocked()
 	request := consensus.ProduceBlockRequest{
 		Slot:           slot,
+		ParentSlot:     head.Slot,
 		Height:         head.Height + 1,
 		EpochSnapshot:  node.epochSnapshot,
 		Schedule:       node.leaderSchedule,
@@ -752,6 +797,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		BlockhashQueue: node.blockhashQueue,
 		LeaderKeyPair:  node.consensusKeyPair,
 		RewardQCs:      rewardQCs,
+		Evidence:       evidence,
 		RewardConfig:   consensus.DefaultRewardConfig(),
 	}
 	node.mutex.Unlock()
@@ -773,6 +819,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode commit produced block failed", slog.Uint64("slot", slot), slog.Any("error", err))
 		return
 	}
+	node.removePendingEvidence(evidence)
 	node.removeCommittedMempoolTransactions(proposal.Transactions)
 	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.mutex.Lock()
@@ -787,6 +834,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		slog.Int("transactions", len(proposal.Transactions)),
 		slog.Any("tx_ids", transactionIDsForLog(proposal.Transactions)),
 		slog.Int("reward_qc_count", len(proposal.RewardQCs)),
+		slog.Int("evidence_count", len(proposal.Evidence)),
 		slog.Int("reward_count", len(proposal.Rewards)),
 		slog.String("block_hash", proposalHash.String()),
 		slog.String("qc_hash", nextHead.QCHash.String()),
@@ -844,6 +892,7 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("tx_count", len(proposal.Transactions)),
 	)
+	node.observeProposalForEvidence(ctx, proposal, proposalHash)
 	firstSeen := node.markProposalSeen(proposalHash)
 	now := time.Now()
 	if node.slotDeadlinePassed(proposal.Header.Slot, now) {
@@ -886,6 +935,7 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 	if err := node.verifyVoteEnvelope(envelope); err != nil {
 		return err
 	}
+	node.observeSignedVoteForEvidence(ctx, envelope)
 	node.mutex.Lock()
 	validatorOrder := node.epochSnapshot.ValidatorOrder()
 	var qc consensus.QuorumCertificate
@@ -948,15 +998,23 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 }
 
 func (node *posNode) handleEvidenceMessage(ctx context.Context, message p2p.Message) error {
-	_ = ctx
-	if len(message.Payload) == 0 {
-		return fmt.Errorf("posnode: empty evidence payload")
+	evidence, err := decodeEvidenceMessage(message)
+	if err != nil {
+		return err
+	}
+	added, err := node.addPendingSlashingEvidence(evidence)
+	if err != nil {
+		return err
 	}
 	node.metrics.evidenceReceived.Add(1)
 	node.logger.Warn("posnode evidence received",
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("payload_bytes", len(message.Payload)),
+		slog.Bool("queued", added),
 	)
+	if added {
+		node.broadcastEvidence(ctx, evidence, message.FromPeerID)
+	}
 	return nil
 }
 
@@ -996,8 +1054,13 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		node.storeOrphanProposal(proposal)
 		return nil
 	}
+	parentSlot, err := node.parentSlotForProposal(proposal.Header.ParentHash)
+	if err != nil {
+		return err
+	}
 	request := consensus.VerifyProposalRequest{
 		Proposal:       proposal,
+		ParentSlot:     parentSlot,
 		EpochSnapshot:  epochSnapshot,
 		Schedule:       leaderSchedule,
 		ParentHash:     proposal.Header.ParentHash,

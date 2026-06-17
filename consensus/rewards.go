@@ -15,9 +15,13 @@ const (
 	DefaultVoteRewardLamportsPerCredit = uint64(1000)
 	DefaultMaxVoteRewardDelaySlots     = uint64(64)
 	DefaultMissedVoteJailThreshold     = uint64(16)
-	DefaultMissedVoteSlashBasisPoints  = uint16(100)
 	DefaultMissedVoteJailEpochs        = uint64(1)
+	DefaultMissedProposalJailThreshold = uint64(8)
+	DefaultMissedProposalJailEpochs    = uint64(1)
+	DefaultMaliciousSlashBasisPoints   = uint16(500)
+	DefaultMaliciousJailEpochs         = uint64(4)
 	MaxRewardQCsPerBlock               = 128
+	MaxSlashingEvidencePerBlock        = 128
 	MaxBlockRewards                    = 8192
 	rewardBasisPointsDenominator       = uint64(10000)
 )
@@ -31,6 +35,7 @@ const (
 	RewardTypeCommission
 	RewardTypeSlash
 	RewardTypeJail
+	RewardTypeMissedProposal
 )
 
 // RewardConfig 描述奖励参数 + 所有节点必须使用同一配置才能得到一致 state root。
@@ -39,8 +44,11 @@ type RewardConfig struct {
 	VoteRewardLamportsPerCredit uint64
 	MaxVoteRewardDelaySlots     uint64
 	MissedVoteJailThreshold     uint64
-	MissedVoteSlashBasisPoints  uint16
 	MissedVoteJailEpochs        uint64
+	MissedProposalJailThreshold uint64
+	MissedProposalJailEpochs    uint64
+	MaliciousSlashBasisPoints   uint16
+	MaliciousJailEpochs         uint64
 }
 
 // BlockReward 描述区块奖励事件 + 进入 reward root 防止 leader 私自多发或漏发。
@@ -58,12 +66,15 @@ type BlockReward struct {
 // BlockRewardInput 描述奖励状态转换输入 + 出块和验块必须传入完全相同的确定性数据。
 type BlockRewardInput struct {
 	Slot          uint64
+	ParentSlot    uint64
 	Height        uint64
 	EpochID       uint64
 	EpochSnapshot EpochSnapshot
+	Schedule      LeaderSchedule
 	Leader        ValidatorState
 	FeeDetails    []structure.FeeDetails
 	RewardQCs     []QuorumCertificate
+	Evidence      []SlashingEvidence
 	Config        RewardConfig
 	RentConfig    structure.RentConfig
 }
@@ -80,8 +91,11 @@ func DefaultRewardConfig() RewardConfig {
 		VoteRewardLamportsPerCredit: DefaultVoteRewardLamportsPerCredit,
 		MaxVoteRewardDelaySlots:     DefaultMaxVoteRewardDelaySlots,
 		MissedVoteJailThreshold:     DefaultMissedVoteJailThreshold,
-		MissedVoteSlashBasisPoints:  DefaultMissedVoteSlashBasisPoints,
 		MissedVoteJailEpochs:        DefaultMissedVoteJailEpochs,
+		MissedProposalJailThreshold: DefaultMissedProposalJailThreshold,
+		MissedProposalJailEpochs:    DefaultMissedProposalJailEpochs,
+		MaliciousSlashBasisPoints:   DefaultMaliciousSlashBasisPoints,
+		MaliciousJailEpochs:         DefaultMaliciousJailEpochs,
 	}
 }
 
@@ -98,7 +112,13 @@ func ApplyBlockRewards(state ChainState, input BlockRewardInput) (ChainState, []
 	if err := applyLeaderFeeReward(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
 		return ChainState{}, nil, err
 	}
+	if err := applyMissedLeaderProposals(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
+		return ChainState{}, nil, err
+	}
 	if err := applyFinalizedVoteCredits(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
+		return ChainState{}, nil, err
+	}
+	if err := applySlashingEvidence(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
 		return ChainState{}, nil, err
 	}
 	if err := applyEpochRewardSettlement(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
@@ -156,11 +176,20 @@ func (input BlockRewardInput) normalize() BlockRewardInput {
 	if input.Config.MissedVoteJailThreshold == 0 {
 		input.Config.MissedVoteJailThreshold = DefaultMissedVoteJailThreshold
 	}
-	if input.Config.MissedVoteSlashBasisPoints == 0 {
-		input.Config.MissedVoteSlashBasisPoints = DefaultMissedVoteSlashBasisPoints
-	}
 	if input.Config.MissedVoteJailEpochs == 0 {
 		input.Config.MissedVoteJailEpochs = DefaultMissedVoteJailEpochs
+	}
+	if input.Config.MissedProposalJailThreshold == 0 {
+		input.Config.MissedProposalJailThreshold = DefaultMissedProposalJailThreshold
+	}
+	if input.Config.MissedProposalJailEpochs == 0 {
+		input.Config.MissedProposalJailEpochs = DefaultMissedProposalJailEpochs
+	}
+	if input.Config.MaliciousSlashBasisPoints == 0 {
+		input.Config.MaliciousSlashBasisPoints = DefaultMaliciousSlashBasisPoints
+	}
+	if input.Config.MaliciousJailEpochs == 0 {
+		input.Config.MaliciousJailEpochs = DefaultMaliciousJailEpochs
 	}
 	if input.RentConfig == (structure.RentConfig{}) {
 		input.RentConfig = structure.DefaultRentConfig
@@ -178,8 +207,11 @@ func (input BlockRewardInput) validate() error {
 	if len(input.RewardQCs) > MaxRewardQCsPerBlock {
 		return fmt.Errorf("consensus: reward qc count exceeds limit")
 	}
-	if input.Config.MissedVoteSlashBasisPoints > 10000 {
-		return fmt.Errorf("consensus: missed vote slash bps exceeds 10000")
+	if len(input.Evidence) > MaxSlashingEvidencePerBlock {
+		return fmt.Errorf("consensus: slashing evidence count exceeds limit")
+	}
+	if input.Config.MaliciousSlashBasisPoints > 10000 {
+		return fmt.Errorf("consensus: malicious slash bps exceeds 10000")
 	}
 	return input.RentConfig.Validate()
 }
@@ -209,6 +241,70 @@ func applyLeaderFeeReward(
 		Lamports:       validatorFee,
 	})
 	return nil
+}
+
+func applyMissedLeaderProposals(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	input BlockRewardInput,
+	rewards *[]BlockReward,
+) error {
+	if input.ParentSlot == 0 || input.ParentSlot+1 >= input.Slot {
+		return nil
+	}
+	schedule := input.Schedule
+	if len(schedule.SlotToLeader) == 0 {
+		generatedSchedule, err := NewLeaderSchedule(input.EpochSnapshot)
+		if err != nil {
+			return err
+		}
+		schedule = generatedSchedule
+	}
+	for slot := input.ParentSlot + 1; slot < input.Slot; slot++ {
+		if slot < input.EpochSnapshot.StartSlot || slot > input.EpochSnapshot.EndSlot {
+			continue
+		}
+		leaderID, err := schedule.LeaderForSlot(slot)
+		if err != nil {
+			return err
+		}
+		leader, exists := input.EpochSnapshot.ValidatorByID(leaderID)
+		if !exists {
+			return fmt.Errorf("consensus: missed proposal leader missing from snapshot")
+		}
+		if err := recordMissedLeaderProposal(state, accountIndexByAddress, leader, input, slot, rewards); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func recordMissedLeaderProposal(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	leader ValidatorState,
+	input BlockRewardInput,
+	slot uint64,
+	rewards *[]BlockReward,
+) error {
+	stakeState, account, index, err := loadStakeStateByAddress(*state, accountIndexByAddress, leader.AccountAddress)
+	if err != nil {
+		return err
+	}
+	if stakeState.MissedProposalCount == ^uint64(0) {
+		return fmt.Errorf("consensus: missed proposal count overflow")
+	}
+	stakeState.MissedProposalCount++
+	*rewards = append(*rewards, BlockReward{
+		Type:           RewardTypeMissedProposal,
+		ValidatorID:    string(leader.ValidatorID),
+		AccountAddress: leader.AccountAddress,
+		StakerAddress:  stakeState.StakerAccount,
+		EpochID:        input.EpochID,
+		Slot:           slot,
+		Credits:        1,
+	})
+	return writeStakeState(state, index, account, stakeState, input.RentConfig)
 }
 
 func applyFinalizedVoteCredits(
@@ -276,6 +372,162 @@ func applySingleQCVoteCredit(
 	return nil
 }
 
+type slashingEvidenceItem struct {
+	Validator ValidatorState
+	Slot      uint64
+	Key       string
+}
+
+func applySlashingEvidence(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	input BlockRewardInput,
+	rewards *[]BlockReward,
+) error {
+	items, err := normalizeSlashingEvidence(input.Evidence, input.EpochSnapshot)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := applySingleSlashingEvidence(state, accountIndexByAddress, input, item, rewards); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeSlashingEvidence(
+	evidences []SlashingEvidence,
+	snapshot EpochSnapshot,
+) ([]slashingEvidenceItem, error) {
+	items := make([]slashingEvidenceItem, 0, len(evidences))
+	seen := make(map[string]struct{}, len(evidences))
+	for index, evidence := range evidences {
+		validator, slot, err := evidence.Validate(snapshot)
+		if err != nil {
+			return nil, fmt.Errorf("consensus: slashing evidence %d: %w", index, err)
+		}
+		key, err := slashingEvidenceKey(evidence, validator, slot)
+		if err != nil {
+			return nil, fmt.Errorf("consensus: slashing evidence %d key: %w", index, err)
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, slashingEvidenceItem{
+			Validator: validator,
+			Slot:      slot,
+			Key:       key,
+		})
+	}
+	sort.Slice(items, func(leftIndex int, rightIndex int) bool {
+		left := items[leftIndex]
+		right := items[rightIndex]
+		if left.Slot != right.Slot {
+			return left.Slot < right.Slot
+		}
+		if left.Validator.ValidatorID != right.Validator.ValidatorID {
+			return left.Validator.ValidatorID < right.Validator.ValidatorID
+		}
+		return left.Key < right.Key
+	})
+	return items, nil
+}
+
+func slashingEvidenceKey(evidence SlashingEvidence, validator ValidatorState, slot uint64) (string, error) {
+	switch evidence.Type {
+	case SlashingEvidenceTypeDoubleProposal:
+		firstHash, err := evidence.DoubleProposal.FirstProposal.Hash()
+		if err != nil {
+			return "", err
+		}
+		secondHash, err := evidence.DoubleProposal.SecondProposal.Hash()
+		if err != nil {
+			return "", err
+		}
+		first, second := orderedStrings(firstHash.String(), secondHash.String())
+		return fmt.Sprintf("%d/%s/%d/%s/%s", evidence.Type, validator.ValidatorID, slot, first, second), nil
+	case SlashingEvidenceTypeDoubleVote:
+		firstVote := evidence.DoubleVote.FirstVote.Vote
+		secondVote := evidence.DoubleVote.SecondVote.Vote
+		first := fmt.Sprintf("%d/%d/%s", firstVote.Type, firstVote.BlockHeight, firstVote.BlockHash.String())
+		second := fmt.Sprintf("%d/%d/%s", secondVote.Type, secondVote.BlockHeight, secondVote.BlockHash.String())
+		first, second = orderedStrings(first, second)
+		return fmt.Sprintf("%d/%s/%d/%s/%s", evidence.Type, validator.ValidatorID, slot, first, second), nil
+	default:
+		return "", fmt.Errorf("consensus: unsupported slashing evidence type %d", evidence.Type)
+	}
+}
+
+func applySingleSlashingEvidence(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	input BlockRewardInput,
+	item slashingEvidenceItem,
+	rewards *[]BlockReward,
+) error {
+	stakeState, account, index, err := loadStakeStateByAddress(*state, accountIndexByAddress, item.Validator.AccountAddress)
+	if err != nil {
+		return err
+	}
+	if stakeState.LastSlashedSlot >= item.Slot {
+		return nil
+	}
+	slashLamports, err := calculateSlashLamports(stakeState, input.Config.MaliciousSlashBasisPoints)
+	if err != nil {
+		return err
+	}
+	burnedLamports, nextAccount, nextStakeState, err := burnSlashFromValidator(account, stakeState, slashLamports, input)
+	if err != nil {
+		return err
+	}
+	jailUntilEpoch := input.EpochID + input.Config.MaliciousJailEpochs
+	if nextStakeState.JailUntilEpoch > jailUntilEpoch {
+		jailUntilEpoch = nextStakeState.JailUntilEpoch
+	}
+	nextStakeState.Status = stake.ValidatorStatusJailed
+	nextStakeState.JailUntilEpoch = jailUntilEpoch
+	nextStakeState.UnlockEpoch = jailUntilEpoch
+	nextStakeState.LastSlashedSlot = item.Slot
+	nextStakeState.VoteCredits = 0
+	nextStakeState.MissedVoteCount = 0
+	nextStakeState.MissedProposalCount = 0
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(nextStakeState, input.EpochID)
+	if err != nil {
+		return fmt.Errorf("consensus: refresh slashed effective stake: %w", err)
+	}
+	nextStakeState.LastEffectiveStake = effectiveStake
+	validatorID := string(NewValidatorID(nextStakeState.ConsensusPublicKey))
+	if burnedLamports > 0 {
+		*rewards = append(*rewards, BlockReward{
+			Type:           RewardTypeSlash,
+			ValidatorID:    validatorID,
+			AccountAddress: item.Validator.AccountAddress,
+			StakerAddress:  nextStakeState.StakerAccount,
+			EpochID:        input.EpochID,
+			Slot:           item.Slot,
+			Lamports:       burnedLamports,
+		})
+	}
+	*rewards = append(*rewards, BlockReward{
+		Type:           RewardTypeJail,
+		ValidatorID:    validatorID,
+		AccountAddress: item.Validator.AccountAddress,
+		StakerAddress:  nextStakeState.StakerAccount,
+		EpochID:        input.EpochID,
+		Slot:           item.Slot,
+	})
+	return writeStakeState(state, index, nextAccount, nextStakeState, input.RentConfig)
+}
+
+func orderedStrings(left string, right string) (string, string) {
+	if left <= right {
+		return left, right
+	}
+	return right, left
+}
+
 func applyEpochRewardSettlement(
 	state *ChainState,
 	accountIndexByAddress map[structure.PublicKey]int,
@@ -293,7 +545,7 @@ func applyEpochRewardSettlement(
 		if stakeState.LastRewardEpoch >= input.EpochID {
 			continue
 		}
-		if shouldJailForMissedVotes(stakeState, input.Config) {
+		if shouldJailForMissedPerformance(stakeState, input.Config) {
 			if err := settleJailedValidator(state, entry, account, stakeState, input, rewards); err != nil {
 				return err
 			}
@@ -318,7 +570,8 @@ func settleRewardedValidator(
 	if err := stake.MatureStakeForEpoch(&stakeState, input.EpochID); err != nil {
 		return fmt.Errorf("consensus: mature rewarded stake: %w", err)
 	}
-	rewardLamports, err := calculateVoteReward(stakeState.VoteCredits, input.Config)
+	rewardCredits := effectiveRewardCredits(stakeState)
+	rewardLamports, err := calculateVoteReward(rewardCredits, input.Config)
 	if err != nil {
 		return err
 	}
@@ -357,7 +610,7 @@ func settleRewardedValidator(
 			EpochID:        input.EpochID,
 			Slot:           input.Slot,
 			Lamports:       stakerLamports,
-			Credits:        stakeState.VoteCredits,
+			Credits:        rewardCredits,
 		})
 	}
 	if ^uint64(0)-stakeState.RewardLamports < rewardLamports {
@@ -366,6 +619,7 @@ func settleRewardedValidator(
 	stakeState.RewardLamports += rewardLamports
 	stakeState.VoteCredits = 0
 	stakeState.MissedVoteCount = 0
+	stakeState.MissedProposalCount = 0
 	stakeState.LastRewardEpoch = input.EpochID
 	return writeStakeState(state, entry.Index, account, stakeState, input.RentConfig)
 }
@@ -382,36 +636,20 @@ func settleJailedValidator(
 		return fmt.Errorf("consensus: mature jailed stake: %w", err)
 	}
 	validatorID := string(NewValidatorID(stakeState.ConsensusPublicKey))
-	requestedSlash, err := calculateSlashLamports(stakeState, input.Config)
-	if err != nil {
-		return err
-	}
-	burnedLamports, nextAccount, nextStakeState, err := burnSlashFromValidator(account, stakeState, requestedSlash, input)
-	if err != nil {
-		return err
-	}
+	nextAccount := account
+	nextStakeState := stakeState
 	nextStakeState.Status = stake.ValidatorStatusJailed
-	nextStakeState.JailUntilEpoch = input.EpochID + input.Config.MissedVoteJailEpochs
+	nextStakeState.JailUntilEpoch = input.EpochID + missedPerformanceJailEpochs(stakeState, input.Config)
 	nextStakeState.UnlockEpoch = nextStakeState.JailUntilEpoch
 	nextStakeState.VoteCredits = 0
 	nextStakeState.MissedVoteCount = 0
+	nextStakeState.MissedProposalCount = 0
 	nextStakeState.LastRewardEpoch = input.EpochID
 	effectiveStake, err := stake.EffectiveStakeAtEpoch(nextStakeState, input.EpochID)
 	if err != nil {
 		return fmt.Errorf("consensus: refresh jailed effective stake: %w", err)
 	}
 	nextStakeState.LastEffectiveStake = effectiveStake
-	if burnedLamports > 0 {
-		*rewards = append(*rewards, BlockReward{
-			Type:           RewardTypeSlash,
-			ValidatorID:    validatorID,
-			AccountAddress: entry.Address,
-			StakerAddress:  nextStakeState.StakerAccount,
-			EpochID:        input.EpochID,
-			Slot:           input.Slot,
-			Lamports:       burnedLamports,
-		})
-	}
 	*rewards = append(*rewards, BlockReward{
 		Type:           RewardTypeJail,
 		ValidatorID:    validatorID,
@@ -463,11 +701,34 @@ func isRewardEligibleQC(qc QuorumCertificate, input BlockRewardInput) bool {
 	return true
 }
 
-func shouldJailForMissedVotes(state stake.ValidatorState, config RewardConfig) bool {
+func effectiveRewardCredits(state stake.ValidatorState) uint64 {
+	if state.MissedProposalCount >= state.VoteCredits {
+		return 0
+	}
+	return state.VoteCredits - state.MissedProposalCount
+}
+
+func shouldJailForMissedPerformance(state stake.ValidatorState, config RewardConfig) bool {
 	if state.Status != stake.ValidatorStatusActive {
 		return false
 	}
-	return state.MissedVoteCount >= config.MissedVoteJailThreshold
+	return state.MissedVoteCount >= config.MissedVoteJailThreshold ||
+		state.MissedProposalCount >= config.MissedProposalJailThreshold
+}
+
+func missedPerformanceJailEpochs(state stake.ValidatorState, config RewardConfig) uint64 {
+	jailEpochs := uint64(0)
+	if state.MissedVoteCount >= config.MissedVoteJailThreshold {
+		jailEpochs = config.MissedVoteJailEpochs
+	}
+	if state.MissedProposalCount >= config.MissedProposalJailThreshold &&
+		config.MissedProposalJailEpochs > jailEpochs {
+		jailEpochs = config.MissedProposalJailEpochs
+	}
+	if jailEpochs == 0 {
+		return 1
+	}
+	return jailEpochs
 }
 
 func sumValidatorFees(fees []structure.FeeDetails) (uint64, error) {
@@ -491,12 +752,15 @@ func calculateVoteReward(credits uint64, config RewardConfig) (uint64, error) {
 	return credits * config.VoteRewardLamportsPerCredit, nil
 }
 
-func calculateSlashLamports(state stake.ValidatorState, config RewardConfig) (uint64, error) {
+func calculateSlashLamports(state stake.ValidatorState, basisPoints uint16) (uint64, error) {
 	totalStake, err := validatorTotalStake(state)
 	if err != nil {
 		return 0, err
 	}
-	return totalStake * uint64(config.MissedVoteSlashBasisPoints) / rewardBasisPointsDenominator, nil
+	if basisPoints != 0 && totalStake > ^uint64(0)/uint64(basisPoints) {
+		return 0, fmt.Errorf("consensus: slash amount overflow")
+	}
+	return totalStake * uint64(basisPoints) / rewardBasisPointsDenominator, nil
 }
 
 func burnSlashFromValidator(

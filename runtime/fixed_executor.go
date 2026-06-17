@@ -26,6 +26,26 @@ func NewFixedExecutor(programs ...Program) (FixedExecutor, error) {
 	return FixedExecutor{Programs: registry}, nil
 }
 
+// NewFixedExecutorWithRegistry 创建处理器执行器 + 支持组合层按 ProgramSpec 注册程序。
+func NewFixedExecutorWithRegistry(registry ProgramRegistry) FixedExecutor {
+	return FixedExecutor{Programs: registry.Clone()}
+}
+
+// RegisterProgramHandler 注册程序处理器 + 让执行器接入方式对齐 p2p 协议注册。
+func (executor *FixedExecutor) RegisterProgramHandler(spec ProgramSpec, handler ProgramHandler) error {
+	return executor.Programs.RegisterHandler(spec, handler)
+}
+
+// RegisterProgram 注册旧接口程序 + 保留现有业务程序的兼容接入方式。
+func (executor *FixedExecutor) RegisterProgram(program Program) error {
+	return executor.Programs.RegisterProgram(program)
+}
+
+// SetFallbackProgramHandler 设置兜底处理器 + 支持未知程序交给 VM 或扩展执行器。
+func (executor *FixedExecutor) SetFallbackProgramHandler(handler ProgramHandler) error {
+	return executor.Programs.SetFallbackHandler(handler)
+}
+
 // ExecuteTransaction 执行交易 + 在调用 structure legacy 模拟器前完成 runtime 边界规范化。
 func (executor FixedExecutor) ExecuteTransaction(contextValue context.Context, request TransactionRequest) (result TransactionResult, err error) {
 	startedAt := time.Now()
@@ -50,12 +70,8 @@ func (executor FixedExecutor) ExecuteTransaction(contextValue context.Context, r
 		input.CurrentSlot = request.Slot
 	}
 	input.CurrentEpoch = request.Epoch
-	if len(input.Programs) == 0 && input.FallbackProgram == nil && !executor.Programs.IsEmpty() {
-		input.Programs = make([]Program, 0, len(executor.Programs.programs))
-		for _, program := range executor.Programs.programs {
-			input.Programs = append(input.Programs, program)
-		}
-		input.FallbackProgram = executor.Programs.fallback
+	if input.ProgramRegistry.IsEmpty() && len(input.Programs) == 0 && input.FallbackProgram == nil && !executor.Programs.IsEmpty() {
+		input.ProgramRegistry = executor.Programs.Clone()
 	}
 
 	simulator := executor.Simulator

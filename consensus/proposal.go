@@ -38,6 +38,7 @@ type BlockProposal struct {
 	Header          BlockHeader
 	Transactions    []structure.Transaction
 	RewardQCs       []QuorumCertificate
+	Evidence        []SlashingEvidence
 	Rewards         []BlockReward
 	LeaderSignature structure.Signature
 }
@@ -111,12 +112,15 @@ func (producer BlockProducer) ProduceBlock(
 	}
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
 		Slot:          request.Slot,
+		ParentSlot:    request.ParentSlot,
 		Height:        request.Height,
 		EpochID:       request.EpochSnapshot.EpochID,
 		EpochSnapshot: request.EpochSnapshot,
+		Schedule:      request.Schedule,
 		Leader:        leader,
 		FeeDetails:    feeDetails,
 		RewardQCs:     request.RewardQCs,
+		Evidence:      request.Evidence,
 		Config:        request.RewardConfig,
 	})
 	if err != nil {
@@ -139,6 +143,7 @@ func (producer BlockProducer) ProduceBlock(
 		Header:          header,
 		Transactions:    includedTransactions,
 		RewardQCs:       append([]QuorumCertificate(nil), request.RewardQCs...),
+		Evidence:        append([]SlashingEvidence(nil), request.Evidence...),
 		Rewards:         append([]BlockReward(nil), rewards...),
 		LeaderSignature: signature,
 	}, nextState, nil
@@ -196,12 +201,15 @@ func (verifier ProposalVerifier) VerifyProposal(
 	}
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
 		Slot:          request.Proposal.Header.Slot,
+		ParentSlot:    request.ParentSlot,
 		Height:        request.Proposal.Header.Height,
 		EpochID:       request.EpochSnapshot.EpochID,
 		EpochSnapshot: request.EpochSnapshot,
+		Schedule:      request.Schedule,
 		Leader:        request.Leader,
 		FeeDetails:    feeDetails,
 		RewardQCs:     request.Proposal.RewardQCs,
+		Evidence:      request.Proposal.Evidence,
 		Config:        request.RewardConfig,
 	})
 	if err != nil {
@@ -258,6 +266,7 @@ func (header BlockHeader) SignBytes() ([]byte, error) {
 
 type ProduceBlockRequest struct {
 	Slot           uint64
+	ParentSlot     uint64
 	Height         uint64
 	EpochSnapshot  EpochSnapshot
 	Schedule       LeaderSchedule
@@ -268,11 +277,13 @@ type ProduceBlockRequest struct {
 	BlockhashQueue structure.BlockhashQueue
 	LeaderKeyPair  structure.SolanaKeyPair
 	RewardQCs      []QuorumCertificate
+	Evidence       []SlashingEvidence
 	RewardConfig   RewardConfig
 }
 
 type VerifyProposalRequest struct {
 	Proposal       BlockProposal
+	ParentSlot     uint64
 	EpochSnapshot  EpochSnapshot
 	Schedule       LeaderSchedule
 	ParentHash     structure.Hash
@@ -285,6 +296,9 @@ type VerifyProposalRequest struct {
 func (request ProduceBlockRequest) validate() error {
 	if request.LeaderKeyPair.PublicKey.IsZero() {
 		return fmt.Errorf("consensus: leader key is empty")
+	}
+	if request.ParentSlot != 0 && request.ParentSlot >= request.Slot {
+		return fmt.Errorf("consensus: parent slot must be lower than proposal slot")
 	}
 	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
 	if err != nil {
@@ -300,6 +314,9 @@ func (request ProduceBlockRequest) validate() error {
 func (request VerifyProposalRequest) validate() error {
 	if request.Proposal.Header.ParentHash != request.ParentHash {
 		return fmt.Errorf("consensus: parent hash mismatch")
+	}
+	if request.ParentSlot != 0 && request.ParentSlot >= request.Proposal.Header.Slot {
+		return fmt.Errorf("consensus: parent slot must be lower than proposal slot")
 	}
 	if request.Proposal.Header.EpochID != request.EpochSnapshot.EpochID {
 		return fmt.Errorf("consensus: epoch mismatch")

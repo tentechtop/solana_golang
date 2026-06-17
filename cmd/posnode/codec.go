@@ -31,6 +31,10 @@ type qcEnvelope struct {
 	QC consensus.QuorumCertificate `json:"qc"`
 }
 
+type evidenceEnvelope struct {
+	Evidence consensus.SlashingEvidence `json:"evidence"`
+}
+
 type blockHashRequestEnvelope struct {
 	Hash string `json:"hash"`
 }
@@ -190,6 +194,7 @@ type posProposalJSON struct {
 	Header          consensus.BlockHeader         `json:"header"`
 	Transactions    []string                      `json:"transactions"`
 	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
+	Evidence        []consensus.SlashingEvidence  `json:"evidence,omitempty"`
 	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
 	LeaderSignature structure.Signature           `json:"leader_signature"`
 }
@@ -305,6 +310,22 @@ func encodeQCMessage(qc consensus.QuorumCertificate) (p2p.Message, error) {
 	return p2p.NewMessage(p2p.ProtocolPoSQCV1, payload)
 }
 
+func encodeEvidenceMessage(evidence consensus.SlashingEvidence) (p2p.Message, error) {
+	payload, err := json.Marshal(evidenceEnvelope{Evidence: evidence})
+	if err != nil {
+		return p2p.Message{}, fmt.Errorf("posnode: marshal evidence envelope: %w", err)
+	}
+	return p2p.NewMessage(p2p.ProtocolPoSEvidenceV1, payload)
+}
+
+func decodeEvidenceMessage(message p2p.Message) (consensus.SlashingEvidence, error) {
+	envelope := evidenceEnvelope{}
+	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
+		return consensus.SlashingEvidence{}, fmt.Errorf("posnode: decode evidence envelope: %w", err)
+	}
+	return envelope.Evidence, nil
+}
+
 func proposalToJSON(proposal consensus.BlockProposal) (posProposalJSON, error) {
 	transactions := make([]string, len(proposal.Transactions))
 	for index, transaction := range proposal.Transactions {
@@ -318,6 +339,7 @@ func proposalToJSON(proposal consensus.BlockProposal) (posProposalJSON, error) {
 		Header:          proposal.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: proposal.LeaderSignature,
 	}, nil
@@ -340,6 +362,7 @@ func proposalFromJSON(proposal posProposalJSON) (consensus.BlockProposal, error)
 		Header:          proposal.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: proposal.LeaderSignature,
 	}, nil

@@ -764,9 +764,14 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		node.storeOrphanProposal(proposal)
 		return nil
 	}
+	parentSlot, err := node.parentSlotForProposal(proposal.Header.ParentHash)
+	if err != nil {
+		return err
+	}
 	verifier := consensus.ProposalVerifier{ChainID: node.config.ChainID, Executor: node.executor}
 	nextState, err := verifier.VerifyProposal(ctx, consensus.VerifyProposalRequest{
 		Proposal:       proposal,
+		ParentSlot:     parentSlot,
 		EpochSnapshot:  epochSnapshot,
 		Schedule:       leaderSchedule,
 		ParentHash:     proposal.Header.ParentHash,
@@ -871,6 +876,24 @@ func (node *posNode) ensureParentAvailable(ctx context.Context, parentHash struc
 	}
 	node.metrics.syncFailures.Add(1)
 	return consensus.ChainState{}, false
+}
+
+func (node *posNode) parentSlotForProposal(parentHash structure.Hash) (uint64, error) {
+	if parentHash.String() == node.config.GenesisHash {
+		return 0, nil
+	}
+	head := node.ledger.Head()
+	if parentHash == head.BlockHash {
+		return head.Slot, nil
+	}
+	parentProposal, found, err := node.ledger.BlockByHash(parentHash)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("posnode: parent block %s not found", parentHash.String())
+	}
+	return parentProposal.Header.Slot, nil
 }
 
 func (node *posNode) logSyncMiss(peerID string, blockHash structure.Hash, err error) {

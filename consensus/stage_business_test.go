@@ -249,6 +249,143 @@ func TestStageBusinessProposalRewardTamperingIsRejected(t *testing.T) {
 	}
 }
 
+func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
+	fixture := newPoSTestFixture(t)
+	executor := newPoSTestExecutor(t)
+	chainID := "accepted-determinism"
+	registeredState, registeredHash := stageRegisteredState(t, fixture, executor)
+	epochOne := mustEpochSnapshot(t, 1, 33, 32, registeredHash, fixture.validatorSetFromStakeAccounts(t, registeredState, 1))
+	scheduleOne := mustLeaderSchedule(t, epochOne)
+	producer := BlockProducer{ChainID: chainID, Executor: executor}
+
+	block33, state33, err := produceDeterministicEmptyBlock(
+		t,
+		producer,
+		fixture,
+		epochOne,
+		scheduleOne,
+		33,
+		1,
+		2,
+		registeredHash,
+		registeredState,
+	)
+	if err != nil {
+		t.Fatalf("produce block 33: %v", err)
+	}
+	block33Hash := proposalHashOrFail(t, block33)
+	block34, state34, err := produceDeterministicEmptyBlock(
+		t,
+		producer,
+		fixture,
+		epochOne,
+		scheduleOne,
+		34,
+		33,
+		3,
+		block33Hash,
+		state33,
+	)
+	if err != nil {
+		t.Fatalf("produce block 34: %v", err)
+	}
+	block34Hash := proposalHashOrFail(t, block34)
+	slot := uint64(36)
+	leaderID, err := scheduleOne.LeaderForSlot(slot)
+	if err != nil {
+		t.Fatalf("leader for accepted block: %v", err)
+	}
+	leader := fixture.validatorByID(t, epochOne, leaderID)
+	slashedValidator := epochOne.Validators[lowestStakeValidatorIndex(epochOne)]
+	slashedKeyPair := fixture.consensusKeyPairByID(t, slashedValidator.ValidatorID)
+	evidence := SlashingEvidence{
+		Type: SlashingEvidenceTypeDoubleVote,
+		DoubleVote: &SignedDoubleVoteEvidence{
+			FirstVote: signedTestVote(t, slashedKeyPair, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               35,
+				BlockHeight:        4,
+				BlockHash:          mustHashFromText(t, "accepted-double-vote-a"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000001,
+			}),
+			SecondVote: signedTestVote(t, slashedKeyPair, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               35,
+				BlockHeight:        4,
+				BlockHash:          mustHashFromText(t, "accepted-double-vote-b"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000002,
+			}),
+		},
+	}
+	rewardQC := collectQC(t, epochOne, VoteTypeConfirm, 33, 2, block33Hash)
+	proposal, producedState, err := producer.ProduceBlock(context.Background(), ProduceBlockRequest{
+		Slot:           slot,
+		ParentSlot:     34,
+		Height:         4,
+		EpochSnapshot:  epochOne,
+		Schedule:       scheduleOne,
+		ParentHash:     block34Hash,
+		PreviousQCHash: mustHashFromText(t, "accepted-determinism-qc"),
+		ParentState:    state34,
+		Transactions:   []structure.Transaction{fixture.transferTransaction(t, 1_000_000)},
+		BlockhashQueue: fixture.blockhashQueue,
+		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+		RewardQCs:      []QuorumCertificate{rewardQC},
+		Evidence:       []SlashingEvidence{evidence},
+	})
+	if err != nil {
+		t.Fatalf("produce accepted block: %v", err)
+	}
+	producedRoot, err := producedState.RootHash()
+	if err != nil {
+		t.Fatalf("produced state root: %v", err)
+	}
+	rewardRoot, err := HashBlockRewards(proposal.Rewards)
+	if err != nil {
+		t.Fatalf("reward root: %v", err)
+	}
+	if proposal.Header.StateRoot != producedRoot || proposal.Header.AccountRoot != producedRoot {
+		t.Fatalf("proposal state root = %s/%s, want %s", proposal.Header.StateRoot.String(), proposal.Header.AccountRoot.String(), producedRoot.String())
+	}
+	if proposal.Header.RewardRoot != rewardRoot {
+		t.Fatalf("proposal reward root = %s, want %s", proposal.Header.RewardRoot.String(), rewardRoot.String())
+	}
+	if len(proposal.Transactions) != 1 ||
+		!containsRewardType(proposal.Rewards, RewardTypeVoteCredit) ||
+		!containsRewardType(proposal.Rewards, RewardTypeMissedProposal) ||
+		!containsRewardType(proposal.Rewards, RewardTypeSlash) {
+		t.Fatalf("proposal rewards/transactions not covering deterministic paths: tx=%d rewards=%+v", len(proposal.Transactions), proposal.Rewards)
+	}
+
+	for _, validator := range epochOne.Validators {
+		verifiedState, err := (ProposalVerifier{ChainID: chainID, Executor: newPoSTestExecutor(t)}).VerifyProposal(context.Background(), VerifyProposalRequest{
+			Proposal:       proposal,
+			ParentSlot:     34,
+			EpochSnapshot:  epochOne,
+			Schedule:       scheduleOne,
+			ParentHash:     block34Hash,
+			ParentState:    state34.clone(),
+			BlockhashQueue: fixture.blockhashQueue,
+			Leader:         leader,
+		})
+		if err != nil {
+			t.Fatalf("validator %s verify accepted block: %v", validator.ValidatorID, err)
+		}
+		verifiedRoot, err := verifiedState.RootHash()
+		if err != nil {
+			t.Fatalf("validator %s state root: %v", validator.ValidatorID, err)
+		}
+		if verifiedRoot != producedRoot {
+			t.Fatalf("validator %s state root = %s, want %s", validator.ValidatorID, verifiedRoot.String(), producedRoot.String())
+		}
+		assertSameStateRoot(t, producedState, verifiedState)
+	}
+}
+
 func TestStageBusinessDuplicateRewardQCIsRejected(t *testing.T) {
 	fixture := newPoSTestFixture(t)
 	state, parentHash := stageRegisteredState(t, fixture, newPoSTestExecutor(t))
@@ -321,6 +458,37 @@ func stageRegisteredState(t *testing.T, fixture posTestFixture, executor runtime
 		t.Fatalf("produce register-all block: %v", err)
 	}
 	return state, proposalHashOrFail(t, proposal)
+}
+
+func produceDeterministicEmptyBlock(
+	t *testing.T,
+	producer BlockProducer,
+	fixture posTestFixture,
+	snapshot EpochSnapshot,
+	schedule LeaderSchedule,
+	slot uint64,
+	parentSlot uint64,
+	height uint64,
+	parentHash structure.Hash,
+	parentState ChainState,
+) (BlockProposal, ChainState, error) {
+	t.Helper()
+	leaderID, err := schedule.LeaderForSlot(slot)
+	if err != nil {
+		return BlockProposal{}, ChainState{}, err
+	}
+	return producer.ProduceBlock(context.Background(), ProduceBlockRequest{
+		Slot:           slot,
+		ParentSlot:     parentSlot,
+		Height:         height,
+		EpochSnapshot:  snapshot,
+		Schedule:       schedule,
+		ParentHash:     parentHash,
+		PreviousQCHash: mustHashFromText(t, "deterministic-empty-qc"),
+		ParentState:    parentState,
+		BlockhashQueue: fixture.blockhashQueue,
+		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+	})
 }
 
 func proposalHashOrFail(t *testing.T, proposal BlockProposal) structure.Hash {

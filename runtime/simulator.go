@@ -25,6 +25,7 @@ type TransactionSimulationInput struct {
 	ComputeBudget   structure.ComputeBudgetLimits
 	RentConfig      structure.RentConfig
 	BuiltinPrograms structure.BuiltinProgramIDs
+	ProgramRegistry ProgramRegistry
 	Programs        []Program
 	FallbackProgram Program
 	ProcessedTxIDs  map[string]struct{}
@@ -90,12 +91,16 @@ func normalizeSimulationInput(input TransactionSimulationInput) TransactionSimul
 }
 
 func newSimulationProgramRegistry(input TransactionSimulationInput) (ProgramRegistry, error) {
-	registry, err := NewProgramRegistry(input.Programs...)
-	if err != nil {
-		return ProgramRegistry{}, err
+	registry := input.ProgramRegistry.Clone()
+	if input.FallbackProgram != nil {
+		if err := registry.SetFallbackProgram(input.FallbackProgram); err != nil {
+			return ProgramRegistry{}, err
+		}
 	}
-	if err := registry.SetFallbackProgram(input.FallbackProgram); err != nil {
-		return ProgramRegistry{}, err
+	for _, program := range input.Programs {
+		if err := registry.RegisterProgram(program); err != nil {
+			return ProgramRegistry{}, err
+		}
 	}
 	return registry, nil
 }

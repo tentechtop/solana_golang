@@ -16,6 +16,11 @@ func NewGoSVM(programs ...Program) (GoSVM, error) {
 	return GoSVM{FixedExecutor: executor}, nil
 }
 
+// NewGoSVMWithRegistry 创建 GoSVM 注册表执行器 + 支持程序处理器模型统一接入。
+func NewGoSVMWithRegistry(registry ProgramRegistry) GoSVM {
+	return GoSVM{FixedExecutor: NewFixedExecutorWithRegistry(registry)}
+}
+
 // ExecuteTransaction 执行交易 + 当前代理到固定指令执行器并保留未来 VM 替换点。
 func (executor GoSVM) ExecuteTransaction(contextValue context.Context, request TransactionRequest) (TransactionResult, error) {
 	if request.Mode == "" {
