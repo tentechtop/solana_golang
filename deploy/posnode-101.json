@@ -1,30 +1,40 @@
 {
-  "node_mode": "rpcnode",
+  "node_mode": "posnode",
+  "chain_id": "pos-public-testnet",
   "environment": "stage",
   "production": false,
-  "node_name": "rpc-101",
+  "node_name": "bootnode-101",
+  "data_path": "/opt/solana_golang/data/posnode-101-stage",
   "listen_ip": "0.0.0.0",
-  "advertised_ip": "101.35.87.31",
   "listen_port": 5101,
-  "peer_seed": "node-101",
-  "allow_insecure_p2p": false,
-  "network_id": "5LHTmVSX2UXFWWEqjzURtmnuafdcAEUjYuTrisvNcT7x",
-  "software_version": "rpcnode/0.1.0",
-  "node_role": "public_rpc",
-  "node_roles": ["public_rpc"],
-  "max_peers": 256,
-  "max_connections": 256,
-  "dial_interval_millis": 2000,
+  "advertised_ip": "101.35.87.31",
+  "advertised_port": 5101,
+  "rpc_enabled": true,
   "rpc_listen_ip": "0.0.0.0",
   "rpc_port": 8899,
-  "rpc_request_timeout_millis": 8000,
-  "rpc_max_body_bytes": 1048576,
-  "rpc_max_batch_size": 32,
-  "static_peers": [
+  "allow_insecure_p2p": false,
+  "node_role": "bootnode",
+  "node_roles": ["bootnode"],
+  "node_capabilities": ["relay", "dht"],
+  "validator_enabled": false,
+  "consensus_enabled": false,
+  "peer_seed": "node-101",
+  "slot_millis": 400,
+  "genesis_start_unix_millis": 1781771251384,
+  "epoch_slots": 600,
+  "finality_depth": 2,
+  "turbine_fanout": 2,
+  "auto_register": false,
+  "mempool_max_transactions": 5000,
+  "mempool_transaction_ttl_millis": 180000,
+  "transaction_leader_forward_slots": 4,
+  "transaction_forward_validators": true,
+  "bootstrap_peers": [
     {
       "peer_id": "EPqwecxfEdeeB3ZtKCVVjEohLYZXQ1XHZapdkeBYirB1",
       "ip": "192.168.120.223",
       "port": 5101,
+      "network": "tcp",
       "role": "validator",
       "roles": ["validator", "full"],
       "capabilities": ["validator", "relay", "state_sync"]
@@ -33,9 +43,36 @@
       "peer_id": "GVbQfQwJK1M1q1wVV6LnzLq9Nwvu3XSBvsJLBJAC935y",
       "ip": "192.168.121.225",
       "port": 5110,
+      "network": "tcp",
       "role": "validator",
       "roles": ["validator", "full"],
       "capabilities": ["validator", "relay", "state_sync"]
     }
-  ]
+  ],
+  "genesis": {
+    "initial_supply_lamports": 100000000000000000,
+    "treasury_address": "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9",
+    "funded_accounts": [
+      {
+        "seed": "genesis local staker win treasury validator test wallet access phrase backup seed",
+        "lamports": 1000000
+      }
+    ],
+    "initial_validators": [
+      {
+        "staker_seed": "staker-223",
+        "validator_seed": "validator-223",
+        "consensus_seed": "consensus-223",
+        "peer_id": "EPqwecxfEdeeB3ZtKCVVjEohLYZXQ1XHZapdkeBYirB1",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-local-win",
+        "validator_seed": "validator-local-win",
+        "consensus_seed": "consensus-local-win",
+        "peer_id": "GVbQfQwJK1M1q1wVV6LnzLq9Nwvu3XSBvsJLBJAC935y",
+        "stake_lamports": 10000000
+      }
+    ]
+  }
 }

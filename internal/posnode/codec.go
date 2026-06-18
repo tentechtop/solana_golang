@@ -1,8 +1,6 @@
 package posnode
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 
 	"solana_golang/blockchain"
@@ -12,11 +10,14 @@ import (
 )
 
 type transactionEnvelope struct {
-	Transaction string `json:"transaction"`
+	Transaction  structure.Transaction
+	OriginPeerID string
+	HopCount     uint8
+	MaxHops      uint8
 }
 
 type proposalEnvelope struct {
-	Proposal posProposalJSON `json:"proposal"`
+	Proposal consensus.BlockProposal
 }
 
 type voteEnvelope struct {
@@ -25,10 +26,17 @@ type voteEnvelope struct {
 	Signature    structure.Signature `json:"signature"`
 	BLSPublicKey []byte              `json:"bls_public_key,omitempty"`
 	BLSSignature []byte              `json:"bls_signature,omitempty"`
+	OriginPeerID string              `json:"origin_peer_id,omitempty"`
+	HopCount     uint8               `json:"hop_count,omitempty"`
+	MaxHops      uint8               `json:"max_hops,omitempty"`
 }
 
 type qcEnvelope struct {
-	QC consensus.QuorumCertificate `json:"qc"`
+	QC              consensus.QuorumCertificate `json:"qc"`
+	RootValidatorID string                      `json:"root_validator_id,omitempty"`
+	OriginPeerID    string                      `json:"origin_peer_id,omitempty"`
+	HopCount        uint8                       `json:"hop_count,omitempty"`
+	MaxHops         uint8                       `json:"max_hops,omitempty"`
 }
 
 type evidenceEnvelope struct {
@@ -48,10 +56,10 @@ type blockLocatorRequestEnvelope struct {
 }
 
 type blockResponseEnvelope struct {
-	Found    bool            `json:"found"`
-	Hash     string          `json:"hash,omitempty"`
-	Proposal posProposalJSON `json:"proposal"`
-	Error    string          `json:"error,omitempty"`
+	Found    bool
+	Hash     string
+	Proposal consensus.BlockProposal
+	Error    string
 }
 
 type blockLocatorEntryJSON struct {
@@ -79,19 +87,19 @@ type stateSnapshotRequestEnvelope struct {
 }
 
 type stateSnapshotResponseEnvelope struct {
-	Found             bool                  `json:"found"`
-	ChainID           string                `json:"chain_id,omitempty"`
-	ChainIdentityHash string                `json:"chain_identity_hash,omitempty"`
-	GenesisHash       string                `json:"genesis_hash,omitempty"`
-	BlockHash         string                `json:"block_hash,omitempty"`
-	StateRoot         string                `json:"state_root,omitempty"`
-	Accounts          []accountSnapshotJSON `json:"accounts,omitempty"`
-	Error             string                `json:"error,omitempty"`
+	Found             bool
+	ChainID           string
+	ChainIdentityHash string
+	GenesisHash       string
+	BlockHash         string
+	StateRoot         string
+	Accounts          []accountSnapshotData
+	Error             string
 }
 
-type accountSnapshotJSON struct {
-	Address string `json:"address"`
-	Account string `json:"account"`
+type accountSnapshotData struct {
+	Address structure.PublicKey
+	Account structure.Account
 }
 
 type statusResponseEnvelope struct {
@@ -197,15 +205,6 @@ type consensusValidatorStatusJSON struct {
 	CommissionBps              uint16   `json:"commission_bps"`
 }
 
-type posProposalJSON struct {
-	Header          consensus.BlockHeader         `json:"header"`
-	Transactions    []string                      `json:"transactions"`
-	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
-	Evidence        []consensus.SlashingEvidence  `json:"evidence,omitempty"`
-	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
-	LeaderSignature structure.Signature           `json:"leader_signature"`
-}
-
 func encodeBlockLocatorEntries(entries []blockchain.BlockLocatorEntry) []blockLocatorEntryJSON {
 	encoded := make([]blockLocatorEntryJSON, 0, len(entries))
 	for _, entry := range entries {
@@ -233,146 +232,134 @@ func decodeBlockLocatorEntries(entries []blockLocatorEntryJSON) ([]blockchain.Bl
 }
 
 func encodeTransactionMessage(transaction structure.Transaction) (p2p.Message, error) {
-	transactionBytes, err := transaction.MarshalBinary()
+	return encodeTransactionRouteMessage(transaction, transactionRouteEnvelope{})
+}
+
+func encodeTransactionRouteMessage(transaction structure.Transaction, route transactionRouteEnvelope) (p2p.Message, error) {
+	payload, err := marshalTransactionEnvelopeBinary(transactionEnvelope{
+		Transaction:  transaction,
+		OriginPeerID: route.OriginPeerID,
+		HopCount:     route.HopCount,
+		MaxHops:      route.MaxHops,
+	})
 	if err != nil {
 		return p2p.Message{}, err
-	}
-	payload, err := json.Marshal(transactionEnvelope{Transaction: base64.StdEncoding.EncodeToString(transactionBytes)})
-	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: marshal transaction envelope: %w", err)
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSTransactionV1, payload)
 }
 
 func decodeTransactionMessage(message p2p.Message) (structure.Transaction, error) {
-	envelope := transactionEnvelope{}
-	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
-		return structure.Transaction{}, fmt.Errorf("posnode: decode transaction envelope: %w", err)
-	}
-	data, err := base64.StdEncoding.DecodeString(envelope.Transaction)
+	transaction, _, err := decodeTransactionRouteMessage(message)
+	return transaction, err
+}
+
+func decodeTransactionRouteMessage(message p2p.Message) (structure.Transaction, transactionRouteEnvelope, error) {
+	envelope, err := unmarshalTransactionEnvelopeBinary(message.Payload)
 	if err != nil {
-		return structure.Transaction{}, fmt.Errorf("posnode: decode transaction bytes: %w", err)
+		return structure.Transaction{}, transactionRouteEnvelope{}, err
 	}
-	return structure.UnmarshalTransactionBinary(data)
+	return envelope.Transaction, transactionRouteEnvelope{
+		OriginPeerID: envelope.OriginPeerID,
+		HopCount:     envelope.HopCount,
+		MaxHops:      envelope.MaxHops,
+	}, nil
 }
 
 func encodeProposalMessage(proposal consensus.BlockProposal) (p2p.Message, error) {
-	proposalJSON, err := proposalToJSON(proposal)
+	payload, err := marshalProposalEnvelopeBinary(proposalEnvelope{Proposal: proposal})
 	if err != nil {
 		return p2p.Message{}, err
-	}
-	payload, err := json.Marshal(proposalEnvelope{Proposal: proposalJSON})
-	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: marshal proposal envelope: %w", err)
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSProposalV1, payload)
 }
 
 func decodeProposalMessage(message p2p.Message) (consensus.BlockProposal, error) {
-	envelope := proposalEnvelope{}
-	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
-		return consensus.BlockProposal{}, fmt.Errorf("posnode: decode proposal envelope: %w", err)
-	}
-	return proposalFromJSON(envelope.Proposal)
+	envelope, err := unmarshalProposalEnvelopeBinary(message.Payload)
+	return envelope.Proposal, err
 }
 
 func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair) (p2p.Message, error) {
-	voteBytes, err := vote.MarshalBinary()
+	envelope, err := newSignedVoteEnvelope(vote, keyPair, blsKeyPair)
 	if err != nil {
 		return p2p.Message{}, err
 	}
+	return encodeSignedVoteEnvelopeMessage(envelope)
+}
+
+func encodeVoteRouteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair, route voteRouteEnvelope) (p2p.Message, error) {
+	envelope, err := newSignedVoteEnvelope(vote, keyPair, blsKeyPair)
+	if err != nil {
+		return p2p.Message{}, err
+	}
+	envelope.OriginPeerID = route.OriginPeerID
+	envelope.HopCount = route.HopCount
+	envelope.MaxHops = route.MaxHops
+	return encodeSignedVoteEnvelopeMessage(envelope)
+}
+
+func newSignedVoteEnvelope(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair) (voteEnvelope, error) {
+	voteBytes, err := vote.MarshalBinary()
+	if err != nil {
+		return voteEnvelope{}, err
+	}
 	signature, err := keyPair.Sign(voteBytes)
 	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: sign vote: %w", err)
+		return voteEnvelope{}, fmt.Errorf("posnode: sign vote: %w", err)
 	}
 	envelope := voteEnvelope{Vote: vote, PublicKey: keyPair.PublicKey, Signature: signature}
 	if len(blsKeyPair.PrivateKey) > 0 {
 		blsSignature, err := consensus.SignBLSVote(blsKeyPair.PrivateKey, vote)
 		if err != nil {
-			return p2p.Message{}, fmt.Errorf("posnode: sign bls vote: %w", err)
+			return voteEnvelope{}, fmt.Errorf("posnode: sign bls vote: %w", err)
 		}
 		envelope.BLSPublicKey = append([]byte(nil), blsKeyPair.PublicKey...)
 		envelope.BLSSignature = blsSignature
 	}
-	payload, err := json.Marshal(envelope)
+	return envelope, nil
+}
+
+func encodeSignedVoteEnvelopeMessage(envelope voteEnvelope) (p2p.Message, error) {
+	payload, err := marshalVoteEnvelopeBinary(envelope)
 	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: marshal vote envelope: %w", err)
+		return p2p.Message{}, err
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSVoteV1, payload)
 }
 
 func decodeVoteMessage(message p2p.Message) (voteEnvelope, error) {
-	envelope := voteEnvelope{}
-	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
-		return voteEnvelope{}, fmt.Errorf("posnode: decode vote envelope: %w", err)
+	envelope, err := unmarshalVoteEnvelopeBinary(message.Payload)
+	if err != nil {
+		return voteEnvelope{}, err
 	}
 	return envelope, envelope.Vote.Validate()
 }
 
 func encodeQCMessage(qc consensus.QuorumCertificate) (p2p.Message, error) {
-	payload, err := json.Marshal(qcEnvelope{QC: qc})
+	return encodeQCEnvelopeMessage(qcEnvelope{QC: qc})
+}
+
+func encodeQCEnvelopeMessage(envelope qcEnvelope) (p2p.Message, error) {
+	payload, err := marshalQCEnvelopeBinary(envelope)
 	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: marshal qc envelope: %w", err)
+		return p2p.Message{}, err
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSQCV1, payload)
 }
 
 func encodeEvidenceMessage(evidence consensus.SlashingEvidence) (p2p.Message, error) {
-	payload, err := json.Marshal(evidenceEnvelope{Evidence: evidence})
+	payload, err := marshalEvidenceEnvelopeBinary(evidenceEnvelope{Evidence: evidence})
 	if err != nil {
-		return p2p.Message{}, fmt.Errorf("posnode: marshal evidence envelope: %w", err)
+		return p2p.Message{}, err
 	}
 	return p2p.NewMessage(p2p.ProtocolPoSEvidenceV1, payload)
 }
 
 func decodeEvidenceMessage(message p2p.Message) (consensus.SlashingEvidence, error) {
-	envelope := evidenceEnvelope{}
-	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
-		return consensus.SlashingEvidence{}, fmt.Errorf("posnode: decode evidence envelope: %w", err)
+	envelope, err := unmarshalEvidenceEnvelopeBinary(message.Payload)
+	if err != nil {
+		return consensus.SlashingEvidence{}, err
 	}
 	return envelope.Evidence, nil
-}
-
-func proposalToJSON(proposal consensus.BlockProposal) (posProposalJSON, error) {
-	transactions := make([]string, len(proposal.Transactions))
-	for index, transaction := range proposal.Transactions {
-		transactionBytes, err := transaction.MarshalBinary()
-		if err != nil {
-			return posProposalJSON{}, fmt.Errorf("posnode: marshal proposal transaction %d: %w", index, err)
-		}
-		transactions[index] = base64.StdEncoding.EncodeToString(transactionBytes)
-	}
-	return posProposalJSON{
-		Header:          proposal.Header,
-		Transactions:    transactions,
-		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
-		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
-		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
-		LeaderSignature: proposal.LeaderSignature,
-	}, nil
-}
-
-func proposalFromJSON(proposal posProposalJSON) (consensus.BlockProposal, error) {
-	transactions := make([]structure.Transaction, len(proposal.Transactions))
-	for index, encodedTransaction := range proposal.Transactions {
-		transactionBytes, err := base64.StdEncoding.DecodeString(encodedTransaction)
-		if err != nil {
-			return consensus.BlockProposal{}, fmt.Errorf("posnode: decode proposal transaction %d: %w", index, err)
-		}
-		transaction, err := structure.UnmarshalTransactionBinary(transactionBytes)
-		if err != nil {
-			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal transaction %d: %w", index, err)
-		}
-		transactions[index] = transaction
-	}
-	return consensus.BlockProposal{
-		Header:          proposal.Header,
-		Transactions:    transactions,
-		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
-		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
-		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
-		LeaderSignature: proposal.LeaderSignature,
-	}, nil
 }
 
 func encodeStateSnapshotResponse(blockHash structure.Hash, state consensus.ChainState) (stateSnapshotResponseEnvelope, error) {
@@ -380,15 +367,11 @@ func encodeStateSnapshotResponse(blockHash structure.Hash, state consensus.Chain
 	if err != nil {
 		return stateSnapshotResponseEnvelope{}, err
 	}
-	accounts := make([]accountSnapshotJSON, len(state.Accounts))
+	accounts := make([]accountSnapshotData, len(state.Accounts))
 	for index, addressedAccount := range state.Accounts {
-		accountBytes, err := addressedAccount.Account.MarshalBinary()
-		if err != nil {
-			return stateSnapshotResponseEnvelope{}, fmt.Errorf("posnode: marshal snapshot account %d: %w", index, err)
-		}
-		accounts[index] = accountSnapshotJSON{
-			Address: addressedAccount.Address.String(),
-			Account: base64.StdEncoding.EncodeToString(accountBytes),
+		accounts[index] = accountSnapshotData{
+			Address: addressedAccount.Address,
+			Account: addressedAccount.Account.Clone(),
 		}
 	}
 	return stateSnapshotResponseEnvelope{
@@ -405,20 +388,11 @@ func decodeStateSnapshotResponse(response stateSnapshotResponseEnvelope) (struct
 		return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot block hash: %w", err)
 	}
 	accounts := make([]structure.AddressedAccount, len(response.Accounts))
-	for index, accountJSON := range response.Accounts {
-		address, err := structure.PublicKeyFromBase58(accountJSON.Address)
-		if err != nil {
-			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot account address %d: %w", index, err)
+	for index, accountData := range response.Accounts {
+		accounts[index] = structure.AddressedAccount{
+			Address: accountData.Address,
+			Account: accountData.Account.Clone(),
 		}
-		accountBytes, err := base64.StdEncoding.DecodeString(accountJSON.Account)
-		if err != nil {
-			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: decode snapshot account bytes %d: %w", index, err)
-		}
-		account, err := structure.UnmarshalAccountBinary(accountBytes)
-		if err != nil {
-			return structure.Hash{}, consensus.ChainState{}, fmt.Errorf("posnode: unmarshal snapshot account %d: %w", index, err)
-		}
-		accounts[index] = structure.AddressedAccount{Address: address, Account: account}
 	}
 	state := consensus.ChainState{Accounts: accounts}
 	stateRoot, err := state.RootHash()

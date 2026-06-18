@@ -24,7 +24,7 @@
     "consensus_seed":  "consensus-local-win",
     "stake_lamports":  10000000,
     "slot_millis":  400,
-    "genesis_start_unix_millis":  1781667404022,
+    "genesis_start_unix_millis":  1781771251384,
     "epoch_slots":  600,
     "finality_depth":  2,
     "turbine_fanout":  2,
@@ -40,9 +40,9 @@
                                 "ip":  "101.35.87.31",
                                 "port":  5101,
                                 "network":  "tcp",
-                                "role":  "public_rpc",
+                                "role":  "bootnode",
                                 "roles":  [
-                                              "public_rpc"
+                                              "bootnode"
                                           ],
                                 "capabilities":  [
                                                      "relay",
@@ -67,7 +67,7 @@
                             }
                         ],
     "genesis":  {
-                    "initial_supply_lamports":  1001000000060000000,
+                    "initial_supply_lamports":  100000000000000000,
                     "treasury_address":  "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9",
                     "funded_accounts":  [
                                             {

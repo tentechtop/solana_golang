@@ -23,7 +23,11 @@ func (node *posNode) markProposalSeen(blockHash structure.Hash) bool {
 }
 
 func (node *posNode) turbineChildPeerIDs(ctx context.Context, slot uint64, leaderID consensus.ValidatorID, excludedPeerID string) ([]string, turbinePositionJSON, error) {
-	childNodes, position, err := node.turbineChildNodes(slot, leaderID)
+	return node.turbineChildPeerIDsForRoot(ctx, slot, leaderID, excludedPeerID)
+}
+
+func (node *posNode) turbineChildPeerIDsForRoot(ctx context.Context, slot uint64, rootID consensus.ValidatorID, excludedPeerID string) ([]string, turbinePositionJSON, error) {
+	childNodes, position, err := node.turbineChildNodes(slot, rootID)
 	if err != nil {
 		return nil, position, err
 	}
@@ -35,7 +39,7 @@ func (node *posNode) turbineChildPeerIDs(ctx context.Context, slot uint64, leade
 		if !node.ensureRoutablePeer(ctx, child.P2PPeerID) {
 			node.logger.Warn("posnode turbine child unresolved",
 				slog.Uint64("slot", slot),
-				slog.String("leader_id", string(leaderID)),
+				slog.String("root_validator_id", string(rootID)),
 				slog.String("child_validator_id", string(child.ValidatorID)),
 				slog.String("child_peer_id", child.P2PPeerID),
 			)
@@ -44,6 +48,24 @@ func (node *posNode) turbineChildPeerIDs(ctx context.Context, slot uint64, leade
 		peerIDs = append(peerIDs, child.P2PPeerID)
 	}
 	return uniquePeerIDs(peerIDs), position, nil
+}
+
+func (node *posNode) turbineParentPeerID(slot uint64, rootID consensus.ValidatorID) (string, turbinePositionJSON, bool) {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if err := node.ensureEpochForSlotLocked(slot); err != nil {
+		return "", turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}, false
+	}
+	tree, err := consensus.NewTurbineTree(node.epochSnapshot, slot, rootID, node.config.TurbineFanout)
+	if err != nil {
+		return "", turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}, false
+	}
+	localValidatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	position, found := tree.NodeByValidator(localValidatorID)
+	if !found || position.ParentPeerID == "" {
+		return "", node.turbinePositionJSONLocked(tree, position, found), false
+	}
+	return position.ParentPeerID, node.turbinePositionJSONLocked(tree, position, found), true
 }
 
 func (node *posNode) turbineChildNodes(slot uint64, leaderID consensus.ValidatorID) ([]consensus.TurbineNode, turbinePositionJSON, error) {

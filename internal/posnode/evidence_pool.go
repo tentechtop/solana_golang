@@ -2,7 +2,6 @@ package posnode
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -238,7 +237,7 @@ func (node *posNode) broadcastEvidence(
 }
 
 func slashingEvidenceLocalKey(evidence consensus.SlashingEvidence) (string, error) {
-	encoded, err := json.Marshal(evidence)
+	encoded, err := marshalEvidenceEnvelopeBinary(evidenceEnvelope{Evidence: evidence})
 	if err != nil {
 		return "", err
 	}

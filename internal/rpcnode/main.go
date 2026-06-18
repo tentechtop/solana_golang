@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"solana_golang/internal/poswire"
 	"solana_golang/p2p"
 	"solana_golang/rpc"
 	"solana_golang/utils"
@@ -732,48 +733,42 @@ func (node *rpcNode) forwardHandler(method string) rpc.HandlerFunc {
 }
 
 func (node *rpcNode) forwardMethod(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *rpc.Error) {
-	body, err := json.Marshal(rpc.Request{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage("1"),
-		Method:  method,
-		Params:  params,
-	})
-	if err != nil {
-		return nil, internalRPCError("marshal forward request", err)
-	}
-	responseBody, err := node.forwardRawRPC(ctx, body)
+	response, err := node.forwardRawRPC(ctx, method, params)
 	if err != nil {
 		return nil, unavailableRPCError(err.Error())
 	}
-	decoded := forwardedRPCResponse{}
-	if err := json.Unmarshal(responseBody, &decoded); err != nil {
-		return nil, internalRPCError("decode upstream response", err)
+	if response.Error != nil {
+		return nil, response.RPCError()
 	}
-	if decoded.Error != nil {
-		return nil, decoded.Error
-	}
-	if len(decoded.Result) == 0 {
+	if len(response.Result) == 0 {
 		return json.RawMessage("null"), nil
 	}
-	return decoded.Result, nil
+	return json.RawMessage(response.Result), nil
 }
 
-func (node *rpcNode) forwardRawRPC(ctx context.Context, body []byte) ([]byte, error) {
+func (node *rpcNode) forwardRawRPC(ctx context.Context, method string, params json.RawMessage) (poswire.RPCForwardResponse, error) {
 	peerID, err := node.selectValidatorPeer()
 	if err != nil {
-		return nil, err
+		return poswire.RPCForwardResponse{}, err
 	}
-	request, err := p2p.NewRequestMessageWithMaxSize(node.keyPair.peerID, p2p.ProtocolPoSRPCForwardV1, body, int(node.config.RPCMaxBodyBytes)+1024)
+	payload, err := poswire.MarshalRPCForwardRequest(poswire.RPCForwardRequest{
+		Method: method,
+		Params: params,
+	}, int(node.config.RPCMaxBodyBytes)+1024)
 	if err != nil {
-		return nil, fmt.Errorf("rpcnode: build p2p rpc request: %w", err)
+		return poswire.RPCForwardResponse{}, fmt.Errorf("rpcnode: marshal p2p rpc request: %w", err)
+	}
+	request, err := p2p.NewRequestMessageWithMaxSize(node.keyPair.peerID, p2p.ProtocolPoSRPCForwardV1, payload, int(node.config.RPCMaxBodyBytes)+1024)
+	if err != nil {
+		return poswire.RPCForwardResponse{}, fmt.Errorf("rpcnode: build p2p rpc request: %w", err)
 	}
 	requestContext, cancel := context.WithTimeout(ctx, time.Duration(node.config.RPCRequestTimeoutMillis)*time.Millisecond)
 	defer cancel()
 	response, err := node.host.Request(requestContext, peerID, request)
 	if err != nil {
-		return nil, fmt.Errorf("rpcnode: forward rpc to validator %s: %w", peerID, err)
+		return poswire.RPCForwardResponse{}, fmt.Errorf("rpcnode: forward rpc to validator %s: %w", peerID, err)
 	}
-	return response.Payload, nil
+	return poswire.UnmarshalRPCForwardResponse(response.Payload, int(node.config.RPCMaxBodyBytes)+1024)
 }
 
 func (node *rpcNode) selectValidatorPeer() (string, error) {
@@ -811,11 +806,6 @@ func isValidatorPeer(snapshot p2p.PeerSnapshot) bool {
 		return true
 	}
 	return snapshot.Capabilities&p2p.PeerCapabilityValidator != 0
-}
-
-type forwardedRPCResponse struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *rpc.Error      `json:"error,omitempty"`
 }
 
 func unavailableRPCError(message string) *rpc.Error {

@@ -1,6 +1,7 @@
 package posnode
 
 import (
+	"context"
 	"testing"
 
 	"solana_golang/consensus"
@@ -160,6 +161,42 @@ func TestTransactionFastPathCanExcludeLocalPeer(t *testing.T) {
 			t.Fatalf("local peer %s found in fast path: %+v", peerID, fastPath.PreferredPeerIDs)
 		}
 	}
+}
+
+func TestVoteRouteTargetsKeepLeaderDirectAndParentPath(t *testing.T) {
+	snapshot, schedule, keysByValidator := newTurbineTestSnapshotForNode(t, 10)
+	slot := snapshot.StartSlot
+	leaderID, err := schedule.LeaderForSlot(slot)
+	if err != nil {
+		t.Fatalf("LeaderForSlot() error = %v", err)
+	}
+	tree, err := consensus.NewTurbineTree(snapshot, slot, leaderID, 2)
+	if err != nil {
+		t.Fatalf("NewTurbineTree() error = %v", err)
+	}
+	localNode := consensus.TurbineNode{}
+	for _, candidate := range tree.Nodes() {
+		if candidate.Layer >= 2 {
+			localNode = candidate
+			break
+		}
+	}
+	if localNode.ValidatorID == "" {
+		t.Fatal("layer-2 validator not found")
+	}
+
+	node := newTurbinePositionTestNode(keysByValidator[localNode.ValidatorID], snapshot, schedule, 2)
+	node.peerKeyPair.peerID = localNode.P2PPeerID
+	vote := consensus.Vote{Slot: slot}
+	targets := node.voteRouteTargets(context.Background(), vote, "", node.peerKeyPair.peerID)
+	leader, exists := snapshot.ValidatorByID(leaderID)
+	if !exists {
+		t.Fatalf("leader %s missing", leaderID)
+	}
+
+	assertPeerSetContains(t, targets, []string{leader.P2PPeerID, localNode.ParentPeerID})
+	assertPeerIDAbsent(t, targets, localNode.P2PPeerID)
+	assertUniquePeerIDs(t, targets)
 }
 
 func newTurbineNodesByValidator(keysByValidator map[consensus.ValidatorID]structure.SolanaKeyPair, snapshot consensus.EpochSnapshot, schedule consensus.LeaderSchedule, fanout int) map[consensus.ValidatorID]*posNode {
@@ -333,7 +370,7 @@ func assertPeerSetContains(t *testing.T, actual []string, expected []string) {
 	}
 }
 
-func newTurbineTestSnapshotForNode(t *testing.T, count int) (consensus.EpochSnapshot, consensus.LeaderSchedule, map[consensus.ValidatorID]structure.SolanaKeyPair) {
+func newTurbineTestSnapshotForNode(t testing.TB, count int) (consensus.EpochSnapshot, consensus.LeaderSchedule, map[consensus.ValidatorID]structure.SolanaKeyPair) {
 	t.Helper()
 	keysByValidator := make(map[consensus.ValidatorID]structure.SolanaKeyPair, count)
 	validators := make([]consensus.ValidatorState, count)

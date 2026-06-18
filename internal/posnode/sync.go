@@ -2,7 +2,6 @@ package posnode
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,8 +27,8 @@ const (
 
 func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
-	request := blockHashRequestEnvelope{}
-	if err := jsonUnmarshal(message.Payload, &request); err != nil {
+	request, err := unmarshalBlockHashRequestBinary(message.Payload)
+	if err != nil {
 		return p2p.Message{}, err
 	}
 	blockHash, err := structure.HashFromBase58(request.Hash)
@@ -42,19 +41,15 @@ func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.M
 		response.Error = err.Error()
 	}
 	if found && err == nil {
-		response.Proposal, err = proposalToJSON(proposal)
-		if err != nil {
-			response.Found = false
-			response.Error = err.Error()
-		}
+		response.Proposal = proposal
 	}
 	return node.newProtocolResponse(message, p2p.ProtocolPoSBlockByHashV1, response)
 }
 
 func (node *posNode) handleBlockByHeightRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
-	request := blockHeightRequestEnvelope{}
-	if err := jsonUnmarshal(message.Payload, &request); err != nil {
+	request, err := unmarshalBlockHeightRequestBinary(message.Payload)
+	if err != nil {
 		return p2p.Message{}, err
 	}
 	proposal, blockHash, found, err := node.ledger.BlockByHeight(request.Height)
@@ -66,19 +61,15 @@ func (node *posNode) handleBlockByHeightRequest(ctx context.Context, message p2p
 		response.Error = err.Error()
 	}
 	if found && err == nil {
-		response.Proposal, err = proposalToJSON(proposal)
-		if err != nil {
-			response.Found = false
-			response.Error = err.Error()
-		}
+		response.Proposal = proposal
 	}
 	return node.newProtocolResponse(message, p2p.ProtocolPoSBlockByHeightV1, response)
 }
 
 func (node *posNode) handleStateSnapshotRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
-	request := stateSnapshotRequestEnvelope{}
-	if err := jsonUnmarshal(message.Payload, &request); err != nil {
+	request, err := unmarshalStateSnapshotRequestBinary(message.Payload)
+	if err != nil {
 		return p2p.Message{}, err
 	}
 	blockHash, err := structure.HashFromBase58(request.BlockHash)
@@ -118,16 +109,17 @@ func (node *posNode) handleStateSnapshotRequest(ctx context.Context, message p2p
 
 func (node *posNode) handleStatusRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
+	if err := unmarshalStatusRequestBinary(message.Payload); err != nil {
+		return p2p.Message{}, err
+	}
 	return node.newProtocolResponse(message, p2p.ProtocolPoSStatusV1, node.statusSnapshot())
 }
 
 func (node *posNode) handleBlockLocatorRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
-	request := blockLocatorRequestEnvelope{}
-	if len(message.Payload) > 0 {
-		if err := jsonUnmarshal(message.Payload, &request); err != nil {
-			return p2p.Message{}, err
-		}
+	request, err := unmarshalBlockLocatorRequestBinary(message.Payload)
+	if err != nil {
+		return p2p.Message{}, err
 	}
 	entries, err := node.ledger.BlockLocator(request.MaxEntries)
 	response := blockLocatorResponseEnvelope{}
@@ -141,8 +133,8 @@ func (node *posNode) handleBlockLocatorRequest(ctx context.Context, message p2p.
 
 func (node *posNode) handleCommonAncestorRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
 	_ = ctx
-	request := commonAncestorRequestEnvelope{}
-	if err := jsonUnmarshal(message.Payload, &request); err != nil {
+	request, err := unmarshalCommonAncestorRequestBinary(message.Payload)
+	if err != nil {
 		return p2p.Message{}, err
 	}
 	locator, err := decodeBlockLocatorEntries(request.Locator)
@@ -166,7 +158,7 @@ func (node *posNode) handleCommonAncestorRequest(ctx context.Context, message p2
 }
 
 func (node *posNode) newProtocolResponse(request p2p.Message, protocolID p2p.ProtocolID, value any) (p2p.Message, error) {
-	payload, err := json.Marshal(value)
+	payload, err := marshalProtocolResponseBinary(protocolID, value)
 	if err != nil {
 		return p2p.Message{}, fmt.Errorf("posnode: marshal protocol response: %w", err)
 	}
@@ -178,8 +170,45 @@ func (node *posNode) newProtocolResponse(request p2p.Message, protocolID p2p.Pro
 	return response, nil
 }
 
+func marshalProtocolResponseBinary(protocolID p2p.ProtocolID, value any) ([]byte, error) {
+	switch protocolID {
+	case p2p.ProtocolPoSBlockByHashV1, p2p.ProtocolPoSBlockByHeightV1:
+		response, ok := value.(blockResponseEnvelope)
+		if !ok {
+			return nil, fmt.Errorf("posnode: invalid block response type %T", value)
+		}
+		return marshalBlockResponseBinary(protocolID, response)
+	case p2p.ProtocolPoSStateSnapshotV1:
+		response, ok := value.(stateSnapshotResponseEnvelope)
+		if !ok {
+			return nil, fmt.Errorf("posnode: invalid snapshot response type %T", value)
+		}
+		return marshalStateSnapshotResponseBinary(response)
+	case p2p.ProtocolPoSStatusV1:
+		response, ok := value.(statusResponseEnvelope)
+		if !ok {
+			return nil, fmt.Errorf("posnode: invalid status response type %T", value)
+		}
+		return marshalStatusResponseBinary(response)
+	case p2p.ProtocolPoSBlockLocatorV1:
+		response, ok := value.(blockLocatorResponseEnvelope)
+		if !ok {
+			return nil, fmt.Errorf("posnode: invalid locator response type %T", value)
+		}
+		return marshalBlockLocatorResponseBinary(response)
+	case p2p.ProtocolPoSCommonAncestorV1:
+		response, ok := value.(commonAncestorResponseEnvelope)
+		if !ok {
+			return nil, fmt.Errorf("posnode: invalid ancestor response type %T", value)
+		}
+		return marshalCommonAncestorResponseBinary(response)
+	default:
+		return nil, fmt.Errorf("posnode: unsupported response protocol %d", protocolID)
+	}
+}
+
 func (node *posNode) requestBlockByHash(ctx context.Context, peerID string, blockHash structure.Hash) (consensus.BlockProposal, bool, error) {
-	requestPayload, err := json.Marshal(blockHashRequestEnvelope{Hash: blockHash.String()})
+	requestPayload, err := marshalBlockHashRequestBinary(blockHashRequestEnvelope{Hash: blockHash.String()})
 	if err != nil {
 		return consensus.BlockProposal{}, false, err
 	}
@@ -193,8 +222,8 @@ func (node *posNode) requestBlockByHash(ctx context.Context, peerID string, bloc
 		node.metrics.syncFailures.Add(1)
 		return consensus.BlockProposal{}, false, err
 	}
-	envelope := blockResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalBlockResponseBinary(p2p.ProtocolPoSBlockByHashV1, response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return consensus.BlockProposal{}, false, err
 	}
@@ -204,16 +233,11 @@ func (node *posNode) requestBlockByHash(ctx context.Context, peerID string, bloc
 	if !envelope.Found {
 		return consensus.BlockProposal{}, false, nil
 	}
-	proposal, err := proposalFromJSON(envelope.Proposal)
-	if err != nil {
-		node.metrics.syncFailures.Add(1)
-		return consensus.BlockProposal{}, false, err
-	}
-	return proposal, true, nil
+	return envelope.Proposal, true, nil
 }
 
 func (node *posNode) requestBlockByHeight(ctx context.Context, peerID string, height uint64) (consensus.BlockProposal, structure.Hash, bool, error) {
-	requestPayload, err := json.Marshal(blockHeightRequestEnvelope{Height: height})
+	requestPayload, err := marshalBlockHeightRequestBinary(blockHeightRequestEnvelope{Height: height})
 	if err != nil {
 		return consensus.BlockProposal{}, structure.Hash{}, false, err
 	}
@@ -227,8 +251,8 @@ func (node *posNode) requestBlockByHeight(ctx context.Context, peerID string, he
 		node.metrics.syncFailures.Add(1)
 		return consensus.BlockProposal{}, structure.Hash{}, false, err
 	}
-	envelope := blockResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalBlockResponseBinary(p2p.ProtocolPoSBlockByHeightV1, response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return consensus.BlockProposal{}, structure.Hash{}, false, err
 	}
@@ -242,16 +266,11 @@ func (node *posNode) requestBlockByHeight(ctx context.Context, peerID string, he
 	if err != nil {
 		return consensus.BlockProposal{}, structure.Hash{}, false, err
 	}
-	proposal, err := proposalFromJSON(envelope.Proposal)
-	if err != nil {
-		node.metrics.syncFailures.Add(1)
-		return consensus.BlockProposal{}, structure.Hash{}, false, err
-	}
-	return proposal, blockHash, true, nil
+	return envelope.Proposal, blockHash, true, nil
 }
 
 func (node *posNode) requestStateSnapshot(ctx context.Context, peerID string, blockHash structure.Hash) (consensus.ChainState, bool, error) {
-	requestPayload, err := json.Marshal(stateSnapshotRequestEnvelope{BlockHash: blockHash.String()})
+	requestPayload, err := marshalStateSnapshotRequestBinary(stateSnapshotRequestEnvelope{BlockHash: blockHash.String()})
 	if err != nil {
 		return consensus.ChainState{}, false, err
 	}
@@ -265,8 +284,8 @@ func (node *posNode) requestStateSnapshot(ctx context.Context, peerID string, bl
 		node.metrics.syncFailures.Add(1)
 		return consensus.ChainState{}, false, err
 	}
-	envelope := stateSnapshotResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalStateSnapshotResponseBinary(response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return consensus.ChainState{}, false, err
 	}
@@ -292,7 +311,8 @@ func (node *posNode) requestStateSnapshot(ctx context.Context, peerID string, bl
 }
 
 func (node *posNode) requestStatus(ctx context.Context, peerID string) (statusResponseEnvelope, error) {
-	request, err := p2p.NewRequestMessage(node.peerKeyPair.peerID, p2p.ProtocolPoSStatusV1, []byte("{}"))
+	requestPayload := marshalStatusRequestBinary()
+	request, err := p2p.NewRequestMessage(node.peerKeyPair.peerID, p2p.ProtocolPoSStatusV1, requestPayload)
 	if err != nil {
 		return statusResponseEnvelope{}, err
 	}
@@ -302,8 +322,8 @@ func (node *posNode) requestStatus(ctx context.Context, peerID string) (statusRe
 		node.metrics.syncFailures.Add(1)
 		return statusResponseEnvelope{}, err
 	}
-	envelope := statusResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalStatusResponseBinary(response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return statusResponseEnvelope{}, err
 	}
@@ -315,7 +335,7 @@ func (node *posNode) requestStatus(ctx context.Context, peerID string) (statusRe
 }
 
 func (node *posNode) requestBlockLocator(ctx context.Context, peerID string, maxEntries int) ([]blockchain.BlockLocatorEntry, error) {
-	requestPayload, err := json.Marshal(blockLocatorRequestEnvelope{MaxEntries: maxEntries})
+	requestPayload, err := marshalBlockLocatorRequestBinary(blockLocatorRequestEnvelope{MaxEntries: maxEntries})
 	if err != nil {
 		return nil, err
 	}
@@ -329,8 +349,8 @@ func (node *posNode) requestBlockLocator(ctx context.Context, peerID string, max
 		node.metrics.syncFailures.Add(1)
 		return nil, err
 	}
-	envelope := blockLocatorResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalBlockLocatorResponseBinary(response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return nil, err
 	}
@@ -350,7 +370,7 @@ func (node *posNode) requestCommonAncestor(
 	peerID string,
 	locator []blockchain.BlockLocatorEntry,
 ) (blockchain.Head, bool, error) {
-	requestPayload, err := json.Marshal(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
+	requestPayload, err := marshalCommonAncestorRequestBinary(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
 	if err != nil {
 		return blockchain.Head{}, false, err
 	}
@@ -364,8 +384,8 @@ func (node *posNode) requestCommonAncestor(
 		node.metrics.syncFailures.Add(1)
 		return blockchain.Head{}, false, err
 	}
-	envelope := commonAncestorResponseEnvelope{}
-	if err := jsonUnmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalCommonAncestorResponseBinary(response.Payload)
+	if err != nil {
 		node.metrics.syncFailures.Add(1)
 		return blockchain.Head{}, false, err
 	}
@@ -641,21 +661,23 @@ func (node *posNode) determineBranchSyncStartHeight(
 	return calculateSyncStartHeightFromAncestor(ancestor.Height), nil
 }
 
-func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint64, slotDeadline time.Time) bool {
+func (node *posNode) shouldPauseProductionForSync(ctx context.Context, localHead blockchain.Head, slotDeadline time.Time) bool {
 	if node.host == nil {
 		return false
 	}
-	if node.smallValidatorNetwork() {
-		node.logger.Debug("posnode production sync gate bypassed for small validator network",
-			slog.Uint64("local_height", localHeight),
+	peerIDs := node.productionSyncGatePeerIDs(localHead.Height)
+	if len(peerIDs) == 0 && node.requiresConnectedValidatorPeerForProduction() {
+		node.logger.Warn("posnode production paused without validator peer",
+			slog.Uint64("local_height", localHead.Height),
+			slog.String("local_hash", localHead.BlockHash.String()),
 		)
-		return false
+		return true
 	}
-	for _, peerID := range node.productionSyncGatePeerIDs(localHeight) {
+	for _, peerID := range peerIDs {
 		statusTimeout := productionSyncGateTimeout(slotDeadline)
 		if statusTimeout == 0 {
 			node.logger.Debug("posnode production sync gate skipped near slot deadline",
-				slog.Uint64("local_height", localHeight),
+				slog.Uint64("local_height", localHead.Height),
 				slog.Time("slot_deadline", slotDeadline),
 			)
 			return false
@@ -666,7 +688,7 @@ func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint
 		if err != nil {
 			continue
 		}
-		if status.HeadHeight > localHeight {
+		if peerNeedsBlockSync(localHead, status) {
 			return true
 		}
 	}
@@ -722,11 +744,11 @@ func productionSyncGateTimeout(slotDeadline time.Time) time.Duration {
 	return timeout
 }
 
-func (node *posNode) smallValidatorNetwork() bool {
+func (node *posNode) requiresConnectedValidatorPeerForProduction() bool {
 	node.mutex.Lock()
 	validatorCount := len(node.epochSnapshot.Validators)
 	node.mutex.Unlock()
-	return validatorCount > 0 && validatorCount <= 2
+	return validatorCount > 1
 }
 
 func (node *posNode) importFinalizedSnapshotFromPeer(ctx context.Context, peerID string, status statusResponseEnvelope) (bool, error) {

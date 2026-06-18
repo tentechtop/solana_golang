@@ -2,7 +2,6 @@ package posnode
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -92,7 +91,7 @@ func TestFaultInjectionOrphanCapacityDropsOverflow(t *testing.T) {
 
 func TestFaultInjectionMissingBlockHeightReturnsNotFound(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
-	requestPayload, err := json.Marshal(blockHeightRequestEnvelope{Height: node.ledger.Head().Height + 99})
+	requestPayload, err := marshalBlockHeightRequestBinary(blockHeightRequestEnvelope{Height: node.ledger.Head().Height + 99})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -108,8 +107,8 @@ func TestFaultInjectionMissingBlockHeightReturnsNotFound(t *testing.T) {
 	if response.Type != p2p.ProtocolPoSBlockByHeightV1 || response.RequestID != request.ID {
 		t.Fatalf("response routing = type %d request %s, want type %d request %s", response.Type, response.RequestID, p2p.ProtocolPoSBlockByHeightV1, request.ID)
 	}
-	envelope := blockResponseEnvelope{}
-	if err := json.Unmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalBlockResponseBinary(p2p.ProtocolPoSBlockByHeightV1, response.Payload)
+	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if envelope.Found || envelope.Hash != "" || envelope.Error != "" {
@@ -120,7 +119,7 @@ func TestFaultInjectionMissingBlockHeightReturnsNotFound(t *testing.T) {
 func TestFaultInjectionBlockLocatorRequestReturnsCurrentHead(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
 	head := node.ledger.Head()
-	requestPayload, err := json.Marshal(blockLocatorRequestEnvelope{MaxEntries: 8})
+	requestPayload, err := marshalBlockLocatorRequestBinary(blockLocatorRequestEnvelope{MaxEntries: 8})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -133,8 +132,8 @@ func TestFaultInjectionBlockLocatorRequestReturnsCurrentHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleBlockLocatorRequest() error = %v", err)
 	}
-	envelope := blockLocatorResponseEnvelope{}
-	if err := json.Unmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalBlockLocatorResponseBinary(response.Payload)
+	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if envelope.Error != "" {
@@ -155,7 +154,7 @@ func TestFaultInjectionCommonAncestorRequestMatchesCurrentHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockLocator() error = %v", err)
 	}
-	requestPayload, err := json.Marshal(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
+	requestPayload, err := marshalCommonAncestorRequestBinary(commonAncestorRequestEnvelope{Locator: encodeBlockLocatorEntries(locator)})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -168,8 +167,8 @@ func TestFaultInjectionCommonAncestorRequestMatchesCurrentHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCommonAncestorRequest() error = %v", err)
 	}
-	envelope := commonAncestorResponseEnvelope{}
-	if err := json.Unmarshal(response.Payload, &envelope); err != nil {
+	envelope, err := unmarshalCommonAncestorResponseBinary(response.Payload)
+	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if envelope.Error != "" || !envelope.Found || envelope.Ancestor.Height != head.Height || envelope.Ancestor.Hash != head.BlockHash.String() {

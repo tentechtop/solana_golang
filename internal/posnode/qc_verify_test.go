@@ -58,7 +58,7 @@ func newBLSCompleteEpochSnapshot(t *testing.T) consensus.EpochSnapshot {
 	return snapshot
 }
 
-func testHashFromText(t *testing.T, text string) structure.Hash {
+func testHashFromText(t testing.TB, text string) structure.Hash {
 	t.Helper()
 	hash, err := structure.NewHash(utils.SHA256([]byte(text)))
 	if err != nil {

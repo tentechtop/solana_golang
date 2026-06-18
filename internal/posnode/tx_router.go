@@ -6,10 +6,65 @@ import (
 	"log/slog"
 	"time"
 
+	"solana_golang/consensus"
 	"solana_golang/p2p"
 )
 
 const kadTransactionRouteQueryLimit = 8
+const defaultTransactionMaxHops uint8 = 2
+const defaultVoteMaxHops uint8 = 4
+const defaultQCMaxHops uint8 = 8
+const consensusFallbackFanout = 2
+
+type transactionRouteEnvelope struct {
+	OriginPeerID string
+	HopCount     uint8
+	MaxHops      uint8
+}
+
+type voteRouteEnvelope struct {
+	OriginPeerID string
+	HopCount     uint8
+	MaxHops      uint8
+}
+
+func (route voteRouteEnvelope) normalized(localPeerID string) voteRouteEnvelope {
+	if route.OriginPeerID == "" {
+		route.OriginPeerID = localPeerID
+	}
+	if route.MaxHops == 0 {
+		route.MaxHops = defaultVoteMaxHops
+	}
+	return route
+}
+
+func (route voteRouteEnvelope) nextHop(localPeerID string) (voteRouteEnvelope, bool) {
+	route = route.normalized(localPeerID)
+	if route.HopCount >= route.MaxHops {
+		return route, false
+	}
+	route.HopCount++
+	return route, true
+}
+
+func (route transactionRouteEnvelope) normalized(localPeerID string) transactionRouteEnvelope {
+	if route.OriginPeerID == "" {
+		route.OriginPeerID = localPeerID
+	}
+	if route.MaxHops == 0 {
+		route.MaxHops = defaultTransactionMaxHops
+	}
+	return route
+}
+
+func (route transactionRouteEnvelope) nextHop(localPeerID string) (transactionRouteEnvelope, bool) {
+	route = route.normalized(localPeerID)
+	if route.HopCount >= route.MaxHops {
+		return route, false
+	}
+	route.HopCount++
+	return route, true
+}
 
 func (node *posNode) transactionRouteTargets(ctx context.Context) ([]string, []string) {
 	preferredPeerIDs := node.preferredTransactionPeerIDs()
@@ -28,17 +83,84 @@ func (node *posNode) transactionRouteTargets(ctx context.Context) ([]string, []s
 		}
 	}
 
-	fallbackPeerIDs := make([]string, 0)
-	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
-		if peerID == "" || peerID == node.peerKeyPair.peerID {
-			continue
-		}
-		if _, exists := seenPreferred[peerID]; exists {
-			continue
-		}
-		fallbackPeerIDs = append(fallbackPeerIDs, peerID)
-	}
+	fallbackPeerIDs := node.transactionLayeredFallbackPeerIDs(ctx, seenPreferred, "")
 	return resolvedPreferred, fallbackPeerIDs
+}
+
+func (node *posNode) transactionForwardTargets(ctx context.Context, excludedPeerID string) []string {
+	seenPreferred := map[string]struct{}{}
+	return node.transactionLayeredFallbackPeerIDs(ctx, seenPreferred, excludedPeerID)
+}
+
+func (node *posNode) voteRouteTargets(ctx context.Context, vote consensus.Vote, fromPeerID string, originPeerID string) []string {
+	leaderPeerID, leaderID, found := node.leaderPeerForSlot(vote.Slot)
+	if !found {
+		return nil
+	}
+	targets := make([]string, 0, 2)
+	if leaderPeerID != "" {
+		targets = append(targets, leaderPeerID)
+	}
+	if parentPeerID, _, ok := node.turbineParentPeerID(vote.Slot, leaderID); ok {
+		targets = append(targets, parentPeerID)
+	}
+	return removePeerIDs(targets, node.peerKeyPair.peerID, fromPeerID, originPeerID)
+}
+
+func (node *posNode) leaderPeerForSlot(slot uint64) (string, consensus.ValidatorID, bool) {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if err := node.ensureEpochForSlotLocked(slot); err != nil {
+		return "", "", false
+	}
+	leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+	if err != nil {
+		return "", "", false
+	}
+	leader, exists := node.epochSnapshot.ValidatorByID(leaderID)
+	if !exists {
+		return "", "", false
+	}
+	return leader.P2PPeerID, leaderID, true
+}
+
+func (node *posNode) validatorIDByPeerID(peerID string) (consensus.ValidatorID, bool) {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	for _, validator := range node.epochSnapshot.Validators {
+		if validator.P2PPeerID == peerID {
+			return validator.ValidatorID, true
+		}
+	}
+	return "", false
+}
+
+func (node *posNode) transactionLayeredFallbackPeerIDs(ctx context.Context, excluded map[string]struct{}, excludedPeerID string) []string {
+	node.mutex.Lock()
+	startSlot := node.currentRoutingSlotLocked()
+	leaderID, err := node.leaderSchedule.LeaderForSlot(startSlot)
+	node.mutex.Unlock()
+	if err == nil {
+		peerIDs, _, childErr := node.turbineChildPeerIDsForRoot(ctx, startSlot, leaderID, excludedPeerID)
+		if childErr == nil && len(peerIDs) > 0 {
+			return filterExcludedPeerIDs(peerIDs, excluded)
+		}
+	}
+	limit := node.config.TurbineFanout
+	if limit <= 0 {
+		limit = consensusFallbackFanout
+	}
+	candidates := make([]string, 0)
+	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+		if peerID == "" || peerID == excludedPeerID {
+			continue
+		}
+		if _, exists := excluded[peerID]; exists {
+			continue
+		}
+		candidates = append(candidates, peerID)
+	}
+	return rotateLimitedPeerIDs(uniquePeerIDs(candidates), startSlot, limit)
 }
 
 func (node *posNode) preferredTransactionPeerIDs() []string {
@@ -296,6 +418,38 @@ func uniquePeerIDs(peerIDs []string) []string {
 		result = append(result, peerID)
 	}
 	return result
+}
+
+func filterExcludedPeerIDs(peerIDs []string, excluded map[string]struct{}) []string {
+	if len(excluded) == 0 {
+		return uniquePeerIDs(peerIDs)
+	}
+	result := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if _, exists := excluded[peerID]; exists {
+			continue
+		}
+		result = append(result, peerID)
+	}
+	return uniquePeerIDs(result)
+}
+
+func removePeerIDs(peerIDs []string, removedPeerIDs ...string) []string {
+	removed := make(map[string]struct{}, len(removedPeerIDs))
+	for _, peerID := range removedPeerIDs {
+		if peerID == "" {
+			continue
+		}
+		removed[peerID] = struct{}{}
+	}
+	result := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if _, exists := removed[peerID]; exists {
+			continue
+		}
+		result = append(result, peerID)
+	}
+	return uniquePeerIDs(result)
 }
 
 func mergeRouteErrors(preferredError error, fallbackError error) error {

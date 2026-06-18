@@ -3,6 +3,7 @@ package posnode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -34,6 +35,8 @@ const (
 	posNodeSoftwareVersion = "posnode/1.0.0"
 	defaultConsensusQuorum = 2
 )
+
+const minOptimisticBlocksWithoutQC uint64 = 1
 
 type posNode struct {
 	mutex             sync.Mutex
@@ -929,8 +932,22 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.mutex.Unlock()
 		return
 	}
+	epochID := node.epochSnapshot.EpochID
 	node.mutex.Unlock()
-	if node.hasAheadValidatorPeer(ctx, head.Height, node.slotProductionDeadline(slot)) {
+	if stakeValue, active, err := node.localValidatorEffectiveStake(epochID); err != nil {
+		node.logger.Warn("posnode production local stake check failed",
+			slog.Uint64("slot", slot),
+			slog.Any("error", err),
+		)
+		return
+	} else if !active || stakeValue == 0 {
+		node.logger.Warn("posnode production paused for inactive local validator",
+			slog.Uint64("slot", slot),
+			slog.Uint64("epoch_id", epochID),
+		)
+		return
+	}
+	if node.shouldPauseProductionForSync(ctx, head, node.slotProductionDeadline(slot)) {
 		node.logger.Info("posnode production paused for block sync",
 			slog.Uint64("slot", slot),
 			slog.Uint64("local_height", head.Height),
@@ -957,6 +974,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.mutex.Unlock()
 		return
 	}
+	epochID = node.epochSnapshot.EpochID
 	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), slot)
 	rewardQCs, err := node.ledger.RewardQCs(head.FinalizedHeight, consensus.MaxRewardQCsPerBlock)
 	if err != nil {
@@ -981,6 +999,19 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		RewardConfig:   consensus.DefaultRewardConfig(),
 	}
 	node.mutex.Unlock()
+	if stakeValue, active, err := node.localValidatorEffectiveStake(epochID); err != nil {
+		node.logger.Warn("posnode production local stake recheck failed",
+			slog.Uint64("slot", slot),
+			slog.Any("error", err),
+		)
+		return
+	} else if !active || stakeValue == 0 {
+		node.logger.Warn("posnode production cancelled for inactive local validator",
+			slog.Uint64("slot", slot),
+			slog.Uint64("epoch_id", epochID),
+		)
+		return
+	}
 	node.deleteMempoolTransactions(removeTransactionIDs)
 
 	producer := consensus.BlockProducer{ChainID: node.config.ChainID, Executor: node.executor}
@@ -1025,7 +1056,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 }
 
 func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.Message) error {
-	transaction, err := decodeTransactionMessage(message)
+	transaction, route, err := decodeTransactionRouteMessage(message)
 	if err != nil {
 		return err
 	}
@@ -1050,7 +1081,7 @@ func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.M
 		slog.String("tx_id", transactionID),
 		slog.String("from_peer", message.FromPeerID),
 	)
-	node.broadcastTransaction(ctx, transaction)
+	node.forwardTransaction(ctx, transaction, route, message.FromPeerID)
 	return nil
 }
 
@@ -1127,6 +1158,9 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 	}
 	node.mutex.Unlock()
 	if err != nil {
+		if errors.Is(err, consensus.ErrDuplicateVote) {
+			return nil
+		}
 		return err
 	}
 	if formed {
@@ -1152,12 +1186,15 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		)
 		node.broadcastQC(ctx, qc, "")
 	}
+	if message.FromPeerID != node.peerKeyPair.peerID {
+		node.forwardVote(ctx, envelope, message.FromPeerID)
+	}
 	return nil
 }
 
 func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) error {
-	envelope := qcEnvelope{}
-	if err := jsonUnmarshal(message.Payload, &envelope); err != nil {
+	envelope, err := unmarshalQCEnvelopeBinary(message.Payload)
+	if err != nil {
 		return err
 	}
 	if err := node.verifyQuorumCertificate(envelope.QC); err != nil {
@@ -1183,7 +1220,7 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 		slog.Uint64("confirmed_stake", envelope.QC.ConfirmedStake),
 		slog.Int("voter_count", len(envelope.QC.Voters)),
 	)
-	node.broadcastQC(ctx, envelope.QC, message.FromPeerID)
+	node.forwardQC(ctx, envelope, message.FromPeerID)
 	return nil
 }
 
@@ -1312,24 +1349,26 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	if !node.config.consensusEnabled() {
 		return nil
 	}
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	stakeValue, active, err := node.localValidatorEffectiveStake(epochSnapshot.EpochID)
+	if err != nil {
+		return fmt.Errorf("posnode: check local validator stake before vote: %w", err)
+	}
+	if !active || stakeValue == 0 {
+		node.logger.Warn("posnode vote skipped for inactive local validator",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.String("validator_id", string(validatorID)),
+		)
+		return nil
+	}
 	node.mutex.Lock()
 	if proposal.Header.Slot <= node.lastVotedSlot {
 		node.mutex.Unlock()
 		return nil
 	}
 	node.lastVotedSlot = proposal.Header.Slot
-	stakeValue := uint64(0)
-	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
-	for _, validator := range node.epochSnapshot.Validators {
-		if validator.ValidatorID == validatorID {
-			stakeValue = validator.StakeLamports
-			break
-		}
-	}
 	node.mutex.Unlock()
-	if stakeValue == 0 {
-		return nil
-	}
 	vote := consensus.Vote{
 		Type:               consensus.VoteTypeConfirm,
 		Slot:               proposal.Header.Slot,
@@ -1371,18 +1410,31 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 		return
 	}
 	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
-	stakeValue := uint64(0)
-	for _, validator := range node.epochSnapshot.Validators {
-		if validator.ValidatorID == validatorID {
-			stakeValue = validator.StakeLamports
-			break
-		}
+	epochID := node.epochSnapshot.EpochID
+	node.mutex.Unlock()
+	stakeValue, active, err := node.localValidatorEffectiveStake(epochID)
+	if err != nil {
+		node.logger.Warn("posnode leader self vote stake check failed",
+			slog.Uint64("slot", slot),
+			slog.String("validator_id", string(validatorID)),
+			slog.Any("error", err),
+		)
+		return
+	}
+	if !active || stakeValue == 0 {
+		node.logger.Warn("posnode leader self vote skipped for inactive local validator",
+			slog.Uint64("slot", slot),
+			slog.String("validator_id", string(validatorID)),
+		)
+		return
+	}
+	node.mutex.Lock()
+	if slot <= node.lastVotedSlot {
+		node.mutex.Unlock()
+		return
 	}
 	node.lastVotedSlot = slot
 	node.mutex.Unlock()
-	if stakeValue == 0 {
-		return
-	}
 	vote := consensus.Vote{
 		Type:               consensus.VoteTypeConfirm,
 		Slot:               slot,
@@ -1413,6 +1465,64 @@ func (node *posNode) handleLocalVote(ctx context.Context, vote consensus.Vote) e
 	}
 	message.FromPeerID = node.peerKeyPair.peerID
 	return node.handleVoteMessage(ctx, message)
+}
+
+func (node *posNode) localValidatorEffectiveStake(epochID uint64) (uint64, bool, error) {
+	if node.ledger == nil {
+		return 0, false, nil
+	}
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	if !node.validatorKeyPair.PublicKey.IsZero() {
+		account, found, err := node.ledger.Account(node.validatorKeyPair.PublicKey)
+		if err != nil {
+			return 0, false, fmt.Errorf("posnode: load local validator account: %w", err)
+		}
+		if found {
+			if account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Data) == 0 {
+				return 0, false, nil
+			}
+			stakeState, err := stake.UnmarshalValidatorStateBinary(account.Data)
+			if err != nil {
+				return 0, false, fmt.Errorf("posnode: decode local validator stake: %w", err)
+			}
+			return validatorEffectiveStakeForEpoch(stakeState, validatorID, epochID)
+		}
+	}
+	state := node.ledger.State()
+	for _, account := range state.Accounts {
+		if account.Account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Account.Data) == 0 {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil {
+			continue
+		}
+		if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != validatorID {
+			continue
+		}
+		return validatorEffectiveStakeForEpoch(stakeState, validatorID, epochID)
+	}
+	return 0, false, nil
+}
+
+func validatorEffectiveStakeForEpoch(stakeState stake.ValidatorState, validatorID consensus.ValidatorID, epochID uint64) (uint64, bool, error) {
+	if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != validatorID {
+		return 0, false, nil
+	}
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+	if err != nil {
+		return 0, false, fmt.Errorf("posnode: calculate local validator effective stake: %w", err)
+	}
+	if effectiveStake == 0 {
+		return 0, false, nil
+	}
+	if stakeState.Status == stake.ValidatorStatusJailed && stakeState.JailUntilEpoch > epochID {
+		return 0, false, nil
+	}
+	if stakeState.Status == stake.ValidatorStatusExiting && stakeState.DeactivationEpoch <= epochID {
+		return 0, false, nil
+	}
+	return effectiveStake, true, nil
 }
 
 func (node *posNode) addTransaction(transaction structure.Transaction) error {
@@ -1486,6 +1596,29 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 }
 
 func (node *posNode) broadcastTransaction(ctx context.Context, transaction structure.Transaction) {
+	node.broadcastTransactionWithRoute(ctx, transaction, transactionRouteEnvelope{
+		OriginPeerID: node.peerKeyPair.peerID,
+		HopCount:     0,
+		MaxHops:      defaultTransactionMaxHops,
+	}, "")
+}
+
+func (node *posNode) forwardTransaction(ctx context.Context, transaction structure.Transaction, route transactionRouteEnvelope, fromPeerID string) {
+	nextRoute, ok := route.nextHop(node.peerKeyPair.peerID)
+	if !ok {
+		transactionID, _ := transaction.TxIDString()
+		node.logger.Debug("posnode transaction forward skipped",
+			slog.String("tx_id", transactionID),
+			slog.String("reason", "max hops reached"),
+			slog.Uint64("hop_count", uint64(route.HopCount)),
+			slog.Uint64("max_hops", uint64(route.normalized(node.peerKeyPair.peerID).MaxHops)),
+		)
+		return
+	}
+	node.broadcastTransactionWithRoute(ctx, transaction, nextRoute, fromPeerID)
+}
+
+func (node *posNode) broadcastTransactionWithRoute(ctx context.Context, transaction structure.Transaction, route transactionRouteEnvelope, fromPeerID string) {
 	transactionID, txIDErr := transaction.TxIDString()
 	if txIDErr != nil {
 		transactionID = ""
@@ -1504,14 +1637,23 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 		)
 		return
 	}
-	message, err := encodeTransactionMessage(transaction)
+	route = route.normalized(node.peerKeyPair.peerID)
+	message, err := encodeTransactionRouteMessage(transaction, route)
 	if err != nil {
 		node.logger.Error("posnode encode transaction failed", slog.String("tx_id", transactionID), slog.Any("error", err))
 		return
 	}
-	preferredPeerIDs, fallbackPeerIDs := node.transactionRouteTargets(ctx)
+	preferredPeerIDs := make([]string, 0)
+	fallbackPeerIDs := make([]string, 0)
+	if route.HopCount == 0 {
+		preferredPeerIDs, fallbackPeerIDs = node.transactionRouteTargets(ctx)
+	} else {
+		fallbackPeerIDs = node.transactionForwardTargets(ctx, fromPeerID)
+	}
 	preferredPeerIDs = uniquePeerIDs(preferredPeerIDs)
 	fallbackPeerIDs = uniquePeerIDs(fallbackPeerIDs)
+	preferredPeerIDs = removePeerIDs(preferredPeerIDs, node.peerKeyPair.peerID, fromPeerID, route.OriginPeerID)
+	fallbackPeerIDs = removePeerIDs(fallbackPeerIDs, node.peerKeyPair.peerID, fromPeerID, route.OriginPeerID)
 	var preferredError error
 	if len(preferredPeerIDs) > 0 {
 		preferredError = node.host.Broadcast(ctx, preferredPeerIDs, message)
@@ -1533,6 +1675,8 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 		slog.String("tx_id", transactionID),
 		slog.Int("preferred_peers", len(preferredPeerIDs)),
 		slog.Int("fallback_peers", len(fallbackPeerIDs)),
+		slog.Uint64("hop_count", uint64(route.HopCount)),
+		slog.Uint64("max_hops", uint64(route.MaxHops)),
 	)
 }
 
@@ -1590,12 +1734,17 @@ func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.B
 }
 
 func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
-	message, err := encodeVoteMessage(vote, node.consensusKeyPair, node.blsKeyPair)
+	route := voteRouteEnvelope{
+		OriginPeerID: node.peerKeyPair.peerID,
+		HopCount:     0,
+		MaxHops:      defaultVoteMaxHops,
+	}
+	message, err := encodeVoteRouteMessage(vote, node.consensusKeyPair, node.blsKeyPair, route)
 	if err != nil {
 		node.logger.Error("posnode encode vote failed", slog.Any("error", err))
 		return
 	}
-	peerIDs := node.validatorPeerIDsSnapshot(true)
+	peerIDs := node.voteRouteTargets(ctx, vote, "", route.OriginPeerID)
 	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
 		node.logger.Warn("posnode broadcast vote failed",
 			slog.Uint64("slot", vote.Slot),
@@ -1612,6 +1761,52 @@ func (node *posNode) broadcastVote(ctx context.Context, vote consensus.Vote) {
 		slog.String("block_hash", vote.BlockHash.String()),
 		slog.String("validator_id", vote.VoterID),
 		slog.Int("peer_count", len(peerIDs)),
+	)
+}
+
+func (node *posNode) forwardVote(ctx context.Context, envelope voteEnvelope, fromPeerID string) {
+	route, ok := voteRouteEnvelope{
+		OriginPeerID: envelope.OriginPeerID,
+		HopCount:     envelope.HopCount,
+		MaxHops:      envelope.MaxHops,
+	}.nextHop(node.peerKeyPair.peerID)
+	if !ok {
+		node.logger.Debug("posnode vote forward skipped",
+			slog.Uint64("slot", envelope.Vote.Slot),
+			slog.String("block_hash", envelope.Vote.BlockHash.String()),
+			slog.String("validator_id", envelope.Vote.VoterID),
+			slog.String("reason", "max hops reached"),
+		)
+		return
+	}
+	envelope.OriginPeerID = route.OriginPeerID
+	envelope.HopCount = route.HopCount
+	envelope.MaxHops = route.MaxHops
+	message, err := encodeSignedVoteEnvelopeMessage(envelope)
+	if err != nil {
+		node.logger.Error("posnode encode forwarded vote failed", slog.Any("error", err))
+		return
+	}
+	peerIDs := node.voteRouteTargets(ctx, envelope.Vote, fromPeerID, route.OriginPeerID)
+	if len(peerIDs) == 0 {
+		return
+	}
+	if err := node.host.Broadcast(ctx, peerIDs, message); err != nil {
+		node.logger.Warn("posnode forward vote failed",
+			slog.Uint64("slot", envelope.Vote.Slot),
+			slog.String("block_hash", envelope.Vote.BlockHash.String()),
+			slog.String("validator_id", envelope.Vote.VoterID),
+			slog.Int("peer_count", len(peerIDs)),
+			slog.Any("error", err),
+		)
+		return
+	}
+	node.logger.Debug("posnode vote forwarded",
+		slog.Uint64("slot", envelope.Vote.Slot),
+		slog.String("block_hash", envelope.Vote.BlockHash.String()),
+		slog.String("validator_id", envelope.Vote.VoterID),
+		slog.Int("peer_count", len(peerIDs)),
+		slog.Uint64("hop_count", uint64(route.HopCount)),
 	)
 }
 
@@ -1682,18 +1877,29 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 	if hashErr != nil {
 		qcHash = structure.Hash{}
 	}
-	message, err := encodeQCMessage(qc)
+	rootValidatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	envelope := qcEnvelope{
+		QC:              qc,
+		RootValidatorID: string(rootValidatorID),
+		OriginPeerID:    node.peerKeyPair.peerID,
+		HopCount:        0,
+		MaxHops:         defaultQCMaxHops,
+	}
+	message, err := encodeQCEnvelopeMessage(envelope)
 	if err != nil {
 		node.logger.Error("posnode encode qc failed", slog.Any("error", err))
 		return
 	}
-	peerIDs := node.validatorPeerIDsSnapshot(true)
-	targets := make([]string, 0, len(peerIDs))
-	for _, peerID := range peerIDs {
-		if peerID == "" || peerID == excludedPeerID {
-			continue
-		}
-		targets = append(targets, peerID)
+	targets, position, err := node.turbineChildPeerIDsForRoot(ctx, qc.Slot, rootValidatorID, excludedPeerID)
+	if err != nil {
+		node.logger.Warn("posnode qc turbine route failed",
+			slog.Uint64("slot", qc.Slot),
+			slog.String("block_hash", qc.BlockHash.String()),
+			slog.String("qc_hash", qcHash.String()),
+			slog.String("root_validator_id", string(rootValidatorID)),
+			slog.Any("error", err),
+		)
+		return
 	}
 	if len(targets) == 0 {
 		return
@@ -1704,6 +1910,8 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 			slog.Uint64("height", qc.BlockHeight),
 			slog.String("block_hash", qc.BlockHash.String()),
 			slog.String("qc_hash", qcHash.String()),
+			slog.String("root_validator_id", string(rootValidatorID)),
+			slog.Int("turbine_layer", position.Layer),
 			slog.Any("error", err),
 		)
 		return
@@ -1713,8 +1921,93 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		slog.Uint64("height", qc.BlockHeight),
 		slog.String("block_hash", qc.BlockHash.String()),
 		slog.String("qc_hash", qcHash.String()),
+		slog.String("root_validator_id", string(rootValidatorID)),
+		slog.Int("turbine_layer", position.Layer),
 		slog.Int("peer_count", len(targets)),
 	)
+}
+
+func (node *posNode) forwardQC(ctx context.Context, envelope qcEnvelope, fromPeerID string) {
+	if envelope.MaxHops == 0 {
+		envelope.MaxHops = defaultQCMaxHops
+	}
+	if envelope.OriginPeerID == "" {
+		envelope.OriginPeerID = fromPeerID
+	}
+	if envelope.HopCount >= envelope.MaxHops {
+		node.logger.Debug("posnode qc forward skipped",
+			slog.Uint64("slot", envelope.QC.Slot),
+			slog.String("block_hash", envelope.QC.BlockHash.String()),
+			slog.String("reason", "max hops reached"),
+		)
+		return
+	}
+	rootValidatorID, ok := node.qcRootValidatorID(envelope, fromPeerID)
+	if !ok {
+		node.logger.Warn("posnode qc forward skipped",
+			slog.Uint64("slot", envelope.QC.Slot),
+			slog.String("block_hash", envelope.QC.BlockHash.String()),
+			slog.String("reason", "root validator unavailable"),
+		)
+		return
+	}
+	envelope.RootValidatorID = string(rootValidatorID)
+	envelope.HopCount++
+	message, err := encodeQCEnvelopeMessage(envelope)
+	if err != nil {
+		node.logger.Error("posnode encode forwarded qc failed", slog.Any("error", err))
+		return
+	}
+	qcHash, hashErr := hashQC(envelope.QC)
+	if hashErr != nil {
+		qcHash = structure.Hash{}
+	}
+	targets, position, err := node.turbineChildPeerIDsForRoot(ctx, envelope.QC.Slot, rootValidatorID, fromPeerID)
+	if err != nil {
+		node.logger.Warn("posnode qc forward route failed",
+			slog.Uint64("slot", envelope.QC.Slot),
+			slog.String("block_hash", envelope.QC.BlockHash.String()),
+			slog.String("qc_hash", qcHash.String()),
+			slog.String("root_validator_id", string(rootValidatorID)),
+			slog.Any("error", err),
+		)
+		return
+	}
+	targets = removePeerIDs(targets, envelope.OriginPeerID)
+	if len(targets) == 0 {
+		return
+	}
+	if err := node.host.Broadcast(ctx, targets, message); err != nil {
+		node.logger.Warn("posnode forward qc failed",
+			slog.Uint64("slot", envelope.QC.Slot),
+			slog.String("block_hash", envelope.QC.BlockHash.String()),
+			slog.String("qc_hash", qcHash.String()),
+			slog.String("root_validator_id", string(rootValidatorID)),
+			slog.Int("peer_count", len(targets)),
+			slog.Any("error", err),
+		)
+		return
+	}
+	node.logger.Debug("posnode qc forwarded",
+		slog.Uint64("slot", envelope.QC.Slot),
+		slog.String("block_hash", envelope.QC.BlockHash.String()),
+		slog.String("qc_hash", qcHash.String()),
+		slog.String("root_validator_id", string(rootValidatorID)),
+		slog.Int("turbine_layer", position.Layer),
+		slog.Int("peer_count", len(targets)),
+		slog.Uint64("hop_count", uint64(envelope.HopCount)),
+	)
+}
+
+func (node *posNode) qcRootValidatorID(envelope qcEnvelope, fromPeerID string) (consensus.ValidatorID, bool) {
+	if envelope.RootValidatorID != "" {
+		return consensus.ValidatorID(envelope.RootValidatorID), true
+	}
+	if validatorID, exists := node.validatorIDByPeerID(fromPeerID); exists {
+		return validatorID, true
+	}
+	_, leaderID, found := node.leaderPeerForSlot(envelope.QC.Slot)
+	return leaderID, found
 }
 
 func (node *posNode) rebuildEpoch(epochID uint64, startSlot uint64, seed structure.Hash) error {

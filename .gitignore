@@ -36,3 +36,4 @@
 /report/**/*.txt
 /report/*.txt
 /report/
+/deploy/

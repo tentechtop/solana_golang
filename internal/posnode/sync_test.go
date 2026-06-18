@@ -5,6 +5,7 @@ import (
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
+	"solana_golang/programs/stake"
 )
 
 func TestPeerNeedsBlockSyncWhenPeerAhead(t *testing.T) {
@@ -83,16 +84,16 @@ func TestCalculateSyncStartHeightFromAncestorStartsFromFirstBlockAfterGenesis(t 
 	}
 }
 
-func TestSmallValidatorNetwork(t *testing.T) {
+func TestRequiresConnectedValidatorPeerForProduction(t *testing.T) {
 	tests := []struct {
 		name           string
 		validatorCount int
 		want           bool
 	}{
 		{name: "empty", validatorCount: 0, want: false},
-		{name: "single", validatorCount: 1, want: true},
+		{name: "single", validatorCount: 1, want: false},
 		{name: "two", validatorCount: 2, want: true},
-		{name: "three", validatorCount: 3, want: false},
+		{name: "three", validatorCount: 3, want: true},
 	}
 
 	for _, testCase := range tests {
@@ -102,11 +103,65 @@ func TestSmallValidatorNetwork(t *testing.T) {
 					Validators: make([]consensus.ValidatorState, testCase.validatorCount),
 				},
 			}
-			if got := node.smallValidatorNetwork(); got != testCase.want {
-				t.Fatalf("smallValidatorNetwork() = %v, want %v", got, testCase.want)
+			if got := node.requiresConnectedValidatorPeerForProduction(); got != testCase.want {
+				t.Fatalf("requiresConnectedValidatorPeerForProduction() = %v, want %v", got, testCase.want)
 			}
 		})
 	}
+}
+
+func TestLocalValidatorEffectiveStakeRejectsCurrentEpochJail(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	stakeValue, active, err := node.localValidatorEffectiveStake(0)
+	if err != nil {
+		t.Fatalf("localValidatorEffectiveStake() error = %v", err)
+	}
+	if !active || stakeValue == 0 {
+		t.Fatalf("active=%v stake=%d, want active stake", active, stakeValue)
+	}
+
+	jailLocalValidatorForTest(t, node, 1)
+	stakeValue, active, err = node.localValidatorEffectiveStake(0)
+	if err != nil {
+		t.Fatalf("localValidatorEffectiveStake(jailed) error = %v", err)
+	}
+	if active || stakeValue != 0 {
+		t.Fatalf("jailed active=%v stake=%d, want inactive", active, stakeValue)
+	}
+
+	stakeValue, active, err = node.localValidatorEffectiveStake(1)
+	if err != nil {
+		t.Fatalf("localValidatorEffectiveStake(expired jail) error = %v", err)
+	}
+	if !active || stakeValue == 0 {
+		t.Fatalf("expired jail active=%v stake=%d, want active stake", active, stakeValue)
+	}
+}
+
+func jailLocalValidatorForTest(t *testing.T, node *posNode, jailUntilEpoch uint64) {
+	t.Helper()
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	state := node.ledger.State()
+	for index := range state.Accounts {
+		stakeState, err := stake.UnmarshalValidatorStateBinary(state.Accounts[index].Account.Data)
+		if err != nil {
+			continue
+		}
+		if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != validatorID {
+			continue
+		}
+		stakeState.Status = stake.ValidatorStatusJailed
+		stakeState.JailUntilEpoch = jailUntilEpoch
+		stakeState.UnlockEpoch = jailUntilEpoch
+		data, err := stakeState.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		state.Accounts[index].Account.Data = data
+		commitConsensusStatusState(t, node.ledger, state)
+		return
+	}
+	t.Fatalf("local validator %s not found", validatorID)
 }
 
 func TestValidatePeerStatusChainIdentityAcceptsMatchingPeer(t *testing.T) {
