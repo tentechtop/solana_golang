@@ -103,6 +103,56 @@ func TestRuntimeRejectsComputeExceeded(t *testing.T) {
 	}
 }
 
+func TestRuntimeRejectsManifestUndeclaredSyscall(t *testing.T) {
+	programID := testAddress(60)
+	loaderID := testAddress(61)
+	programData, err := EncodeGovernedBytecode(BuildProgramCode(BuildSyscallOp(SyscallLog, []byte("blocked"))), ProgramManifest{})
+	if err != nil {
+		t.Fatalf("EncodeGovernedBytecode() error = %v", err)
+	}
+	programAccount := ProgramAccount{Address: programID, Owner: loaderID, Executable: true, Data: programData}
+
+	_, err = NewRuntime(loaderID).Execute(Invocation{ProgramID: programID, ProgramAccount: programAccount})
+	if !errors.Is(err, ErrInvalidProgram) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidProgram", err)
+	}
+}
+
+func TestRuntimeUsesManifestComputeLimit(t *testing.T) {
+	programID := testAddress(62)
+	loaderID := testAddress(63)
+	programData, err := EncodeGovernedBytecode(BuildProgramCode(), ProgramManifest{ComputeUnitLimit: 1})
+	if err != nil {
+		t.Fatalf("EncodeGovernedBytecode() error = %v", err)
+	}
+	programAccount := ProgramAccount{Address: programID, Owner: loaderID, Executable: true, Data: programData}
+
+	_, err = NewRuntime(loaderID).Execute(Invocation{
+		ProgramID:      programID,
+		ProgramAccount: programAccount,
+		ComputeLimit:   DefaultComputeUnitLimit,
+	})
+	if !errors.Is(err, ErrComputeExceeded) {
+		t.Fatalf("Execute() error = %v, want ErrComputeExceeded", err)
+	}
+}
+
+func TestBytecodeLoaderRejectsManifestChecksumMismatch(t *testing.T) {
+	programID := testAddress(64)
+	loaderID := testAddress(65)
+	programData, err := EncodeGovernedBytecode(BuildProgramCode(), ProgramManifest{ComputeUnitLimit: DefaultComputeUnitLimit})
+	if err != nil {
+		t.Fatalf("EncodeGovernedBytecode() error = %v", err)
+	}
+	programData[len(programData)-1] ^= 0xff
+	programAccount := ProgramAccount{Address: programID, Owner: loaderID, Executable: true, Data: programData}
+
+	_, err = (BytecodeLoader{}).Load(programAccount, loaderID)
+	if !errors.Is(err, ErrInvalidProgram) {
+		t.Fatalf("Load() error = %v, want ErrInvalidProgram", err)
+	}
+}
+
 func TestRuntimeSyscallsLogAndReturnData(t *testing.T) {
 	programID := testAddress(19)
 	loaderID := testAddress(20)

@@ -58,7 +58,7 @@ type registerMemory struct {
 }
 
 func executeRegisterProgram(context *Context, program Program) error {
-	if err := verifyRegisterProgram(program, context.Syscalls); err != nil {
+	if err := verifyRegisterProgramWithManifest(program, context.Syscalls); err != nil {
 		return err
 	}
 	executor := registerExecutor{}

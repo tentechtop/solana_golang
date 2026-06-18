@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"solana_golang/blockchain"
@@ -24,6 +25,7 @@ type chainIdentityPayload struct {
 	TransactionForwardValidators  bool   `json:"transaction_forward_validators"`
 	PrivacyExecutionMode          string `json:"privacy_execution_mode"`
 	ProgramExecutionPolicy        string `json:"program_execution_policy"`
+	ContractDeploymentPolicy      string `json:"contract_deployment_policy"`
 }
 
 func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
@@ -51,6 +53,7 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 		TransactionForwardValidators:  config.forwardTransactionsToValidators(),
 		PrivacyExecutionMode:          string(config.Genesis.PrivacyExecutionMode),
 		ProgramExecutionPolicy:        programExecutionPolicy,
+		ContractDeploymentPolicy:      contractDeploymentPolicyFingerprint(config.ContractDeploymentPolicy),
 	}
 	identityBytes, err := json.Marshal(identityPayload)
 	if err != nil {
@@ -70,6 +73,29 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 	config.ChainIdentityHash = identityHash.String()
 	config.P2PNetworkID = identityHash.String()
 	return config, nil
+}
+
+func contractDeploymentPolicyFingerprint(config contractDeploymentPolicyConfig) string {
+	requireManifest := false
+	if config.RequireManifest != nil {
+		requireManifest = *config.RequireManifest
+	}
+	allowUpgradeable := false
+	if config.AllowUpgradeableContracts != nil {
+		allowUpgradeable = *config.AllowUpgradeableContracts
+	}
+	deployers := make([]string, 0, len(config.ResolvedAllowedDeployers))
+	for _, deployer := range config.ResolvedAllowedDeployers {
+		deployers = append(deployers, deployer.String())
+	}
+	sort.Strings(deployers)
+	return fmt.Sprintf(
+		"contract_deployment_policy_v1|min_deposit=%d|require_manifest=%t|allow_upgradeable=%t|deployers=%s",
+		config.MinDeploymentDepositLamports,
+		requireManifest,
+		allowUpgradeable,
+		strings.Join(deployers, ","),
+	)
 }
 
 func resolveChainDataPath(dataRootPath string, chainIdentityHash string) string {
