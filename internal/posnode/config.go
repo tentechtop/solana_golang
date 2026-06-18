@@ -51,10 +51,12 @@ type nodeConfig struct {
 	ConsensusKeyPath              string                          `json:"consensus_key_path,omitempty"`
 	BLSKeyPath                    string                          `json:"bls_key_path,omitempty"`
 	NodeRole                      string                          `json:"node_role,omitempty"`
+	NodeRoles                     []string                        `json:"node_roles,omitempty"`
 	NodeCapabilities              []string                        `json:"node_capabilities,omitempty"`
 	ValidatorEnabled              *bool                           `json:"validator_enabled,omitempty"`
 	ConsensusEnabled              *bool                           `json:"consensus_enabled,omitempty"`
 	ResolvedNodeRole              p2p.PeerRole                    `json:"-"`
+	ResolvedNodeRoles             []p2p.PeerRole                  `json:"-"`
 	ResolvedNodeCapabilities      p2p.PeerCapability              `json:"-"`
 	StakeLamports                 uint64                          `json:"stake_lamports"`
 	BootstrapPeers                []peerConfig                    `json:"bootstrap_peers"`
@@ -87,8 +89,10 @@ type peerConfig struct {
 	Port                 int                `json:"port"`
 	Network              string             `json:"network"`
 	Role                 string             `json:"role,omitempty"`
+	Roles                []string           `json:"roles,omitempty"`
 	Capabilities         []string           `json:"capabilities,omitempty"`
 	ResolvedRole         p2p.PeerRole       `json:"-"`
+	ResolvedRoles        []p2p.PeerRole     `json:"-"`
 	ResolvedCapabilities p2p.PeerCapability `json:"-"`
 }
 
@@ -311,33 +315,76 @@ func normalizePrivacyExecutionModeConfig(config *nodeConfig) error {
 }
 
 func normalizeNodeAttributes(config *nodeConfig) error {
-	role, err := parsePeerRoleConfig(config.NodeRole, p2p.PeerRoleFull)
+	role, roles, roleCapabilities, err := parsePeerRolesConfig(config.NodeRole, config.NodeRoles, p2p.PeerRoleFull)
 	if err != nil {
 		return fmt.Errorf("posnode: invalid node role: %w", err)
 	}
-	capabilities, err := parsePeerCapabilitiesConfig(config.NodeCapabilities, role, defaultNodeCapabilities(role))
+	defaultCapabilities := defaultNodeCapabilities(role) | roleCapabilities
+	capabilities, err := parsePeerCapabilitiesConfig(config.NodeCapabilities, role, defaultCapabilities)
 	if err != nil {
 		return fmt.Errorf("posnode: invalid node capabilities: %w", err)
 	}
 	config.ResolvedNodeRole = role
-	config.ResolvedNodeCapabilities = capabilities
+	config.ResolvedNodeRoles = roles
+	config.ResolvedNodeCapabilities = capabilities | roleCapabilities
 	return nil
 }
 
 func normalizeBootstrapPeerAttributes(peers []peerConfig) error {
 	for index := range peers {
-		role, err := parsePeerRoleConfig(peers[index].Role, p2p.PeerRoleValidator)
+		role, roles, roleCapabilities, err := parsePeerRolesConfig(peers[index].Role, peers[index].Roles, p2p.PeerRoleValidator)
 		if err != nil {
 			return fmt.Errorf("posnode: invalid bootstrap peer %s role: %w", peers[index].PeerID, err)
 		}
-		capabilities, err := parsePeerCapabilitiesConfig(peers[index].Capabilities, role, defaultPeerCapabilities(role))
+		defaultCapabilities := defaultPeerCapabilities(role) | roleCapabilities
+		capabilities, err := parsePeerCapabilitiesConfig(peers[index].Capabilities, role, defaultCapabilities)
 		if err != nil {
 			return fmt.Errorf("posnode: invalid bootstrap peer %s capabilities: %w", peers[index].PeerID, err)
 		}
 		peers[index].ResolvedRole = role
-		peers[index].ResolvedCapabilities = capabilities
+		peers[index].ResolvedRoles = roles
+		peers[index].ResolvedCapabilities = capabilities | roleCapabilities
 	}
 	return nil
+}
+
+func parsePeerRolesConfig(
+	roleValue string,
+	roleValues []string,
+	defaultRole p2p.PeerRole,
+) (p2p.PeerRole, []p2p.PeerRole, p2p.PeerCapability, error) {
+	rawRoles := make([]string, 0, len(roleValues)+1)
+	if strings.TrimSpace(roleValue) != "" {
+		rawRoles = append(rawRoles, roleValue)
+	}
+	rawRoles = append(rawRoles, roleValues...)
+	if len(rawRoles) == 0 {
+		return defaultRole, []p2p.PeerRole{defaultRole}, 0, nil
+	}
+	roles := make([]p2p.PeerRole, 0, len(rawRoles))
+	seen := make(map[p2p.PeerRole]struct{}, len(rawRoles))
+	for _, rawRole := range rawRoles {
+		role, err := parsePeerRoleConfig(rawRole, p2p.PeerRoleUnknown)
+		if err != nil {
+			return p2p.PeerRoleUnknown, nil, 0, err
+		}
+		if role == p2p.PeerRoleUnknown {
+			return p2p.PeerRoleUnknown, nil, 0, fmt.Errorf("unsupported role %q", rawRole)
+		}
+		if _, exists := seen[role]; exists {
+			continue
+		}
+		seen[role] = struct{}{}
+		roles = append(roles, role)
+	}
+	if len(roles) == 0 {
+		return defaultRole, []p2p.PeerRole{defaultRole}, 0, nil
+	}
+	capabilities := p2p.PeerCapability(0)
+	for _, role := range roles {
+		capabilities |= capabilitiesForRole(role)
+	}
+	return roles[0], roles, capabilities, nil
 }
 
 func parsePeerRoleConfig(value string, defaultRole p2p.PeerRole) (p2p.PeerRole, error) {
@@ -429,6 +476,23 @@ func defaultPeerCapabilities(role p2p.PeerRole) p2p.PeerCapability {
 	}
 }
 
+func capabilitiesForRole(role p2p.PeerRole) p2p.PeerCapability {
+	switch role {
+	case p2p.PeerRoleValidator:
+		return p2p.PeerCapabilityValidator | p2p.PeerCapabilityRelay | p2p.PeerCapabilityStateSync
+	case p2p.PeerRolePublicRPC:
+		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
+	case p2p.PeerRoleBootnode:
+		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
+	case p2p.PeerRoleArchive:
+		return p2p.PeerCapabilityArchive | p2p.PeerCapabilityRelay
+	case p2p.PeerRoleFull:
+		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
+	default:
+		return 0
+	}
+}
+
 func (config nodeConfig) slotDuration() time.Duration {
 	return time.Duration(config.SlotMillis) * time.Millisecond
 }
@@ -448,7 +512,7 @@ func (config nodeConfig) allowInsecureP2P() bool {
 }
 
 func (config nodeConfig) publicRPCMode() bool {
-	return config.ResolvedNodeRole == p2p.PeerRolePublicRPC
+	return containsPeerRole(config.ResolvedNodeRoles, p2p.PeerRolePublicRPC)
 }
 
 func (config nodeConfig) validatorEnabled() bool {
@@ -496,6 +560,15 @@ func validateNodeRoleControls(config nodeConfig) error {
 		return fmt.Errorf("posnode: validator capability requires validator_enabled")
 	}
 	return nil
+}
+
+func containsPeerRole(roles []p2p.PeerRole, target p2p.PeerRole) bool {
+	for _, role := range roles {
+		if role == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (config nodeConfig) allowHardcodedTreasury() bool {

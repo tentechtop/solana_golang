@@ -489,3 +489,76 @@ func containsProtocol(protocols []utils.MultiAddressProtocol, target utils.Multi
 	}
 	return false
 }
+
+// PeerCapabilityNames 返回能力名称列表 + APP 需要稳定字段区分 RPC 入口和验证者。
+func PeerCapabilityNames(capabilities PeerCapability) []string {
+	names := make([]string, 0, 5)
+	if capabilities&PeerCapabilityRelay != 0 {
+		names = append(names, "relay")
+	}
+	if capabilities&PeerCapabilityArchive != 0 {
+		names = append(names, "archive")
+	}
+	if capabilities&PeerCapabilityValidator != 0 {
+		names = append(names, "validator")
+	}
+	if capabilities&PeerCapabilityStateSync != 0 {
+		names = append(names, "state_sync")
+	}
+	if capabilities&PeerCapabilityDHT != 0 {
+		names = append(names, "dht")
+	}
+	return names
+}
+
+// PeerRoleNames 返回节点角色列表 + 用角色叠加能力表达多角色节点而不破坏旧协议字段。
+func PeerRoleNames(role PeerRole, capabilities PeerCapability) []string {
+	return PeerRolesNames([]PeerRole{role}, capabilities)
+}
+
+// PeerRolesNames 返回节点角色列表 + 保留配置中的多角色并兼容旧 capability 字段。
+func PeerRolesNames(peerRoles []PeerRole, capabilities PeerCapability) []string {
+	seen := make(map[string]struct{}, 4)
+	roles := make([]string, 0, 4)
+	appendRole := func(value string) {
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		roles = append(roles, value)
+	}
+
+	for _, role := range peerRoles {
+		switch role {
+		case PeerRolePublicRPC:
+			appendRole("public_rpc")
+			appendRole("rpc")
+		case PeerRoleValidator:
+			appendRole("validator")
+		case PeerRoleBootnode:
+			appendRole("bootnode")
+			appendRole("bootstrap")
+		case PeerRoleArchive:
+			appendRole("archive")
+		case PeerRoleFull:
+			appendRole("full")
+		}
+	}
+	if capabilities&PeerCapabilityValidator != 0 {
+		appendRole("validator")
+	}
+	if capabilities&PeerCapabilityArchive != 0 {
+		appendRole("archive")
+	}
+	for _, role := range peerRoles {
+		if capabilities&PeerCapabilityRelay == 0 || role != PeerRolePublicRPC {
+			continue
+		}
+		appendRole("relay")
+		break
+	}
+	return roles
+}

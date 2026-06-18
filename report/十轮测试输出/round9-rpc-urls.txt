@@ -1,2 +1,0 @@
-http://127.0.0.1:1 # local unreachable node
-http://127.0.0.1:1/ # duplicate after normalization

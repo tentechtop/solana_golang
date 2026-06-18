@@ -144,6 +144,29 @@ func TestNormalizeNodeConfigParsesNodeAttributes(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigParsesNodeRoles(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "validator"
+	config.NodeRoles = []string{"full", "archive"}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.ResolvedNodeRole != p2p.PeerRoleValidator {
+		t.Fatalf("ResolvedNodeRole = %q, want validator", normalized.ResolvedNodeRole)
+	}
+	if !containsPeerRole(normalized.ResolvedNodeRoles, p2p.PeerRoleFull) {
+		t.Fatal("ResolvedNodeRoles missing full role")
+	}
+	if normalized.ResolvedNodeCapabilities&p2p.PeerCapabilityValidator == 0 {
+		t.Fatal("ResolvedNodeCapabilities missing validator capability")
+	}
+	if normalized.ResolvedNodeCapabilities&p2p.PeerCapabilityArchive == 0 {
+		t.Fatal("ResolvedNodeCapabilities missing archive capability")
+	}
+}
+
 func TestNormalizeNodeConfigPublicRPCDefaultsToGatewayOnly(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 	config.NodeRole = "public_rpc"
@@ -169,6 +192,18 @@ func TestNormalizeNodeConfigPublicRPCDefaultsToGatewayOnly(t *testing.T) {
 	}
 	if !normalized.transactionForwardEnabled() {
 		t.Fatal("transactionForwardEnabled() = false, want true")
+	}
+}
+
+func TestNormalizeNodeConfigRejectsPublicRPCValidatorMix(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.NodeRoles = []string{"public_rpc", "validator"}
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want public rpc validator mix rejection")
 	}
 }
 
@@ -364,6 +399,7 @@ func TestNormalizeNodeConfigParsesBootstrapPeerAttributes(t *testing.T) {
 		Port:         5101,
 		Network:      "tcp",
 		Role:         "bootstrap",
+		Roles:        []string{"archive"},
 		Capabilities: []string{"relay", "dht"},
 	}}
 
@@ -380,6 +416,9 @@ func TestNormalizeNodeConfigParsesBootstrapPeerAttributes(t *testing.T) {
 	}
 	if peer.ResolvedCapabilities&p2p.PeerCapabilityValidator != 0 {
 		t.Fatal("ResolvedCapabilities includes validator, want bootnode only")
+	}
+	if peer.ResolvedCapabilities&p2p.PeerCapabilityArchive == 0 {
+		t.Fatal("ResolvedCapabilities missing archive capability from roles")
 	}
 }
 

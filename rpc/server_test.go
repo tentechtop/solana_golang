@@ -126,7 +126,6 @@ func TestPublicRouterDoesNotExposeManagementMethods(t *testing.T) {
 		MethodSlashValidator,
 		MethodJailValidator,
 		MethodGetLocalValidatorIdentity,
-		MethodGetPeerNetwork,
 		MethodGetConsensusStatus,
 		MethodGetMetrics,
 	}
@@ -140,6 +139,29 @@ func TestPublicRouterDoesNotExposeManagementMethods(t *testing.T) {
 		if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
 			t.Fatalf("%s error = %+v, want method not found", method, decoded.Error)
 		}
+	}
+}
+
+func TestHandleRawRequestReusesRouterValidation(t *testing.T) {
+	router := NewPublicRouter(testPublicBackend{})
+	body, err := HandleRawRequest(context.Background(), router, []byte(`{"jsonrpc":"2.0","id":7,"method":"getNodeStatus","params":[]}`), 8)
+	if err != nil {
+		t.Fatalf("HandleRawRequest() error = %v", err)
+	}
+
+	var decoded Response
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	if string(decoded.ID) != "7" {
+		t.Fatalf("response id = %s, want 7", decoded.ID)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["head_height"].(float64) != 9 {
+		t.Fatalf("result = %#v, want node status", decoded.Result)
 	}
 }
 func TestServerInvalidParams(t *testing.T) {

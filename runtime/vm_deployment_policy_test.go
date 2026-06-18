@@ -123,10 +123,11 @@ func simulateBPFLoaderDeployment(
 		payerKey:   payerPrivateKey,
 		programKey: programPrivateKey,
 	})
+	transactionFee := mustTransactionFeeDetails(t, transaction).TotalFee
 	result, err := simulateWithBPFLoaderPolicy(t, TransactionSimulationInput{
 		Transaction: transaction,
 		Accounts: []AddressedAccount{
-			newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+LamportsPerSignature*2+100, DefaultBuiltinProgramIDs.System, false),
+			newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+transactionFee+100, DefaultBuiltinProgramIDs.System, false),
 			newSimulationDataAccount(t, programKey, programLamports, DefaultBuiltinProgramIDs.BPFLoader, false, make([]byte, len(programData))),
 		},
 		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, slot),
@@ -169,8 +170,9 @@ func simulateBPFLoaderUpgrade(
 		AccountMeta{PublicKey: DefaultBuiltinProgramIDs.BPFLoader, IsSigner: false, IsWritable: false},
 	)
 	transaction := signedSimulationProgramTransaction(t, DefaultBuiltinProgramIDs.BPFLoader, accountMetas, []PublicKey{programKey}, upgradeData, blockhash, privateKeys)
+	transactionFee := mustTransactionFeeDetails(t, transaction).TotalFee
 	accounts := []AddressedAccount{
-		newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+LamportsPerSignature*2+100, DefaultBuiltinProgramIDs.System, false),
+		newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+transactionFee+100, DefaultBuiltinProgramIDs.System, false),
 		newSimulationDataAccount(t, programKey, programLamports, DefaultBuiltinProgramIDs.BPFLoader, true, currentProgramData),
 	}
 	if !authorityKey.IsZero() {

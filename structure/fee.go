@@ -3,13 +3,19 @@ package structure
 import "fmt"
 
 const (
-	LamportsPerSignature           = uint64(5000)
-	DefaultInstructionComputeUnits = uint64(200000)
-	MaxComputeUnitsPerTransaction  = uint64(1400000)
-	DefaultLoadedAccountsDataSize  = uint64(64 * 1024 * 1024)
-	MicroLamportsPerLamport        = uint64(1000000)
-	DefaultBaseFeeBurnPercent      = uint8(0)
-	DefaultBuiltinInstructionCU    = uint64(3000)
+	LamportsPerSignature                     = uint64(5000)
+	DefaultInstructionComputeUnits           = uint64(200000)
+	MaxComputeUnitsPerTransaction            = uint64(1400000)
+	DefaultLoadedAccountsDataSize            = uint64(64 * 1024 * 1024)
+	MicroLamportsPerLamport                  = uint64(1000000)
+	DefaultBaseFeeBurnPercent                = uint8(50)
+	DefaultBuiltinInstructionCU              = uint64(3000)
+	DefaultTransferComputeUnits              = uint64(3000)
+	DefaultContractCallComputeUnits          = uint64(200000)
+	DefaultContractDeployBaseCU              = uint64(200000)
+	DefaultContractDeployByteCU              = uint64(10)
+	DefaultBaseComputeUnitPriceMicroLamports = uint64(100)
+	DefaultStorageWriteLamportsPerByte       = uint64(10)
 )
 
 // ComputeBudgetLimits 描述交易计算预算 + 限制执行成本和加载账户数据量。
@@ -17,6 +23,7 @@ type ComputeBudgetLimits struct {
 	MaxComputeUnits               uint64
 	ComputeUnitPriceMicroLamports uint64
 	LoadedAccountsDataSizeLimit   uint64
+	StorageWriteBytesLimit        uint64
 	HeapFrameBytes                uint32
 }
 
@@ -29,6 +36,9 @@ type PrioritizationFee struct {
 // FeeDetails 描述费用明细 + 区分基础费、优先费、燃烧和验证者收入。
 type FeeDetails struct {
 	SignatureCount    uint64
+	SignatureFee      uint64
+	ComputeFee        uint64
+	StorageWriteFee   uint64
 	BaseFee           uint64
 	PrioritizationFee uint64
 	TotalFee          uint64
@@ -38,8 +48,10 @@ type FeeDetails struct {
 
 // FeeCalculator 描述费用参数 + 让测试网和私有网络可配置基础费策略。
 type FeeCalculator struct {
-	LamportsPerSignature uint64
-	BaseFeeBurnPercent   uint8
+	LamportsPerSignature              uint64
+	BaseComputeUnitPriceMicroLamports uint64
+	StorageWriteLamportsPerByte       uint64
+	BaseFeeBurnPercent                uint8
 }
 
 // DefaultComputeBudgetLimits 返回默认计算预算 + 为交易执行提供保守上限。
@@ -50,11 +62,13 @@ func DefaultComputeBudgetLimits() ComputeBudgetLimits {
 	}
 }
 
-// DefaultFeeCalculator 返回默认费用计算器 + 当前私链默认把基础费和优先费全部分配给 leader。
+// DefaultFeeCalculator 返回默认费用计算器 + 基础费按比例燃烧后把剩余费用和优先费分配给 leader。
 func DefaultFeeCalculator() FeeCalculator {
 	return FeeCalculator{
-		LamportsPerSignature: LamportsPerSignature,
-		BaseFeeBurnPercent:   DefaultBaseFeeBurnPercent,
+		LamportsPerSignature:              LamportsPerSignature,
+		BaseComputeUnitPriceMicroLamports: DefaultBaseComputeUnitPriceMicroLamports,
+		StorageWriteLamportsPerByte:       DefaultStorageWriteLamportsPerByte,
+		BaseFeeBurnPercent:                DefaultBaseFeeBurnPercent,
 	}
 }
 
@@ -107,7 +121,19 @@ func (calculator FeeCalculator) Calculate(signatureCount int, limits ComputeBudg
 		return FeeDetails{}, fmt.Errorf("%w: negative signature count", ErrInvalidFee)
 	}
 
-	baseFee, err := safeMulUint64(uint64(signatureCount), calculator.LamportsPerSignature)
+	signatureFee, err := safeMulUint64(uint64(signatureCount), calculator.LamportsPerSignature)
+	if err != nil {
+		return FeeDetails{}, fmt.Errorf("structure: calculate signature fee: %w", err)
+	}
+	computeFee, err := unitPriceFeeFloor(limits.MaxComputeUnits, calculator.BaseComputeUnitPriceMicroLamports, "compute")
+	if err != nil {
+		return FeeDetails{}, err
+	}
+	storageWriteFee, err := safeMulUint64(limits.StorageWriteBytesLimit, calculator.StorageWriteLamportsPerByte)
+	if err != nil {
+		return FeeDetails{}, fmt.Errorf("structure: calculate storage write fee: %w", err)
+	}
+	baseFee, err := safeAddManyUint64(signatureFee, computeFee, storageWriteFee)
 	if err != nil {
 		return FeeDetails{}, fmt.Errorf("structure: calculate base fee: %w", err)
 	}
@@ -123,7 +149,11 @@ func (calculator FeeCalculator) Calculate(signatureCount int, limits ComputeBudg
 		return FeeDetails{}, fmt.Errorf("structure: calculate total fee: %w", err)
 	}
 
-	burnedFee := baseFee * uint64(calculator.BaseFeeBurnPercent) / 100
+	burnedFeeNumerator, err := safeMulUint64(baseFee, uint64(calculator.BaseFeeBurnPercent))
+	if err != nil {
+		return FeeDetails{}, fmt.Errorf("structure: calculate burned fee: %w", err)
+	}
+	burnedFee := burnedFeeNumerator / 100
 	validatorBaseFee := baseFee - burnedFee
 	validatorFee, err := safeAddUint64(validatorBaseFee, priorityFee)
 	if err != nil {
@@ -131,10 +161,33 @@ func (calculator FeeCalculator) Calculate(signatureCount int, limits ComputeBudg
 	}
 	return FeeDetails{
 		SignatureCount:    uint64(signatureCount),
+		SignatureFee:      signatureFee,
+		ComputeFee:        computeFee,
+		StorageWriteFee:   storageWriteFee,
 		BaseFee:           baseFee,
 		PrioritizationFee: priorityFee,
 		TotalFee:          totalFee,
 		BurnedFee:         burnedFee,
 		ValidatorFee:      validatorFee,
 	}, nil
+}
+
+func unitPriceFeeFloor(units uint64, microLamportsPerUnit uint64, label string) (uint64, error) {
+	product, err := safeMulUint64(units, microLamportsPerUnit)
+	if err != nil {
+		return 0, fmt.Errorf("structure: calculate %s fee: %w", label, err)
+	}
+	return product / MicroLamportsPerLamport, nil
+}
+
+func safeAddManyUint64(values ...uint64) (uint64, error) {
+	total := uint64(0)
+	for _, value := range values {
+		nextTotal, err := safeAddUint64(total, value)
+		if err != nil {
+			return 0, err
+		}
+		total = nextTotal
+	}
+	return total, nil
 }

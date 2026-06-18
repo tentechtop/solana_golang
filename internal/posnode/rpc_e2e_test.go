@@ -48,8 +48,9 @@ func TestHTTPJSONRPCSubmitsSignedTransaction(t *testing.T) {
 	if len(node.mempool) != 1 {
 		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
 	}
-	if node.mempool[0].Fee != structure.LamportsPerSignature {
-		t.Fatalf("mempool fee = %d, want %d", node.mempool[0].Fee, structure.LamportsPerSignature)
+	expectedFee := mustEstimateTransactionFeeDetails(t, transaction)
+	if node.mempool[0].Fee != expectedFee.TotalFee {
+		t.Fatalf("mempool fee = %d, want %d", node.mempool[0].Fee, expectedFee.TotalFee)
 	}
 	if got := node.metrics.transactionsIn.Load(); got != 1 {
 		t.Fatalf("transactionsIn = %d, want 1", got)
@@ -138,18 +139,8 @@ func TestHTTPJSONRPCGetTransactionReturnsMempoolDetails(t *testing.T) {
 	if detail.Sender != source.PublicKey.String() {
 		t.Fatalf("detail sender = %s, want %s", detail.Sender, source.PublicKey.String())
 	}
-	if detail.FeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail fee = %d, want %d", detail.FeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.BaseFeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail base fee = %d, want %d", detail.BaseFeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.LeaderFeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail leader fee = %d, want %d", detail.LeaderFeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.BurnedFeeLamports != 0 {
-		t.Fatalf("detail burned fee = %d, want 0", detail.BurnedFeeLamports)
-	}
+	expectedFee := mustEstimateTransactionFeeDetails(t, transaction)
+	assertRPCTransactionFeeDetails(t, detail, expectedFee)
 	if detail.InstructionCount != 1 {
 		t.Fatalf("detail instruction count = %d, want 1", detail.InstructionCount)
 	}
@@ -224,18 +215,8 @@ func TestHTTPJSONRPCGetTransactionReturnsCommittedBlockDetails(t *testing.T) {
 	if detail.Blockhash != committedHead.BlockHash.String() {
 		t.Fatalf("detail block hash = %s, want %s", detail.Blockhash, committedHead.BlockHash.String())
 	}
-	if detail.FeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail fee = %d, want %d", detail.FeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.BaseFeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail base fee = %d, want %d", detail.BaseFeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.LeaderFeeLamports != structure.LamportsPerSignature {
-		t.Fatalf("detail leader fee = %d, want %d", detail.LeaderFeeLamports, structure.LamportsPerSignature)
-	}
-	if detail.BurnedFeeLamports != 0 {
-		t.Fatalf("detail burned fee = %d, want 0", detail.BurnedFeeLamports)
-	}
+	expectedFee := mustEstimateTransactionFeeDetails(t, transaction)
+	assertRPCTransactionFeeDetails(t, detail, expectedFee)
 }
 
 func TestHTTPJSONRPCGetAddressTransactionsReturnsCommittedHistory(t *testing.T) {
@@ -702,6 +683,34 @@ func newRPCTransferTransaction(t *testing.T, node *posNode, source structure.Sol
 		t.Fatalf("NewTransferTransaction() error = %v", err)
 	}
 	return transaction
+}
+
+func mustEstimateTransactionFeeDetails(t *testing.T, transaction structure.Transaction) structure.FeeDetails {
+	t.Helper()
+	feeDetails, err := estimateTransactionFeeDetails(transaction)
+	if err != nil {
+		t.Fatalf("estimateTransactionFeeDetails() error = %v", err)
+	}
+	return feeDetails
+}
+
+func assertRPCTransactionFeeDetails(t *testing.T, detail rpc.TransactionDetailResult, expected structure.FeeDetails) {
+	t.Helper()
+	if detail.FeeLamports != expected.TotalFee {
+		t.Fatalf("detail fee = %d, want %d", detail.FeeLamports, expected.TotalFee)
+	}
+	if detail.BaseFeeLamports != expected.BaseFee {
+		t.Fatalf("detail base fee = %d, want %d", detail.BaseFeeLamports, expected.BaseFee)
+	}
+	if detail.PrioritizationFeeLamports != expected.PrioritizationFee {
+		t.Fatalf("detail priority fee = %d, want %d", detail.PrioritizationFeeLamports, expected.PrioritizationFee)
+	}
+	if detail.LeaderFeeLamports != expected.ValidatorFee {
+		t.Fatalf("detail leader fee = %d, want %d", detail.LeaderFeeLamports, expected.ValidatorFee)
+	}
+	if detail.BurnedFeeLamports != expected.BurnedFee {
+		t.Fatalf("detail burned fee = %d, want %d", detail.BurnedFeeLamports, expected.BurnedFee)
+	}
 }
 
 func blockchainTestProposalFromHead(t *testing.T, head blockchain.Head, state consensus.ChainState, slot uint64, height uint64, seed string) (consensus.BlockProposal, consensus.ChainState) {

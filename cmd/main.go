@@ -19,6 +19,7 @@ import (
 	"solana_golang/database"
 	"solana_golang/internal/bootstrapnode"
 	"solana_golang/internal/posnode"
+	"solana_golang/internal/rpcnode"
 	"solana_golang/p2p"
 	p2ppeerstore "solana_golang/p2p/peerstore"
 	"solana_golang/rpc"
@@ -57,6 +58,8 @@ func run() error {
 	case "runtime":
 	case "posnode", "pos", "validator":
 		return posnode.Run(configPath)
+	case "rpcnode", "rpc", "public_rpc", "rpc_gateway":
+		return rpcnode.Run(configPath)
 	case "bootstrapnode", "bootstrap", "bootnode":
 		return bootstrapnode.Run(configPath)
 	default:

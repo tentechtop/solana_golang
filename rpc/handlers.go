@@ -309,6 +309,9 @@ type PeerNetworkPeerResult struct {
 	PeerID                    string              `json:"peer_id"`
 	Status                    string              `json:"status"`
 	Role                      string              `json:"role"`
+	Roles                     []string            `json:"roles,omitempty"`
+	Capabilities              uint64              `json:"capabilities"`
+	CapabilityNames           []string            `json:"capability_names,omitempty"`
 	Validator                 bool                `json:"validator"`
 	Connected                 bool                `json:"connected"`
 	BestAddress               string              `json:"best_address,omitempty"`
@@ -386,6 +389,7 @@ func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
 	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetPeerNetwork, getPeerNetworkHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
 }
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {

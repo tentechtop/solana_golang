@@ -8,7 +8,11 @@ import (
 
 // estimateTransactionFeeDetails 估算交易手续费明细 + 入池排序和 RPC 展示必须基于节点可信费用。
 func estimateTransactionFeeDetails(transaction structure.Transaction) (structure.FeeDetails, error) {
-	feeDetails, err := structure.DefaultFeeCalculator().Calculate(len(transaction.Signatures), structure.DefaultComputeBudgetLimits())
+	limits, err := structure.EstimateTransactionComputeBudget(transaction, structure.DefaultBuiltinProgramIDs)
+	if err != nil {
+		return structure.FeeDetails{}, fmt.Errorf("posnode: estimate transaction budget: %w", err)
+	}
+	feeDetails, err := structure.DefaultFeeCalculator().Calculate(len(transaction.Signatures), limits)
 	if err != nil {
 		return structure.FeeDetails{}, fmt.Errorf("posnode: estimate transaction fee: %w", err)
 	}

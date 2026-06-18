@@ -93,17 +93,108 @@ func TestFeeCalculatorSplitsBaseAndPriorityFees(t *testing.T) {
 		t.Fatalf("Calculate() error = %v", err)
 	}
 
-	if feeDetails.BaseFee != 10000 {
-		t.Fatalf("BaseFee = %d, want 10000", feeDetails.BaseFee)
+	if feeDetails.SignatureFee != 10000 {
+		t.Fatalf("SignatureFee = %d, want 10000", feeDetails.SignatureFee)
+	}
+	if feeDetails.ComputeFee != 140 {
+		t.Fatalf("ComputeFee = %d, want 140", feeDetails.ComputeFee)
+	}
+	if feeDetails.BaseFee != 10140 {
+		t.Fatalf("BaseFee = %d, want 10140", feeDetails.BaseFee)
 	}
 	if feeDetails.PrioritizationFee != 2 {
 		t.Fatalf("PrioritizationFee = %d, want 2", feeDetails.PrioritizationFee)
 	}
-	if feeDetails.TotalFee != 10002 {
-		t.Fatalf("TotalFee = %d, want 10002", feeDetails.TotalFee)
+	if feeDetails.TotalFee != 10142 {
+		t.Fatalf("TotalFee = %d, want 10142", feeDetails.TotalFee)
 	}
-	if feeDetails.BurnedFee != 0 || feeDetails.ValidatorFee != 10002 {
-		t.Fatalf("fee split burned=%d validator=%d, want 0 and 10002", feeDetails.BurnedFee, feeDetails.ValidatorFee)
+	if feeDetails.BurnedFee != 5070 || feeDetails.ValidatorFee != 5072 {
+		t.Fatalf("fee split burned=%d validator=%d, want 5070 and 5072", feeDetails.BurnedFee, feeDetails.ValidatorFee)
+	}
+}
+
+func TestFeeBudgetEstimatesSystemTransferAndLoaderDeploy(t *testing.T) {
+	transfer := Transaction{
+		Signatures: []Signature{newTestSignature(1)},
+		Accounts: []AccountMeta{
+			{PublicKey: newTestPublicKey(1), IsSigner: true, IsWritable: true},
+			{PublicKey: newTestPublicKey(2), IsSigner: false, IsWritable: true},
+			{PublicKey: DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
+		},
+		Instructions: []CompiledInstruction{{
+			ProgramIDIndex: 2,
+			AccountIndexes: []uint8{0, 1},
+			Data:           []byte{1},
+		}},
+		RecentBlockhash: newTestHash(3),
+	}
+	transferBudget, err := EstimateTransactionComputeBudget(transfer, DefaultBuiltinProgramIDs)
+	if err != nil {
+		t.Fatalf("EstimateTransactionComputeBudget(transfer) error = %v", err)
+	}
+	if transferBudget.MaxComputeUnits != DefaultTransferComputeUnits || transferBudget.StorageWriteBytesLimit != 0 {
+		t.Fatalf("transfer budget = %+v, want %d compute and zero storage", transferBudget, DefaultTransferComputeUnits)
+	}
+	transferFee, err := DefaultFeeCalculator().Calculate(len(transfer.Signatures), transferBudget)
+	if err != nil {
+		t.Fatalf("Calculate(transfer) error = %v", err)
+	}
+	if transferFee.TotalFee != LamportsPerSignature {
+		t.Fatalf("transfer fee = %d, want %d", transferFee.TotalFee, LamportsPerSignature)
+	}
+
+	loaderData := []byte{byte(loaderInstructionDeploy), 0, 0, 0, 0, 0, 0, 0, 11, 12, 13, 14}
+	loaderDeploy := Transaction{
+		Signatures: []Signature{newTestSignature(4), newTestSignature(5)},
+		Accounts: []AccountMeta{
+			{PublicKey: newTestPublicKey(4), IsSigner: true, IsWritable: true},
+			{PublicKey: newTestPublicKey(5), IsSigner: true, IsWritable: true},
+			{PublicKey: DefaultBuiltinProgramIDs.BPFLoader, IsSigner: false, IsWritable: false},
+		},
+		Instructions: []CompiledInstruction{{
+			ProgramIDIndex: 2,
+			AccountIndexes: []uint8{1},
+			Data:           loaderData,
+		}},
+		RecentBlockhash: newTestHash(6),
+	}
+	loaderBudget, err := EstimateTransactionComputeBudget(loaderDeploy, DefaultBuiltinProgramIDs)
+	if err != nil {
+		t.Fatalf("EstimateTransactionComputeBudget(loader) error = %v", err)
+	}
+	if loaderBudget.MaxComputeUnits != 200040 || loaderBudget.StorageWriteBytesLimit != 4 {
+		t.Fatalf("loader budget = %+v, want 200040 compute and 4 storage bytes", loaderBudget)
+	}
+	loaderFee, err := DefaultFeeCalculator().Calculate(len(loaderDeploy.Signatures), loaderBudget)
+	if err != nil {
+		t.Fatalf("Calculate(loader) error = %v", err)
+	}
+	if loaderFee.ComputeFee != 20 || loaderFee.StorageWriteFee != 40 || loaderFee.TotalFee != 10060 {
+		t.Fatalf("loader fee = %+v, want compute 20 storage 40 total 10060", loaderFee)
+	}
+}
+
+func TestDefaultMonetaryPolicyCalculatesGenesisInflation(t *testing.T) {
+	policy := DefaultMonetaryPolicy()
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if policy.GenesisSupplyLamports != 100000000000000000 {
+		t.Fatalf("genesis supply = %d, want 100000000000000000", policy.GenesisSupplyLamports)
+	}
+	inflationBps, err := policy.InflationBpsForEpoch(0)
+	if err != nil {
+		t.Fatalf("InflationBpsForEpoch() error = %v", err)
+	}
+	if inflationBps != DefaultInitialInflationBps {
+		t.Fatalf("inflation bps = %d, want %d", inflationBps, DefaultInitialInflationBps)
+	}
+	epochReward, err := policy.InflationLamportsForEpoch(policy.GenesisSupplyLamports, 0, policy.SlotsPerEpoch)
+	if err != nil {
+		t.Fatalf("InflationLamportsForEpoch() error = %v", err)
+	}
+	if epochReward != 27397260273972 {
+		t.Fatalf("epoch reward = %d, want 27397260273972", epochReward)
 	}
 }
 

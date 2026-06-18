@@ -188,6 +188,36 @@ func (s *Server) handleBatch(ctx context.Context, body []byte) []Response {
 }
 
 // readRequestBody 读取请求体 + 使用 MaxBytesReader 在入口限制内存占用。
+// HandleRawRequest 处理内存中的 JSON-RPC 请求体 + 让 P2P RPC 转发复用 HTTP 服务的严格解析和批量上限。
+func HandleRawRequest(ctx context.Context, router *Router, body []byte, maxBatchSize int) ([]byte, error) {
+	server := &Server{
+		router:       router,
+		maxBatchSize: maxBatchSize,
+	}
+	if server.router == nil {
+		server.router = NewDefaultRouter(nil)
+	}
+	if server.maxBatchSize <= 0 {
+		server.maxBatchSize = defaultMaxBatchSize
+	}
+	response, batch := server.handleBody(ctx, body)
+	if response == nil {
+		return []byte("null"), nil
+	}
+	if batch {
+		encoded, err := json.Marshal(response.([]Response))
+		if err != nil {
+			return nil, fmt.Errorf("rpc: marshal batch response: %w", err)
+		}
+		return encoded, nil
+	}
+	encoded, err := json.Marshal(response.(Response))
+	if err != nil {
+		return nil, fmt.Errorf("rpc: marshal response: %w", err)
+	}
+	return encoded, nil
+}
+
 func readRequestBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64) ([]byte, error) {
 	reader := http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	defer reader.Close()

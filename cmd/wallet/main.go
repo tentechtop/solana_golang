@@ -88,6 +88,8 @@ func run(args []string) error {
 		return runBalance(args[1:])
 	case "transfer":
 		return runTransfer(args[1:])
+	case "deploy-contract":
+		return runDeployContract(args[1:])
 	case "validator-register":
 		return runValidatorRegister(args[1:])
 	case "stake":
@@ -203,6 +205,53 @@ func runTransfer(args []string) error {
 		return fmt.Errorf("build transfer transaction: %w", err)
 	}
 	return submitAndPrint(*rpcURL, transaction)
+}
+
+func runDeployContract(args []string) error {
+	flags := flag.NewFlagSet("deploy-contract", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "payer ed25519 keystore path")
+	programKeyPath := flags.String("program-key", "", "program ed25519 keystore path")
+	bytecodePath := flags.String("bytecode", "", "compiled .svmbin bytecode path")
+	depositLamports := flags.Uint64("deposit-lamports", 0, "extra deployment deposit lamports")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load payer key: %w", err)
+	}
+	program, err := loadEd25519KeyPair(*programKeyPath)
+	if err != nil {
+		return fmt.Errorf("load program key: %w", err)
+	}
+	programData, err := readBytecodeFile(*bytecodePath)
+	if err != nil {
+		return err
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	transaction, err := blockchain.NewDeployContractTransaction(payer, program, programData, *depositLamports, blockhash)
+	if err != nil {
+		return fmt.Errorf("build deploy contract transaction: %w", err)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	result := map[string]string{
+		"signature": signature,
+		"program":   program.PublicKey.String(),
+		"bytecode":  filepath.Clean(strings.TrimSpace(*bytecodePath)),
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode deploy result: %w", err)
+	}
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func runValidatorRegister(args []string) error {
@@ -513,6 +562,24 @@ func randomBytes(size int) ([]byte, error) {
 	return value, nil
 }
 
+func readBytecodeFile(path string) ([]byte, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return nil, fmt.Errorf("bytecode path is empty")
+	}
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("read bytecode: %w", err)
+	}
+	if len(data) < 10 {
+		return nil, fmt.Errorf("bytecode is too short")
+	}
+	if string(data[:4]) != "SVM1" {
+		return nil, fmt.Errorf("bytecode magic is invalid")
+	}
+	return data, nil
+}
+
 func latestBlockhash(rpcURL string) (structure.Hash, error) {
 	var result latestBlockhashResult
 	if err := rpcCall(rpcURL, "getLatestBlockhash", []any{}, &result); err != nil {
@@ -526,17 +593,25 @@ func latestBlockhash(rpcURL string) (structure.Hash, error) {
 }
 
 func submitAndPrint(rpcURL string, transaction structure.Transaction) error {
+	signature, err := submitTransaction(rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	fmt.Println(signature)
+	return nil
+}
+
+func submitTransaction(rpcURL string, transaction structure.Transaction) (string, error) {
 	encoded, err := transaction.MarshalBinary()
 	if err != nil {
-		return fmt.Errorf("marshal transaction: %w", err)
+		return "", fmt.Errorf("marshal transaction: %w", err)
 	}
 	var result transactionSubmitResult
 	payload := base64.StdEncoding.EncodeToString(encoded)
 	if err := rpcCall(rpcURL, "sendTransaction", []any{payload}, &result); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Println(result.Signature)
-	return nil
+	return result.Signature, nil
 }
 
 func rpcCall(rpcURL string, method string, params []any, result any) error {
@@ -589,6 +664,7 @@ func printUsage() {
 		"  wallet address -key keys/staker.json",
 		"  wallet balance -rpc http://127.0.0.1:8899 -address ADDRESS",
 		"  wallet transfer -rpc http://127.0.0.1:8899 -key keys/staker.json -to ADDRESS -lamports 1000",
+		"  wallet deploy-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program-key keys/program.json -bytecode dist/pop.svmbin -deposit-lamports 0",
 		"  wallet validator-register -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -consensus-address ADDRESS -bls-public-key KEY -peer-id PEER -lamports 10000000",
 		"  wallet stake -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -lamports 10000000",
 		"  wallet delegate -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -lamports 10000000",

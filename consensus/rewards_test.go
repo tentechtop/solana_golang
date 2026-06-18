@@ -70,7 +70,7 @@ func TestApplyBlockRewardsSettlesVoteCreditsAtEpochBoundary(t *testing.T) {
 	}
 	stakerAfter := mustFindAccount(t, settledState, validatorState.StakerAccount).Account.Lamports
 	validatorAfter := mustFindAccount(t, settledState, validators[voterIndex].AccountAddress).Account.Lamports
-	if stakerAfter != stakerBefore+900 || validatorAfter != validatorBefore+100 {
+	if stakerAfter != stakerBefore+183 || validatorAfter != validatorBefore+20 {
 		t.Fatalf("reward split staker=%d validator=%d", stakerAfter-stakerBefore, validatorAfter-validatorBefore)
 	}
 	if len(rewards) == 0 {
@@ -110,18 +110,18 @@ func TestApplyBlockRewardsDistributesDelegationPayouts(t *testing.T) {
 	stakerAfter := mustFindAccount(t, nextState, validatorState.StakerAccount).Account.Lamports
 	delegatorAfter := mustFindAccount(t, nextState, delegator.PublicKey).Account.Lamports
 	validatorAfter := mustFindAccount(t, nextState, validator.AccountAddress).Account.Lamports
-	if validatorAfter != validatorBefore+500 {
-		t.Fatalf("commission = %d, want 500", validatorAfter-validatorBefore)
+	if validatorAfter != validatorBefore+8 {
+		t.Fatalf("commission = %d, want 8", validatorAfter-validatorBefore)
 	}
-	if stakerAfter != stakerBefore+2250 {
-		t.Fatalf("staker payout = %d, want 2250", stakerAfter-stakerBefore)
+	if stakerAfter != stakerBefore+37 {
+		t.Fatalf("staker payout = %d, want 37", stakerAfter-stakerBefore)
 	}
-	if delegatorAfter != delegatorBefore+2250 {
-		t.Fatalf("delegator payout = %d, want 2250", delegatorAfter-delegatorBefore)
+	if delegatorAfter != delegatorBefore+37 {
+		t.Fatalf("delegator payout = %d, want 37", delegatorAfter-delegatorBefore)
 	}
 	settledState := mustStakeState(t, nextState, validator.AccountAddress)
-	if settledState.Delegations[0].RewardLamports != 2250 {
-		t.Fatalf("delegation reward = %d, want 2250", settledState.Delegations[0].RewardLamports)
+	if settledState.Delegations[0].RewardLamports != 37 {
+		t.Fatalf("delegation reward = %d, want 37", settledState.Delegations[0].RewardLamports)
 	}
 	if !containsRewardType(rewards, RewardTypeCommission) || !containsRewardType(rewards, RewardTypeVotePayout) {
 		t.Fatalf("rewards = %+v, want commission and vote payout", rewards)
@@ -269,12 +269,31 @@ func TestApplyBlockRewardsSettlesVoteCreditsWithMissedProposalPenalty(t *testing
 		t.Fatalf("settled validator = %+v", settledValidator)
 	}
 	stakerAfter := mustFindAccount(t, settledState, validatorState.StakerAccount).Account.Lamports
-	if stakerAfter != stakerBefore+3*DefaultVoteRewardLamportsPerCredit {
-		t.Fatalf("staker reward = %d, want %d", stakerAfter-stakerBefore, 3*DefaultVoteRewardLamportsPerCredit)
+	if stakerAfter != stakerBefore+203 {
+		t.Fatalf("staker reward = %d, want 203", stakerAfter-stakerBefore)
 	}
 	payout := firstRewardType(rewards, RewardTypeVotePayout)
 	if payout.Credits != 3 {
 		t.Fatalf("payout credits = %d, want 3", payout.Credits)
+	}
+}
+
+func TestApplyBlockRewardsRejectsInvalidEpochRewardSlotRange(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{1}, []uint16{0})
+	validatorState := mustStakeState(t, state, validators[0].AccountAddress)
+	validatorState.VoteCredits = 1
+	state = replaceStakeState(t, state, validators[0].AccountAddress, validatorState)
+	snapshot.EndSlot = snapshot.StartSlot - 1
+
+	_, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          65,
+		Height:        65,
+		EpochID:       1,
+		EpochSnapshot: snapshot,
+		Leader:        validators[0],
+	})
+	if err == nil {
+		t.Fatal("ApplyBlockRewards() error = nil, want invalid epoch slot range")
 	}
 }
 

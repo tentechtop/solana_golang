@@ -50,14 +50,16 @@ type ChainState struct {
 
 // BlockProducer 生产区块 + 只依赖 runtime 执行接口和本地账户快照。
 type BlockProducer struct {
-	ChainID  string
-	Executor runtime.TransactionExecutor
+	ChainID                  string
+	Executor                 runtime.TransactionExecutor
+	ParallelExecutionWorkers int
 }
 
 // ProposalVerifier 验证区块 + 验签、leader、交易执行和状态根必须全部通过。
 type ProposalVerifier struct {
-	ChainID  string
-	Executor runtime.TransactionExecutor
+	ChainID                  string
+	Executor                 runtime.TransactionExecutor
+	ParallelExecutionWorkers int
 }
 
 // ProduceBlock 生产区块 + 执行成功交易进入区块并更新状态根。
@@ -72,36 +74,29 @@ func (producer BlockProducer) ProduceBlock(
 		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: nil transaction executor")
 	}
 
-	nextState := request.ParentState.clone()
-	includedTransactions := make([]structure.Transaction, 0, len(request.Transactions))
-	receipts := make([]structure.Hash, 0, len(request.Transactions))
-	feeDetails := make([]structure.FeeDetails, 0, len(request.Transactions))
-	processedTransactionIDs := make(map[string]struct{}, len(request.Transactions))
-	for transactionIndex, transaction := range request.Transactions {
-		if len(includedTransactions) >= MaxProposalTransactions {
-			break
-		}
-		result, err := producer.executeTransaction(contextValue, request, transaction, nextState, processedTransactionIDs)
-		if err != nil {
-			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: execute transaction %d: %w", transactionIndex, err)
-		}
-		if result.Execution.Status != structure.TransactionStatusConfirmed {
-			continue
-		}
-		transactionID, err := transaction.TxIDString()
-		if err != nil {
-			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: transaction id %d: %w", transactionIndex, err)
-		}
-		processedTransactionIDs[transactionID] = struct{}{}
-		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
-		includedTransactions = append(includedTransactions, markTransactionConfirmed(transaction, result.Execution.FeeDetails.TotalFee))
-		feeDetails = append(feeDetails, result.Execution.FeeDetails)
-		receiptHash, err := hashReceipt(result.Execution)
-		if err != nil {
-			return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: hash receipt %d: %w", transactionIndex, err)
-		}
-		receipts = append(receipts, receiptHash)
+	executionOutput, err := executeTransactionsParallel(contextValue, parallelExecutionInput{
+		ChainID:          producer.ChainID,
+		Slot:             request.Slot,
+		Epoch:            request.EpochSnapshot.EpochID,
+		Transactions:     request.Transactions,
+		State:            request.ParentState,
+		BlockhashQueue:   request.BlockhashQueue,
+		ProcessedTxIDs:   make(map[string]struct{}, len(request.Transactions)),
+		Executor:         producer.Executor,
+		MaxIncludedCount: MaxProposalTransactions,
+		WorkerCount:      producer.ParallelExecutionWorkers,
+		RejectFailed:     false,
+		MarkIncluded:     true,
+		FailureLabel:     "produce",
+		ExecutionMode:    runtime.ExecutionModeFixedInstruction,
+	})
+	if err != nil {
+		return BlockProposal{}, ChainState{}, err
 	}
+	nextState := executionOutput.State
+	includedTransactions := executionOutput.Transactions
+	receipts := executionOutput.Receipts
+	feeDetails := executionOutput.FeeDetails
 	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
 	if err != nil {
 		return BlockProposal{}, ChainState{}, err
@@ -174,31 +169,28 @@ func (verifier ProposalVerifier) VerifyProposal(
 		return ChainState{}, fmt.Errorf("consensus: proposal leader mismatch")
 	}
 
-	nextState := request.ParentState.clone()
-	receipts := make([]structure.Hash, 0, len(request.Proposal.Transactions))
-	feeDetails := make([]structure.FeeDetails, 0, len(request.Proposal.Transactions))
-	processedTransactionIDs := make(map[string]struct{}, len(request.Proposal.Transactions))
-	for transactionIndex, transaction := range request.Proposal.Transactions {
-		result, err := verifier.executeVerifyTransaction(contextValue, request, transaction, nextState, processedTransactionIDs)
-		if err != nil {
-			return ChainState{}, fmt.Errorf("consensus: verify transaction %d: %w", transactionIndex, err)
-		}
-		if result.Execution.Status != structure.TransactionStatusConfirmed {
-			return ChainState{}, fmt.Errorf("consensus: proposal contains failed transaction %d", transactionIndex)
-		}
-		transactionID, err := transaction.TxIDString()
-		if err != nil {
-			return ChainState{}, fmt.Errorf("consensus: transaction id %d: %w", transactionIndex, err)
-		}
-		processedTransactionIDs[transactionID] = struct{}{}
-		nextState = nextState.applyWrites(result.Execution.WrittenAccounts)
-		feeDetails = append(feeDetails, result.Execution.FeeDetails)
-		receiptHash, err := hashReceipt(result.Execution)
-		if err != nil {
-			return ChainState{}, fmt.Errorf("consensus: hash receipt %d: %w", transactionIndex, err)
-		}
-		receipts = append(receipts, receiptHash)
+	executionOutput, err := executeTransactionsParallel(contextValue, parallelExecutionInput{
+		ChainID:          verifier.ChainID,
+		Slot:             request.Proposal.Header.Slot,
+		Epoch:            request.EpochSnapshot.EpochID,
+		Transactions:     request.Proposal.Transactions,
+		State:            request.ParentState,
+		BlockhashQueue:   request.BlockhashQueue,
+		ProcessedTxIDs:   make(map[string]struct{}, len(request.Proposal.Transactions)),
+		Executor:         verifier.Executor,
+		MaxIncludedCount: len(request.Proposal.Transactions),
+		WorkerCount:      verifier.ParallelExecutionWorkers,
+		RejectFailed:     true,
+		MarkIncluded:     false,
+		FailureLabel:     "proposal",
+		ExecutionMode:    runtime.ExecutionModeFixedInstruction,
+	})
+	if err != nil {
+		return ChainState{}, err
 	}
+	nextState := executionOutput.State
+	receipts := executionOutput.Receipts
+	feeDetails := executionOutput.FeeDetails
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
 		Slot:          request.Proposal.Header.Slot,
 		ParentSlot:    request.ParentSlot,

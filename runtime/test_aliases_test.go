@@ -144,3 +144,16 @@ func mustMinimumBalance(t *testing.T, dataLength int) uint64 {
 	}
 	return balance
 }
+
+func mustTransactionFeeDetails(t *testing.T, transaction Transaction) structure.FeeDetails {
+	t.Helper()
+	computeBudget, err := structure.EstimateTransactionComputeBudget(transaction, DefaultBuiltinProgramIDs)
+	if err != nil {
+		t.Fatalf("EstimateTransactionComputeBudget() error = %v", err)
+	}
+	feeDetails, err := DefaultFeeCalculator().Calculate(len(transaction.Signatures), computeBudget)
+	if err != nil {
+		t.Fatalf("FeeCalculator.Calculate() error = %v", err)
+	}
+	return feeDetails
+}

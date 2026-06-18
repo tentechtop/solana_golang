@@ -22,6 +22,7 @@ $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repositoryRoot = Split-Path -Parent $scriptDirectory
 $distDirectory = Join-Path $repositoryRoot "dist"
 $localBinaryPath = Join-Path $distDirectory "posnode-windows-amd64.exe"
+$linuxRpcNodeBinaryPath = Join-Path $distDirectory "rpcnode-linux-amd64"
 $localStdoutPath = Join-Path $repositoryRoot "deploy\posnode-local-win.stdout.log"
 $localStderrPath = Join-Path $repositoryRoot "deploy\posnode-local-win.stderr.log"
 
@@ -87,12 +88,28 @@ function Build-PosNodeBinary {
     Invoke-CheckedCommand "build posnode $TargetOS/$TargetArch" "go" @("build", "-o", $OutputPath, ".\cmd\posnode") $buildEnvironment
 }
 
+function Build-RpcNodeBinary {
+    param(
+        [string]$TargetOS,
+        [string]$TargetArch,
+        [string]$OutputPath
+    )
+
+    $buildEnvironment = @{
+        GOOS = $TargetOS
+        GOARCH = $TargetArch
+        CGO_ENABLED = "0"
+    }
+    Invoke-CheckedCommand "build rpcnode $TargetOS/$TargetArch" "go" @("build", "-o", $OutputPath, ".\cmd\rpcnode") $buildEnvironment
+}
+
 function Build-AllBinaries {
     if (-not (Test-Path -LiteralPath $distDirectory)) {
         New-Item -ItemType Directory -Path $distDirectory -Force | Out-Null
     }
 
     Build-PosNodeBinary "linux" "amd64" (Join-Path $distDirectory "posnode-linux-amd64")
+    Build-RpcNodeBinary "linux" "amd64" $linuxRpcNodeBinaryPath
     Build-PosNodeBinary "darwin" "arm64" (Join-Path $distDirectory "posnode-darwin-arm64")
     Build-PosNodeBinary "windows" "amd64" $localBinaryPath
 }
@@ -101,15 +118,14 @@ function Invoke-LinuxDeploy {
     Assert-RequiredEnvironment "POSNODE_DEPLOY_PASSWORD"
 
     $deployEnvironment = @{
-        POSNODE_DEPLOY_HOST = $LinuxHost
-        POSNODE_DEPLOY_USER = $LinuxUser
-        POSNODE_DEPLOY_CONFIG = "deploy/posnode-101.json"
-        POSNODE_REMOTE_CONFIG = "/opt/solana_golang/config/posnode-101.json"
-        POSNODE_REMOTE_DATA_PATH = "/opt/solana_golang/data/posnode-101"
-        POSNODE_SERVICE_NAME = "posnode.service"
-        POSNODE_DEPLOY_RESET_DATA = [string]([bool]$ResetData).ToString().ToLowerInvariant()
+        RPCNODE_DEPLOY_HOST = $LinuxHost
+        RPCNODE_DEPLOY_USER = $LinuxUser
+        RPCNODE_DEPLOY_CONFIG = "deploy/rpcnode-101.json"
+        RPCNODE_REMOTE_CONFIG = "/opt/solana_golang/config/rpcnode-101.json"
+        RPCNODE_SERVICE_NAME = "rpcnode.service"
+        RPCNODE_DEPLOY_PASSWORD = [Environment]::GetEnvironmentVariable("POSNODE_DEPLOY_PASSWORD", "Process")
     }
-    Invoke-CheckedCommand "deploy linux posnode $LinuxHost" "go" @("run", ".\tools\deploy_posnode_ssh") $deployEnvironment
+    Invoke-CheckedCommand "deploy linux rpcnode $LinuxHost" "go" @("run", ".\tools\deploy_rpcnode_ssh") $deployEnvironment
 }
 
 function Invoke-MacDeploy {
@@ -216,6 +232,23 @@ function Test-ClusterHealth {
 
     foreach ($node in $nodes) {
         $health = Invoke-JsonRpc $node.Name $node.Endpoint "getHealth"
+        if ($node.Name -eq "linux-101") {
+            $nodeStatus = Invoke-JsonRpc $node.Name $node.Endpoint "getNodeStatus"
+            if ($nodeStatus.validator_enabled -ne $false -or $nodeStatus.consensus_enabled -ne $false) {
+                throw "linux-101 must be rpc-only"
+            }
+            Write-Host ("health {0}: ok={1} height={2} slot={3} finalized={4} role={5} forwarding={6} connected_peers={7}" -f `
+                $node.Name, `
+                $health.ok, `
+                $health.head_height, `
+                $health.head_slot, `
+                $health.finalized_height, `
+                $nodeStatus.node_role, `
+                $nodeStatus.rpc_forwarding, `
+                $nodeStatus.connected_peer_count)
+            continue
+        }
+
         $consensusStatus = Invoke-JsonRpc $node.Name $node.Endpoint "getConsensusStatus"
         Write-Host ("health {0}: ok={1} height={2} slot={3} finalized={4} mempool={5} validators={6} layer={7}" -f `
             $node.Name, `

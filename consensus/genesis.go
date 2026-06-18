@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	// HardcodedGenesisTreasuryPublicKeyBase58 固定创世资金公钥 + 共识只能依赖公开身份避免私钥进入代码。
+	// HardcodedGenesisTreasuryPublicKeyBase58 固定创世资金公钥 + 共识只依赖公开身份避免私钥进入代码。
 	HardcodedGenesisTreasuryPublicKeyBase58 = "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9"
-	// DefaultGenesisSupplyLamports 固定创世总供应 + 本地 PoS 网络使用 10 亿代币按 9 位精度计数。
-	DefaultGenesisSupplyLamports = uint64(1_000_000_000_000_000_000)
+	// DefaultGenesisSupplyLamports 固定创世总供应 + 统一使用 1 亿枚代币和 9 位精度。
+	DefaultGenesisSupplyLamports = structure.DefaultGenesisSupplyLamports
 )
 
 // HardcodedGenesisTreasuryKeyPair 拒绝返回私钥 + 共识层不允许内置可签名密钥材料。

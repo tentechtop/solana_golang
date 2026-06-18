@@ -2,6 +2,7 @@ package assembler
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -27,16 +28,83 @@ type instructionPlan struct {
 
 // Assemble 编译 VM 汇编源码 + 输出可直接写入程序账户的字节码。
 func Assemble(source string) ([]byte, error) {
+	code, readOnlyData, err := AssembleCode(source)
+	if err != nil {
+		return nil, err
+	}
+	return vm.EncodeRegisterBytecode(code, readOnlyData)
+}
+
+// AssembleWithManifest 编译受治理的 VM 字节码 + 将合约能力声明写入部署产物。
+func AssembleWithManifest(source string, manifest vm.ProgramManifest) ([]byte, error) {
+	code, readOnlyData, err := AssembleCode(source)
+	if err != nil {
+		return nil, err
+	}
+	usedSyscalls, err := UsedSyscalls(source)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateManifestSyscalls(manifest, usedSyscalls); err != nil {
+		return nil, err
+	}
+	return vm.EncodeGovernedRegisterBytecode(code, readOnlyData, manifest)
+}
+
+// UsedSyscalls 提取源码使用的 syscall + 编译前校验 manifest 能力边界。
+func UsedSyscalls(source string) ([]vm.SyscallID, error) {
+	lines := normalizeLines(source)
+	plans, _, _, err := planInstructions(lines)
+	if err != nil {
+		return nil, err
+	}
+	syscallSet := make(map[vm.SyscallID]struct{})
+	for _, plan := range plans {
+		if plan.Opcode != "syscall" || len(plan.Operands) == 0 {
+			continue
+		}
+		syscallID, err := syscallIDByName(plan.Operands[0])
+		if err != nil {
+			return nil, lineError(plan.Line, "%s", err.Error())
+		}
+		syscallSet[syscallID] = struct{}{}
+	}
+	syscalls := make([]vm.SyscallID, 0, len(syscallSet))
+	for syscallID := range syscallSet {
+		syscalls = append(syscalls, syscallID)
+	}
+	sort.Slice(syscalls, func(leftIndex int, rightIndex int) bool {
+		return syscalls[leftIndex] < syscalls[rightIndex]
+	})
+	return syscalls, nil
+}
+
+// AssembleCode 编译 VM 汇编源码 + 分离代码和只读数据便于 manifest 打包。
+func AssembleCode(source string) ([]byte, []byte, error) {
 	lines := normalizeLines(source)
 	plans, labels, readOnlyData, err := planInstructions(lines)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	code, err := encodePlans(plans, labels, readOnlyData)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return vm.EncodeRegisterBytecode(code, flattenData(readOnlyData))
+	return code, flattenData(readOnlyData), nil
+}
+
+func validateManifestSyscalls(manifest vm.ProgramManifest, usedSyscalls []vm.SyscallID) error {
+	declared := make(map[vm.SyscallID]struct{}, len(manifest.RequiredSyscalls))
+	for _, syscallID := range manifest.RequiredSyscalls {
+		declared[syscallID] = struct{}{}
+	}
+	for _, syscallID := range usedSyscalls {
+		if _, exists := declared[syscallID]; exists {
+			continue
+		}
+		return fmt.Errorf("manifest missing required syscall %d", syscallID)
+	}
+	return nil
 }
 
 func normalizeLines(source string) []sourceLine {

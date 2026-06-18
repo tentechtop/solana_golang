@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	bpfloader "solana_golang/programs/bpfloader"
 	"solana_golang/programs/stake"
 	"solana_golang/structure"
 )
@@ -40,6 +41,67 @@ func NewTransferTransaction(source structure.SolanaKeyPair, destination structur
 	return transaction.Sign(map[structure.PublicKey][]byte{source.PublicKey: source.PrivateKey})
 }
 
+// NewDeployContractTransaction 构造 VM 合约部署交易 + 同一交易内创建程序账户并写入可执行字节码。
+func NewDeployContractTransaction(payer structure.SolanaKeyPair, program structure.SolanaKeyPair, programData []byte, depositLamports uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	if len(programData) == 0 {
+		return structure.Transaction{}, fmt.Errorf("blockchain: program data is empty")
+	}
+	minimumBalance, err := structure.MinimumBalanceForRentExemption(len(programData))
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: calculate program rent: %w", err)
+	}
+	programLamports, err := safeAddLamports(minimumBalance, depositLamports)
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: calculate program lamports: %w", err)
+	}
+	createInstruction, err := structure.NewCreateAccountInstruction(structure.CreateAccountParams{
+		Lamports: programLamports,
+		Space:    uint64(len(programData)),
+		Owner:    structure.DefaultBuiltinProgramIDs.BPFLoader,
+	})
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: build program account: %w", err)
+	}
+	createData, err := createInstruction.MarshalBinary()
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: marshal program account: %w", err)
+	}
+	deployInstruction, err := bpfloader.NewDeployInstruction(programData)
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: build deploy instruction: %w", err)
+	}
+	deployData, err := deployInstruction.MarshalBinary()
+	if err != nil {
+		return structure.Transaction{}, fmt.Errorf("blockchain: marshal deploy instruction: %w", err)
+	}
+	transaction := structure.Transaction{
+		Accounts: []structure.AccountMeta{
+			{PublicKey: payer.PublicKey, IsSigner: true, IsWritable: true},
+			{PublicKey: program.PublicKey, IsSigner: true, IsWritable: true},
+			{PublicKey: structure.DefaultBuiltinProgramIDs.System, IsSigner: false, IsWritable: false},
+			{PublicKey: structure.DefaultBuiltinProgramIDs.BPFLoader, IsSigner: false, IsWritable: false},
+		},
+		Instructions: []structure.CompiledInstruction{
+			{
+				ProgramIDIndex: 2,
+				AccountIndexes: []uint8{0, 1},
+				Data:           createData,
+			},
+			{
+				ProgramIDIndex: 3,
+				AccountIndexes: []uint8{1},
+				Data:           deployData,
+			},
+		},
+		RecentBlockhash: recentBlockhash,
+		SubmitTime:      time.Now().UnixMilli(),
+	}
+	return transaction.Sign(map[structure.PublicKey][]byte{
+		payer.PublicKey:   payer.PrivateKey,
+		program.PublicKey: program.PrivateKey,
+	})
+}
+
 // NewRegisterValidatorTransaction 构造验证者注册交易 + 新节点必须链上注册并质押后才可选 leader。
 func NewRegisterValidatorTransaction(staker structure.SolanaKeyPair, validatorAccount structure.PublicKey, consensusPublicKey structure.PublicKey, p2pPeerID string, amount uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
 	return NewRegisterValidatorTransactionWithBLS(staker, validatorAccount, consensusPublicKey, nil, p2pPeerID, amount, recentBlockhash)
@@ -70,6 +132,13 @@ func NewRegisterValidatorTransactionWithBLS(staker structure.SolanaKeyPair, vali
 		SubmitTime:      time.Now().UnixMilli(),
 	}
 	return transaction.Sign(map[structure.PublicKey][]byte{staker.PublicKey: staker.PrivateKey})
+}
+
+func safeAddLamports(left uint64, right uint64) (uint64, error) {
+	if ^uint64(0)-left < right {
+		return 0, fmt.Errorf("lamports overflow")
+	}
+	return left + right, nil
 }
 
 // NewStakeTransaction 构造追加质押交易 + pending stake 通过 stake program 延迟到后续 epoch 生效。

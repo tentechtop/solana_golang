@@ -15,4 +15,6 @@ const (
 	ProtocolPoSBlockLocatorV1 ProtocolID = 49
 	// ProtocolPoSCommonAncestorV1 定义共同祖先查询协议 + proposal 和 block sync 统一分支起点。
 	ProtocolPoSCommonAncestorV1 ProtocolID = 50
+	// ProtocolPoSRPCForwardV1 定义 RPC 转发协议 + 公网入口节点通过已连接验证者无状态转发钱包请求。
+	ProtocolPoSRPCForwardV1 ProtocolID = 51
 )

@@ -45,8 +45,9 @@ func TestTransactionSimulatorDepositsTransparentToPrivate(t *testing.T) {
 
 	sourceWritten := findWrittenAccount(t, result.WrittenAccounts, sourceKey)
 	stateWritten := findWrittenAccount(t, result.WrittenAccounts, privacyStateKey)
-	if sourceWritten.Lamports != sourceLamports-LamportsPerSignature-amount {
-		t.Fatalf("source lamports = %d, want %d", sourceWritten.Lamports, sourceLamports-LamportsPerSignature-amount)
+	feeLamports := mustTransactionFeeDetails(t, transaction).TotalFee
+	if sourceWritten.Lamports != sourceLamports-feeLamports-amount {
+		t.Fatalf("source lamports = %d, want %d", sourceWritten.Lamports, sourceLamports-feeLamports-amount)
 	}
 	if stateWritten.Lamports != stateLamports+amount {
 		t.Fatalf("state lamports = %d, want %d", stateWritten.Lamports, stateLamports+amount)
@@ -205,8 +206,9 @@ func TestTransactionSimulatorSameAccountSendsTransparentAndPrivateTransactions(t
 		t.Fatalf("private status = %d, want confirmed: %v", privateResult.Status, privateResult.Error)
 	}
 	sourceAfterPrivate := findWrittenAccount(t, privateResult.WrittenAccounts, sourceKey).Lamports
-	if sourceAfterPrivate != sourceAfterTransparent-LamportsPerSignature-privateAmount {
-		t.Fatalf("source final lamports = %d, want %d", sourceAfterPrivate, sourceAfterTransparent-LamportsPerSignature-privateAmount)
+	privateFeeLamports := mustTransactionFeeDetails(t, privateTransaction).TotalFee
+	if sourceAfterPrivate != sourceAfterTransparent-privateFeeLamports-privateAmount {
+		t.Fatalf("source final lamports = %d, want %d", sourceAfterPrivate, sourceAfterTransparent-privateFeeLamports-privateAmount)
 	}
 }
 
@@ -253,8 +255,9 @@ func TestTransactionSimulatorWithdrawsPrivateToTransparent(t *testing.T) {
 
 	destinationWritten := findWrittenAccount(t, result.WrittenAccounts, destinationKey)
 	stateWritten := findWrittenAccount(t, result.WrittenAccounts, privacyStateKey)
-	if destinationWritten.Lamports != destinationLamports-LamportsPerSignature+amount {
-		t.Fatalf("destination lamports = %d, want %d", destinationWritten.Lamports, destinationLamports-LamportsPerSignature+amount)
+	feeLamports := mustTransactionFeeDetails(t, transaction).TotalFee
+	if destinationWritten.Lamports != destinationLamports-feeLamports+amount {
+		t.Fatalf("destination lamports = %d, want %d", destinationWritten.Lamports, destinationLamports-feeLamports+amount)
 	}
 	state, err := UnmarshalPrivacyStateBinary(stateWritten.Data)
 	if err != nil {

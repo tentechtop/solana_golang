@@ -20,8 +20,12 @@ func TestAddTransactionAcceptsSignedUserTransaction(t *testing.T) {
 	if len(node.mempool) != 1 {
 		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
 	}
-	if node.mempool[0].Fee != structure.LamportsPerSignature {
-		t.Fatalf("mempool fee = %d, want %d", node.mempool[0].Fee, structure.LamportsPerSignature)
+	expectedFee, err := estimateTransactionFeeDetails(transaction)
+	if err != nil {
+		t.Fatalf("estimateTransactionFeeDetails() error = %v", err)
+	}
+	if node.mempool[0].Fee != expectedFee.TotalFee {
+		t.Fatalf("mempool fee = %d, want %d", node.mempool[0].Fee, expectedFee.TotalFee)
 	}
 	if err := node.addTransaction(transaction); err != nil {
 		t.Fatalf("duplicate addTransaction() error = %v", err)

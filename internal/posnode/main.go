@@ -673,6 +673,7 @@ func (node *posNode) registerProtocols() error {
 		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSBlockLocatorV1, Name: "/pos/sync/block-locator/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSCommonAncestorV1, Name: "/pos/sync/common-ancestor/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSRPCForwardV1, Name: "/pos/rpc/forward/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityNormal, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless},
 	}
 	resultHandlers := []p2p.ResultProtocolHandler{
 		node.handleBlockByHashRequest,
@@ -681,6 +682,7 @@ func (node *posNode) registerProtocols() error {
 		node.handleStatusRequest,
 		node.handleBlockLocatorRequest,
 		node.handleCommonAncestorRequest,
+		node.handleRPCForwardRequest,
 	}
 	for index, spec := range resultSpecs {
 		if err := node.host.RegisterResultHandler(spec, resultHandlers[index]); err != nil {

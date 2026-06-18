@@ -100,6 +100,13 @@ type statusResponseEnvelope struct {
 	GenesisHash       string              `json:"genesis_hash"`
 	NodeName          string              `json:"node_name"`
 	PeerID            string              `json:"peer_id"`
+	NodeMode          string              `json:"node_mode"`
+	NodeRole          string              `json:"node_role"`
+	NodeRoles         []string            `json:"node_roles,omitempty"`
+	NodeCapabilities  uint64              `json:"node_capabilities"`
+	CapabilityNames   []string            `json:"node_capability_names,omitempty"`
+	ValidatorEnabled  bool                `json:"validator_enabled"`
+	ConsensusEnabled  bool                `json:"consensus_enabled"`
 	HeadHeight        uint64              `json:"head_height"`
 	HeadSlot          uint64              `json:"head_slot"`
 	HeadHash          string              `json:"head_hash"`

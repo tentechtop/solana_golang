@@ -38,7 +38,14 @@ type TransactionSimulator struct{}
 
 // Simulate 执行交易模拟 + 校验签名、blockhash、费用和程序状态转换。
 func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput) (structure.TransactionExecutionResult, error) {
-	normalizedInput := normalizeSimulationInput(input)
+	normalizedInput, err := normalizeSimulationInput(input)
+	if err != nil {
+		result := structure.TransactionExecutionResult{
+			Status: structure.TransactionStatusFailed,
+			Error:  transactionFailure(structure.TransactionErrorCodeSanitizeFailure, err.Error()),
+		}
+		return result, result.Validate()
+	}
 	loadedTransaction, result, err := prepareSimulation(normalizedInput)
 	if err != nil {
 		return result, err
@@ -82,12 +89,9 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 	return result, result.Validate()
 }
 
-func normalizeSimulationInput(input TransactionSimulationInput) TransactionSimulationInput {
+func normalizeSimulationInput(input TransactionSimulationInput) (TransactionSimulationInput, error) {
 	if input.FeeCalculator == (structure.FeeCalculator{}) {
 		input.FeeCalculator = structure.DefaultFeeCalculator()
-	}
-	if input.ComputeBudget == (structure.ComputeBudgetLimits{}) {
-		input.ComputeBudget = structure.DefaultComputeBudgetLimits()
 	}
 	if input.RentConfig == (structure.RentConfig{}) {
 		input.RentConfig = structure.DefaultRentConfig
@@ -95,7 +99,14 @@ func normalizeSimulationInput(input TransactionSimulationInput) TransactionSimul
 	if input.BuiltinPrograms == (structure.BuiltinProgramIDs{}) {
 		input.BuiltinPrograms = structure.DefaultBuiltinProgramIDs
 	}
-	return input
+	if input.ComputeBudget == (structure.ComputeBudgetLimits{}) {
+		estimatedBudget, err := structure.EstimateTransactionComputeBudget(input.Transaction, input.BuiltinPrograms)
+		if err != nil {
+			return TransactionSimulationInput{}, fmt.Errorf("runtime: estimate transaction compute budget: %w", err)
+		}
+		input.ComputeBudget = estimatedBudget
+	}
+	return input, nil
 }
 
 func newSimulationProgramRegistry(input TransactionSimulationInput) (ProgramRegistry, error) {

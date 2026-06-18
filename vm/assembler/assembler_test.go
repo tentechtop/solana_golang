@@ -56,6 +56,51 @@ exit
 	}
 }
 
+func TestAssembleWithManifestBuildsGovernedRegisterBytecode(t *testing.T) {
+	source := `
+syscall asset_execute
+exit
+`
+	bytecode, err := AssembleWithManifest(source, vm.ProgramManifest{
+		ComputeUnitLimit: 100_000,
+		RequiredSyscalls: []vm.SyscallID{
+			vm.SyscallAssetExecute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AssembleWithManifest() error = %v", err)
+	}
+	manifest, ok, err := vm.DecodeProgramManifest(bytecode)
+	if err != nil {
+		t.Fatalf("DecodeProgramManifest() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("DecodeProgramManifest() ok = false, want true")
+	}
+	if manifest.ComputeUnitLimit != 100_000 {
+		t.Fatalf("ComputeUnitLimit = %d, want 100000", manifest.ComputeUnitLimit)
+	}
+	if len(manifest.RequiredSyscalls) != 1 || manifest.RequiredSyscalls[0] != vm.SyscallAssetExecute {
+		t.Fatalf("RequiredSyscalls = %+v, want asset_execute", manifest.RequiredSyscalls)
+	}
+}
+
+func TestAssembleWithManifestRejectsMissingSyscallDeclaration(t *testing.T) {
+	source := `
+syscall asset_execute
+exit
+`
+	_, err := AssembleWithManifest(source, vm.ProgramManifest{
+		ComputeUnitLimit: 100_000,
+		RequiredSyscalls: []vm.SyscallID{
+			vm.SyscallLog,
+		},
+	})
+	if err == nil {
+		t.Fatal("AssembleWithManifest() error = nil, want missing syscall error")
+	}
+}
+
 func testAddress(seed byte) vm.Address {
 	var address vm.Address
 	for index := range address {

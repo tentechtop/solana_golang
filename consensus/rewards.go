@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"fmt"
+	"math/big"
 	"sort"
 
 	"solana_golang/programs/stake"
@@ -43,6 +44,7 @@ const (
 type RewardConfig struct {
 	FinalityDepth                           uint64
 	VoteRewardLamportsPerCredit             uint64
+	MonetaryPolicy                          structure.MonetaryPolicy
 	MaxVoteRewardDelaySlots                 uint64
 	MissedVoteJailThreshold                 uint64
 	MissedVoteJailEpochs                    uint64
@@ -86,11 +88,16 @@ type stakeAccountEntry struct {
 	Index   int
 }
 
+type epochRewardContext struct {
+	PoolLamports uint64
+	TotalWeight  uint64
+}
+
 // DefaultRewardConfig 返回默认奖励策略 + 兼顾本地测试网可见收益和确定性惩罚。
 func DefaultRewardConfig() RewardConfig {
 	return RewardConfig{
 		FinalityDepth:                           DefaultRewardFinalityDepth,
-		VoteRewardLamportsPerCredit:             DefaultVoteRewardLamportsPerCredit,
+		MonetaryPolicy:                          structure.DefaultMonetaryPolicy(),
 		MaxVoteRewardDelaySlots:                 DefaultMaxVoteRewardDelaySlots,
 		MissedVoteJailThreshold:                 DefaultMissedVoteJailThreshold,
 		MissedVoteJailEpochs:                    DefaultMissedVoteJailEpochs,
@@ -191,6 +198,7 @@ func (input BlockRewardInput) normalize() BlockRewardInput {
 	if input.Config.MinActiveValidatorsAfterPerformanceJail == 0 {
 		input.Config.MinActiveValidatorsAfterPerformanceJail = DefaultMinActiveValidatorsAfterPerformanceJail
 	}
+	input.Config.MonetaryPolicy = input.Config.MonetaryPolicy.Normalize()
 	if input.Config.MaliciousSlashBasisPoints == 0 {
 		input.Config.MaliciousSlashBasisPoints = DefaultMaliciousSlashBasisPoints
 	}
@@ -218,6 +226,9 @@ func (input BlockRewardInput) validate() error {
 	}
 	if input.Config.MaliciousSlashBasisPoints > 10000 {
 		return fmt.Errorf("consensus: malicious slash bps exceeds 10000")
+	}
+	if err := input.Config.MonetaryPolicy.Validate(); err != nil {
+		return fmt.Errorf("consensus: reward monetary policy: %w", err)
 	}
 	return input.RentConfig.Validate()
 }
@@ -547,6 +558,10 @@ func applyEpochRewardSettlement(
 	if err != nil {
 		return err
 	}
+	rewardContext, err := buildEpochRewardContext(*state, accountIndexByAddress, input)
+	if err != nil {
+		return err
+	}
 	for _, entry := range sortedStakeAccountEntries(*state) {
 		stakeState, account, _, err := loadStakeStateByAddress(*state, accountIndexByAddress, entry.Address)
 		if err != nil {
@@ -563,7 +578,7 @@ func applyEpochRewardSettlement(
 			activeValidatorCount--
 			continue
 		}
-		if err := settleRewardedValidator(state, accountIndexByAddress, entry, account, stakeState, input, rewards); err != nil {
+		if err := settleRewardedValidator(state, accountIndexByAddress, entry, account, stakeState, input, rewardContext, rewards); err != nil {
 			return err
 		}
 	}
@@ -592,6 +607,82 @@ func countActivePerformanceValidators(state ChainState, accountIndexByAddress ma
 	return activeValidatorCount, nil
 }
 
+func buildEpochRewardContext(
+	state ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	input BlockRewardInput,
+) (epochRewardContext, error) {
+	totalWeight, err := totalEpochRewardWeight(state, accountIndexByAddress, input)
+	if err != nil {
+		return epochRewardContext{}, err
+	}
+	if totalWeight == 0 || input.Config.VoteRewardLamportsPerCredit != 0 {
+		return epochRewardContext{TotalWeight: totalWeight}, nil
+	}
+	currentSupply, err := totalStateLamports(state)
+	if err != nil {
+		return epochRewardContext{}, err
+	}
+	if input.EpochSnapshot.EndSlot < input.EpochSnapshot.StartSlot {
+		return epochRewardContext{}, fmt.Errorf("consensus: reward epoch snapshot has invalid slot range")
+	}
+	epochSlots, err := safeAddUint64Consensus(input.EpochSnapshot.EndSlot-input.EpochSnapshot.StartSlot, 1)
+	if err != nil {
+		return epochRewardContext{}, err
+	}
+	poolLamports, err := input.Config.MonetaryPolicy.InflationLamportsForEpoch(currentSupply, input.EpochID, epochSlots)
+	if err != nil {
+		return epochRewardContext{}, fmt.Errorf("consensus: calculate epoch inflation: %w", err)
+	}
+	return epochRewardContext{PoolLamports: poolLamports, TotalWeight: totalWeight}, nil
+}
+
+func totalEpochRewardWeight(
+	state ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	input BlockRewardInput,
+) (uint64, error) {
+	totalWeight := uint64(0)
+	for _, entry := range sortedStakeAccountEntries(state) {
+		stakeState, _, _, err := loadStakeStateByAddress(state, accountIndexByAddress, entry.Address)
+		if err != nil {
+			return 0, err
+		}
+		if stakeState.LastRewardEpoch >= input.EpochID || shouldJailForMissedPerformance(stakeState, input.Config) {
+			continue
+		}
+		credits := effectiveRewardCredits(stakeState)
+		if credits == 0 || stakeState.Status != stake.ValidatorStatusActive {
+			continue
+		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, input.EpochID)
+		if err != nil {
+			return 0, fmt.Errorf("consensus: reward weight effective stake: %w", err)
+		}
+		weight, err := safeMulUint64Consensus(effectiveStake, credits)
+		if err != nil {
+			return 0, err
+		}
+		totalWeight, err = safeAddUint64Consensus(totalWeight, weight)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return totalWeight, nil
+}
+
+func totalStateLamports(state ChainState) (uint64, error) {
+	total := uint64(0)
+	for _, account := range state.Accounts {
+		nextTotal, err := safeAddUint64Consensus(total, account.Account.Lamports)
+		if err != nil {
+			return 0, err
+		}
+		total = nextTotal
+	}
+	return total, nil
+}
+
 func settleRewardedValidator(
 	state *ChainState,
 	accountIndexByAddress map[structure.PublicKey]int,
@@ -599,13 +690,14 @@ func settleRewardedValidator(
 	account structure.Account,
 	stakeState stake.ValidatorState,
 	input BlockRewardInput,
+	rewardContext epochRewardContext,
 	rewards *[]BlockReward,
 ) error {
 	if err := stake.MatureStakeForEpoch(&stakeState, input.EpochID); err != nil {
 		return fmt.Errorf("consensus: mature rewarded stake: %w", err)
 	}
 	rewardCredits := effectiveRewardCredits(stakeState)
-	rewardLamports, err := calculateVoteReward(rewardCredits, input.Config)
+	rewardLamports, err := calculateVoteReward(stakeState, rewardCredits, input, rewardContext)
 	if err != nil {
 		return err
 	}
@@ -879,14 +971,58 @@ func sumValidatorFees(fees []structure.FeeDetails) (uint64, error) {
 	return total, nil
 }
 
-func calculateVoteReward(credits uint64, config RewardConfig) (uint64, error) {
-	if credits == 0 || config.VoteRewardLamportsPerCredit == 0 {
+func calculateVoteReward(
+	stakeState stake.ValidatorState,
+	credits uint64,
+	input BlockRewardInput,
+	rewardContext epochRewardContext,
+) (uint64, error) {
+	if credits == 0 {
 		return 0, nil
 	}
-	if credits > ^uint64(0)/config.VoteRewardLamportsPerCredit {
-		return 0, fmt.Errorf("consensus: vote reward overflow")
+	if input.Config.VoteRewardLamportsPerCredit != 0 {
+		reward, err := safeMulUint64Consensus(credits, input.Config.VoteRewardLamportsPerCredit)
+		if err != nil {
+			return 0, fmt.Errorf("consensus: vote reward overflow: %w", err)
+		}
+		return reward, nil
 	}
-	return credits * config.VoteRewardLamportsPerCredit, nil
+	if rewardContext.PoolLamports == 0 || rewardContext.TotalWeight == 0 {
+		return 0, nil
+	}
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, input.EpochID)
+	if err != nil {
+		return 0, fmt.Errorf("consensus: reward effective stake: %w", err)
+	}
+	weight, err := safeMulUint64Consensus(effectiveStake, credits)
+	if err != nil {
+		return 0, err
+	}
+	return prorateLamports(rewardContext.PoolLamports, weight, rewardContext.TotalWeight), nil
+}
+
+func prorateLamports(poolLamports uint64, weight uint64, totalWeight uint64) uint64 {
+	if poolLamports == 0 || weight == 0 || totalWeight == 0 {
+		return 0
+	}
+	pool := new(big.Int).SetUint64(poolLamports)
+	pool.Mul(pool, new(big.Int).SetUint64(weight))
+	pool.Div(pool, new(big.Int).SetUint64(totalWeight))
+	return pool.Uint64()
+}
+
+func safeAddUint64Consensus(left uint64, right uint64) (uint64, error) {
+	if ^uint64(0)-left < right {
+		return 0, fmt.Errorf("consensus: uint64 addition overflow")
+	}
+	return left + right, nil
+}
+
+func safeMulUint64Consensus(left uint64, right uint64) (uint64, error) {
+	if left != 0 && right > ^uint64(0)/left {
+		return 0, fmt.Errorf("consensus: uint64 multiplication overflow")
+	}
+	return left * right, nil
 }
 
 func calculateSlashLamports(state stake.ValidatorState, basisPoints uint16) (uint64, error) {

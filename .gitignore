@@ -1,8 +1,38 @@
+# 运行数据 + 节点账本属于本机状态，不能进入仓库。
 /data/
 /tmp/
 /logs/
-/dist/p2pstress-linux-amd64
+
+# 构建产物 + 压测二进制可重复生成，避免污染代码仓库。
+/dist/
+/coverage
+/coverage.*
 /p2pstress-linux-amd64
-/dist/
-/dist/
 /posnode.exe
+/*.exe
+/*.test
+/*.out
+/*.prof
+
+# 本地 IDE 配置 + 只服务个人开发环境。
+/.idea/
+/.vscode/
+
+# 部署和测试输出日志 + 保留配置和报告文档，只过滤运行痕迹。
+/deploy/**/*.log
+/deploy/**/*.out
+/deploy/**/*.err
+/deploy/**/*.pid
+/deploy/*.log
+/deploy/*.out
+/deploy/*.err
+/deploy/*.pid
+/report/**/*.log
+/report/**/*.pid
+/report/*.log
+/report/*.pid
+/report/**/*.json
+/report/*.json
+/report/**/*.txt
+/report/*.txt
+/report/

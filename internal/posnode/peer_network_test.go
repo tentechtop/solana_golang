@@ -15,6 +15,7 @@ func TestBuildPeerNetworkResultMarksConnectedValidator(t *testing.T) {
 		ID:                     validatorPeerID,
 		Status:                 p2p.PeerStatusConnected,
 		Role:                   p2p.PeerRoleValidator,
+		Capabilities:           p2p.PeerCapabilityValidator | p2p.PeerCapabilityRelay,
 		Validator:              true,
 		AdvertisedAddresses:    []utils.MultiAddress{validatorAddress},
 		VerifiedAddresses:      []utils.MultiAddress{verifiedAddress},
@@ -62,6 +63,9 @@ func TestBuildPeerNetworkResultMarksConnectedValidator(t *testing.T) {
 	}
 	if !connectedPeer.Connected {
 		t.Fatal("connected peer marked disconnected")
+	}
+	if connectedPeer.Capabilities&uint64(p2p.PeerCapabilityValidator) == 0 {
+		t.Fatalf("Capabilities = %d, want validator bit", connectedPeer.Capabilities)
 	}
 	if connectedPeer.BestAddress != verifiedAddress.String() {
 		t.Fatalf("BestAddress = %q, want %q", connectedPeer.BestAddress, verifiedAddress.String())
