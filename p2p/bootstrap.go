@@ -126,7 +126,7 @@ func (host *Host) addBootstrapPeer(address utils.MultiAddress) error {
 	if err != nil {
 		return err
 	}
-	peer.Capabilities |= PeerCapabilityDHT
+	peer.Capabilities |= PeerCapabilityDHT | PeerCapabilityRelay
 	peer.Role = PeerRoleBootnode
 	return host.AddPeer(peer)
 }

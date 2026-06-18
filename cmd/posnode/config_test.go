@@ -3,6 +3,9 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"solana_golang/p2p"
+	runtimepkg "solana_golang/runtime"
 )
 
 func TestNormalizeNodeConfigRejectsProductionInsecureP2P(t *testing.T) {
@@ -117,6 +120,83 @@ func TestNormalizeNodeConfigChainIdentityChangesWithGenesisStart(t *testing.T) {
 	}
 	if firstNormalized.DataPath == secondNormalized.DataPath {
 		t.Fatal("DataPath mismatch check failed, want different data paths for different chain identities")
+	}
+}
+
+func TestNormalizeNodeConfigParsesNodeAttributes(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "bootnode"
+	config.NodeCapabilities = []string{"relay", "dht", "archive"}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.ResolvedNodeRole != p2p.PeerRoleBootnode {
+		t.Fatalf("ResolvedNodeRole = %q, want bootnode", normalized.ResolvedNodeRole)
+	}
+	if normalized.ResolvedNodeCapabilities&p2p.PeerCapabilityArchive == 0 {
+		t.Fatal("ResolvedNodeCapabilities missing archive capability")
+	}
+	if normalized.ResolvedNodeCapabilities&p2p.PeerCapabilityDHT == 0 {
+		t.Fatal("ResolvedNodeCapabilities missing dht capability")
+	}
+}
+
+func TestNormalizeNodeConfigDefaultsPrivacyExecutionMode(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.PrivacyExecutionMode != runtimepkg.PrivacyExecutionModeFixed {
+		t.Fatalf("PrivacyExecutionMode = %q, want fixed", normalized.PrivacyExecutionMode)
+	}
+}
+
+func TestNormalizeNodeConfigRejectsInvalidPrivacyExecutionMode(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.PrivacyExecutionMode = "bad-mode"
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want invalid privacy execution mode rejection")
+	}
+}
+
+func TestNormalizeNodeConfigParsesBootstrapPeerAttributes(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.BootstrapPeers = []peerConfig{{
+		PeerID:       testPeerIDForNode(7),
+		IP:           "127.0.0.1",
+		Port:         5101,
+		Network:      "tcp",
+		Role:         "bootstrap",
+		Capabilities: []string{"relay", "dht"},
+	}}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	peer := normalized.BootstrapPeers[0]
+	if peer.ResolvedRole != p2p.PeerRoleBootnode {
+		t.Fatalf("ResolvedRole = %q, want bootnode", peer.ResolvedRole)
+	}
+	if peer.ResolvedCapabilities&p2p.PeerCapabilityDHT == 0 {
+		t.Fatal("ResolvedCapabilities missing dht capability")
+	}
+	if peer.ResolvedCapabilities&p2p.PeerCapabilityValidator != 0 {
+		t.Fatal("ResolvedCapabilities includes validator, want bootnode only")
+	}
+}
+
+func TestNormalizeNodeConfigRejectsInvalidNodeCapability(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.NodeCapabilities = []string{"archive", "bad-capability"}
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want invalid capability rejection")
 	}
 }
 

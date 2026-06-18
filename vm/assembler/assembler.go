@@ -411,6 +411,8 @@ func syscallIDByName(name string) (vm.SyscallID, error) {
 		return vm.SyscallGetAccountData, nil
 	case "set_account_data", "sol_set_account_data":
 		return vm.SyscallSetAccountData, nil
+	case "privacy_execute", "sol_privacy_execute":
+		return vm.SyscallPrivacyExecute, nil
 	default:
 		return 0, fmt.Errorf("unknown syscall %s", name)
 	}

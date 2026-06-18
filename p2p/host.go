@@ -22,6 +22,8 @@ const (
 // HostConfig 保存 Host 配置 + 支持注入节点身份、协议优先级和日志。
 type HostConfig struct {
 	PeerID               string
+	Role                 PeerRole
+	Capabilities         PeerCapability
 	SecureIdentity       SecureSessionIdentity
 	EnableSecureSession  bool
 	AllowInsecure        bool
@@ -45,6 +47,7 @@ type HostConfig struct {
 	ProtocolScheduler    ProtocolSchedulerConfig
 	AsyncWrite           AsyncWriteConfig
 	BroadcastConcurrency int
+	Relay                RelayConfig
 	Logger               *slog.Logger
 	Registry             *ProtocolRegistry
 	RoutingTable         *KADRoutingTable
@@ -57,6 +60,8 @@ type HostConfig struct {
 type Host struct {
 	mutex                sync.RWMutex
 	peerID               string
+	role                 PeerRole
+	capabilities         PeerCapability
 	secureSession        bool
 	secureIdentity       SecureSessionIdentity
 	preferredProtocols   []utils.MultiAddressProtocol
@@ -91,6 +96,7 @@ type Host struct {
 	resumptionTickets    map[string]SecureSessionResumptionTicket
 	registry             *ProtocolRegistry
 	requests             *requestManager
+	relay                *relayService
 	routingTable         *KADRoutingTable
 	peerStore            PeerStore
 	persistedPeerLimit   int
@@ -142,6 +148,8 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 
 	host := &Host{
 		peerID:               config.PeerID,
+		role:                 normalizeHostRole(config.Role),
+		capabilities:         normalizeHostCapabilities(config.Capabilities, config.Role),
 		secureSession:        secureSession,
 		secureIdentity:       secureIdentity,
 		preferredProtocols:   normalizedProtocolOrder(config.PreferredProtocols),
@@ -175,6 +183,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		resumptionTickets:    make(map[string]SecureSessionResumptionTicket),
 		registry:             normalizeRegistry(config.Registry),
 		requests:             newRequestManager(),
+		relay:                newRelayService(config.Relay),
 		routingTable:         routingTable,
 		peerStore:            normalizePeerStore(config.PeerStore),
 		persistedPeerLimit:   normalizePeerStoreLimit(config.PersistedPeerLimit),

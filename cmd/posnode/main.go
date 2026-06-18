@@ -21,10 +21,12 @@ import (
 	"solana_golang/programs/stake"
 	"solana_golang/programs/system"
 	tokenprogram "solana_golang/programs/token"
+	vmprogram "solana_golang/programs/vm"
 	"solana_golang/rpc"
 	"solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
+	svm "solana_golang/vm"
 )
 
 const (
@@ -135,7 +137,7 @@ func run(configPath string) error {
 }
 
 func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
-	executor, err := newRuntimeExecutor(logger)
+	executor, err := newRuntimeExecutorWithPrivacyMode(config.PrivacyExecutionMode, logger)
 	if err != nil {
 		return nil, fmt.Errorf("posnode: create executor: %w", err)
 	}
@@ -198,6 +200,8 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.String("chain_identity_hash", node.config.ChainIdentityHash),
 		slog.String("genesis_hash", node.config.GenesisHash),
 		slog.String("peer_id", node.peerKeyPair.peerID),
+		slog.String("node_role", string(node.config.ResolvedNodeRole)),
+		slog.Uint64("node_capabilities", uint64(node.config.ResolvedNodeCapabilities)),
 		slog.String("staker", node.stakerKeyPair.PublicKey.String()),
 		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
 		slog.String("consensus", node.consensusKeyPair.PublicKey.String()),
@@ -205,6 +209,7 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.Int64("genesis_start_unix_millis", node.config.GenesisStartMs),
 		slog.Uint64("finality_depth", node.config.FinalityDepth),
 		slog.Bool("p2p_insecure_allowed", node.config.allowInsecureP2P()),
+		slog.String("privacy_execution_mode", string(node.config.PrivacyExecutionMode)),
 		slog.Bool("state_recovery_enabled", !node.config.DisableStateRecovery),
 		slog.String("data_root_path", node.config.DataRootPath),
 		slog.String("data_path", node.config.DataPath),
@@ -345,6 +350,8 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	allowInsecureP2P := node.config.allowInsecureP2P()
 	hostConfig := p2p.HostConfig{
 		PeerID:        node.peerKeyPair.peerID,
+		Role:          node.config.ResolvedNodeRole,
+		Capabilities:  node.config.ResolvedNodeCapabilities,
 		AllowInsecure: allowInsecureP2P,
 		Production:    node.config.Production,
 		Environment:   node.config.Environment,
@@ -386,8 +393,9 @@ func (node *posNode) startP2P(ctx context.Context) error {
 			_ = host.Close()
 			return fmt.Errorf("posnode: create peer: %w", err)
 		}
-		peer.Role = p2p.PeerRoleValidator
-		peer.Capabilities = p2p.PeerCapabilityValidator | p2p.PeerCapabilityRelay
+		peer.Role = peerConfig.ResolvedRole
+		peer.Capabilities = peerConfig.ResolvedCapabilities
+		peer.Validator = peer.Capabilities&p2p.PeerCapabilityValidator != 0
 		if err := host.AddPeer(peer); err != nil {
 			_ = host.Close()
 			return fmt.Errorf("posnode: add peer: %w", err)
@@ -440,9 +448,14 @@ type programRegistration struct {
 }
 
 func newRuntimeExecutor(logger *slog.Logger) (runtime.FixedExecutor, error) {
+	return newRuntimeExecutorWithPrivacyMode(runtime.PrivacyExecutionModeFixed, logger)
+}
+
+func newRuntimeExecutorWithPrivacyMode(privacyExecutionMode runtime.PrivacyExecutionMode, logger *slog.Logger) (runtime.FixedExecutor, error) {
 	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
 	executor.Logger = logger
-	if err := registerPrograms(&executor); err != nil {
+	executor.PrivacyExecutionMode = privacyExecutionMode
+	if err := registerProgramsWithPrivacyMode(&executor, privacyExecutionMode); err != nil {
 		return runtime.FixedExecutor{}, err
 	}
 	return executor, nil
@@ -450,6 +463,14 @@ func newRuntimeExecutor(logger *slog.Logger) (runtime.FixedExecutor, error) {
 
 // registerPrograms 注册链上程序处理器 + 对齐 p2p 协议注册模式降低新增程序改动面。
 func registerPrograms(executor *runtime.FixedExecutor) error {
+	return registerProgramsWithPrivacyMode(executor, runtime.PrivacyExecutionModeFixed)
+}
+
+func registerProgramsWithPrivacyMode(executor *runtime.FixedExecutor, privacyExecutionMode runtime.PrivacyExecutionMode) error {
+	privacyHandler, err := privacyProgramHandler(privacyExecutionMode)
+	if err != nil {
+		return err
+	}
 	registrations := []programRegistration{
 		{
 			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.System, Name: "system"},
@@ -465,7 +486,7 @@ func registerPrograms(executor *runtime.FixedExecutor) error {
 		},
 		{
 			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Privacy, Name: "privacy"},
-			handler: privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy).Execute,
+			handler: privacyHandler,
 		},
 	}
 	for _, registration := range registrations {
@@ -474,6 +495,21 @@ func registerPrograms(executor *runtime.FixedExecutor) error {
 		}
 	}
 	return nil
+}
+
+func privacyProgramHandler(privacyExecutionMode runtime.PrivacyExecutionMode) (runtime.ProgramHandler, error) {
+	normalizedMode, err := runtime.NormalizePrivacyExecutionMode(privacyExecutionMode)
+	if err != nil {
+		return nil, fmt.Errorf("posnode: privacy execution mode: %w", err)
+	}
+	switch normalizedMode {
+	case runtime.PrivacyExecutionModeFixed:
+		return privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy).Execute, nil
+	case runtime.PrivacyExecutionModeVMSyscall:
+		return vmprogram.NewPrivacyBridgeProgram(structure.DefaultBuiltinProgramIDs.Privacy, structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}).Execute, nil
+	default:
+		return nil, fmt.Errorf("posnode: unsupported privacy execution mode %s", normalizedMode)
+	}
 }
 
 func (node *posNode) registerProtocols() error {

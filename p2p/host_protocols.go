@@ -20,6 +20,32 @@ func (host *Host) registerDefaultProtocolHandlers() error {
 }
 
 func (host *Host) registerDefaultDiscoveryHandlers() error {
+	if _, ok := host.registry.Spec(ProtocolRelayMessageV1); !ok {
+		spec := ProtocolSpec{
+			ID:          ProtocolRelayMessageV1,
+			Name:        "/p2p/relay/1.0.0",
+			HasResponse: false,
+			Priority:    MessagePriorityHigh,
+			Class:       ProtocolClassControl,
+			Concurrency: ProtocolConcurrencyStateless,
+		}
+		if err := host.RegisterVoidHandler(spec, host.handleRelayMessage); err != nil {
+			return err
+		}
+	}
+	if _, ok := host.registry.Spec(ProtocolQUICHolePunchV1); !ok {
+		spec := ProtocolSpec{
+			ID:          ProtocolQUICHolePunchV1,
+			Name:        "/p2p/quic-hole-punch/1.0.0",
+			HasResponse: false,
+			Priority:    MessagePriorityHigh,
+			Class:       ProtocolClassControl,
+			Concurrency: ProtocolConcurrencyStateless,
+		}
+		if err := host.RegisterVoidHandler(spec, host.handleQUICHolePunchMessage); err != nil {
+			return err
+		}
+	}
 	if _, ok := host.registry.Spec(ProtocolIdentifyRequestV1); !ok {
 		spec := ProtocolSpec{
 			ID:          ProtocolIdentifyRequestV1,

@@ -46,6 +46,16 @@ exit
 	}
 }
 
+func TestAssemblePrivacyExecuteSyscall(t *testing.T) {
+	source := `
+syscall privacy_execute
+exit
+`
+	if _, err := Assemble(source); err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+}
+
 func testAddress(seed byte) vm.Address {
 	var address vm.Address
 	for index := range address {

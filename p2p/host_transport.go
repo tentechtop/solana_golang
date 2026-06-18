@@ -197,6 +197,11 @@ func (host *Host) dialPeerDirect(ctx context.Context, peerID string) (Connection
 		host.recordPeerConnectionSuccess(peerID)
 		return existingConnection, nil
 	}
+	if connection, err := host.dialPeerViaQUICHolePunch(ctx, peerID); err == nil && connection != nil {
+		return connection, nil
+	} else if err != nil {
+		dialErrors = append(dialErrors, err)
+	}
 	if len(dialErrors) == 0 {
 		return nil, fmt.Errorf("p2p: dial peer %s: no usable address", peerID)
 	}

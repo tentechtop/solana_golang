@@ -10,7 +10,7 @@ import (
 
 const (
 	MaxAccountDataSize                   = 10 * 1024 * 1024
-	MaxAccountDataIncreasePerInstruction = 10 * 1024
+	MaxAccountDataIncreasePerInstruction = 60 * 1024
 	RentAccountStorageOverheadBytes      = uint64(128)
 	RentLamportsPerByteYear              = uint64(3480)
 	RentExemptionThresholdYears          = uint64(2)

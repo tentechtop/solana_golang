@@ -9,14 +9,18 @@ import (
 )
 
 const (
+	PrivacyStateLegacyVersion      = uint16(1)
 	PrivacyStateVersion            = uint16(1)
+	PrivacyStateStorageVersion     = uint16(2)
 	MaxPrivacyNotesPerState        = 1024
-	MaxPrivacyInstructionBytes     = 4096
+	MaxPrivacyInstructionBytes     = 128 * 1024
 	MaxPrivacyEncryptedNoteBytes   = 512
 	MaxPrivacyAuditRecordsPerNote  = 8
 	MaxPrivacyAuditCiphertextBytes = 512
 	MaxPrivacyProofBytes           = zk.DefaultMaxProofBytes
 	privacySpendProofDomainV1      = "solana_golang.privacy.spend.v1"
+	privacyMerkleLeafDomainV1      = "solana_golang.privacy.merkle.leaf.v1"
+	privacyMerkleNodeDomainV1      = "solana_golang.privacy.merkle.node.v1"
 )
 
 type PrivacyInstructionType uint32
@@ -36,7 +40,7 @@ const (
 	PrivacyAuditScopeRegulatory
 )
 
-// PrivacyInstruction 描述隐私固定指令 + 预留 VM 版本和证明字段便于未来替换验证器。
+// PrivacyInstruction 閹诲繗鍫梾鎰潌閸ュ搫鐣鹃幐鍥︽姢 + 妫板嫮鏆€ VM 閻楀牊婀伴崪宀冪槈閺勫骸鐡у▓鍏哥┒娴滃孩婀弶銉︽禌閹广垽鐛欑拠浣告珤閵?
 type PrivacyInstruction struct {
 	Type           PrivacyInstructionType
 	VMVersion      uint16
@@ -47,16 +51,18 @@ type PrivacyInstruction struct {
 	AuthorizeAudit *PrivacyAuthorizeAuditParams
 }
 
-// PrivacyDepositParams 描述透明转隐私参数 + 用 commitment 和密文 note 表达隐私收款。
+// PrivacyDepositParams 閹诲繗鍫柅蹇旀鏉烆剟娈ｇ粔浣稿棘閺?+ 閻?commitment 閸滃苯鐦戦弬?note 鐞涖劏鎻梾鎰潌閺€鑸殿儥閵?
 type PrivacyDepositParams struct {
 	Amount         uint64
 	Commitment     Hash
 	SpendAuthority PublicKey
 	EncryptedNote  []byte
 	AuditRecords   []PrivacyAuditRecord
+	Confidential   *PrivacyConfidentialOutput
+	AmountProof    zk.BalanceProof
 }
 
-// PrivacyWithdrawParams 描述隐私转透明参数 + 可选找零 note 支持部分花费。
+// PrivacyWithdrawParams 閹诲繗鍫梾鎰潌鏉烆剟鈧繑妲戦崣鍌涙殶 + 閸欘垶鈧澹橀梿?note 閺€顖涘瘮闁劌鍨庨懞杈瀭閵?
 type PrivacyWithdrawParams struct {
 	Amount               uint64
 	SourceCommitment     Hash
@@ -67,9 +73,12 @@ type PrivacyWithdrawParams struct {
 	ChangeSpendAuthority PublicKey
 	ChangeEncryptedNote  []byte
 	ChangeAuditRecords   []PrivacyAuditRecord
+	SourceConfidential   []byte
+	ChangeConfidential   *PrivacyConfidentialOutput
+	BalanceProof         zk.BalanceProof
 }
 
-// PrivacyTransferParams 描述隐私转隐私参数 + 支持输出 note 和找零 note 原子创建。
+// PrivacyTransferParams 閹诲繗鍫梾鎰潌鏉烆剟娈ｇ粔浣稿棘閺?+ 閺€顖涘瘮鏉堟挸鍤?note 閸滃本澹橀梿?note 閸樼喎鐡欓崚娑樼紦閵?
 type PrivacyTransferParams struct {
 	Amount               uint64
 	SourceCommitment     Hash
@@ -83,9 +92,13 @@ type PrivacyTransferParams struct {
 	ChangeSpendAuthority PublicKey
 	ChangeEncryptedNote  []byte
 	ChangeAuditRecords   []PrivacyAuditRecord
+	SourceConfidential   []byte
+	OutputConfidential   *PrivacyConfidentialOutput
+	ChangeConfidential   *PrivacyConfidentialOutput
+	BalanceProof         zk.BalanceProof
 }
 
-// PrivacyAuthorizeAuditParams 描述审计授权参数 + 后续补充授权不需要改动隐私余额。
+// PrivacyAuthorizeAuditParams 閹诲繗鍫€孤ゎ吀閹哄牊娼堥崣鍌涙殶 + 閸氬海鐢荤悰銉ュ帠閹哄牊娼堟稉宥夋付鐟曚焦鏁奸崝銊╂缁変椒缍戞０婵勨偓?
 type PrivacyAuthorizeAuditParams struct {
 	Commitment      Hash
 	Auditor         PublicKey
@@ -94,7 +107,7 @@ type PrivacyAuthorizeAuditParams struct {
 	AuditCiphertext []byte
 }
 
-// PrivacyAuditRecord 描述授权审计记录 + 链上只保存授权范围和审计密文。
+// PrivacyAuditRecord 閹诲繗鍫幒鍫熸綀鐎孤ゎ吀鐠佹澘缍?+ 闁惧彞绗傞崣顏冪箽鐎涙ɑ宸块弶鍐瘱閸ユ潙鎷扮€孤ゎ吀鐎靛棙鏋冮妴?
 type PrivacyAuditRecord struct {
 	Auditor         PublicKey
 	Scope           PrivacyAuditScope
@@ -102,7 +115,16 @@ type PrivacyAuditRecord struct {
 	AuditCiphertext []byte
 }
 
-// PrivacyNoteRecord 描述隐私状态记录 + 当前模拟器保存固定指令执行需要的最小账本事实。
+// PrivacyConfidentialOutput 閹诲繗鍫崝鐘茬槕 Note 鏉堟挸鍤?+ 閻?Pedersen 閹佃儻顕崪宀冪槈閺勫孩娴涙禒锝夋懠娑撳﹥妲戦弬鍥櫨妫版縿鈧?
+type PrivacyConfidentialOutput struct {
+	Commitment       []byte
+	AmountPublicKey  []byte
+	AmountCiphertext zk.ElGamalCiphertext
+	AmountProof      zk.AmountCiphertextProof
+	RangeProof       zk.RangeProof
+}
+
+// PrivacyNoteRecord 閹诲繗鍫梾鎰潌閻樿埖鈧浇顔囪ぐ?+ 閺€顖涘瘮閺冄勬閺?Note 閸滃瞼鏁撴禍褏楠囬崝鐘茬槕 Note 閸忓崬鐡ㄩ妴?
 type PrivacyNoteRecord struct {
 	Commitment     Hash
 	SpendAuthority PublicKey
@@ -113,13 +135,17 @@ type PrivacyNoteRecord struct {
 	VMVersion      uint16
 	EncryptedNote  []byte
 	AuditRecords   []PrivacyAuditRecord
+	Confidential   *PrivacyConfidentialOutput
 }
 
-// PrivacyState 描述隐私程序状态 + 用 note 集合和 nullifier 集合支撑固定指令闭环。
+// PrivacyState 閹诲繗鍫梾鎰潌缁嬪绨悩鑸碘偓?+ 閸忣剙绱戝Ч鐘虹閸婂搫鎷?Merkle 閺嶇顔€閸忋劎缍夐弮鐘绘付鐎孤ゎ吀閸楀啿褰查弽绋款嚠娓氭稓绮伴妴?
 type PrivacyState struct {
-	Version         uint16
-	Notes           []PrivacyNoteRecord
-	SpentNullifiers []Hash
+	Version              uint16
+	Notes                []PrivacyNoteRecord
+	SpentNullifiers      []Hash
+	MerkleRoot           Hash
+	PrivacyPoolLamports  uint64
+	UnspentNoteLiability uint64
 }
 
 type privacyAuditRecordKey struct {
@@ -128,37 +154,46 @@ type privacyAuditRecordKey struct {
 	CiphertextHash Hash
 }
 
-// NewPrivacyDepositInstruction 创建透明转隐私指令 + 统一执行参数校验。
+// NewPrivacyDepositInstruction 閸掓稑缂撻柅蹇旀鏉烆剟娈ｇ粔浣瑰瘹娴?+ 缂佺喍绔撮幍褑顢戦崣鍌涙殶閺嶏繝鐛欓妴?
 func NewPrivacyDepositInstruction(vmVersion uint16, proof []byte, params PrivacyDepositParams) (PrivacyInstruction, error) {
 	clonedParams := params
 	clonedParams.EncryptedNote = utils.CloneBytes(params.EncryptedNote)
 	clonedParams.AuditRecords = clonePrivacyAuditRecords(params.AuditRecords)
+	clonedParams.Confidential = clonePrivacyConfidentialOutput(params.Confidential)
+	clonedParams.AmountProof = cloneBalanceProof(params.AmountProof)
 	instruction := PrivacyInstruction{Type: PrivacyInstructionDeposit, VMVersion: vmVersion, Proof: utils.CloneBytes(proof), Deposit: &clonedParams}
 	return instruction, instruction.Validate()
 }
 
-// NewPrivacyWithdrawInstruction 创建隐私转透明指令 + 统一执行参数校验。
+// NewPrivacyWithdrawInstruction 閸掓稑缂撻梾鎰潌鏉烆剟鈧繑妲戦幐鍥︽姢 + 缂佺喍绔撮幍褑顢戦崣鍌涙殶閺嶏繝鐛欓妴?
 func NewPrivacyWithdrawInstruction(vmVersion uint16, proof []byte, params PrivacyWithdrawParams) (PrivacyInstruction, error) {
 	clonedParams := params
 	clonedParams.AuditRecords = clonePrivacyAuditRecords(params.AuditRecords)
 	clonedParams.ChangeEncryptedNote = utils.CloneBytes(params.ChangeEncryptedNote)
 	clonedParams.ChangeAuditRecords = clonePrivacyAuditRecords(params.ChangeAuditRecords)
+	clonedParams.SourceConfidential = utils.CloneBytes(params.SourceConfidential)
+	clonedParams.ChangeConfidential = clonePrivacyConfidentialOutput(params.ChangeConfidential)
+	clonedParams.BalanceProof = cloneBalanceProof(params.BalanceProof)
 	instruction := PrivacyInstruction{Type: PrivacyInstructionWithdraw, VMVersion: vmVersion, Proof: utils.CloneBytes(proof), Withdraw: &clonedParams}
 	return instruction, instruction.Validate()
 }
 
-// NewPrivacyTransferInstruction 创建隐私转隐私指令 + 统一执行参数校验。
+// NewPrivacyTransferInstruction 閸掓稑缂撻梾鎰潌鏉烆剟娈ｇ粔浣瑰瘹娴?+ 缂佺喍绔撮幍褑顢戦崣鍌涙殶閺嶏繝鐛欓妴?
 func NewPrivacyTransferInstruction(vmVersion uint16, proof []byte, params PrivacyTransferParams) (PrivacyInstruction, error) {
 	clonedParams := params
 	clonedParams.OutputEncryptedNote = utils.CloneBytes(params.OutputEncryptedNote)
 	clonedParams.OutputAuditRecords = clonePrivacyAuditRecords(params.OutputAuditRecords)
 	clonedParams.ChangeEncryptedNote = utils.CloneBytes(params.ChangeEncryptedNote)
 	clonedParams.ChangeAuditRecords = clonePrivacyAuditRecords(params.ChangeAuditRecords)
+	clonedParams.SourceConfidential = utils.CloneBytes(params.SourceConfidential)
+	clonedParams.OutputConfidential = clonePrivacyConfidentialOutput(params.OutputConfidential)
+	clonedParams.ChangeConfidential = clonePrivacyConfidentialOutput(params.ChangeConfidential)
+	clonedParams.BalanceProof = cloneBalanceProof(params.BalanceProof)
 	instruction := PrivacyInstruction{Type: PrivacyInstructionTransfer, VMVersion: vmVersion, Proof: utils.CloneBytes(proof), Transfer: &clonedParams}
 	return instruction, instruction.Validate()
 }
 
-// NewPrivacyAuthorizeAuditInstruction 创建审计授权指令 + 允许用户后续授权监管或审计方。
+// NewPrivacyAuthorizeAuditInstruction 閸掓稑缂撶€孤ゎ吀閹哄牊娼堥幐鍥︽姢 + 閸忎浇顔忛悽銊﹀煕閸氬海鐢婚幒鍫熸綀閻╂垹顓搁幋鏍ь吀鐠佲剝鏌熼妴?
 func NewPrivacyAuthorizeAuditInstruction(vmVersion uint16, proof []byte, params PrivacyAuthorizeAuditParams) (PrivacyInstruction, error) {
 	clonedParams := params
 	clonedParams.AuditCiphertext = utils.CloneBytes(params.AuditCiphertext)
@@ -166,7 +201,7 @@ func NewPrivacyAuthorizeAuditInstruction(vmVersion uint16, proof []byte, params 
 	return instruction, instruction.Validate()
 }
 
-// BuildPrivacyWithdrawProofMessage 构造隐私提现证明消息 + 绑定全部花费语义防止 proof 重放。
+// BuildPrivacyWithdrawProofMessage 閺嬪嫰鈧娀娈ｇ粔浣瑰絹閻滄媽鐦夐弰搴㈢Х閹?+ 缂佹垵鐣鹃崗銊╁劥閼鸿精鍨傜拠顓濈疅闂冨弶顒?proof 闁插秵鏂侀妴?
 func BuildPrivacyWithdrawProofMessage(vmVersion uint16, stateAddress PublicKey, destinationAddress PublicKey, params PrivacyWithdrawParams, currentSlot uint64) ([]byte, error) {
 	if err := validatePrivacyProofMessageHeader(vmVersion, stateAddress, currentSlot); err != nil {
 		return nil, err
@@ -204,12 +239,12 @@ func BuildPrivacyWithdrawProofMessage(vmVersion uint16, stateAddress PublicKey, 
 	return writer.Bytes(), nil
 }
 
-// BuildPrivacyTransferProofMessage 构造隐私转隐私证明消息 + 默认绑定同一状态账户保持兼容调用。
+// BuildPrivacyTransferProofMessage 閺嬪嫰鈧娀娈ｇ粔浣芥祮闂呮劗顫嗙拠浣规濞戝牊浼?+ 姒涙顓荤紒鎴濈暰閸氬奔绔撮悩鑸碘偓浣藉閹磋渹绻氶幐浣稿悑鐎圭鐨熼悽銊ｂ偓?
 func BuildPrivacyTransferProofMessage(vmVersion uint16, stateAddress PublicKey, params PrivacyTransferParams, currentSlot uint64) ([]byte, error) {
 	return BuildPrivacyTransferProofMessageWithOutputState(vmVersion, stateAddress, stateAddress, params, currentSlot)
 }
 
-// BuildPrivacyTransferProofMessageWithOutputState 构造隐私转隐私证明消息 + 绑定输出状态账户防止 note 被重定向。
+// BuildPrivacyTransferProofMessageWithOutputState 閺嬪嫰鈧娀娈ｇ粔浣芥祮闂呮劗顫嗙拠浣规濞戝牊浼?+ 缂佹垵鐣炬潏鎾冲毉閻樿埖鈧浇澶勯幋鐑芥Щ濮?note 鐞氼偊鍣哥€规艾鎮滈妴?
 func BuildPrivacyTransferProofMessageWithOutputState(vmVersion uint16, stateAddress PublicKey, outputStateAddress PublicKey, params PrivacyTransferParams, currentSlot uint64) ([]byte, error) {
 	if err := validatePrivacyProofMessageHeader(vmVersion, stateAddress, currentSlot); err != nil {
 		return nil, err
@@ -254,7 +289,7 @@ func BuildPrivacyTransferProofMessageWithOutputState(vmVersion uint16, stateAddr
 	return writer.Bytes(), nil
 }
 
-// Validate 校验隐私指令 + 防止金额为零、证明过大和 oneof 参数缺失。
+// Validate 閺嶏繝鐛欓梾鎰潌閹稿洣鎶?+ 闂冨弶顒涢柌鎴︻杺娑撴椽娴傞妴浣界槈閺勫氦绻冩径褍鎷?oneof 閸欏倹鏆熺紓鍝勩亼閵?
 func (instruction PrivacyInstruction) Validate() error {
 	if err := zk.ValidateProtocolVersion(instruction.VMVersion); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPrivacyInstruction, err)
@@ -276,7 +311,7 @@ func (instruction PrivacyInstruction) Validate() error {
 	}
 }
 
-// MarshalBinary 序列化隐私指令 + 固定格式便于交易签名和未来 VM 兼容。
+// MarshalBinary 鎼村繐鍨崠鏍缁変焦瀵氭禒?+ 閸ュ搫鐣鹃弽鐓庣础娓氬じ绨禍銈嗘缁涙儳鎮曢崪灞炬弓閺?VM 閸忕厧顔愰妴?
 func (instruction PrivacyInstruction) MarshalBinary() ([]byte, error) {
 	if err := instruction.Validate(); err != nil {
 		return nil, err
@@ -294,7 +329,7 @@ func (instruction PrivacyInstruction) MarshalBinary() ([]byte, error) {
 	return writer.Bytes(), nil
 }
 
-// UnmarshalPrivacyInstructionBinary 反序列化隐私指令 + 拒绝尾部污染字节。
+// UnmarshalPrivacyInstructionBinary 閸欏秴绨崚妤€瀵查梾鎰潌閹稿洣鎶?+ 閹锋帞绮风亸楣冨劥濮光剝鐓嬬€涙濡妴?
 func UnmarshalPrivacyInstructionBinary(data []byte) (PrivacyInstruction, error) {
 	reader := borsh.NewReader(data, MaxPrivacyInstructionBytes)
 	instructionType, err := reader.ReadUint32()
@@ -320,14 +355,17 @@ func UnmarshalPrivacyInstructionBinary(data []byte) (PrivacyInstruction, error) 
 	return instruction, instruction.Validate()
 }
 
-// MarshalBinary 序列化隐私状态 + 使用 Borsh 保证状态字节确定性。
+// MarshalBinary 鎼村繐鍨崠鏍缁変胶濮搁幀?+ 娴ｈ法鏁?Borsh 娣囨繆鐦夐悩鑸碘偓浣哥摟閼哄倻鈥樼€规碍鈧佲偓?
 func (state PrivacyState) MarshalBinary() ([]byte, error) {
+	if err := normalizePrivacyState(&state); err != nil {
+		return nil, err
+	}
 	if err := state.Validate(); err != nil {
 		return nil, err
 	}
 
 	writer := borsh.NewWriter(MaxAccountDataSize)
-	writer.WriteUint16(state.Version)
+	writer.WriteUint16(PrivacyStateStorageVersion)
 	writer.WriteUint32(uint32(len(state.Notes)))
 	for _, note := range state.Notes {
 		writer.WriteFixedBytes(note.Commitment[:])
@@ -343,15 +381,21 @@ func (state PrivacyState) MarshalBinary() ([]byte, error) {
 		if err := writePrivacyAuditRecords(writer, note.AuditRecords); err != nil {
 			return nil, fmt.Errorf("structure: encode privacy audit records: %w", err)
 		}
+		if err := writePrivacyConfidentialOutput(writer, note.Confidential); err != nil {
+			return nil, fmt.Errorf("structure: encode privacy confidential note: %w", err)
+		}
 	}
 	writer.WriteUint32(uint32(len(state.SpentNullifiers)))
 	for _, nullifier := range state.SpentNullifiers {
 		writer.WriteFixedBytes(nullifier[:])
 	}
+	writer.WriteFixedBytes(state.MerkleRoot[:])
+	writer.WriteUint64(state.PrivacyPoolLamports)
+	writer.WriteUint64(state.UnspentNoteLiability)
 	return writer.Bytes(), nil
 }
 
-// UnmarshalPrivacyStateBinary 反序列化隐私状态 + 空账户和预分配零数据都按版本一初始化。
+// UnmarshalPrivacyStateBinary 閸欏秴绨崚妤€瀵查梾鎰潌閻樿埖鈧?+ 缁岄缚澶勯幋宄版嫲妫板嫬鍨庨柊宥夋祩閺佺増宓侀柈鑺ュ瘻閻楀牊婀版稉鈧崚婵嗩潗閸栨牓鈧?
 func UnmarshalPrivacyStateBinary(data []byte) (PrivacyState, error) {
 	if len(data) == 0 || isZeroFilledPrivacyStateData(data) {
 		return PrivacyState{Version: PrivacyStateVersion}, nil
@@ -363,14 +407,28 @@ func UnmarshalPrivacyStateBinary(data []byte) (PrivacyState, error) {
 		return PrivacyState{}, fmt.Errorf("structure: decode privacy state version: %w", err)
 	}
 	state := PrivacyState{Version: version}
-	if state.Notes, err = readPrivacyNotes(reader); err != nil {
+	if state.Notes, err = readPrivacyNotes(reader, version); err != nil {
 		return PrivacyState{}, err
 	}
 	if state.SpentNullifiers, err = readPrivacyNullifiers(reader); err != nil {
 		return PrivacyState{}, err
 	}
+	if reader.Remaining() > 0 {
+		if state.MerkleRoot, err = readPrivacyHash(reader, "privacy merkle root"); err != nil {
+			return PrivacyState{}, err
+		}
+		if state.PrivacyPoolLamports, err = reader.ReadUint64(); err != nil {
+			return PrivacyState{}, fmt.Errorf("structure: decode privacy pool lamports: %w", err)
+		}
+		if state.UnspentNoteLiability, err = reader.ReadUint64(); err != nil {
+			return PrivacyState{}, fmt.Errorf("structure: decode unspent note liability: %w", err)
+		}
+	}
 	if err := reader.EnsureEOF(); err != nil {
 		return PrivacyState{}, fmt.Errorf("structure: decode privacy state eof: %w", err)
+	}
+	if err := normalizePrivacyState(&state); err != nil {
+		return PrivacyState{}, err
 	}
 	return state, state.Validate()
 }
@@ -384,15 +442,45 @@ func isZeroFilledPrivacyStateData(data []byte) bool {
 	return true
 }
 
-// Validate 校验隐私状态 + 防止重复 commitment 和重复 nullifier。
+// Validate 閺嶏繝鐛欓梾鎰潌閻樿埖鈧?+ 闂冨弶顒涢柌宥咁槻 commitment 閸滃矂鍣告径?nullifier閵?
 func (state PrivacyState) Validate() error {
-	if state.Version != PrivacyStateVersion {
+	if state.Version != PrivacyStateVersion && state.Version != PrivacyStateStorageVersion {
 		return fmt.Errorf("%w: unsupported state version %d", ErrInvalidPrivacyInstruction, state.Version)
 	}
 	if len(state.Notes) > MaxPrivacyNotesPerState {
 		return fmt.Errorf("%w: note count %d exceeds %d", ErrInvalidPrivacyInstruction, len(state.Notes), MaxPrivacyNotesPerState)
 	}
-	return validatePrivacyStateUniqueness(state)
+	if err := validatePrivacyStateUniqueness(state); err != nil {
+		return err
+	}
+	if err := validatePrivacyStateMerkleRoot(state); err != nil {
+		return err
+	}
+	if state.PrivacyPoolLamports != state.UnspentNoteLiability {
+		return fmt.Errorf("%w: privacy pool liability mismatch", ErrInvalidPrivacyInstruction)
+	}
+	return nil
+}
+
+func normalizePrivacyState(state *PrivacyState) error {
+	if state == nil {
+		return fmt.Errorf("%w: privacy state is nil", ErrInvalidPrivacyInstruction)
+	}
+	merkleRoot, err := ComputePrivacyMerkleRoot(state.Notes)
+	if err != nil {
+		return err
+	}
+	if state.Version == PrivacyStateLegacyVersion {
+		state.Version = PrivacyStateStorageVersion
+		state.MerkleRoot = merkleRoot
+		state.UnspentNoteLiability = legacyPrivacyStateLiability(state.Notes)
+		state.PrivacyPoolLamports = state.UnspentNoteLiability
+		return nil
+	}
+	if state.MerkleRoot.IsZero() {
+		state.MerkleRoot = merkleRoot
+	}
+	return nil
 }
 
 func validatePrivacyProofMessageHeader(vmVersion uint16, stateAddress PublicKey, currentSlot uint64) error {
@@ -435,7 +523,13 @@ func writePrivacyInstructionBody(writer *borsh.Writer, instruction PrivacyInstru
 		if err := writer.WriteBytes(instruction.Deposit.EncryptedNote); err != nil {
 			return err
 		}
-		return writePrivacyAuditRecords(writer, instruction.Deposit.AuditRecords)
+		if err := writePrivacyAuditRecords(writer, instruction.Deposit.AuditRecords); err != nil {
+			return err
+		}
+		if err := writePrivacyConfidentialOutput(writer, instruction.Deposit.Confidential); err != nil {
+			return err
+		}
+		return writePrivacyBalanceProof(writer, instruction.Deposit.AmountProof)
 	case PrivacyInstructionWithdraw:
 		writer.WriteUint64(instruction.Withdraw.Amount)
 		writer.WriteFixedBytes(instruction.Withdraw.SourceCommitment[:])
@@ -443,13 +537,22 @@ func writePrivacyInstructionBody(writer *borsh.Writer, instruction PrivacyInstru
 		if err := writePrivacyAuditRecords(writer, instruction.Withdraw.AuditRecords); err != nil {
 			return err
 		}
-		return writePrivacyChangeOutput(writer,
+		if err := writePrivacyChangeOutput(writer,
 			instruction.Withdraw.ChangeAmount,
 			instruction.Withdraw.ChangeCommitment,
 			instruction.Withdraw.ChangeSpendAuthority,
 			instruction.Withdraw.ChangeEncryptedNote,
 			instruction.Withdraw.ChangeAuditRecords,
-		)
+		); err != nil {
+			return err
+		}
+		if err := writer.WriteBytes(instruction.Withdraw.SourceConfidential); err != nil {
+			return err
+		}
+		if err := writePrivacyConfidentialOutput(writer, instruction.Withdraw.ChangeConfidential); err != nil {
+			return err
+		}
+		return writePrivacyBalanceProof(writer, instruction.Withdraw.BalanceProof)
 	case PrivacyInstructionTransfer:
 		writer.WriteUint64(instruction.Transfer.Amount)
 		writer.WriteFixedBytes(instruction.Transfer.SourceCommitment[:])
@@ -462,13 +565,25 @@ func writePrivacyInstructionBody(writer *borsh.Writer, instruction PrivacyInstru
 		if err := writePrivacyAuditRecords(writer, instruction.Transfer.OutputAuditRecords); err != nil {
 			return err
 		}
-		return writePrivacyChangeOutput(writer,
+		if err := writePrivacyChangeOutput(writer,
 			instruction.Transfer.ChangeAmount,
 			instruction.Transfer.ChangeCommitment,
 			instruction.Transfer.ChangeSpendAuthority,
 			instruction.Transfer.ChangeEncryptedNote,
 			instruction.Transfer.ChangeAuditRecords,
-		)
+		); err != nil {
+			return err
+		}
+		if err := writer.WriteBytes(instruction.Transfer.SourceConfidential); err != nil {
+			return err
+		}
+		if err := writePrivacyConfidentialOutput(writer, instruction.Transfer.OutputConfidential); err != nil {
+			return err
+		}
+		if err := writePrivacyConfidentialOutput(writer, instruction.Transfer.ChangeConfidential); err != nil {
+			return err
+		}
+		return writePrivacyBalanceProof(writer, instruction.Transfer.BalanceProof)
 	case PrivacyInstructionAuthorizeAudit:
 		writer.WriteFixedBytes(instruction.AuthorizeAudit.Commitment[:])
 		writer.WriteFixedBytes(instruction.AuthorizeAudit.Auditor[:])
@@ -515,7 +630,18 @@ func readPrivacyDepositInstruction(reader *borsh.Reader, vmVersion uint16, proof
 	if err != nil {
 		return PrivacyInstruction{}, err
 	}
-	return NewPrivacyDepositInstruction(vmVersion, proof, PrivacyDepositParams{Amount: amount, Commitment: commitment, SpendAuthority: spendAuthority, EncryptedNote: encryptedNote, AuditRecords: auditRecords})
+	params := PrivacyDepositParams{Amount: amount, Commitment: commitment, SpendAuthority: spendAuthority, EncryptedNote: encryptedNote, AuditRecords: auditRecords}
+	if reader.Remaining() > 0 {
+		params.Confidential, err = readPrivacyConfidentialOutput(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+		params.AmountProof, err = readPrivacyBalanceProof(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+	}
+	return NewPrivacyDepositInstruction(vmVersion, proof, params)
 }
 
 func readPrivacyWithdrawInstruction(reader *borsh.Reader, vmVersion uint16, proof []byte) (PrivacyInstruction, error) {
@@ -539,6 +665,23 @@ func readPrivacyWithdrawInstruction(reader *borsh.Reader, vmVersion uint16, proo
 	if err != nil {
 		return PrivacyInstruction{}, err
 	}
+	sourceConfidential := []byte(nil)
+	var changeConfidential *PrivacyConfidentialOutput
+	balanceProof := zk.BalanceProof{}
+	if reader.Remaining() > 0 {
+		sourceConfidential, err = reader.ReadBytes()
+		if err != nil {
+			return PrivacyInstruction{}, fmt.Errorf("structure: decode withdraw source confidential: %w", err)
+		}
+		changeConfidential, err = readPrivacyConfidentialOutput(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+		balanceProof, err = readPrivacyBalanceProof(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+	}
 	return NewPrivacyWithdrawInstruction(vmVersion, proof, PrivacyWithdrawParams{
 		Amount:               amount,
 		SourceCommitment:     sourceCommitment,
@@ -549,6 +692,9 @@ func readPrivacyWithdrawInstruction(reader *borsh.Reader, vmVersion uint16, proo
 		ChangeSpendAuthority: changeSpendAuthority,
 		ChangeEncryptedNote:  changeEncryptedNote,
 		ChangeAuditRecords:   changeAuditRecords,
+		SourceConfidential:   sourceConfidential,
+		ChangeConfidential:   changeConfidential,
+		BalanceProof:         balanceProof,
 	})
 }
 
@@ -585,6 +731,28 @@ func readPrivacyTransferInstruction(reader *borsh.Reader, vmVersion uint16, proo
 	if err != nil {
 		return PrivacyInstruction{}, err
 	}
+	sourceConfidential := []byte(nil)
+	var outputConfidential *PrivacyConfidentialOutput
+	var changeConfidential *PrivacyConfidentialOutput
+	balanceProof := zk.BalanceProof{}
+	if reader.Remaining() > 0 {
+		sourceConfidential, err = reader.ReadBytes()
+		if err != nil {
+			return PrivacyInstruction{}, fmt.Errorf("structure: decode transfer source confidential: %w", err)
+		}
+		outputConfidential, err = readPrivacyConfidentialOutput(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+		changeConfidential, err = readPrivacyConfidentialOutput(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+		balanceProof, err = readPrivacyBalanceProof(reader)
+		if err != nil {
+			return PrivacyInstruction{}, err
+		}
+	}
 	return NewPrivacyTransferInstruction(vmVersion, proof, PrivacyTransferParams{
 		Amount:               amount,
 		SourceCommitment:     sourceCommitment,
@@ -598,6 +766,10 @@ func readPrivacyTransferInstruction(reader *borsh.Reader, vmVersion uint16, proo
 		ChangeSpendAuthority: changeSpendAuthority,
 		ChangeEncryptedNote:  changeEncryptedNote,
 		ChangeAuditRecords:   changeAuditRecords,
+		SourceConfidential:   sourceConfidential,
+		OutputConfidential:   outputConfidential,
+		ChangeConfidential:   changeConfidential,
+		BalanceProof:         balanceProof,
 	})
 }
 
@@ -631,7 +803,7 @@ func readPrivacyAuthorizeAuditInstruction(reader *borsh.Reader, vmVersion uint16
 	})
 }
 
-func readPrivacyNotes(reader *borsh.Reader) ([]PrivacyNoteRecord, error) {
+func readPrivacyNotes(reader *borsh.Reader, version uint16) ([]PrivacyNoteRecord, error) {
 	noteCount, err := reader.ReadUint32()
 	if err != nil {
 		return nil, fmt.Errorf("structure: decode privacy note count: %w", err)
@@ -641,7 +813,7 @@ func readPrivacyNotes(reader *borsh.Reader) ([]PrivacyNoteRecord, error) {
 	}
 	notes := make([]PrivacyNoteRecord, int(noteCount))
 	for noteIndex := range notes {
-		note, err := readPrivacyNote(reader)
+		note, err := readPrivacyNote(reader, version)
 		if err != nil {
 			return nil, fmt.Errorf("structure: decode privacy note %d: %w", noteIndex, err)
 		}
@@ -650,7 +822,7 @@ func readPrivacyNotes(reader *borsh.Reader) ([]PrivacyNoteRecord, error) {
 	return notes, nil
 }
 
-func readPrivacyNote(reader *borsh.Reader) (PrivacyNoteRecord, error) {
+func readPrivacyNote(reader *borsh.Reader, version uint16) (PrivacyNoteRecord, error) {
 	commitment, err := readPrivacyHash(reader, "note commitment")
 	if err != nil {
 		return PrivacyNoteRecord{}, err
@@ -687,6 +859,13 @@ func readPrivacyNote(reader *borsh.Reader) (PrivacyNoteRecord, error) {
 	if err != nil {
 		return PrivacyNoteRecord{}, err
 	}
+	var confidential *PrivacyConfidentialOutput
+	if version >= PrivacyStateStorageVersion {
+		confidential, err = readPrivacyConfidentialOutput(reader)
+		if err != nil {
+			return PrivacyNoteRecord{}, err
+		}
+	}
 	return PrivacyNoteRecord{
 		Commitment:     commitment,
 		SpendAuthority: spendAuthority,
@@ -697,6 +876,7 @@ func readPrivacyNote(reader *borsh.Reader) (PrivacyNoteRecord, error) {
 		VMVersion:      vmVersion,
 		EncryptedNote:  encryptedNote,
 		AuditRecords:   auditRecords,
+		Confidential:   confidential,
 	}, nil
 }
 
@@ -776,6 +956,114 @@ func readPrivacyChangeOutput(reader *borsh.Reader, field string) (uint64, Hash, 
 		return 0, Hash{}, PublicKey{}, nil, nil, err
 	}
 	return amount, commitment, spendAuthority, encryptedNote, auditRecords, nil
+}
+
+func writePrivacyConfidentialOutput(writer *borsh.Writer, output *PrivacyConfidentialOutput) error {
+	writer.WriteBool(output != nil)
+	if output == nil {
+		return nil
+	}
+	if err := writer.WriteBytes(output.Commitment); err != nil {
+		return fmt.Errorf("structure: encode confidential commitment: %w", err)
+	}
+	if err := writer.WriteBytes(output.AmountPublicKey); err != nil {
+		return fmt.Errorf("structure: encode confidential amount public key: %w", err)
+	}
+	if err := writer.WriteBytes(output.AmountCiphertext.NonceCommitment); err != nil {
+		return fmt.Errorf("structure: encode confidential amount nonce: %w", err)
+	}
+	if err := writer.WriteBytes(output.AmountCiphertext.CiphertextPoint); err != nil {
+		return fmt.Errorf("structure: encode confidential amount ciphertext: %w", err)
+	}
+	if err := writePrivacyAmountCiphertextProof(writer, output.AmountProof); err != nil {
+		return err
+	}
+	rangeProofBytes, err := output.RangeProof.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("structure: encode confidential range proof: %w", err)
+	}
+	return writer.WriteBytes(rangeProofBytes)
+}
+
+func readPrivacyConfidentialOutput(reader *borsh.Reader) (*PrivacyConfidentialOutput, error) {
+	exists, err := reader.ReadBool()
+	if err != nil {
+		return nil, fmt.Errorf("structure: decode confidential output flag: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	output := PrivacyConfidentialOutput{}
+	if output.Commitment, err = reader.ReadBytes(); err != nil {
+		return nil, fmt.Errorf("structure: decode confidential commitment: %w", err)
+	}
+	if output.AmountPublicKey, err = reader.ReadBytes(); err != nil {
+		return nil, fmt.Errorf("structure: decode confidential amount public key: %w", err)
+	}
+	if output.AmountCiphertext.NonceCommitment, err = reader.ReadBytes(); err != nil {
+		return nil, fmt.Errorf("structure: decode confidential amount nonce: %w", err)
+	}
+	if output.AmountCiphertext.CiphertextPoint, err = reader.ReadBytes(); err != nil {
+		return nil, fmt.Errorf("structure: decode confidential amount ciphertext: %w", err)
+	}
+	if output.AmountProof, err = readPrivacyAmountCiphertextProof(reader); err != nil {
+		return nil, err
+	}
+	rangeProofBytes, err := reader.ReadBytes()
+	if err != nil {
+		return nil, fmt.Errorf("structure: decode confidential range proof: %w", err)
+	}
+	output.RangeProof, err = zk.UnmarshalRangeProofBinary(rangeProofBytes)
+	if err != nil {
+		return nil, fmt.Errorf("structure: decode confidential range proof: %w", err)
+	}
+	return &output, nil
+}
+
+func writePrivacyBalanceProof(writer *borsh.Writer, proof zk.BalanceProof) error {
+	if isZeroBalanceProof(proof) {
+		return writer.WriteBytes(nil)
+	}
+	proofBytes, err := proof.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("structure: encode balance proof: %w", err)
+	}
+	return writer.WriteBytes(proofBytes)
+}
+
+func readPrivacyBalanceProof(reader *borsh.Reader) (zk.BalanceProof, error) {
+	proofBytes, err := reader.ReadBytes()
+	if err != nil {
+		return zk.BalanceProof{}, fmt.Errorf("structure: decode balance proof: %w", err)
+	}
+	if len(proofBytes) == 0 {
+		return zk.BalanceProof{}, nil
+	}
+	proof, err := zk.UnmarshalBalanceProofBinary(proofBytes)
+	if err != nil {
+		return zk.BalanceProof{}, fmt.Errorf("structure: decode balance proof: %w", err)
+	}
+	return proof, nil
+}
+
+func writePrivacyAmountCiphertextProof(writer *borsh.Writer, proof zk.AmountCiphertextProof) error {
+	proofBytes, err := proof.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("structure: encode amount ciphertext proof: %w", err)
+	}
+	return writer.WriteBytes(proofBytes)
+}
+
+func readPrivacyAmountCiphertextProof(reader *borsh.Reader) (zk.AmountCiphertextProof, error) {
+	proofBytes, err := reader.ReadBytes()
+	if err != nil {
+		return zk.AmountCiphertextProof{}, fmt.Errorf("structure: decode amount ciphertext proof: %w", err)
+	}
+	proof, err := zk.UnmarshalAmountCiphertextProofBinary(proofBytes)
+	if err != nil {
+		return zk.AmountCiphertextProof{}, fmt.Errorf("structure: decode amount ciphertext proof: %w", err)
+	}
+	return proof, nil
 }
 
 func writePrivacyAuditRecords(writer *borsh.Writer, records []PrivacyAuditRecord) error {
@@ -886,6 +1174,31 @@ func validatePrivacyStateUniqueness(state PrivacyState) error {
 	return nil
 }
 
+func validatePrivacyStateMerkleRoot(state PrivacyState) error {
+	merkleRoot, err := ComputePrivacyMerkleRoot(state.Notes)
+	if err != nil {
+		return err
+	}
+	if state.MerkleRoot != merkleRoot {
+		return fmt.Errorf("%w: privacy merkle root mismatch", ErrInvalidPrivacyInstruction)
+	}
+	return nil
+}
+
+func legacyPrivacyStateLiability(notes []PrivacyNoteRecord) uint64 {
+	total := uint64(0)
+	for _, note := range notes {
+		if note.Spent {
+			continue
+		}
+		if ^uint64(0)-total < note.Amount {
+			return ^uint64(0)
+		}
+		total += note.Amount
+	}
+	return total
+}
+
 func validatePrivacyNote(note PrivacyNoteRecord) error {
 	if note.Commitment.IsZero() {
 		return fmt.Errorf("%w: zero commitment", ErrInvalidPrivacyInstruction)
@@ -893,8 +1206,13 @@ func validatePrivacyNote(note PrivacyNoteRecord) error {
 	if note.SpendAuthority.IsZero() {
 		return fmt.Errorf("%w: zero spend authority", ErrInvalidPrivacyInstruction)
 	}
-	if note.Amount == 0 {
+	if note.Amount == 0 && note.Confidential == nil {
 		return fmt.Errorf("%w: note amount cannot be zero", ErrInvalidPrivacyInstruction)
+	}
+	if note.Confidential != nil {
+		if err := validatePrivacyConfidentialOutput(note.Confidential); err != nil {
+			return err
+		}
 	}
 	if note.Spent {
 		if note.SpentSlot == 0 || note.SpendNullifier.IsZero() {
@@ -926,7 +1244,16 @@ func validatePrivacyDepositParams(params *PrivacyDepositParams) error {
 	if err := validateEncryptedNote(params.EncryptedNote); err != nil {
 		return err
 	}
-	return validatePrivacyAuditRecords(params.AuditRecords)
+	if err := validatePrivacyAuditRecords(params.AuditRecords); err != nil {
+		return err
+	}
+	if params.Confidential == nil {
+		return nil
+	}
+	if err := validatePrivacyConfidentialOutput(params.Confidential); err != nil {
+		return err
+	}
+	return validatePrivacyBalanceProof(params.AmountProof, "deposit amount proof")
 }
 
 func validatePrivacyWithdrawParams(params *PrivacyWithdrawParams) error {
@@ -942,13 +1269,33 @@ func validatePrivacyWithdrawParams(params *PrivacyWithdrawParams) error {
 	if err := validatePrivacyAuditRecords(params.AuditRecords); err != nil {
 		return err
 	}
-	return validatePrivacyChangeOutput(
+	if err := validatePrivacyChangeOutput(
 		params.ChangeAmount,
 		params.ChangeCommitment,
 		params.ChangeSpendAuthority,
 		params.ChangeEncryptedNote,
 		params.ChangeAuditRecords,
-	)
+	); err != nil {
+		return err
+	}
+	if len(params.SourceConfidential) == 0 && params.ChangeConfidential == nil && isZeroBalanceProof(params.BalanceProof) {
+		return nil
+	}
+	if len(params.SourceConfidential) == 0 {
+		return fmt.Errorf("%w: withdraw confidential source is empty", ErrInvalidPrivacyInstruction)
+	}
+	if params.ChangeAmount == 0 && params.ChangeConfidential != nil {
+		return fmt.Errorf("%w: zero withdraw change has confidential output", ErrInvalidPrivacyInstruction)
+	}
+	if params.ChangeAmount > 0 {
+		if params.ChangeConfidential == nil {
+			return fmt.Errorf("%w: withdraw change confidential output is missing", ErrInvalidPrivacyInstruction)
+		}
+		if err := validatePrivacyConfidentialOutput(params.ChangeConfidential); err != nil {
+			return err
+		}
+	}
+	return validatePrivacyBalanceProof(params.BalanceProof, "withdraw balance proof")
 }
 
 func validatePrivacyTransferParams(params *PrivacyTransferParams) error {
@@ -973,13 +1320,66 @@ func validatePrivacyTransferParams(params *PrivacyTransferParams) error {
 	if err := validatePrivacyAuditRecords(params.OutputAuditRecords); err != nil {
 		return err
 	}
-	return validatePrivacyChangeOutput(
+	if err := validatePrivacyChangeOutput(
 		params.ChangeAmount,
 		params.ChangeCommitment,
 		params.ChangeSpendAuthority,
 		params.ChangeEncryptedNote,
 		params.ChangeAuditRecords,
-	)
+	); err != nil {
+		return err
+	}
+	if len(params.SourceConfidential) == 0 && params.OutputConfidential == nil && params.ChangeConfidential == nil && isZeroBalanceProof(params.BalanceProof) {
+		return nil
+	}
+	if len(params.SourceConfidential) == 0 || params.OutputConfidential == nil {
+		return fmt.Errorf("%w: transfer confidential source or output is missing", ErrInvalidPrivacyInstruction)
+	}
+	if err := validatePrivacyConfidentialOutput(params.OutputConfidential); err != nil {
+		return err
+	}
+	if params.ChangeAmount == 0 && params.ChangeConfidential != nil {
+		return fmt.Errorf("%w: zero transfer change has confidential output", ErrInvalidPrivacyInstruction)
+	}
+	if params.ChangeAmount > 0 {
+		if params.ChangeConfidential == nil {
+			return fmt.Errorf("%w: transfer change confidential output is missing", ErrInvalidPrivacyInstruction)
+		}
+		if err := validatePrivacyConfidentialOutput(params.ChangeConfidential); err != nil {
+			return err
+		}
+	}
+	return validatePrivacyBalanceProof(params.BalanceProof, "transfer balance proof")
+}
+
+func validatePrivacyConfidentialOutput(output *PrivacyConfidentialOutput) error {
+	if output == nil {
+		return fmt.Errorf("%w: confidential output is nil", ErrInvalidPrivacyInstruction)
+	}
+	if err := zk.VerifyAmountCiphertextProof(output.AmountPublicKey, output.Commitment, output.AmountCiphertext, output.AmountProof); err != nil {
+		return fmt.Errorf("%w: confidential amount proof: %w", ErrInvalidPrivacyInstruction, err)
+	}
+	if err := output.RangeProof.Verify(); err != nil {
+		return fmt.Errorf("%w: confidential range proof: %w", ErrInvalidPrivacyInstruction, err)
+	}
+	if string(output.RangeProof.Commitment) != string(output.Commitment) {
+		return fmt.Errorf("%w: confidential range commitment mismatch", ErrInvalidPrivacyInstruction)
+	}
+	return nil
+}
+
+func validatePrivacyBalanceProof(proof zk.BalanceProof, field string) error {
+	if isZeroBalanceProof(proof) {
+		return fmt.Errorf("%w: %s is missing", ErrInvalidPrivacyInstruction, field)
+	}
+	if _, err := proof.MarshalBinary(); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrInvalidPrivacyInstruction, field, err)
+	}
+	return nil
+}
+
+func isZeroBalanceProof(proof zk.BalanceProof) bool {
+	return proof.Version == 0 && len(proof.NonceCommitment) == 0 && len(proof.Response) == 0
 }
 
 func validatePrivacyChangeOutput(
@@ -1121,6 +1521,128 @@ func clonePrivacyAuditRecord(record PrivacyAuditRecord) PrivacyAuditRecord {
 		ExpiresAtSlot:   record.ExpiresAtSlot,
 		AuditCiphertext: utils.CloneBytes(record.AuditCiphertext),
 	}
+}
+
+func clonePrivacyConfidentialOutput(output *PrivacyConfidentialOutput) *PrivacyConfidentialOutput {
+	if output == nil {
+		return nil
+	}
+	cloned := *output
+	cloned.Commitment = utils.CloneBytes(output.Commitment)
+	cloned.AmountPublicKey = utils.CloneBytes(output.AmountPublicKey)
+	cloned.AmountCiphertext = cloneElGamalCiphertext(output.AmountCiphertext)
+	cloned.AmountProof = cloneAmountCiphertextProof(output.AmountProof)
+	cloned.RangeProof = cloneRangeProof(output.RangeProof)
+	return &cloned
+}
+
+func cloneElGamalCiphertext(ciphertext zk.ElGamalCiphertext) zk.ElGamalCiphertext {
+	return zk.ElGamalCiphertext{
+		NonceCommitment: utils.CloneBytes(ciphertext.NonceCommitment),
+		CiphertextPoint: utils.CloneBytes(ciphertext.CiphertextPoint),
+	}
+}
+
+func cloneAmountCiphertextProof(proof zk.AmountCiphertextProof) zk.AmountCiphertextProof {
+	return zk.AmountCiphertextProof{
+		Version:            proof.Version,
+		CommitmentNonce:    utils.CloneBytes(proof.CommitmentNonce),
+		RandomnessNonce:    utils.CloneBytes(proof.RandomnessNonce),
+		CiphertextNonce:    utils.CloneBytes(proof.CiphertextNonce),
+		AmountResponse:     utils.CloneBytes(proof.AmountResponse),
+		BlindingResponse:   utils.CloneBytes(proof.BlindingResponse),
+		RandomnessResponse: utils.CloneBytes(proof.RandomnessResponse),
+	}
+}
+
+func cloneRangeProof(proof zk.RangeProof) zk.RangeProof {
+	cloned := zk.RangeProof{
+		Version:    proof.Version,
+		Bits:       proof.Bits,
+		Commitment: utils.CloneBytes(proof.Commitment),
+		BitProofs:  make([]zk.BitProof, len(proof.BitProofs)),
+	}
+	cloned.BitCommitments = make([][]byte, len(proof.BitCommitments))
+	for index := range proof.BitCommitments {
+		cloned.BitCommitments[index] = utils.CloneBytes(proof.BitCommitments[index])
+	}
+	for index, bitProof := range proof.BitProofs {
+		cloned.BitProofs[index] = zk.BitProof{
+			Nonce0:     utils.CloneBytes(bitProof.Nonce0),
+			Nonce1:     utils.CloneBytes(bitProof.Nonce1),
+			Challenge0: utils.CloneBytes(bitProof.Challenge0),
+			Challenge1: utils.CloneBytes(bitProof.Challenge1),
+			Response0:  utils.CloneBytes(bitProof.Response0),
+			Response1:  utils.CloneBytes(bitProof.Response1),
+		}
+	}
+	return cloned
+}
+
+func cloneBalanceProof(proof zk.BalanceProof) zk.BalanceProof {
+	return zk.BalanceProof{
+		Version:         proof.Version,
+		NonceCommitment: utils.CloneBytes(proof.NonceCommitment),
+		Response:        utils.CloneBytes(proof.Response),
+	}
+}
+
+// ComputePrivacyMerkleRoot 鐠侊紕鐣婚梾鎰潌 Note 閺?+ 閸忋劏濡悙鍦暏绾喖鐣鹃幀褎鐗撮弽锟犵崣閹佃儻顕崣顏囨嫹閸旂姳绗夌弧鈩冩暭閵?
+func ComputePrivacyMerkleRoot(notes []PrivacyNoteRecord) (Hash, error) {
+	if len(notes) == 0 {
+		return Hash{}, nil
+	}
+	leaves := make([]Hash, len(notes))
+	for noteIndex, note := range notes {
+		leaf, err := privacyMerkleLeaf(note)
+		if err != nil {
+			return Hash{}, fmt.Errorf("structure: privacy merkle leaf %d: %w", noteIndex, err)
+		}
+		leaves[noteIndex] = leaf
+	}
+	return privacyMerkleRoot(leaves)
+}
+
+func privacyMerkleLeaf(note PrivacyNoteRecord) (Hash, error) {
+	writer := borsh.NewWriter(MaxPrivacyInstructionBytes)
+	writer.WriteFixedBytes([]byte(privacyMerkleLeafDomainV1))
+	if note.Confidential != nil {
+		if err := writer.WriteBytes(note.Confidential.Commitment); err != nil {
+			return Hash{}, err
+		}
+	} else {
+		writer.WriteFixedBytes(note.Commitment[:])
+	}
+	writer.WriteFixedBytes(note.SpendAuthority[:])
+	return NewHash(utils.SHA256(writer.Bytes()))
+}
+
+func privacyMerkleRoot(leaves []Hash) (Hash, error) {
+	currentLevel := append([]Hash(nil), leaves...)
+	for len(currentLevel) > 1 {
+		nextLevel := make([]Hash, 0, (len(currentLevel)+1)/2)
+		for index := 0; index < len(currentLevel); index += 2 {
+			rightIndex := index + 1
+			if rightIndex >= len(currentLevel) {
+				rightIndex = index
+			}
+			parent, err := privacyMerkleParent(currentLevel[index], currentLevel[rightIndex])
+			if err != nil {
+				return Hash{}, err
+			}
+			nextLevel = append(nextLevel, parent)
+		}
+		currentLevel = nextLevel
+	}
+	return currentLevel[0], nil
+}
+
+func privacyMerkleParent(left Hash, right Hash) (Hash, error) {
+	writer := borsh.NewWriter(MaxPrivacyInstructionBytes)
+	writer.WriteFixedBytes([]byte(privacyMerkleNodeDomainV1))
+	writer.WriteFixedBytes(left[:])
+	writer.WriteFixedBytes(right[:])
+	return NewHash(utils.SHA256(writer.Bytes()))
 }
 
 // IsValid 校验审计范围 + 防止链上出现未定义权限语义。

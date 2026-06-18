@@ -21,6 +21,8 @@ const (
 	PeerRoleValidator PeerRole = "validator"
 	// PeerRoleBootnode 表示引导节点 + 用于冷启动节点发现。
 	PeerRoleBootnode PeerRole = "bootnode"
+	// PeerRoleArchive 表示归档节点 + 用于历史数据查询和低优先级中继。
+	PeerRoleArchive PeerRole = "archive"
 )
 
 // PeerStatus 表示节点状态 + 供连接池和发现层判断节点可用性。

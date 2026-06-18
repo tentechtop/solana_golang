@@ -12,9 +12,10 @@ import (
 
 // FixedExecutor 执行固定指令交易 + 作为 VM 接入前的生产闭环执行入口。
 type FixedExecutor struct {
-	Simulator TransactionSimulator
-	Programs  ProgramRegistry
-	Logger    *slog.Logger
+	Simulator            TransactionSimulator
+	Programs             ProgramRegistry
+	Logger               *slog.Logger
+	PrivacyExecutionMode PrivacyExecutionMode
 }
 
 // NewFixedExecutor 创建固定指令执行器 + 组合层显式注册程序防止 runtime import programs。
@@ -104,6 +105,7 @@ func (executor FixedExecutor) logTransactionExecution(
 		slog.Uint64("slot", request.Slot),
 		slog.String("tx_id", transactionID),
 		slog.String("execution_mode", string(normalizeExecutionMode(request.Mode))),
+		slog.String("privacy_execution_mode", string(executor.privacyExecutionMode())),
 		slog.Int("status", int(result.Execution.Status)),
 		slog.Uint64("fee_total", result.Execution.FeeDetails.TotalFee),
 		slog.Uint64("fee_burned", result.Execution.FeeDetails.BurnedFee),
@@ -128,6 +130,14 @@ func (executor FixedExecutor) logTransactionExecution(
 		return
 	}
 	logger.LogAttrs(normalizeExecutionContext(contextValue), slog.LevelInfo, "runtime transaction executed", attrs...)
+}
+
+func (executor FixedExecutor) privacyExecutionMode() PrivacyExecutionMode {
+	mode, err := NormalizePrivacyExecutionMode(executor.PrivacyExecutionMode)
+	if err != nil {
+		return PrivacyExecutionModeFixed
+	}
+	return mode
 }
 
 func transactionIDForLog(transaction structure.Transaction) string {

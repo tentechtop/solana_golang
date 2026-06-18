@@ -379,8 +379,9 @@ func (host *Host) localSignedPeerRecord() (SignedPeerRecord, error) {
 	if err != nil {
 		return SignedPeerRecord{}, err
 	}
-	peer.Role = PeerRoleFull
-	peer.Capabilities = PeerCapabilityDHT
+	peer.Role = host.role
+	peer.Capabilities = host.capabilities
+	peer.Validator = host.role == PeerRoleValidator || host.capabilities&PeerCapabilityValidator != 0
 	peer.ProtocolVersion = fmt.Sprintf("%d", MessageProtocolVersion)
 	peer.SoftwareVersion = host.secureIdentity.SoftwareVersion
 	peer.PreferredProtocols = cloneProtocols(host.preferredProtocols)

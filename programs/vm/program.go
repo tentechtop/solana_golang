@@ -32,13 +32,25 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 	if err != nil {
 		return err
 	}
+	return executeProgramAccount(program.Runtime, program.loaderProgram(context.BuiltinPrograms), programID, programAccount, context)
+}
+
+func executeProgramAccount(
+	runtimeValue svm.Runtime,
+	loaderProgram structure.PublicKey,
+	programID structure.PublicKey,
+	programAccount svm.ProgramAccount,
+	context runtime.InstructionContext,
+) error {
 	vmAccounts, err := buildInstructionAccounts(context)
 	if err != nil {
 		return err
 	}
-	runtimeValue := program.Runtime
 	if runtimeValue.LoaderID == (svm.Address{}) {
-		runtimeValue = svm.NewRuntime(vmAddressFromPublicKey(program.loaderProgram(context.BuiltinPrograms)))
+		runtimeValue = svm.NewRuntime(vmAddressFromPublicKey(loaderProgram))
+	}
+	if err := attachPrivacySyscall(&runtimeValue, context); err != nil {
+		return err
 	}
 	result, err := runtimeValue.Execute(svm.Invocation{
 		ProgramID:       vmAddressFromPublicKey(programID),

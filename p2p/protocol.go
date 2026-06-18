@@ -53,6 +53,10 @@ const (
 	ProtocolIdentifyRequestV1 ProtocolID = 24
 	// ProtocolIdentifyResponseV1 表示节点身份响应 + 返回对端签名的地址记录。
 	ProtocolIdentifyResponseV1 ProtocolID = 25
+	// ProtocolRelayMessageV1 表示中继消息 + 让公网节点按目标节点转发内外网通信。
+	ProtocolRelayMessageV1 ProtocolID = 26
+	// ProtocolQUICHolePunchV1 表示 QUIC 打洞协调 + 由公网中继协助两个内网节点同时拨号。
+	ProtocolQUICHolePunchV1 ProtocolID = 27
 	// ProtocolPoSTransactionV1 表示 PoS 交易传播 + 用于注册、质押和普通转账进入 leader mempool。
 	ProtocolPoSTransactionV1 ProtocolID = 40
 	// ProtocolPoSProposalV1 表示 PoS 区块提案 + leader 按 slot 广播候选区块。
@@ -166,7 +170,9 @@ func defaultProtocolClass(protocolID ProtocolID) ProtocolClass {
 		ProtocolFindNodeResponseV1,
 		ProtocolSecureSessionV1,
 		ProtocolIdentifyRequestV1,
-		ProtocolIdentifyResponseV1:
+		ProtocolIdentifyResponseV1,
+		ProtocolRelayMessageV1,
+		ProtocolQUICHolePunchV1:
 		return ProtocolClassControl
 	default:
 		return ProtocolClassData
@@ -184,7 +190,9 @@ func defaultProtocolPriority(protocolID ProtocolID) MessagePriority {
 		ProtocolHotStuffQCV1,
 		ProtocolSecureSessionV1,
 		ProtocolIdentifyRequestV1,
-		ProtocolIdentifyResponseV1:
+		ProtocolIdentifyResponseV1,
+		ProtocolRelayMessageV1,
+		ProtocolQUICHolePunchV1:
 		return MessagePriorityHigh
 	case ProtocolBlockV1,
 		ProtocolGetResourceRequestV1,
@@ -210,7 +218,9 @@ func defaultProtocolConcurrency(protocolID ProtocolID) ProtocolConcurrencyMode {
 		ProtocolQueryCommonAncestorV1,
 		ProtocolQueryBlockHeadersV1,
 		ProtocolIdentifyRequestV1,
-		ProtocolIdentifyResponseV1:
+		ProtocolIdentifyResponseV1,
+		ProtocolRelayMessageV1,
+		ProtocolQUICHolePunchV1:
 		return ProtocolConcurrencyStateless
 	default:
 		return ProtocolConcurrencyOrdered
@@ -256,6 +266,8 @@ func DefaultProtocolSpecs() []ProtocolSpec {
 		defaultProtocolSpec(ProtocolSecureSessionV1, "/p2p/secure-session/1.0.0", true),
 		defaultProtocolSpec(ProtocolIdentifyRequestV1, "/p2p/identify/request/1.0.0", true),
 		defaultProtocolSpec(ProtocolIdentifyResponseV1, "/p2p/identify/response/1.0.0", false),
+		defaultProtocolSpec(ProtocolRelayMessageV1, "/p2p/relay/1.0.0", false),
+		defaultProtocolSpec(ProtocolQUICHolePunchV1, "/p2p/quic-hole-punch/1.0.0", false),
 		defaultProtocolSpec(ProtocolPoSTransactionV1, "/pos/transaction/1.0.0", false),
 		defaultProtocolSpec(ProtocolPoSProposalV1, "/pos/proposal/1.0.0", false),
 		defaultProtocolSpec(ProtocolPoSVoteV1, "/pos/vote/1.0.0", false),

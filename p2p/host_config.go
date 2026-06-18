@@ -56,6 +56,32 @@ func normalizeMaxPeers(maxPeers int) int {
 	return maxPeers
 }
 
+// normalizeHostRole 归一化本节点角色 + 保持旧配置默认按全节点对外声明。
+func normalizeHostRole(role PeerRole) PeerRole {
+	if role == "" || role == PeerRoleUnknown {
+		return PeerRoleFull
+	}
+	return role
+}
+
+// normalizeHostCapabilities 归一化本节点能力 + 空配置沿用旧的 DHT 和中继能力。
+func normalizeHostCapabilities(capabilities PeerCapability, role PeerRole) PeerCapability {
+	if capabilities != 0 {
+		return capabilities
+	}
+	normalizedRole := normalizeHostRole(role)
+	switch normalizedRole {
+	case PeerRoleValidator:
+		return PeerCapabilityDHT | PeerCapabilityRelay | PeerCapabilityValidator
+	case PeerRoleBootnode:
+		return PeerCapabilityDHT | PeerCapabilityRelay
+	case PeerRoleArchive:
+		return PeerCapabilityDHT | PeerCapabilityRelay | PeerCapabilityArchive
+	default:
+		return PeerCapabilityDHT | PeerCapabilityRelay
+	}
+}
+
 func normalizeBroadcastConcurrency(concurrency int) int {
 	if concurrency <= 0 {
 		return 32

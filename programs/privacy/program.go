@@ -69,6 +69,12 @@ func executeDeposit(programID structure.PublicKey, instruction structure.Privacy
 	}
 
 	stateAccount = context.Accounts[stateAddress].Clone()
+	if instruction.Deposit.Confidential != nil {
+		if err := appendConfidentialDepositNote(&state, instruction); err != nil {
+			return err
+		}
+		return storeStateAccount(stateAddress, stateAccount, state, context)
+	}
 	state.Notes = append(state.Notes, structure.PrivacyNoteRecord{
 		Commitment:     instruction.Deposit.Commitment,
 		SpendAuthority: instruction.Deposit.SpendAuthority,
@@ -77,6 +83,9 @@ func executeDeposit(programID structure.PublicKey, instruction structure.Privacy
 		EncryptedNote:  utils.CloneBytes(instruction.Deposit.EncryptedNote),
 		AuditRecords:   cloneAuditRecords(instruction.Deposit.AuditRecords),
 	})
+	if err := creditPrivacyLiability(&state, instruction.Deposit.Amount); err != nil {
+		return err
+	}
 	return storeStateAccount(stateAddress, stateAccount, state, context)
 }
 
@@ -104,6 +113,15 @@ func executeWithdraw(programID structure.PublicKey, instruction structure.Privac
 	if err != nil {
 		return err
 	}
+	if len(instruction.Withdraw.SourceConfidential) > 0 {
+		if err := executeConfidentialWithdraw(&state, instruction, context, proofMessage); err != nil {
+			return err
+		}
+		if err := storeStateAccount(stateAddress, stateAccount, state, context); err != nil {
+			return err
+		}
+		return runtime.TransferLamports(stateAddress, destinationAddress, instruction.Withdraw.Amount, context.Accounts, context.RentConfig)
+	}
 	sourceNote, err := consumeNote(&state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.Nullifier, inputAmount, context, instruction.Proof, proofMessage)
 	if err != nil {
 		return err
@@ -112,6 +130,9 @@ func executeWithdraw(programID structure.PublicKey, instruction structure.Privac
 		return err
 	}
 	if err := appendAuditRecords(&state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.AuditRecords); err != nil {
+		return err
+	}
+	if err := debitPrivacyLiability(&state, instruction.Withdraw.Amount); err != nil {
 		return err
 	}
 	if err := storeStateAccount(stateAddress, stateAccount, state, context); err != nil {
@@ -157,6 +178,21 @@ func executeTransfer(programID structure.PublicKey, instruction structure.Privac
 	if err != nil {
 		return err
 	}
+	if len(instruction.Transfer.SourceConfidential) > 0 {
+		if err := executeConfidentialTransfer(&sourceState, &outputState, outputStateAddress, stateAddress, instruction, context, proofMessage); err != nil {
+			return err
+		}
+		if outputStateAddress == stateAddress {
+			return storeStateAccount(stateAddress, sourceStateAccount, sourceState, context)
+		}
+		if err := storeStateAccount(stateAddress, sourceStateAccount, sourceState, context); err != nil {
+			return err
+		}
+		if err := storeStateAccount(outputStateAddress, outputStateAccount, outputState, context); err != nil {
+			return err
+		}
+		return runtime.TransferLamports(stateAddress, outputStateAddress, instruction.Transfer.Amount, context.Accounts, context.RentConfig)
+	}
 	sourceNote, err := consumeNote(&sourceState, instruction.Transfer.SourceCommitment, instruction.Transfer.Nullifier, inputAmount, context, instruction.Proof, proofMessage)
 	if err != nil {
 		return err
@@ -173,6 +209,12 @@ func executeTransfer(programID structure.PublicKey, instruction structure.Privac
 		return err
 	}
 	outputState.Notes = append(outputState.Notes, outputNote)
+	if err := debitPrivacyLiability(&sourceState, instruction.Transfer.Amount); err != nil {
+		return err
+	}
+	if err := creditPrivacyLiability(&outputState, instruction.Transfer.Amount); err != nil {
+		return err
+	}
 	if err := storeStateAccount(stateAddress, sourceStateAccount, sourceState, context); err != nil {
 		return err
 	}
@@ -197,6 +239,96 @@ func privacyOutputNote(instruction structure.PrivacyInstruction) structure.Priva
 		VMVersion:      instruction.VMVersion,
 		EncryptedNote:  utils.CloneBytes(instruction.Transfer.OutputEncryptedNote),
 		AuditRecords:   cloneAuditRecords(instruction.Transfer.OutputAuditRecords),
+	}
+}
+
+func appendConfidentialDepositNote(state *structure.PrivacyState, instruction structure.PrivacyInstruction) error {
+	if err := validateConfidentialDeposit(instruction.Deposit); err != nil {
+		return err
+	}
+	state.Notes = append(state.Notes, structure.PrivacyNoteRecord{
+		Commitment:     instruction.Deposit.Commitment,
+		SpendAuthority: instruction.Deposit.SpendAuthority,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Deposit.EncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Deposit.AuditRecords),
+		Confidential:   cloneConfidentialOutput(instruction.Deposit.Confidential),
+	})
+	if err := creditPrivacyLiability(state, instruction.Deposit.Amount); err != nil {
+		return err
+	}
+	return nil
+}
+
+func executeConfidentialWithdraw(state *structure.PrivacyState, instruction structure.PrivacyInstruction, context runtime.InstructionContext, proofMessage []byte) error {
+	sourceNote, err := consumeStateConfidentialNote(state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.SourceConfidential, instruction.Withdraw.Nullifier, context, instruction.Proof, proofMessage)
+	if err != nil {
+		return err
+	}
+	outputCommitments := make([][]byte, 0, 1)
+	if instruction.Withdraw.ChangeConfidential != nil {
+		if err := appendConfidentialWithdrawChangeNote(state, instruction, sourceNote); err != nil {
+			return err
+		}
+		outputCommitments = append(outputCommitments, instruction.Withdraw.ChangeConfidential.Commitment)
+	}
+	if err := zk.VerifyBalanceProof([][]byte{instruction.Withdraw.SourceConfidential}, outputCommitments, instruction.Withdraw.Amount, instruction.Withdraw.BalanceProof); err != nil {
+		return fmt.Errorf("%w: verify confidential withdraw balance: %w", structure.ErrInvalidPrivacyInstruction, err)
+	}
+	if err := debitPrivacyLiability(state, instruction.Withdraw.Amount); err != nil {
+		return err
+	}
+	return appendAuditRecords(state, instruction.Withdraw.SourceCommitment, instruction.Withdraw.AuditRecords)
+}
+
+func executeConfidentialTransfer(sourceState *structure.PrivacyState, outputState *structure.PrivacyState, outputStateAddress structure.PublicKey, sourceStateAddress structure.PublicKey, instruction structure.PrivacyInstruction, context runtime.InstructionContext, proofMessage []byte) error {
+	sourceNote, err := consumeStateConfidentialNote(sourceState, instruction.Transfer.SourceCommitment, instruction.Transfer.SourceConfidential, instruction.Transfer.Nullifier, context, instruction.Proof, proofMessage)
+	if err != nil {
+		return err
+	}
+	outputCommitments := [][]byte{instruction.Transfer.OutputConfidential.Commitment}
+	outputNote := privacyConfidentialTransferOutputNote(instruction)
+	if outputStateAddress == sourceStateAddress {
+		sourceState.Notes = append(sourceState.Notes, outputNote)
+		if instruction.Transfer.ChangeConfidential != nil {
+			if err := appendConfidentialTransferChangeNote(sourceState, instruction, sourceNote); err != nil {
+				return err
+			}
+			outputCommitments = append(outputCommitments, instruction.Transfer.ChangeConfidential.Commitment)
+		}
+		return verifyConfidentialTransferBalance(instruction, outputCommitments)
+	}
+	if instruction.Transfer.ChangeConfidential != nil {
+		if err := appendConfidentialTransferChangeNote(sourceState, instruction, sourceNote); err != nil {
+			return err
+		}
+		outputCommitments = append(outputCommitments, instruction.Transfer.ChangeConfidential.Commitment)
+	}
+	outputState.Notes = append(outputState.Notes, outputNote)
+	if err := debitPrivacyLiability(sourceState, instruction.Transfer.Amount); err != nil {
+		return err
+	}
+	if err := creditPrivacyLiability(outputState, instruction.Transfer.Amount); err != nil {
+		return err
+	}
+	return verifyConfidentialTransferBalance(instruction, outputCommitments)
+}
+
+func verifyConfidentialTransferBalance(instruction structure.PrivacyInstruction, outputCommitments [][]byte) error {
+	if err := zk.VerifyBalanceProof([][]byte{instruction.Transfer.SourceConfidential}, outputCommitments, 0, instruction.Transfer.BalanceProof); err != nil {
+		return fmt.Errorf("%w: verify confidential transfer balance: %w", structure.ErrInvalidPrivacyInstruction, err)
+	}
+	return nil
+}
+
+func privacyConfidentialTransferOutputNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
+		Commitment:     instruction.Transfer.OutputCommitment,
+		SpendAuthority: instruction.Transfer.OutputSpendAuthority,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Transfer.OutputEncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Transfer.OutputAuditRecords),
+		Confidential:   cloneConfidentialOutput(instruction.Transfer.OutputConfidential),
 	}
 }
 
@@ -225,6 +357,27 @@ func appendChangeNote(state *structure.PrivacyState, changeNote structure.Privac
 	return nil
 }
 
+func appendConfidentialWithdrawChangeNote(state *structure.PrivacyState, instruction structure.PrivacyInstruction, sourceNote structure.PrivacyNoteRecord) error {
+	changeNote := privacyConfidentialWithdrawChangeNote(instruction)
+	return appendConfidentialChangeNote(state, changeNote, sourceNote)
+}
+
+func appendConfidentialTransferChangeNote(state *structure.PrivacyState, instruction structure.PrivacyInstruction, sourceNote structure.PrivacyNoteRecord) error {
+	changeNote := privacyConfidentialTransferChangeNote(instruction)
+	return appendConfidentialChangeNote(state, changeNote, sourceNote)
+}
+
+func appendConfidentialChangeNote(state *structure.PrivacyState, changeNote structure.PrivacyNoteRecord, sourceNote structure.PrivacyNoteRecord) error {
+	if changeNote.SpendAuthority != sourceNote.SpendAuthority {
+		return fmt.Errorf("%w: confidential change spend authority must match source note", structure.ErrInvalidPrivacyInstruction)
+	}
+	if findNote(*state, changeNote.Commitment) >= 0 {
+		return fmt.Errorf("%w: duplicate confidential change commitment", structure.ErrInvalidPrivacyInstruction)
+	}
+	state.Notes = append(state.Notes, changeNote)
+	return nil
+}
+
 func privacyWithdrawChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
 	return structure.PrivacyNoteRecord{
 		Commitment:     instruction.Withdraw.ChangeCommitment,
@@ -236,6 +389,17 @@ func privacyWithdrawChangeNote(instruction structure.PrivacyInstruction) structu
 	}
 }
 
+func privacyConfidentialWithdrawChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
+		Commitment:     instruction.Withdraw.ChangeCommitment,
+		SpendAuthority: instruction.Withdraw.ChangeSpendAuthority,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Withdraw.ChangeEncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Withdraw.ChangeAuditRecords),
+		Confidential:   cloneConfidentialOutput(instruction.Withdraw.ChangeConfidential),
+	}
+}
+
 func privacyTransferChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
 	return structure.PrivacyNoteRecord{
 		Commitment:     instruction.Transfer.ChangeCommitment,
@@ -244,6 +408,17 @@ func privacyTransferChangeNote(instruction structure.PrivacyInstruction) structu
 		VMVersion:      instruction.VMVersion,
 		EncryptedNote:  utils.CloneBytes(instruction.Transfer.ChangeEncryptedNote),
 		AuditRecords:   cloneAuditRecords(instruction.Transfer.ChangeAuditRecords),
+	}
+}
+
+func privacyConfidentialTransferChangeNote(instruction structure.PrivacyInstruction) structure.PrivacyNoteRecord {
+	return structure.PrivacyNoteRecord{
+		Commitment:     instruction.Transfer.ChangeCommitment,
+		SpendAuthority: instruction.Transfer.ChangeSpendAuthority,
+		VMVersion:      instruction.VMVersion,
+		EncryptedNote:  utils.CloneBytes(instruction.Transfer.ChangeEncryptedNote),
+		AuditRecords:   cloneAuditRecords(instruction.Transfer.ChangeAuditRecords),
+		Confidential:   cloneConfidentialOutput(instruction.Transfer.ChangeConfidential),
 	}
 }
 
@@ -304,6 +479,9 @@ func loadStateAccount(programID structure.PublicKey, stateAddress structure.Publ
 }
 
 func storeStateAccount(stateAddress structure.PublicKey, account structure.Account, state structure.PrivacyState, context runtime.InstructionContext) error {
+	if err := refreshPrivacyStatePublicCommitments(&state); err != nil {
+		return err
+	}
 	encoded, err := state.MarshalBinary()
 	if err != nil {
 		return err
@@ -312,6 +490,16 @@ func storeStateAccount(stateAddress structure.PublicKey, account structure.Accou
 		return err
 	}
 	context.Accounts[stateAddress] = account
+	return nil
+}
+
+func refreshPrivacyStatePublicCommitments(state *structure.PrivacyState) error {
+	state.Version = structure.PrivacyStateStorageVersion
+	merkleRoot, err := structure.ComputePrivacyMerkleRoot(state.Notes)
+	if err != nil {
+		return err
+	}
+	state.MerkleRoot = merkleRoot
 	return nil
 }
 
@@ -369,6 +557,51 @@ func consumeNote(
 	return note, nil
 }
 
+func consumeStateConfidentialNote(
+	state *structure.PrivacyState,
+	commitment structure.Hash,
+	confidentialCommitment []byte,
+	nullifier structure.Hash,
+	context runtime.InstructionContext,
+	proof []byte,
+	proofMessage []byte,
+) (structure.PrivacyNoteRecord, error) {
+	if context.CurrentSlot == 0 {
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: spend slot cannot be zero", structure.ErrInvalidPrivacyInstruction)
+	}
+	if hasNullifier(*state, nullifier) {
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: nullifier already spent", structure.ErrInvalidPrivacyInstruction)
+	}
+	noteIndex := findConfidentialNote(*state, commitment, confidentialCommitment)
+	if noteIndex < 0 {
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: confidential source commitment not found", structure.ErrInvalidPrivacyInstruction)
+	}
+	note := state.Notes[noteIndex]
+	if note.Spent {
+		return structure.PrivacyNoteRecord{}, fmt.Errorf("%w: confidential source commitment already spent", structure.ErrInvalidPrivacyInstruction)
+	}
+	if err := validateSpendAuthorization(note.SpendAuthority, context.Message, proof, proofMessage); err != nil {
+		return structure.PrivacyNoteRecord{}, err
+	}
+	state.Notes[noteIndex].Spent = true
+	state.Notes[noteIndex].SpentSlot = context.CurrentSlot
+	state.Notes[noteIndex].SpendNullifier = nullifier
+	state.SpentNullifiers = append(state.SpentNullifiers, nullifier)
+	return note, nil
+}
+
+func findConfidentialNote(state structure.PrivacyState, commitment structure.Hash, confidentialCommitment []byte) int {
+	for noteIndex, note := range state.Notes {
+		if note.Commitment != commitment || note.Confidential == nil {
+			continue
+		}
+		if string(note.Confidential.Commitment) == string(confidentialCommitment) {
+			return noteIndex
+		}
+	}
+	return -1
+}
+
 func validateSpendAuthorization(spendAuthority structure.PublicKey, message structure.ResolvedMessage, proof []byte, proofMessage []byte) error {
 	if runtime.IsSignerAddress(spendAuthority, message) {
 		return nil
@@ -383,6 +616,90 @@ func validateSpendAuthorization(spendAuthority structure.PublicKey, message stru
 		return fmt.Errorf("%w: verify spend zk proof: %w", structure.ErrInvalidPrivacyInstruction, err)
 	}
 	return nil
+}
+
+func validateConfidentialDeposit(params *structure.PrivacyDepositParams) error {
+	if params == nil || params.Confidential == nil {
+		return fmt.Errorf("%w: confidential deposit output is missing", structure.ErrInvalidPrivacyInstruction)
+	}
+	if err := zk.VerifyCommitmentAmountProof(params.Confidential.Commitment, params.Amount, params.AmountProof); err != nil {
+		return fmt.Errorf("%w: verify confidential deposit amount: %w", structure.ErrInvalidPrivacyInstruction, err)
+	}
+	return nil
+}
+
+func creditPrivacyLiability(state *structure.PrivacyState, amount uint64) error {
+	nextPool, err := safeAddUint64(state.PrivacyPoolLamports, amount)
+	if err != nil {
+		return fmt.Errorf("%w: privacy pool liability overflow", structure.ErrInvalidPrivacyInstruction)
+	}
+	nextLiability, err := safeAddUint64(state.UnspentNoteLiability, amount)
+	if err != nil {
+		return fmt.Errorf("%w: unspent note liability overflow", structure.ErrInvalidPrivacyInstruction)
+	}
+	state.PrivacyPoolLamports = nextPool
+	state.UnspentNoteLiability = nextLiability
+	return nil
+}
+
+func debitPrivacyLiability(state *structure.PrivacyState, amount uint64) error {
+	if state.PrivacyPoolLamports < amount || state.UnspentNoteLiability < amount {
+		return fmt.Errorf("%w: privacy pool liability too low", structure.ErrInsufficientLamports)
+	}
+	state.PrivacyPoolLamports -= amount
+	state.UnspentNoteLiability -= amount
+	return nil
+}
+
+func cloneConfidentialOutput(output *structure.PrivacyConfidentialOutput) *structure.PrivacyConfidentialOutput {
+	if output == nil {
+		return nil
+	}
+	cloned := &structure.PrivacyConfidentialOutput{
+		Commitment:      utils.CloneBytes(output.Commitment),
+		AmountPublicKey: utils.CloneBytes(output.AmountPublicKey),
+		AmountCiphertext: zk.ElGamalCiphertext{
+			NonceCommitment: utils.CloneBytes(output.AmountCiphertext.NonceCommitment),
+			CiphertextPoint: utils.CloneBytes(output.AmountCiphertext.CiphertextPoint),
+		},
+		AmountProof: zk.AmountCiphertextProof{
+			Version:            output.AmountProof.Version,
+			CommitmentNonce:    utils.CloneBytes(output.AmountProof.CommitmentNonce),
+			RandomnessNonce:    utils.CloneBytes(output.AmountProof.RandomnessNonce),
+			CiphertextNonce:    utils.CloneBytes(output.AmountProof.CiphertextNonce),
+			AmountResponse:     utils.CloneBytes(output.AmountProof.AmountResponse),
+			BlindingResponse:   utils.CloneBytes(output.AmountProof.BlindingResponse),
+			RandomnessResponse: utils.CloneBytes(output.AmountProof.RandomnessResponse),
+		},
+		RangeProof: output.RangeProof,
+	}
+	cloned.RangeProof.Commitment = utils.CloneBytes(output.RangeProof.Commitment)
+	cloned.RangeProof.BitCommitments = cloneByteSlices(output.RangeProof.BitCommitments)
+	cloned.RangeProof.BitProofs = cloneBitProofs(output.RangeProof.BitProofs)
+	return cloned
+}
+
+func cloneByteSlices(values [][]byte) [][]byte {
+	cloned := make([][]byte, len(values))
+	for index := range values {
+		cloned[index] = utils.CloneBytes(values[index])
+	}
+	return cloned
+}
+
+func cloneBitProofs(proofs []zk.BitProof) []zk.BitProof {
+	cloned := make([]zk.BitProof, len(proofs))
+	for index, proof := range proofs {
+		cloned[index] = zk.BitProof{
+			Nonce0:     utils.CloneBytes(proof.Nonce0),
+			Nonce1:     utils.CloneBytes(proof.Nonce1),
+			Challenge0: utils.CloneBytes(proof.Challenge0),
+			Challenge1: utils.CloneBytes(proof.Challenge1),
+			Response0:  utils.CloneBytes(proof.Response0),
+			Response1:  utils.CloneBytes(proof.Response1),
+		}
+	}
+	return cloned
 }
 
 func appendAuditRecords(state *structure.PrivacyState, commitment structure.Hash, records []structure.PrivacyAuditRecord) error {

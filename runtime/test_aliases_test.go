@@ -105,6 +105,17 @@ func simulateWithVirtualMachine(t *testing.T, input TransactionSimulationInput) 
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
 }
 
+func simulateWithPrivacyVMSyscall(t *testing.T, input TransactionSimulationInput) (structure.TransactionExecutionResult, error) {
+	t.Helper()
+	input.Programs = append(input.Programs,
+		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
+		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
+		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
+		vmprogram.NewPrivacyBridgeProgram(DefaultBuiltinProgramIDs.Privacy, DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}),
+	)
+	return runtimepkg.TransactionSimulator{}.Simulate(input)
+}
+
 func newTestPublicKey(seed byte) PublicKey {
 	var publicKey PublicKey
 	for index := range publicKey {

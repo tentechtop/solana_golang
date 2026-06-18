@@ -267,6 +267,9 @@ func (memory registerMemory) Read(address uint64, length int) ([]byte, error) {
 	if length < 0 || length > RegisterMaxMemoryAccessSize {
 		return nil, fmt.Errorf("%w: memory read length %d invalid", ErrExecutionFailed, length)
 	}
+	if length == 0 {
+		return []byte{}, nil
+	}
 	region, offset, err := memory.region(address, length)
 	if err != nil {
 		return nil, err

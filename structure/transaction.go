@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	MaxSolanaTransactionSize      = 1232
+	MaxSolanaTransactionSize      = 60 * 1024
 	MaxSignaturesPerTransaction   = 12
 	MaxAccountsPerTransaction     = 64
 	MaxInstructionsPerTransaction = 64

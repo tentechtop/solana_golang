@@ -347,36 +347,32 @@ func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
 	}
 	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
 
-	privacyState := structure.PrivacyState{
-		Version: structure.PrivacyStateVersion,
-		Notes: []structure.PrivacyNoteRecord{
-			{
-				Commitment:     blockchainTestHash(t, "rpc-privacy-note-available"),
-				SpendAuthority: owner.PublicKey,
-				Amount:         7,
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("available"),
-			},
-			{
-				Commitment:     blockchainTestHash(t, "rpc-privacy-note-spent"),
-				SpendAuthority: owner.PublicKey,
-				Amount:         4,
-				Spent:          true,
-				SpentSlot:      2,
-				SpendNullifier: blockchainTestHash(t, "rpc-privacy-note-nullifier"),
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("spent"),
-			},
-			{
-				Commitment:     blockchainTestHash(t, "rpc-privacy-note-other"),
-				SpendAuthority: other.PublicKey,
-				Amount:         9,
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("other"),
-			},
+	privacyState := buildPrivacyStateForTest(t, []structure.PrivacyNoteRecord{
+		{
+			Commitment:     blockchainTestHash(t, "rpc-privacy-note-available"),
+			SpendAuthority: owner.PublicKey,
+			Amount:         7,
+			VMVersion:      structure.PrivacyStateVersion,
+			EncryptedNote:  []byte("available"),
 		},
-		SpentNullifiers: []structure.Hash{blockchainTestHash(t, "rpc-privacy-note-nullifier")},
-	}
+		{
+			Commitment:     blockchainTestHash(t, "rpc-privacy-note-spent"),
+			SpendAuthority: owner.PublicKey,
+			Amount:         4,
+			Spent:          true,
+			SpentSlot:      2,
+			SpendNullifier: blockchainTestHash(t, "rpc-privacy-note-nullifier"),
+			VMVersion:      structure.PrivacyStateVersion,
+			EncryptedNote:  []byte("spent"),
+		},
+		{
+			Commitment:     blockchainTestHash(t, "rpc-privacy-note-other"),
+			SpendAuthority: other.PublicKey,
+			Amount:         9,
+			VMVersion:      structure.PrivacyStateVersion,
+			EncryptedNote:  []byte("other"),
+		},
+	}, []structure.Hash{blockchainTestHash(t, "rpc-privacy-note-nullifier")})
 	data, err := privacyState.MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary(privacy state) error = %v", err)
@@ -508,6 +504,52 @@ func TestHTTPJSONRPCPrivacyTransferToReceiverBuildsChangeNote(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONRPCPrivacyWithdrawBuildsChangeNote(t *testing.T) {
+	node, source, destination := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	sourceState := mustStructureKeyPair("rpc-privacy-withdraw-source-state")
+	sourceCommitment := blockchainTestHash(t, "rpc-privacy-withdraw-source-note")
+	nullifier := blockchainTestHash(t, "rpc-privacy-withdraw-nullifier")
+	addPrivacyStateWithNotesToLedger(t, node.ledger, sourceState.PublicKey, []structure.PrivacyNoteRecord{
+		{
+			Commitment:     sourceCommitment,
+			SpendAuthority: source.PublicKey,
+			Amount:         1000,
+			VMVersion:      structure.PrivacyStateVersion,
+			EncryptedNote:  []byte("withdraw-source-note"),
+		},
+	}, 1000)
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodPrivacyWithdraw, []any{
+		"rpc-source",
+		encodeTestProtocolAddress(protocolAddressPrivacy, sourceState.PublicKey[:], "z"),
+		sourceCommitment.String(),
+		nullifier.String(),
+		encodeTestProtocolAddress(protocolAddressTransparent, destination.PublicKey[:], "t"),
+		uint64(400),
+		"",
+		"",
+		uint64(0),
+	})
+	result := decodePosNodeRPCResult[rpc.PrivacyTransactionResult](t, response)
+	if result.Signature == "" || result.ChangeCommitment == "" || result.ChangeLamports != "600" {
+		t.Fatalf("result = %+v, want signature and 600 lamports change", result)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	privacyInstruction, err := structure.UnmarshalPrivacyInstructionBinary(node.mempool[0].Instructions[0].Data)
+	if err != nil {
+		t.Fatalf("UnmarshalPrivacyInstructionBinary() error = %v", err)
+	}
+	if privacyInstruction.Withdraw.Amount != 400 || privacyInstruction.Withdraw.ChangeAmount != 600 {
+		t.Fatalf("withdraw params = %+v, want output 400 and change 600", privacyInstruction.Withdraw)
+	}
+	if privacyInstruction.Withdraw.ChangeSpendAuthority != source.PublicKey {
+		t.Fatalf("change spend authority = %s, want %s", privacyInstruction.Withdraw.ChangeSpendAuthority.String(), source.PublicKey.String())
+	}
+}
+
 func TestHTTPJSONRPCStakeExplainsStakerMismatch(t *testing.T) {
 	node, source, _ := newRPCIntegrationTestNode(t)
 	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
@@ -587,7 +629,7 @@ func addPrivacyStateAccountToLedger(t *testing.T, ledger *blockchain.Ledger, sta
 
 func addPrivacyStateWithNotesToLedger(t *testing.T, ledger *blockchain.Ledger, stateAddress structure.PublicKey, notes []structure.PrivacyNoteRecord, escrowLamports uint64) {
 	t.Helper()
-	privacyState := structure.PrivacyState{Version: structure.PrivacyStateVersion, Notes: notes}
+	privacyState := buildPrivacyStateForTest(t, notes, nil)
 	data, err := privacyState.MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary(privacy state) error = %v", err)
@@ -605,6 +647,33 @@ func addPrivacyStateWithNotesToLedger(t *testing.T, ledger *blockchain.Ledger, s
 	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, ledger.Head().Slot+1, ledger.Head().Height+1, "rpc-privacy-state-account")
 	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
 		t.Fatalf("CommitBlock() error = %v", err)
+	}
+}
+
+// buildPrivacyStateForTest 构造一致隐私状态 + 保证测试数据满足 Merkle 和负债校验。
+func buildPrivacyStateForTest(t *testing.T, notes []structure.PrivacyNoteRecord, spentNullifiers []structure.Hash) structure.PrivacyState {
+	t.Helper()
+	unspentNoteLiability := uint64(0)
+	for _, note := range notes {
+		if note.Spent {
+			continue
+		}
+		if ^uint64(0)-unspentNoteLiability < note.Amount {
+			t.Fatalf("privacy test note liability overflow")
+		}
+		unspentNoteLiability += note.Amount
+	}
+	merkleRoot, err := structure.ComputePrivacyMerkleRoot(notes)
+	if err != nil {
+		t.Fatalf("ComputePrivacyMerkleRoot() error = %v", err)
+	}
+	return structure.PrivacyState{
+		Version:              structure.PrivacyStateVersion,
+		Notes:                notes,
+		SpentNullifiers:      spentNullifiers,
+		MerkleRoot:           merkleRoot,
+		PrivacyPoolLamports:  unspentNoteLiability,
+		UnspentNoteLiability: unspentNoteLiability,
 	}
 }
 

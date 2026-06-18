@@ -25,6 +25,7 @@ const (
 	SyscallVerifySchnorr
 	SyscallGetAccountData
 	SyscallSetAccountData
+	SyscallPrivacyExecute SyscallID = 10_001
 )
 
 // SyscallFunc 执行系统调用 + 输入输出统一使用确定性字节编码。
@@ -56,6 +57,24 @@ func NewSyscallRegistry(syscalls ...Syscall) (SyscallRegistry, error) {
 		registry.syscalls[syscall.ID] = syscall
 	}
 	return registry, nil
+}
+
+// With 复制并扩展 syscall 表 + 让上层程序安全注入业务 syscall。
+func (registry SyscallRegistry) With(syscalls ...Syscall) (SyscallRegistry, error) {
+	next := SyscallRegistry{syscalls: make(map[SyscallID]Syscall, len(registry.syscalls)+len(syscalls))}
+	for syscallID, syscall := range registry.syscalls {
+		next.syscalls[syscallID] = syscall
+	}
+	for _, syscall := range syscalls {
+		if syscall.ID == 0 || syscall.Name == "" || syscall.Handler == nil {
+			return SyscallRegistry{}, fmt.Errorf("%w: invalid syscall", ErrExecutionFailed)
+		}
+		if _, exists := next.syscalls[syscall.ID]; exists {
+			return SyscallRegistry{}, fmt.Errorf("%w: duplicate syscall %d", ErrExecutionFailed, syscall.ID)
+		}
+		next.syscalls[syscall.ID] = syscall
+	}
+	return next, nil
 }
 
 // DefaultSyscallRegistry 返回默认 syscall 集合 + 覆盖日志、返回值、sysvar、PDA、CPI 和 ZK。

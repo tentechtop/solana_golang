@@ -14,3 +14,26 @@
 - 六台机器必须互相路由可达，且开放 TCP 5100 到 5105。
 - genesis 必须完全一致，否则状态根、验证者集合和 leader schedule 会分叉。
 - 创世资金账户由 consensus.HardcodedGenesisTreasurySeed 写死，多节点会推导出同一个 treasury 地址。
+- 节点属性通过配置控制，不需要重新打包：本节点使用 node_role 和 node_capabilities，bootstrap_peers 中的对端使用 role 和 capabilities。
+- role 支持 full、validator、bootnode、bootstrap、archive，其中 bootstrap 会按 bootnode 处理。
+- capabilities 支持 relay、archive、validator、state_sync、dht；需要归档能力时只增加 archive，不要回退或补偿其他字段值。
+- 公网中继节点必须配置 relay 能力；两个内网节点都先连上该公网节点后，普通 QUIC 直连失败会自动请求中继协调 QUIC 打洞。
+- QUIC 打洞只使用中继节点观测到的 UDP 映射地址，打洞成功后节点之间走 QUIC 直连；失败时业务消息自动通过已连接 relay 节点转发兜底。
+
+示例：
+```json
+{
+  "node_role": "bootnode",
+  "node_capabilities": ["relay", "dht", "archive"],
+  "bootstrap_peers": [
+    {
+      "peer_id": "peer id",
+      "ip": "127.0.0.1",
+      "port": 5101,
+      "network": "tcp",
+      "role": "bootnode",
+      "capabilities": ["relay", "dht"]
+    }
+  ]
+}
+```

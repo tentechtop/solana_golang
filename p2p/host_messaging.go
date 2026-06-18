@@ -22,7 +22,7 @@ func (host *Host) Send(ctx context.Context, peerID string, message Message) erro
 		var err error
 		connection, err = host.DialPeer(ctx, peerID)
 		if err != nil {
-			return err
+			return host.sendRelayFallback(ctx, peerID, message, err)
 		}
 	}
 
@@ -30,7 +30,10 @@ func (host *Host) Send(ctx context.Context, peerID string, message Message) erro
 	if err != nil {
 		return err
 	}
-	return host.writePeerMessage(ctx, peerID, connection, outbound)
+	if err := host.writePeerMessage(ctx, peerID, connection, outbound); err != nil {
+		return host.sendRelayFallback(ctx, peerID, message, err)
+	}
+	return nil
 }
 
 // Broadcast 广播消息 + 对多个节点逐个发送并聚合错误。
@@ -173,7 +176,7 @@ func (host *Host) broadcastToPeer(ctx context.Context, peerID string, baseMessag
 		var err error
 		connection, err = host.DialPeer(ctx, peerID)
 		if err != nil {
-			return fmt.Errorf("%s: %w", peerID, err)
+			return fmt.Errorf("%s: %w", peerID, host.sendRelayFallback(ctx, peerID, baseMessage, err))
 		}
 	}
 	outbound := baseMessage
@@ -182,9 +185,36 @@ func (host *Host) broadcastToPeer(ctx context.Context, peerID string, baseMessag
 		return fmt.Errorf("%s: %w", peerID, err)
 	}
 	if err := host.writePeerMessage(ctx, peerID, connection, outbound); err != nil {
-		return fmt.Errorf("%s: %w", peerID, err)
+		return fmt.Errorf("%s: %w", peerID, host.sendRelayFallback(ctx, peerID, baseMessage, err))
 	}
 	return nil
+}
+
+func (host *Host) sendRelayFallback(ctx context.Context, peerID string, message Message, directErr error) error {
+	if directErr == nil {
+		return nil
+	}
+	if !host.canRelayFallback(message) {
+		return directErr
+	}
+	if err := host.SendRelayMessage(ctx, peerID, message); err != nil {
+		return errors.Join(directErr, fmt.Errorf("p2p: relay fallback failed: %w", err))
+	}
+	host.logger.Info("p2p relay fallback sent",
+		"target_peer_id", peerID,
+		"protocol_id", uint64(message.Type),
+	)
+	return nil
+}
+
+func (host *Host) canRelayFallback(message Message) bool {
+	if message.Type == ProtocolRelayMessageV1 || message.Type == ProtocolSecureSessionV1 {
+		return false
+	}
+	if message.Type == ProtocolQUICHolePunchV1 {
+		return false
+	}
+	return !host.relay.disabled()
 }
 
 func validateOutboundPeerID(peerID string) error {

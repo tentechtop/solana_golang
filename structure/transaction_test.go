@@ -421,7 +421,7 @@ func newOversizedWireTransaction() Transaction {
 			{
 				ProgramIDIndex: uint8(len(accounts) - 1),
 				AccountIndexes: []uint8{0},
-				Data:           make([]byte, 20),
+				Data:           make([]byte, MaxSolanaTransactionSize),
 			},
 		},
 		RecentBlockhash: newTestHash(3),
