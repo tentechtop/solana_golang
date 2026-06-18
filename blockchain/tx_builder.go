@@ -81,6 +81,33 @@ func NewStakeTransaction(staker structure.SolanaKeyPair, validatorAccount struct
 	return newSignedStakeTransaction(staker, validatorAccount, instruction, recentBlockhash)
 }
 
+// NewDelegateStakeTransaction 构造 DPoS 委托交易 + 普通用户本地签名后通过 sendTransaction 广播。
+func NewDelegateStakeTransaction(delegator structure.SolanaKeyPair, validatorAccount structure.PublicKey, amount uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	instruction, err := stake.NewDelegateInstruction(amount)
+	if err != nil {
+		return structure.Transaction{}, err
+	}
+	return newSignedStakeTransaction(delegator, validatorAccount, instruction, recentBlockhash)
+}
+
+// NewUndelegateStakeTransaction 构造 DPoS 取消委托交易 + active 委托进入 unlocking 状态。
+func NewUndelegateStakeTransaction(delegator structure.SolanaKeyPair, validatorAccount structure.PublicKey, amount uint64, unlockEpoch uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	instruction, err := stake.NewUndelegateInstruction(amount, unlockEpoch)
+	if err != nil {
+		return structure.Transaction{}, err
+	}
+	return newSignedStakeTransaction(delegator, validatorAccount, instruction, recentBlockhash)
+}
+
+// NewWithdrawDelegationTransaction 构造 DPoS 委托提现交易 + 到期资金回到委托人账户。
+func NewWithdrawDelegationTransaction(delegator structure.SolanaKeyPair, validatorAccount structure.PublicKey, currentEpoch uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
+	instruction, err := stake.NewWithdrawDelegationInstruction(currentEpoch)
+	if err != nil {
+		return structure.Transaction{}, err
+	}
+	return newSignedStakeTransaction(delegator, validatorAccount, instruction, recentBlockhash)
+}
+
 // NewUnstakeTransaction 构造解除质押交易 + active stake 进入 unlocking 状态等待提取。
 func NewUnstakeTransaction(staker structure.SolanaKeyPair, validatorAccount structure.PublicKey, amount uint64, unlockEpoch uint64, recentBlockhash structure.Hash) (structure.Transaction, error) {
 	instruction, err := stake.NewUnstakeInstruction(amount, unlockEpoch)

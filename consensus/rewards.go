@@ -627,25 +627,9 @@ func settleRewardedValidator(
 		})
 	}
 	if stakerLamports > 0 {
-		if stakeState.StakerAccount == entry.Address {
-			if err := account.CreditLamports(stakerLamports); err != nil {
-				return err
-			}
-		} else {
-			if err := creditAccountLamports(state, accountIndexByAddress, stakeState.StakerAccount, stakerLamports, input.RentConfig); err != nil {
-				return fmt.Errorf("consensus: credit staker vote reward: %w", err)
-			}
+		if err := distributeStakePayout(state, accountIndexByAddress, entry.Address, &account, &stakeState, stakerLamports, validatorID, input, rewards, rewardCredits); err != nil {
+			return err
 		}
-		*rewards = append(*rewards, BlockReward{
-			Type:           RewardTypeVotePayout,
-			ValidatorID:    validatorID,
-			AccountAddress: stakeState.StakerAccount,
-			StakerAddress:  stakeState.StakerAccount,
-			EpochID:        input.EpochID,
-			Slot:           input.Slot,
-			Lamports:       stakerLamports,
-			Credits:        rewardCredits,
-		})
 	}
 	if ^uint64(0)-stakeState.RewardLamports < rewardLamports {
 		return fmt.Errorf("consensus: validator reward overflow")
@@ -656,6 +640,125 @@ func settleRewardedValidator(
 	stakeState.MissedProposalCount = 0
 	stakeState.LastRewardEpoch = input.EpochID
 	return writeStakeState(state, entry.Index, account, stakeState, input.RentConfig)
+}
+
+func distributeStakePayout(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	validatorAddress structure.PublicKey,
+	validatorAccount *structure.Account,
+	stakeState *stake.ValidatorState,
+	payoutLamports uint64,
+	validatorID string,
+	input BlockRewardInput,
+	rewards *[]BlockReward,
+	rewardCredits uint64,
+) error {
+	if payoutLamports == 0 {
+		return nil
+	}
+	activeStake := stakeState.ActiveStake
+	if activeStake == 0 {
+		return nil
+	}
+	selfActiveStake, err := stake.SelfActiveStake(*stakeState)
+	if err != nil {
+		return err
+	}
+	distributed := uint64(0)
+	lastDelegatorIndex := -1
+	selfPayout := payoutLamports * selfActiveStake / activeStake
+	if selfPayout > 0 {
+		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, stakeState.StakerAccount, selfPayout, input); err != nil {
+			return err
+		}
+		appendVotePayoutReward(rewards, validatorID, stakeState.StakerAccount, stakeState.StakerAccount, input, selfPayout, rewardCredits)
+		distributed += selfPayout
+	}
+	for index := range stakeState.Delegations {
+		delegation := &stakeState.Delegations[index]
+		if delegation.ActiveStake == 0 {
+			continue
+		}
+		delegatorPayout := payoutLamports * delegation.ActiveStake / activeStake
+		if delegatorPayout == 0 {
+			lastDelegatorIndex = index
+			continue
+		}
+		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, delegation.DelegatorAccount, delegatorPayout, input); err != nil {
+			return err
+		}
+		if ^uint64(0)-delegation.RewardLamports < delegatorPayout {
+			return fmt.Errorf("consensus: delegation reward overflow")
+		}
+		delegation.RewardLamports += delegatorPayout
+		appendVotePayoutReward(rewards, validatorID, delegation.DelegatorAccount, stakeState.StakerAccount, input, delegatorPayout, rewardCredits)
+		distributed += delegatorPayout
+		lastDelegatorIndex = index
+	}
+	if distributed >= payoutLamports {
+		return nil
+	}
+	remainder := payoutLamports - distributed
+	if selfActiveStake > 0 {
+		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, stakeState.StakerAccount, remainder, input); err != nil {
+			return err
+		}
+		appendVotePayoutReward(rewards, validatorID, stakeState.StakerAccount, stakeState.StakerAccount, input, remainder, rewardCredits)
+		return nil
+	}
+	if lastDelegatorIndex < 0 {
+		return nil
+	}
+	delegation := &stakeState.Delegations[lastDelegatorIndex]
+	if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, delegation.DelegatorAccount, remainder, input); err != nil {
+		return err
+	}
+	if ^uint64(0)-delegation.RewardLamports < remainder {
+		return fmt.Errorf("consensus: delegation reward overflow")
+	}
+	delegation.RewardLamports += remainder
+	appendVotePayoutReward(rewards, validatorID, delegation.DelegatorAccount, stakeState.StakerAccount, input, remainder, rewardCredits)
+	return nil
+}
+
+func creditStakeReward(
+	state *ChainState,
+	accountIndexByAddress map[structure.PublicKey]int,
+	validatorAddress structure.PublicKey,
+	validatorAccount *structure.Account,
+	destination structure.PublicKey,
+	lamports uint64,
+	input BlockRewardInput,
+) error {
+	if lamports == 0 {
+		return nil
+	}
+	if destination == validatorAddress {
+		return validatorAccount.CreditLamports(lamports)
+	}
+	return creditAccountLamports(state, accountIndexByAddress, destination, lamports, input.RentConfig)
+}
+
+func appendVotePayoutReward(
+	rewards *[]BlockReward,
+	validatorID string,
+	accountAddress structure.PublicKey,
+	stakerAddress structure.PublicKey,
+	input BlockRewardInput,
+	lamports uint64,
+	rewardCredits uint64,
+) {
+	*rewards = append(*rewards, BlockReward{
+		Type:           RewardTypeVotePayout,
+		ValidatorID:    validatorID,
+		AccountAddress: accountAddress,
+		StakerAddress:  stakerAddress,
+		EpochID:        input.EpochID,
+		Slot:           input.Slot,
+		Lamports:       lamports,
+		Credits:        rewardCredits,
+	})
 }
 
 func settleJailedValidator(
@@ -820,11 +923,11 @@ func burnSlashFromValidator(
 	if err := account.DebitLamports(burnedLamports, input.RentConfig); err != nil {
 		return 0, structure.Account{}, stake.ValidatorState{}, err
 	}
-	remainingSlash := burnedLamports
-	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
-	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
-	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
-	return burnedLamports, account, state, nil
+	nextState, err := stake.ApplySlash(state, burnedLamports)
+	if err != nil {
+		return 0, structure.Account{}, stake.ValidatorState{}, err
+	}
+	return burnedLamports, account, nextState, nil
 }
 
 func validatorTotalStake(state stake.ValidatorState) (uint64, error) {

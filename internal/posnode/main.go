@@ -183,18 +183,32 @@ func (node *posNode) start(ctx context.Context) error {
 	}
 	node.logger.Info("posnode started",
 		slog.String("node", node.config.NodeName),
+		slog.String("config_path", node.config.ConfigPath),
 		slog.String("chain_id", node.config.ChainID),
 		slog.String("chain_identity_hash", node.config.ChainIdentityHash),
 		slog.String("genesis_hash", node.config.GenesisHash),
 		slog.String("peer_id", node.peerKeyPair.peerID),
+		slog.String("peer_key_source", keyMaterialSource(node.config.PeerKeyPath, node.config.PeerSeed, true)),
+		slog.String("peer_key_location", keyMaterialLocation(node.config, node.config.PeerKeyPath, node.config.PeerSeed, true)),
 		slog.String("node_role", string(node.config.ResolvedNodeRole)),
 		slog.Uint64("node_capabilities", uint64(node.config.ResolvedNodeCapabilities)),
 		slog.Bool("validator_enabled", node.config.validatorEnabled()),
 		slog.Bool("consensus_enabled", node.config.consensusEnabled()),
 		slog.Bool("transaction_forward_enabled", node.config.transactionForwardEnabled()),
 		slog.String("staker", node.stakerKeyPair.PublicKey.String()),
+		slog.String("staker_key_source", keyMaterialSource(node.config.StakerKeyPath, node.config.StakerSeed, node.config.validatorEnabled())),
+		slog.String("staker_key_location", keyMaterialLocation(node.config, node.config.StakerKeyPath, node.config.StakerSeed, node.config.validatorEnabled())),
 		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
+		slog.String("validator_key_source", keyMaterialSource(node.config.ValidatorKeyPath, node.config.ValidatorSeed, node.config.validatorEnabled())),
+		slog.String("validator_key_location", keyMaterialLocation(node.config, node.config.ValidatorKeyPath, node.config.ValidatorSeed, node.config.validatorEnabled())),
 		slog.String("consensus", node.consensusKeyPair.PublicKey.String()),
+		slog.String("consensus_key_source", keyMaterialSource(node.config.ConsensusKeyPath, node.config.ConsensusSeed, node.config.validatorEnabled())),
+		slog.String("consensus_key_location", keyMaterialLocation(node.config, node.config.ConsensusKeyPath, node.config.ConsensusSeed, node.config.validatorEnabled())),
+		slog.String("bls_public_key", utils.Base58Encode(node.blsKeyPair.PublicKey)),
+		slog.String("bls_key_source", keyMaterialSource(node.config.BLSKeyPath, node.config.ConsensusSeed, node.config.validatorEnabled())),
+		slog.String("bls_key_location", keyMaterialLocation(node.config, node.config.BLSKeyPath, node.config.ConsensusSeed, node.config.validatorEnabled())),
+		slog.String("treasury_key_source", keyMaterialSource(node.config.TreasuryKeyPath, "", !node.config.publicRPCMode())),
+		slog.String("treasury_key_location", keyMaterialLocation(node.config, node.config.TreasuryKeyPath, "", !node.config.publicRPCMode())),
 		slog.Uint64("genesis_supply", node.config.Genesis.InitialSupplyLamports),
 		slog.Int64("genesis_start_unix_millis", node.config.GenesisStartMs),
 		slog.Uint64("finality_depth", node.config.FinalityDepth),
@@ -220,6 +234,34 @@ func (node *posNode) start(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// keyMaterialSource 标识密钥来源 + 日志只暴露来源类型避免泄露 seed 或私钥。
+func keyMaterialSource(keyPath string, seedText string, enabled bool) string {
+	if !enabled {
+		return "disabled"
+	}
+	if strings.TrimSpace(keyPath) != "" {
+		return "keystore_file"
+	}
+	if strings.TrimSpace(seedText) != "" {
+		return "config_seed"
+	}
+	return "missing"
+}
+
+// keyMaterialLocation 标识密钥位置 + 用户排查登录材料时只需要位置不需要日志明文。
+func keyMaterialLocation(config nodeConfig, keyPath string, seedText string, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	if strings.TrimSpace(keyPath) != "" {
+		return strings.TrimSpace(keyPath)
+	}
+	if strings.TrimSpace(seedText) != "" {
+		return config.ConfigPath
+	}
+	return ""
 }
 
 // loadLocalValidatorKeyPairs 加载本地验证者密钥 + 公网 RPC 节点不应持有共识私钥。

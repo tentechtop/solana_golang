@@ -46,6 +46,105 @@ func TestSlashInstructionRejectsZeroAmount(t *testing.T) {
 	}
 }
 
+func TestDelegationInstructionsRoundTrip(t *testing.T) {
+	delegateInstruction, err := NewDelegateInstruction(MinimumStakeLamports)
+	if err != nil {
+		t.Fatalf("NewDelegateInstruction() error = %v", err)
+	}
+	delegateBytes, err := delegateInstruction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(delegate) error = %v", err)
+	}
+	decodedDelegate, err := UnmarshalInstructionBinary(delegateBytes)
+	if err != nil {
+		t.Fatalf("UnmarshalInstructionBinary(delegate) error = %v", err)
+	}
+	if decodedDelegate.Type != InstructionDelegate || decodedDelegate.Amount != MinimumStakeLamports {
+		t.Fatalf("decoded delegate = %+v", decodedDelegate)
+	}
+
+	undelegateInstruction, err := NewUndelegateInstruction(MinimumStakeLamports, 9)
+	if err != nil {
+		t.Fatalf("NewUndelegateInstruction() error = %v", err)
+	}
+	undelegateBytes, err := undelegateInstruction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(undelegate) error = %v", err)
+	}
+	decodedUndelegate, err := UnmarshalInstructionBinary(undelegateBytes)
+	if err != nil {
+		t.Fatalf("UnmarshalInstructionBinary(undelegate) error = %v", err)
+	}
+	if decodedUndelegate.Type != InstructionUndelegate || decodedUndelegate.UnlockEpoch != 9 {
+		t.Fatalf("decoded undelegate = %+v", decodedUndelegate)
+	}
+}
+
+func TestDelegationStateRoundTripAndMature(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = MinimumStakeLamports
+	state.PendingStake = MinimumStakeLamports
+	state.ActivationEpoch = 3
+	state.Delegations = []DelegationState{{
+		DelegatorAccount: testPublicKey(t, 9),
+		PendingStake:     MinimumStakeLamports,
+		ActivationEpoch:  3,
+	}}
+
+	encoded, err := state.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	decoded, err := UnmarshalValidatorStateBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalValidatorStateBinary() error = %v", err)
+	}
+	if len(decoded.Delegations) != 1 {
+		t.Fatalf("delegation count = %d, want 1", len(decoded.Delegations))
+	}
+	if err := MatureStakeForEpoch(&decoded, 3); err != nil {
+		t.Fatalf("MatureStakeForEpoch() error = %v", err)
+	}
+	if decoded.Delegations[0].ActiveStake != MinimumStakeLamports {
+		t.Fatalf("delegation active = %d, want %d", decoded.Delegations[0].ActiveStake, MinimumStakeLamports)
+	}
+	selfActiveStake, err := SelfActiveStake(decoded)
+	if err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
+	}
+	if selfActiveStake != MinimumStakeLamports {
+		t.Fatalf("self active = %d, want %d", selfActiveStake, MinimumStakeLamports)
+	}
+}
+
+func TestApplySlashKeepsDelegationBucketsConsistent(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = 3 * MinimumStakeLamports
+	state.LastEffectiveStake = state.ActiveStake
+	state.Delegations = []DelegationState{{
+		DelegatorAccount: testPublicKey(t, 9),
+		ActiveStake:      MinimumStakeLamports,
+	}}
+
+	slashed, err := ApplySlash(state, MinimumStakeLamports)
+	if err != nil {
+		t.Fatalf("ApplySlash() error = %v", err)
+	}
+	if len(slashed.Delegations) != 0 {
+		t.Fatalf("delegation count = %d, want 0", len(slashed.Delegations))
+	}
+	selfActiveStake, err := SelfActiveStake(slashed)
+	if err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
+	}
+	if selfActiveStake != 2*MinimumStakeLamports {
+		t.Fatalf("self active = %d, want %d", selfActiveStake, 2*MinimumStakeLamports)
+	}
+	if err := slashed.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestEffectiveStakeActivatesAtEpochBoundary(t *testing.T) {
 	state := testValidatorState(t)
 	state.ActiveStake = 0

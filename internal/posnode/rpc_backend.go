@@ -917,17 +917,53 @@ func (node *posNode) GetValidatorSet(ctx context.Context) (rpc.ValidatorSetResul
 	validators := validatorSet.Validators()
 	result := rpc.ValidatorSetResult{Validators: make([]rpc.ValidatorInfo, len(validators))}
 	for index, validator := range validators {
+		stakeState, err := node.loadValidatorStakeState(validator.AccountAddress)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
+		selfStakeLamports, err := stake.SelfActiveStake(stakeState)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
+		delegatedLamports, err := stake.TotalDelegatedStake(stakeState)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
 		result.Validators[index] = rpc.ValidatorInfo{
 			ValidatorID:        string(validator.ValidatorID),
 			AccountAddress:     validator.AccountAddress.String(),
 			ConsensusPublicKey: validator.ConsensusPublicKey.String(),
 			P2PPeerID:          validator.P2PPeerID,
 			StakeLamports:      validator.StakeLamports,
+			SelfStakeLamports:  selfStakeLamports,
+			DelegatedLamports:  delegatedLamports,
+			DelegatorCount:     len(stakeState.Delegations),
 			Status:             validatorStatusText(validator.Status),
 			CommissionBps:      validator.CommissionBps,
+			Delegations:        delegationInfos(stakeState.Delegations),
 		}
 	}
 	return result, nil
+}
+
+func delegationInfos(delegations []stake.DelegationState) []rpc.DelegationInfo {
+	if len(delegations) == 0 {
+		return nil
+	}
+	result := make([]rpc.DelegationInfo, 0, len(delegations))
+	for _, delegation := range delegations {
+		result = append(result, rpc.DelegationInfo{
+			DelegatorAddress:       delegation.DelegatorAccount.String(),
+			ActiveStakeLamports:    delegation.ActiveStake,
+			PendingStakeLamports:   delegation.PendingStake,
+			UnlockingStakeLamports: delegation.UnlockingStake,
+			RewardLamports:         delegation.RewardLamports,
+			ActivationEpoch:        delegation.ActivationEpoch,
+			DeactivationEpoch:      delegation.DeactivationEpoch,
+			UnlockEpoch:            delegation.UnlockEpoch,
+		})
+	}
+	return result
 }
 
 func (node *posNode) GetNodeStatus(ctx context.Context) (any, error) {

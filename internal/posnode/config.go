@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ const (
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
 type nodeConfig struct {
+	ConfigPath                    string                          `json:"-"`
 	ChainID                       string                          `json:"chain_id"`
 	Environment                   string                          `json:"environment"`
 	Production                    bool                            `json:"production"`
@@ -139,6 +141,7 @@ func loadNodeConfig(path string) (nodeConfig, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nodeConfig{}, fmt.Errorf("posnode: decode config: %w", err)
 	}
+	config.ConfigPath = filepath.Clean(strings.TrimSpace(path))
 	return normalizeNodeConfig(config)
 }
 

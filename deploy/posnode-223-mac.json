@@ -35,6 +35,12 @@
                                 "ip":  "101.35.87.31",
                                 "port":  5101,
                                 "network":  "tcp"
+                            },
+                            {
+                                "peer_id":  "GVbQfQwJK1M1q1wVV6LnzLq9Nwvu3XSBvsJLBJAC935y",
+                                "ip":  "192.168.121.225",
+                                "port":  5110,
+                                "network":  "tcp"
                             }
                         ],
     "genesis":  {

@@ -239,13 +239,28 @@ type PrivacyBalanceResult struct {
 }
 
 type ValidatorInfo struct {
-	ValidatorID        string `json:"validator_id"`
-	AccountAddress     string `json:"account_address"`
-	ConsensusPublicKey string `json:"consensus_public_key"`
-	P2PPeerID          string `json:"p2p_peer_id"`
-	StakeLamports      uint64 `json:"stake_lamports"`
-	Status             string `json:"status"`
-	CommissionBps      uint16 `json:"commission_bps"`
+	ValidatorID        string           `json:"validator_id"`
+	AccountAddress     string           `json:"account_address"`
+	ConsensusPublicKey string           `json:"consensus_public_key"`
+	P2PPeerID          string           `json:"p2p_peer_id"`
+	StakeLamports      uint64           `json:"stake_lamports"`
+	SelfStakeLamports  uint64           `json:"self_stake_lamports"`
+	DelegatedLamports  uint64           `json:"delegated_lamports"`
+	DelegatorCount     int              `json:"delegator_count"`
+	Status             string           `json:"status"`
+	CommissionBps      uint16           `json:"commission_bps"`
+	Delegations        []DelegationInfo `json:"delegations,omitempty"`
+}
+
+type DelegationInfo struct {
+	DelegatorAddress       string `json:"delegator_address"`
+	ActiveStakeLamports    uint64 `json:"active_stake_lamports"`
+	PendingStakeLamports   uint64 `json:"pending_stake_lamports"`
+	UnlockingStakeLamports uint64 `json:"unlocking_stake_lamports"`
+	RewardLamports         uint64 `json:"reward_lamports"`
+	ActivationEpoch        uint64 `json:"activation_epoch"`
+	DeactivationEpoch      uint64 `json:"deactivation_epoch"`
+	UnlockEpoch            uint64 `json:"unlock_epoch"`
 }
 
 type ValidatorSetResult struct {

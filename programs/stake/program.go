@@ -14,7 +14,8 @@ import (
 const (
 	MaxPeerIDLength      = 128
 	MaxBLSPublicKeyBytes = 128
-	MaxStakeStateBytes   = 768
+	MaxStakeStateBytes   = 32768
+	MaxDelegations       = 256
 	MinimumStakeLamports = uint64(10_000_000)
 )
 
@@ -28,6 +29,9 @@ const (
 	InstructionExitValidator
 	InstructionSlashValidator
 	InstructionJailValidator
+	InstructionDelegate
+	InstructionUndelegate
+	InstructionWithdrawDelegation
 )
 
 type ValidatorStatus uint8
@@ -78,6 +82,19 @@ type ValidatorState struct {
 	DeactivationEpoch   uint64
 	LastEffectiveStake  uint64
 	LastSlashedSlot     uint64
+	Delegations         []DelegationState
+}
+
+// DelegationState 描述普通用户委托 + 与验证者自质押分离以便按份额自动分配收益。
+type DelegationState struct {
+	DelegatorAccount  structure.PublicKey
+	ActiveStake       uint64
+	PendingStake      uint64
+	UnlockingStake    uint64
+	UnlockEpoch       uint64
+	ActivationEpoch   uint64
+	DeactivationEpoch uint64
+	RewardLamports    uint64
 }
 
 // NewProgram 创建质押程序 + 由组合层显式注册到 runtime。
@@ -111,6 +128,12 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 		return executeSlashValidator(instruction, context)
 	case InstructionJailValidator:
 		return executeJailValidator(instruction, context)
+	case InstructionDelegate:
+		return executeDelegate(instruction, context)
+	case InstructionUndelegate:
+		return executeUndelegate(instruction, context)
+	case InstructionWithdrawDelegation:
+		return executeWithdrawDelegation(instruction, context)
 	default:
 		return fmt.Errorf("stake: unsupported instruction type %d", instruction.Type)
 	}
@@ -170,6 +193,24 @@ func NewJailValidatorInstruction(jailUntilEpoch uint64) (Instruction, error) {
 	return instruction, instruction.Validate()
 }
 
+// NewDelegateInstruction 创建委托质押指令 + 普通用户 stake 延迟到后续 epoch 生效。
+func NewDelegateInstruction(amount uint64) (Instruction, error) {
+	instruction := Instruction{Type: InstructionDelegate, Amount: amount}
+	return instruction, instruction.Validate()
+}
+
+// NewUndelegateInstruction 创建取消委托指令 + active 委托进入 unlocking 后等待提现。
+func NewUndelegateInstruction(amount uint64, unlockEpoch uint64) (Instruction, error) {
+	instruction := Instruction{Type: InstructionUndelegate, Amount: amount, UnlockEpoch: unlockEpoch}
+	return instruction, instruction.Validate()
+}
+
+// NewWithdrawDelegationInstruction 创建委托提现指令 + 到期 unlocking 资金回到委托人账户。
+func NewWithdrawDelegationInstruction(currentEpoch uint64) (Instruction, error) {
+	instruction := Instruction{Type: InstructionWithdrawDelegation, UnlockEpoch: currentEpoch}
+	return instruction, instruction.Validate()
+}
+
 func (instruction Instruction) Validate() error {
 	if instruction.P2PPeerID != "" && len(instruction.P2PPeerID) > MaxPeerIDLength {
 		return fmt.Errorf("stake: p2p peer id too long")
@@ -183,14 +224,14 @@ func (instruction Instruction) Validate() error {
 	switch instruction.Type {
 	case InstructionRegisterValidator:
 		return validateRegisterInstruction(instruction)
-	case InstructionStake, InstructionUnstake:
+	case InstructionStake, InstructionUnstake, InstructionDelegate, InstructionUndelegate:
 		return validateStakeAmount(instruction.Amount)
 	case InstructionSlashValidator:
 		if instruction.Amount == 0 {
 			return fmt.Errorf("stake: slash amount is zero")
 		}
 		return nil
-	case InstructionWithdrawUnstaked, InstructionExitValidator, InstructionJailValidator:
+	case InstructionWithdrawUnstaked, InstructionExitValidator, InstructionJailValidator, InstructionWithdrawDelegation:
 		return nil
 	default:
 		return fmt.Errorf("stake: invalid instruction type %d", instruction.Type)
@@ -296,6 +337,17 @@ func (state ValidatorState) MarshalBinary() ([]byte, error) {
 		return nil, fmt.Errorf("stake: encode validator bls public key: %w", err)
 	}
 	writer.WriteUint64(state.LastSlashedSlot)
+	writer.WriteUint32(uint32(len(state.Delegations)))
+	for _, delegation := range state.Delegations {
+		writer.WriteFixedBytes(delegation.DelegatorAccount[:])
+		writer.WriteUint64(delegation.ActiveStake)
+		writer.WriteUint64(delegation.PendingStake)
+		writer.WriteUint64(delegation.UnlockingStake)
+		writer.WriteUint64(delegation.UnlockEpoch)
+		writer.WriteUint64(delegation.ActivationEpoch)
+		writer.WriteUint64(delegation.DeactivationEpoch)
+		writer.WriteUint64(delegation.RewardLamports)
+	}
 	return writer.Bytes(), nil
 }
 
@@ -400,6 +452,24 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 	if state.LastSlashedSlot, err = reader.ReadUint64(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode last slashed slot: %w", err)
 	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	delegationCount, err := reader.ReadUint32()
+	if err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode delegation count: %w", err)
+	}
+	if delegationCount > MaxDelegations {
+		return ValidatorState{}, fmt.Errorf("stake: delegation count exceeds limit")
+	}
+	state.Delegations = make([]DelegationState, 0, delegationCount)
+	for index := uint32(0); index < delegationCount; index++ {
+		delegation, err := readDelegationState(reader)
+		if err != nil {
+			return ValidatorState{}, fmt.Errorf("stake: decode delegation %d: %w", index, err)
+		}
+		state.Delegations = append(state.Delegations, delegation)
+	}
 	if err := reader.EnsureEOF(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
 	}
@@ -444,6 +514,16 @@ func (state ValidatorState) validate(checkLastEffectiveStake bool) error {
 	totalBondedStake += state.UnlockingStake
 	if checkLastEffectiveStake && state.LastEffectiveStake > totalBondedStake {
 		return fmt.Errorf("stake: effective stake exceeds bonded stake")
+	}
+	if err := validateDelegations(state.Delegations); err != nil {
+		return err
+	}
+	delegatedStake, err := TotalDelegatedStake(state)
+	if err != nil {
+		return err
+	}
+	if delegatedStake > totalBondedStake {
+		return fmt.Errorf("stake: delegated stake exceeds total stake")
 	}
 	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting && state.Status != ValidatorStatusJailed {
 		return fmt.Errorf("stake: invalid validator status %d", state.Status)
@@ -494,6 +574,18 @@ func MatureStakeForEpoch(state *ValidatorState, epochID uint64) error {
 		state.ActiveStake += state.PendingStake
 		state.PendingStake = 0
 		state.ActivationEpoch = 0
+	}
+	for index := range state.Delegations {
+		delegation := &state.Delegations[index]
+		if delegation.PendingStake == 0 || delegation.ActivationEpoch > epochID {
+			continue
+		}
+		if ^uint64(0)-delegation.ActiveStake < delegation.PendingStake {
+			return fmt.Errorf("stake: delegation active stake overflow")
+		}
+		delegation.ActiveStake += delegation.PendingStake
+		delegation.PendingStake = 0
+		delegation.ActivationEpoch = 0
 	}
 	effectiveStake, err := EffectiveStakeAtEpoch(*state, epochID)
 	if err != nil {
@@ -569,6 +661,47 @@ func executeStake(instruction Instruction, context runtime.InstructionContext) e
 	return writeValidatorState("stake", validatorAddress, validatorAccount, state, context)
 }
 
+func executeDelegate(instruction Instruction, context runtime.InstructionContext) error {
+	delegatorAddress, validatorAddress, state, validatorAccount, err := loadValidatorForDelegator(context)
+	if err != nil {
+		return err
+	}
+	if state.Status != ValidatorStatusActive {
+		return fmt.Errorf("stake: validator is not active")
+	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
+		return err
+	}
+	if err := runtime.TransferLamports(delegatorAddress, validatorAddress, instruction.Amount, context.Accounts, context.RentConfig); err != nil {
+		return err
+	}
+	if ^uint64(0)-state.PendingStake < instruction.Amount {
+		return fmt.Errorf("stake: pending stake overflow")
+	}
+	delegationIndex, exists := findDelegationIndex(state.Delegations, delegatorAddress)
+	if !exists {
+		if len(state.Delegations) >= MaxDelegations {
+			return fmt.Errorf("stake: too many delegations")
+		}
+		state.Delegations = append(state.Delegations, DelegationState{DelegatorAccount: delegatorAddress})
+		delegationIndex = len(state.Delegations) - 1
+	}
+	delegation := &state.Delegations[delegationIndex]
+	if ^uint64(0)-delegation.PendingStake < instruction.Amount {
+		return fmt.Errorf("stake: delegation pending stake overflow")
+	}
+	delegation.PendingStake += instruction.Amount
+	delegation.ActivationEpoch = context.CurrentEpoch + 1
+	state.PendingStake += instruction.Amount
+	state.ActivationEpoch = context.CurrentEpoch + 1
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
+	return writeValidatorState("delegate", validatorAddress, validatorAccount, state, context)
+}
+
 func executeUnstake(instruction Instruction, context runtime.InstructionContext) error {
 	_, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
 	if err != nil {
@@ -577,7 +710,11 @@ func executeUnstake(instruction Instruction, context runtime.InstructionContext)
 	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
 		return err
 	}
-	if instruction.Amount > state.ActiveStake {
+	selfActiveStake, err := SelfActiveStake(state)
+	if err != nil {
+		return err
+	}
+	if instruction.Amount > selfActiveStake {
 		return fmt.Errorf("stake: unstake exceeds active stake")
 	}
 	state.ActiveStake -= instruction.Amount
@@ -590,6 +727,41 @@ func executeUnstake(instruction Instruction, context runtime.InstructionContext)
 	}
 	state.LastEffectiveStake = effectiveStake
 	return writeValidatorState("unstake", validatorAddress, validatorAccount, state, context)
+}
+
+func executeUndelegate(instruction Instruction, context runtime.InstructionContext) error {
+	delegatorAddress, validatorAddress, state, validatorAccount, err := loadValidatorForDelegator(context)
+	if err != nil {
+		return err
+	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
+		return err
+	}
+	delegationIndex, exists := findDelegationIndex(state.Delegations, delegatorAddress)
+	if !exists {
+		return fmt.Errorf("stake: delegation not found")
+	}
+	delegation := &state.Delegations[delegationIndex]
+	if instruction.Amount > delegation.ActiveStake {
+		return fmt.Errorf("stake: undelegate exceeds active delegation")
+	}
+	if instruction.Amount > state.ActiveStake {
+		return fmt.Errorf("stake: undelegate exceeds validator active stake")
+	}
+	delegation.ActiveStake -= instruction.Amount
+	delegation.UnlockingStake += instruction.Amount
+	delegation.UnlockEpoch = instruction.UnlockEpoch
+	delegation.DeactivationEpoch = context.CurrentEpoch + 1
+	state.ActiveStake -= instruction.Amount
+	state.UnlockingStake += instruction.Amount
+	state.DeactivationEpoch = context.CurrentEpoch + 1
+	effectiveStake, err := EffectiveStakeAtEpoch(state, context.CurrentEpoch)
+	if err != nil {
+		return err
+	}
+	state.LastEffectiveStake = effectiveStake
+	state.Delegations = compactDelegations(state.Delegations)
+	return writeValidatorState("undelegate", validatorAddress, validatorAccount, state, context)
 }
 
 func executeWithdrawUnstaked(instruction Instruction, context runtime.InstructionContext) error {
@@ -610,6 +782,36 @@ func executeWithdrawUnstaked(instruction Instruction, context runtime.Instructio
 	}
 	validatorAccount := context.Accounts[validatorAddress].Clone()
 	return writeValidatorState("withdraw_unstaked", validatorAddress, validatorAccount, state, context)
+}
+
+func executeWithdrawDelegation(instruction Instruction, context runtime.InstructionContext) error {
+	delegatorAddress, validatorAddress, state, validatorAccount, err := loadValidatorForDelegator(context)
+	if err != nil {
+		return err
+	}
+	if err := MatureStakeForEpoch(&state, context.CurrentEpoch); err != nil {
+		return err
+	}
+	delegationIndex, exists := findDelegationIndex(state.Delegations, delegatorAddress)
+	if !exists {
+		return fmt.Errorf("stake: delegation not found")
+	}
+	delegation := &state.Delegations[delegationIndex]
+	if delegation.UnlockingStake == 0 || instruction.UnlockEpoch < delegation.UnlockEpoch {
+		return fmt.Errorf("stake: delegation is not withdrawable")
+	}
+	amount := delegation.UnlockingStake
+	delegation.UnlockingStake = 0
+	if amount > state.UnlockingStake {
+		return fmt.Errorf("stake: delegation unlocking exceeds validator unlocking stake")
+	}
+	state.UnlockingStake -= amount
+	if err := runtime.TransferLamports(validatorAddress, delegatorAddress, amount, context.Accounts, context.RentConfig); err != nil {
+		return err
+	}
+	state.Delegations = compactDelegations(state.Delegations)
+	validatorAccount = context.Accounts[validatorAddress].Clone()
+	return writeValidatorState("withdraw_delegation", validatorAddress, validatorAccount, state, context)
 }
 
 func executeExitValidator(context runtime.InstructionContext) error {
@@ -645,10 +847,10 @@ func executeSlashValidator(instruction Instruction, context runtime.InstructionC
 	if err := validatorAccount.DebitLamports(instruction.Amount, context.RentConfig); err != nil {
 		return fmt.Errorf("stake: burn slashed lamports: %w", err)
 	}
-	remainingSlash := instruction.Amount
-	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
-	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
-	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
+	state, err = ApplySlash(state, instruction.Amount)
+	if err != nil {
+		return err
+	}
 	if state.ActiveStake+state.PendingStake < MinimumStakeLamports {
 		state.Status = ValidatorStatusJailed
 		state.JailUntilEpoch = state.UnlockEpoch
@@ -722,6 +924,26 @@ func loadWritableValidator(context runtime.InstructionContext) (structure.Public
 	return stakerAddress, validatorAddress, state, validatorAccount.Clone(), nil
 }
 
+func loadValidatorForDelegator(context runtime.InstructionContext) (structure.PublicKey, structure.PublicKey, ValidatorState, structure.Account, error) {
+	if len(context.Instruction.AccountIndexes) < 2 {
+		return structure.PublicKey{}, structure.PublicKey{}, ValidatorState{}, structure.Account{}, fmt.Errorf("stake: delegate requires delegator and validator accounts")
+	}
+	delegatorAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
+	validatorAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
+	if !runtime.IsSignerContextAddress(delegatorAddress, context) {
+		return structure.PublicKey{}, structure.PublicKey{}, ValidatorState{}, structure.Account{}, fmt.Errorf("%w: delegator must sign", structure.ErrMissingRequiredSignature)
+	}
+	validatorAccount, exists := context.Accounts[validatorAddress]
+	if !exists {
+		return structure.PublicKey{}, structure.PublicKey{}, ValidatorState{}, structure.Account{}, fmt.Errorf("stake: validator account not found")
+	}
+	state, err := UnmarshalValidatorStateBinary(validatorAccount.Data)
+	if err != nil {
+		return structure.PublicKey{}, structure.PublicKey{}, ValidatorState{}, structure.Account{}, err
+	}
+	return delegatorAddress, validatorAddress, state, validatorAccount.Clone(), nil
+}
+
 func writeValidatorState(action string, address structure.PublicKey, account structure.Account, state ValidatorState, context runtime.InstructionContext) error {
 	data, err := state.MarshalBinary()
 	if err != nil {
@@ -792,6 +1014,170 @@ func readPublicKey(reader *borsh.Reader, field string) (structure.PublicKey, err
 		return structure.PublicKey{}, fmt.Errorf("stake: decode %s: %w", field, err)
 	}
 	return publicKey, nil
+}
+
+func readDelegationState(reader *borsh.Reader) (DelegationState, error) {
+	delegatorAccount, err := readPublicKey(reader, "delegator account")
+	if err != nil {
+		return DelegationState{}, err
+	}
+	activeStake, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation active stake: %w", err)
+	}
+	pendingStake, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation pending stake: %w", err)
+	}
+	unlockingStake, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation unlocking stake: %w", err)
+	}
+	unlockEpoch, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation unlock epoch: %w", err)
+	}
+	activationEpoch, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation activation epoch: %w", err)
+	}
+	deactivationEpoch, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation deactivation epoch: %w", err)
+	}
+	rewardLamports, err := reader.ReadUint64()
+	if err != nil {
+		return DelegationState{}, fmt.Errorf("stake: decode delegation reward lamports: %w", err)
+	}
+	return DelegationState{
+		DelegatorAccount:  delegatorAccount,
+		ActiveStake:       activeStake,
+		PendingStake:      pendingStake,
+		UnlockingStake:    unlockingStake,
+		UnlockEpoch:       unlockEpoch,
+		ActivationEpoch:   activationEpoch,
+		DeactivationEpoch: deactivationEpoch,
+		RewardLamports:    rewardLamports,
+	}, nil
+}
+
+func validateDelegations(delegations []DelegationState) error {
+	if len(delegations) > MaxDelegations {
+		return fmt.Errorf("stake: too many delegations")
+	}
+	seen := make(map[structure.PublicKey]struct{}, len(delegations))
+	for _, delegation := range delegations {
+		if delegation.DelegatorAccount.IsZero() {
+			return fmt.Errorf("stake: delegation account is empty")
+		}
+		if _, exists := seen[delegation.DelegatorAccount]; exists {
+			return fmt.Errorf("stake: duplicate delegation")
+		}
+		if _, err := delegation.TotalStake(); err != nil {
+			return err
+		}
+		seen[delegation.DelegatorAccount] = struct{}{}
+	}
+	return nil
+}
+
+func findDelegationIndex(delegations []DelegationState, delegator structure.PublicKey) (int, bool) {
+	for index, delegation := range delegations {
+		if delegation.DelegatorAccount == delegator {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func compactDelegations(delegations []DelegationState) []DelegationState {
+	compacted := delegations[:0]
+	for _, delegation := range delegations {
+		total, err := delegation.TotalStake()
+		if err != nil || total == 0 {
+			continue
+		}
+		compacted = append(compacted, delegation)
+	}
+	return compacted
+}
+
+// SelfActiveStake 返回验证者自有 active stake + 防止验证者提走普通用户委托资金。
+func SelfActiveStake(state ValidatorState) (uint64, error) {
+	delegatedActive := uint64(0)
+	for _, delegation := range state.Delegations {
+		if ^uint64(0)-delegatedActive < delegation.ActiveStake {
+			return 0, fmt.Errorf("stake: delegated active overflow")
+		}
+		delegatedActive += delegation.ActiveStake
+	}
+	if delegatedActive > state.ActiveStake {
+		return 0, fmt.Errorf("stake: delegated active exceeds validator active stake")
+	}
+	return state.ActiveStake - delegatedActive, nil
+}
+
+// TotalDelegatedStake 返回总委托质押 + 奖励分配和校验共用同一口径。
+func TotalDelegatedStake(state ValidatorState) (uint64, error) {
+	total := uint64(0)
+	for _, delegation := range state.Delegations {
+		delegationTotal, err := delegation.TotalStake()
+		if err != nil {
+			return 0, err
+		}
+		if ^uint64(0)-total < delegationTotal {
+			return 0, fmt.Errorf("stake: delegated stake overflow")
+		}
+		total += delegationTotal
+	}
+	return total, nil
+}
+
+// TotalStake 返回单个委托总额 + 包含 active、pending 和 unlocking。
+func (delegation DelegationState) TotalStake() (uint64, error) {
+	total := delegation.ActiveStake
+	if ^uint64(0)-total < delegation.PendingStake {
+		return 0, fmt.Errorf("stake: delegation stake overflow")
+	}
+	total += delegation.PendingStake
+	if ^uint64(0)-total < delegation.UnlockingStake {
+		return 0, fmt.Errorf("stake: delegation stake overflow")
+	}
+	return total + delegation.UnlockingStake, nil
+}
+
+// ApplySlash 扣减验证者和委托质押 + 保证总桶和委托明细保持一致。
+func ApplySlash(state ValidatorState, amount uint64) (ValidatorState, error) {
+	totalStake, err := validatorTotalStake(state)
+	if err != nil {
+		return ValidatorState{}, err
+	}
+	if amount > totalStake {
+		return ValidatorState{}, fmt.Errorf("stake: slash exceeds total stake")
+	}
+	remainingSlash := amount
+	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
+	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
+	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
+	remainingDelegationSlash := amount
+	for index := range state.Delegations {
+		delegation := &state.Delegations[index]
+		delegation.PendingStake, remainingDelegationSlash = subtractStakeBucket(delegation.PendingStake, remainingDelegationSlash)
+		delegation.ActiveStake, remainingDelegationSlash = subtractStakeBucket(delegation.ActiveStake, remainingDelegationSlash)
+		delegation.UnlockingStake, remainingDelegationSlash = subtractStakeBucket(delegation.UnlockingStake, remainingDelegationSlash)
+		if remainingDelegationSlash == 0 {
+			break
+		}
+	}
+	state.Delegations = compactDelegations(state.Delegations)
+	nextTotalStake, err := validatorTotalStake(state)
+	if err != nil {
+		return ValidatorState{}, err
+	}
+	if state.LastEffectiveStake > nextTotalStake {
+		state.LastEffectiveStake = nextTotalStake
+	}
+	return state, nil
 }
 
 func cloneBytes(value []byte) []byte {
