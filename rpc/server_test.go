@@ -16,6 +16,9 @@ type testLedgerBackend struct{}
 func (b testLedgerBackend) GetBalance(context.Context, string) (BalanceResult, error) {
 	return BalanceResult{Value: 100}, nil
 }
+func (b testLedgerBackend) GetLatestBlockhash(context.Context) (LatestBlockhashResult, error) {
+	return LatestBlockhashResult{Blockhash: "test-blockhash", Slot: 10, Height: 9, LastValidSlot: 160}, nil
+}
 func (b testLedgerBackend) SendTransaction(context.Context, string) (string, error) {
 	return "test-signature", nil
 }
@@ -36,6 +39,22 @@ func TestServerGetBalance(t *testing.T) {
 	result, ok := decoded.Result.(map[string]any)
 	if !ok || result["value"].(float64) != 100 {
 		t.Fatalf("result = %#v, want value 100", decoded.Result)
+	}
+}
+func TestServerGetLatestBlockhash(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result, ok := decoded.Result.(map[string]any)
+	if !ok || result["blockhash"].(string) != "test-blockhash" {
+		t.Fatalf("result = %#v, want latest blockhash", decoded.Result)
 	}
 }
 func TestServerMethodNotFound(t *testing.T) {

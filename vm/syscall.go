@@ -25,7 +25,9 @@ const (
 	SyscallVerifySchnorr
 	SyscallGetAccountData
 	SyscallSetAccountData
-	SyscallPrivacyExecute SyscallID = 10_001
+	SyscallPrivacyExecute   SyscallID = 10_001
+	SyscallStakePoolExecute SyscallID = 10_002
+	SyscallAssetExecute     SyscallID = 10_003
 )
 
 // SyscallFunc 执行系统调用 + 输入输出统一使用确定性字节编码。

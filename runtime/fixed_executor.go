@@ -12,10 +12,11 @@ import (
 
 // FixedExecutor 执行固定指令交易 + 作为 VM 接入前的生产闭环执行入口。
 type FixedExecutor struct {
-	Simulator            TransactionSimulator
-	Programs             ProgramRegistry
-	Logger               *slog.Logger
-	PrivacyExecutionMode PrivacyExecutionMode
+	Simulator              TransactionSimulator
+	Programs               ProgramRegistry
+	Logger                 *slog.Logger
+	PrivacyExecutionMode   PrivacyExecutionMode
+	ProgramExecutionPolicy ProgramExecutionPolicy
 }
 
 // NewFixedExecutor 创建固定指令执行器 + 组合层显式注册程序防止 runtime import programs。
@@ -24,12 +25,12 @@ func NewFixedExecutor(programs ...Program) (FixedExecutor, error) {
 	if err != nil {
 		return FixedExecutor{}, err
 	}
-	return FixedExecutor{Programs: registry}, nil
+	return FixedExecutor{Programs: registry, ProgramExecutionPolicy: defaultFixedProgramExecutionPolicy()}, nil
 }
 
 // NewFixedExecutorWithRegistry 创建处理器执行器 + 支持组合层按 ProgramSpec 注册程序。
 func NewFixedExecutorWithRegistry(registry ProgramRegistry) FixedExecutor {
-	return FixedExecutor{Programs: registry.Clone()}
+	return FixedExecutor{Programs: registry.Clone(), ProgramExecutionPolicy: defaultFixedProgramExecutionPolicy()}
 }
 
 // RegisterProgramHandler 注册程序处理器 + 让执行器接入方式对齐 p2p 协议注册。
@@ -106,6 +107,7 @@ func (executor FixedExecutor) logTransactionExecution(
 		slog.String("tx_id", transactionID),
 		slog.String("execution_mode", string(normalizeExecutionMode(request.Mode))),
 		slog.String("privacy_execution_mode", string(executor.privacyExecutionMode())),
+		slog.String("program_execution_policy", executor.programExecutionPolicy().Fingerprint()),
 		slog.Int("status", int(result.Execution.Status)),
 		slog.Uint64("fee_total", result.Execution.FeeDetails.TotalFee),
 		slog.Uint64("fee_burned", result.Execution.FeeDetails.BurnedFee),
@@ -138,6 +140,17 @@ func (executor FixedExecutor) privacyExecutionMode() PrivacyExecutionMode {
 		return PrivacyExecutionModeFixed
 	}
 	return mode
+}
+
+func (executor FixedExecutor) programExecutionPolicy() ProgramExecutionPolicy {
+	if !executor.ProgramExecutionPolicy.IsZero() {
+		return NormalizeProgramExecutionPolicy(executor.ProgramExecutionPolicy)
+	}
+	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, executor.privacyExecutionMode())
+	if err != nil {
+		return defaultFixedProgramExecutionPolicy()
+	}
+	return policy
 }
 
 func transactionIDForLog(transaction structure.Transaction) string {

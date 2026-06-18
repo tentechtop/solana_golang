@@ -96,6 +96,44 @@ func TestRunReturnsConfigError(t *testing.T) {
 		t.Fatal("run() error = nil, want config error")
 	}
 }
+func TestNodeModeFromConfigReadsJSONMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bootstrap.json")
+	if err := os.WriteFile(path, []byte(`{"node_mode":"bootstrapnode"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	mode, err := nodeModeFromConfig(path)
+	if err != nil {
+		t.Fatalf("nodeModeFromConfig() error = %v", err)
+	}
+	if mode != "bootstrapnode" {
+		t.Fatalf("nodeModeFromConfig() = %q, want bootstrapnode", mode)
+	}
+}
+func TestNodeModeFromConfigReadsYAMLMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pos.yaml")
+	if err := os.WriteFile(path, []byte("node_mode: POSNODE\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	mode, err := nodeModeFromConfig(path)
+	if err != nil {
+		t.Fatalf("nodeModeFromConfig() error = %v", err)
+	}
+	if mode != "posnode" {
+		t.Fatalf("nodeModeFromConfig() = %q, want posnode", mode)
+	}
+}
+func TestNodeModeFromConfigRejectsMissingMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	if err := os.WriteFile(path, []byte("rpc:\n  address: ':8899'\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := nodeModeFromConfig(path); err == nil {
+		t.Fatal("nodeModeFromConfig() error = nil, want missing node_mode error")
+	}
+}
 func TestRunReturnsServerError(t *testing.T) {
 	configPath := writeRuntimeConfig(t, "bad address", freeTCPPort(t), filepath.Join(t.TempDir(), "db"))
 	restoreFlags := replaceCommandLine([]string{"cmd", "-config", configPath})
@@ -394,6 +432,7 @@ func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePa
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := strings.Join([]string{
+		"node_mode: \"runtime\"",
 		"rpc:",
 		"  address: \"" + rpcAddress + "\"",
 		"  max_body_bytes: 1048576",

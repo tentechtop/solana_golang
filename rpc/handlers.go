@@ -9,6 +9,7 @@ import (
 const (
 	MethodGetBalance                = "getBalance"
 	MethodGetAccountType            = "getAccountType"
+	MethodGetLatestBlockhash        = "getLatestBlockhash"
 	MethodSendTransaction           = "sendTransaction"
 	MethodGetBlock                  = "getBlock"
 	MethodGetTransaction            = "getTransaction"
@@ -42,6 +43,7 @@ const (
 // LedgerBackend 定义链业务后端 + 让 RPC 层只负责协议转换和参数校验。
 type LedgerBackend interface {
 	GetBalance(ctx context.Context, address string) (BalanceResult, error)
+	GetLatestBlockhash(ctx context.Context) (LatestBlockhashResult, error)
 	SendTransaction(ctx context.Context, encodedTransaction string) (string, error)
 	GetBlock(ctx context.Context, slot uint64) (BlockResult, error)
 }
@@ -118,6 +120,13 @@ type MetricsBackend interface {
 
 type BalanceResult struct {
 	Value uint64 `json:"value"`
+}
+
+type LatestBlockhashResult struct {
+	Blockhash     string `json:"blockhash"`
+	Slot          uint64 `json:"slot"`
+	Height        uint64 `json:"height"`
+	LastValidSlot uint64 `json:"last_valid_slot"`
 }
 
 type AccountTypeResult struct {
@@ -261,6 +270,10 @@ type LocalValidatorIdentityResult struct {
 	DeactivationEpoch        uint64 `json:"deactivation_epoch"`
 	CurrentEpoch             uint64 `json:"current_epoch"`
 	CommissionBps            uint16 `json:"commission_bps"`
+	VoteCredits              uint64 `json:"vote_credits"`
+	RewardLamports           uint64 `json:"reward_lamports"`
+	LastRewardedSlot         uint64 `json:"last_rewarded_slot"`
+	LastRewardEpoch          uint64 `json:"last_reward_epoch"`
 }
 
 // PeerConnectionInfo 保存连接细节 + 让前端展示当前连通性和最近活跃时间。
@@ -314,6 +327,7 @@ type HealthResult struct {
 func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
 	_ = router.Register(MethodGetAccountType, getAccountTypeHandler(backend))
+	_ = router.Register(MethodGetLatestBlockhash, getLatestBlockhashHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
@@ -329,10 +343,10 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodPrivacyTransfer, privacyTransferHandler(backend))
 	_ = router.Register(MethodPrivacyTransferToReceiver, privacyTransferToReceiverHandler(backend))
 	_ = router.Register(MethodPrivacyAuthorizeAudit, privacyAuthorizeAuditHandler(backend))
-	_ = router.Register(MethodRegisterValidator, registerValidatorHandler(backend))
-	_ = router.Register(MethodRegisterValidatorIdentity, registerValidatorIdentityHandler(backend))
-	_ = router.Register(MethodStake, stakeHandler(backend))
-	_ = router.Register(MethodUnstake, unstakeHandler(backend))
+	_ = router.Register(MethodRegisterValidator, signedTransactionRequiredHandler(MethodRegisterValidator))
+	_ = router.Register(MethodRegisterValidatorIdentity, signedTransactionRequiredHandler(MethodRegisterValidatorIdentity))
+	_ = router.Register(MethodStake, signedTransactionRequiredHandler(MethodStake))
+	_ = router.Register(MethodUnstake, signedTransactionRequiredHandler(MethodUnstake))
 	_ = router.Register(MethodSlashValidator, slashValidatorHandler(backend))
 	_ = router.Register(MethodJailValidator, jailValidatorHandler(backend))
 	_ = router.Register(MethodGetLocalValidatorIdentity, getLocalValidatorIdentityHandler(backend))
@@ -385,6 +399,22 @@ func getAccountTypeHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
+func getLatestBlockhashHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		if backend == nil {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := backend.GetLatestBlockhash(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get latest blockhash: %v", err))
+		}
+		return result, nil
+	}
+}
+
 func sendTransactionHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {
@@ -401,6 +431,15 @@ func sendTransactionHandler(backend LedgerBackend) HandlerFunc {
 		return signature, nil
 	}
 }
+
+func signedTransactionRequiredHandler(method string) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		_ = ctx
+		_ = params
+		return nil, invalidParamsError(method + " requires wallet-local signing; submit the signed transaction with sendTransaction")
+	}
+}
+
 func getBlockHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {

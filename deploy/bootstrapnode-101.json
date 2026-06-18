@@ -1,4 +1,5 @@
 {
+  "node_mode": "bootstrapnode",
   "environment": "stage",
   "production": false,
   "node_name": "bootstrap-101",

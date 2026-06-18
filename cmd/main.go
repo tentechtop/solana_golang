@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,8 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	appconfig "solana_golang/config"
 	"solana_golang/database"
+	"solana_golang/internal/bootstrapnode"
+	"solana_golang/internal/posnode"
 	"solana_golang/p2p"
 	p2ppeerstore "solana_golang/p2p/peerstore"
 	"solana_golang/rpc"
@@ -44,6 +48,21 @@ func main() {
 // run 执行应用主流程 + 串联配置加载、资源启动和优雅停机。
 func run() error {
 	configPath := configPathFromFlag()
+	nodeMode, err := nodeModeFromConfig(configPath)
+	if err != nil {
+		return err
+	}
+	switch nodeMode {
+	case "default":
+	case "runtime":
+	case "posnode", "pos", "validator":
+		return posnode.Run(configPath)
+	case "bootstrapnode", "bootstrap", "bootnode":
+		return bootstrapnode.Run(configPath)
+	default:
+		return fmt.Errorf("cmd: unsupported node mode %q", nodeMode)
+	}
+
 	config, err := appconfig.Load(configPath)
 	if err != nil {
 		return err
@@ -80,6 +99,39 @@ func configPathFromFlag() string {
 		return path
 	}
 	return appconfig.DefaultPath
+}
+
+type nodeModeConfig struct {
+	NodeMode string `json:"node_mode" yaml:"node_mode"`
+}
+
+func nodeModeFromConfig(configPath string) (string, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		configPath = appconfig.DefaultPath
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("cmd: read node mode config: %w", err)
+	}
+
+	config := nodeModeConfig{}
+	if err := json.Unmarshal(data, &config); err == nil {
+		return requireNodeMode(config)
+	}
+	config = nodeModeConfig{}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return "", fmt.Errorf("cmd: decode node mode config: %w", err)
+	}
+	return requireNodeMode(config)
+}
+
+func requireNodeMode(config nodeModeConfig) (string, error) {
+	mode := strings.TrimSpace(config.NodeMode)
+	if mode == "" {
+		return "", fmt.Errorf("cmd: node_mode is required")
+	}
+	return strings.ToLower(mode), nil
 }
 
 // startRuntime 启动核心运行时资源 + 按日志、数据库、P2P、RPC 顺序建立依赖。

@@ -23,6 +23,7 @@ type InstructionContext struct {
 	RentConfig       structure.RentConfig
 	ComputeBudget    structure.ComputeBudgetLimits
 	BuiltinPrograms  structure.BuiltinProgramIDs
+	SignerOverrides  map[structure.PublicKey]struct{}
 	Logger           *slog.Logger
 }
 
@@ -209,6 +210,9 @@ func (registry ProgramRegistry) Execute(context InstructionContext) error {
 		return program.handler(context)
 	}
 	if fallback != nil {
+		if err := validateVirtualMachineFallbackProgram(programID, context); err != nil {
+			return err
+		}
 		return fallback(context)
 	}
 	return fmt.Errorf("runtime: unsupported program %s", programID.String())
@@ -237,6 +241,25 @@ func (registry ProgramRegistry) lookup(programID ProgramID) (registeredProgram, 
 		return program, nil
 	}
 	return registeredProgram{}, state.fallback
+}
+
+// validateVirtualMachineFallbackProgram 校验 VM 兜底入口 + 防止普通未知账户绕过固定程序边界。
+func validateVirtualMachineFallbackProgram(programID ProgramID, context InstructionContext) error {
+	account, exists := context.Accounts[programID]
+	if !exists {
+		return fmt.Errorf("%w: vm program account %s not found", structure.ErrInvalidLoadedTransaction, programID.String())
+	}
+	if !account.Executable {
+		return fmt.Errorf("%w: vm program account %s is not executable", structure.ErrInvalidInstruction, programID.String())
+	}
+	loaderProgramID := context.BuiltinPrograms.BPFLoader
+	if loaderProgramID.IsZero() {
+		loaderProgramID = structure.DefaultBuiltinProgramIDs.BPFLoader
+	}
+	if account.Owner != loaderProgramID {
+		return fmt.Errorf("%w: vm program account %s owner is not bpf loader", structure.ErrInvalidInstruction, programID.String())
+	}
+	return nil
 }
 
 func (registry *ProgramRegistry) ensureState() *programRegistryState {

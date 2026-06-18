@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"testing"
 
+	bpfloader "solana_golang/programs/bpfloader"
 	privacyprogram "solana_golang/programs/privacy"
 	stakeprogram "solana_golang/programs/stake"
 	systemprogram "solana_golang/programs/system"
@@ -91,6 +92,7 @@ func simulateWithDefaultPrograms(t *testing.T, input TransactionSimulationInput)
 		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
 		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
 		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
+		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 	)
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
 }
@@ -100,6 +102,7 @@ func simulateWithVirtualMachine(t *testing.T, input TransactionSimulationInput) 
 	input.Programs = append(input.Programs,
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
 		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
+		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 	)
 	input.FallbackProgram = vmprogram.NewProgram(DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
@@ -111,6 +114,7 @@ func simulateWithPrivacyVMSyscall(t *testing.T, input TransactionSimulationInput
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
 		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
 		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
+		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 		vmprogram.NewPrivacyBridgeProgram(DefaultBuiltinProgramIDs.Privacy, DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}),
 	)
 	return runtimepkg.TransactionSimulator{}.Simulate(input)

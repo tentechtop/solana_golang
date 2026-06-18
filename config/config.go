@@ -35,6 +35,7 @@ const (
 
 // AppConfig 保存启动配置 + 集中声明外部可调参数避免散落读取。
 type AppConfig struct {
+	NodeMode string         `yaml:"node_mode"`
 	RPC      RPCConfig      `yaml:"rpc"`
 	Log      LogConfig      `yaml:"log"`
 	Database DatabaseConfig `yaml:"database"`
@@ -110,6 +111,7 @@ func Load(path string) (AppConfig, error) {
 // Default 构造默认配置 + 保证脚本直接运行时有完整启动参数。
 func Default() AppConfig {
 	return AppConfig{
+		NodeMode: "runtime",
 		RPC: RPCConfig{
 			Address:      defaultRPCAddress,
 			MaxBodyBytes: defaultRPCMaxBodyBytes,
@@ -142,6 +144,9 @@ func Default() AppConfig {
 
 // Validate 校验配置边界 + 阻断无效配置进入启动路径。
 func (config AppConfig) Validate() error {
+	if err := validateRuntimeNodeMode(config.NodeMode); err != nil {
+		return err
+	}
 	if err := config.RPC.Validate(); err != nil {
 		return err
 	}
@@ -152,6 +157,14 @@ func (config AppConfig) Validate() error {
 		return err
 	}
 	return config.P2P.Validate()
+}
+
+func validateRuntimeNodeMode(value string) error {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "runtime" || mode == "default" {
+		return nil
+	}
+	return fmt.Errorf("node_mode must be runtime for default app config, got %q", value)
 }
 
 // Validate 校验 RPC 配置 + 防止无监听地址和无界请求体。

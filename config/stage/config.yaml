@@ -1,3 +1,4 @@
+node_mode: runtime
 rpc:
   address: ":8901"
   max_body_bytes: 1048576

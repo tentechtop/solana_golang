@@ -17,6 +17,18 @@ func IsSignerAddress(address structure.PublicKey, message structure.ResolvedMess
 	return false
 }
 
+// IsSignerContextAddress 判断上下文签名者 + 支持受控 CPI 注入池账户签名。
+func IsSignerContextAddress(address structure.PublicKey, context InstructionContext) bool {
+	if IsSignerAddress(address, context.Message) {
+		return true
+	}
+	if len(context.SignerOverrides) == 0 {
+		return false
+	}
+	_, exists := context.SignerOverrides[address]
+	return exists
+}
+
 // IsWritableMessageAccount 判断消息账户是否可写 + VM 写回和固定程序共享同一权限判断。
 func IsWritableMessageAccount(accountIndex int, message structure.ResolvedMessage) bool {
 	staticMetas := message.StaticAccountMetas()

@@ -512,7 +512,7 @@ func executeRegisterValidator(instruction Instruction, context runtime.Instructi
 	}
 	stakerAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
 	validatorAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
-	if !runtime.IsSignerAddress(stakerAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(stakerAddress, context) {
 		return fmt.Errorf("%w: staker must sign", structure.ErrMissingRequiredSignature)
 	}
 	if err := runtime.TransferLamports(stakerAddress, validatorAddress, instruction.Amount, context.Accounts, context.RentConfig); err != nil {
@@ -705,7 +705,7 @@ func loadWritableValidator(context runtime.InstructionContext) (structure.Public
 	}
 	stakerAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
 	validatorAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
-	if !runtime.IsSignerAddress(stakerAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(stakerAddress, context) {
 		return structure.PublicKey{}, structure.PublicKey{}, ValidatorState{}, structure.Account{}, fmt.Errorf("%w: staker must sign", structure.ErrMissingRequiredSignature)
 	}
 	validatorAccount, exists := context.Accounts[validatorAddress]

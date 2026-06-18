@@ -1,4 +1,5 @@
 {
+  "node_mode": "posnode",
   "chain_id": "pos-localnet-six",
   "node_name": "node-137",
   "data_path": "data/posnode-137",

@@ -1,4 +1,5 @@
 {
+  "node_mode": "posnode",
   "chain_id": "pos-public-testnet",
   "environment": "stage",
   "production": false,

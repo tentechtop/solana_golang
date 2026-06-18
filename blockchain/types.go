@@ -9,11 +9,13 @@ import (
 
 // GenesisConfig 描述创世账本 + 初始化资金账户和启动验证者。
 type GenesisConfig struct {
-	ChainID               string
-	InitialSupplyLamports uint64
-	TreasuryAddress       structure.PublicKey
-	FundedAccounts        []GenesisAccount
-	InitialValidators     []GenesisValidator
+	ChainID                string
+	InitialSupplyLamports  uint64
+	TreasuryAddress        structure.PublicKey
+	PrivacyExecutionMode   string
+	ProgramExecutionPolicy string
+	FundedAccounts         []GenesisAccount
+	InitialValidators      []GenesisValidator
 }
 
 // LedgerConfig 描述账本运行参数 + 让 finality 和启动恢复由节点配置显式控制。

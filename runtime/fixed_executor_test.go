@@ -60,6 +60,7 @@ func TestFixedExecutorWritesAuditLog(t *testing.T) {
 		`"chain_id":"audit-chain"`,
 		`"tx_id"`,
 		`"privacy_execution_mode":"fixed"`,
+		`"program_execution_policy"`,
 		`"fee_total"`,
 		`"balance_changes"`,
 	} {

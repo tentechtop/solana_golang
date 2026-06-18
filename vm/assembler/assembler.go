@@ -413,6 +413,10 @@ func syscallIDByName(name string) (vm.SyscallID, error) {
 		return vm.SyscallSetAccountData, nil
 	case "privacy_execute", "sol_privacy_execute":
 		return vm.SyscallPrivacyExecute, nil
+	case "stake_pool_execute", "sol_stake_pool_execute":
+		return vm.SyscallStakePoolExecute, nil
+	case "asset_execute", "sol_asset_execute":
+		return vm.SyscallAssetExecute, nil
 	default:
 		return 0, fmt.Errorf("unknown syscall %s", name)
 	}

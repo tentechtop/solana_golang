@@ -52,6 +52,12 @@ func executeProgramAccount(
 	if err := attachPrivacySyscall(&runtimeValue, context); err != nil {
 		return err
 	}
+	if err := attachStakePoolSyscall(&runtimeValue, context); err != nil {
+		return err
+	}
+	if err := attachAssetSyscall(&runtimeValue, context); err != nil {
+		return err
+	}
 	result, err := runtimeValue.Execute(svm.Invocation{
 		ProgramID:       vmAddressFromPublicKey(programID),
 		ProgramAccount:  programAccount,
