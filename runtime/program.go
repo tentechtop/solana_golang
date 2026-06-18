@@ -24,6 +24,7 @@ type InstructionContext struct {
 	ComputeBudget    structure.ComputeBudgetLimits
 	BuiltinPrograms  structure.BuiltinProgramIDs
 	SignerOverrides  map[structure.PublicKey]struct{}
+	ComputeUnitsUsed *uint64
 	Logger           *slog.Logger
 }
 

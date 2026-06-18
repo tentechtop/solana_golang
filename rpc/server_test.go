@@ -25,6 +25,18 @@ func (b testLedgerBackend) SendTransaction(context.Context, string) (string, err
 func (b testLedgerBackend) GetBlock(context.Context, uint64) (BlockResult, error) {
 	return BlockResult{Slot: 10, Blockhash: "test-blockhash"}, nil
 }
+
+type testPublicBackend struct {
+	testLedgerBackend
+}
+
+func (b testPublicBackend) GetNodeStatus(context.Context) (any, error) {
+	return map[string]any{"head_height": float64(9)}, nil
+}
+func (b testPublicBackend) GetHealth(context.Context) (HealthResult, error) {
+	return HealthResult{OK: true, HeadHeight: 9, HeadSlot: 10}, nil
+}
+
 func TestServerGetBalance(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["address"]}`)
@@ -67,6 +79,67 @@ func TestServerMethodNotFound(t *testing.T) {
 	}
 	if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
 		t.Fatalf("error = %+v, want method not found", decoded.Error)
+	}
+}
+
+func TestPublicRouterAllowsSignedTransactionSubmission(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testLedgerBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"sendTransaction","params":["tx"]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	if decoded.Result.(string) != "test-signature" {
+		t.Fatalf("result = %#v, want test signature", decoded.Result)
+	}
+}
+
+func TestPublicRouterKeepsReadOnlyNodeStatus(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getNodeStatus","params":[]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["head_height"].(float64) != 9 {
+		t.Fatalf("result = %#v, want node status", decoded.Result)
+	}
+}
+
+func TestPublicRouterDoesNotExposeManagementMethods(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testLedgerBackend{}))
+	methods := []string{
+		MethodTreasuryTransfer,
+		MethodTransfer,
+		MethodRegisterValidator,
+		MethodStake,
+		MethodUnstake,
+		MethodSlashValidator,
+		MethodJailValidator,
+		MethodGetLocalValidatorIdentity,
+		MethodGetPeerNetwork,
+		MethodGetConsensusStatus,
+		MethodGetMetrics,
+	}
+	for _, method := range methods {
+		body := `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":[]}`
+		response := postJSONRPC(t, server, body)
+		var decoded Response
+		if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+			t.Fatalf("decode response for %s: %v", method, err)
+		}
+		if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
+			t.Fatalf("%s error = %+v, want method not found", method, decoded.Error)
+		}
 	}
 }
 func TestServerInvalidParams(t *testing.T) {

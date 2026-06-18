@@ -17,6 +17,8 @@ const (
 	PeerRoleUnknown PeerRole = "unknown"
 	// PeerRoleFull 表示全节点 + 用于区块和状态同步。
 	PeerRoleFull PeerRole = "full"
+	// PeerRolePublicRPC 表示公网入口节点 + 用于钱包查询和交易转发。
+	PeerRolePublicRPC PeerRole = "public_rpc"
 	// PeerRoleValidator 表示验证节点 + 用于共识消息优先连接。
 	PeerRoleValidator PeerRole = "validator"
 	// PeerRoleBootnode 表示引导节点 + 用于冷启动节点发现。

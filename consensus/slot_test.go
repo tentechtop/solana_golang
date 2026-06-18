@@ -21,6 +21,9 @@ func TestSlotClockTickAndSkip(t *testing.T) {
 	if openTick.Slot != 9 {
 		t.Fatalf("open slot = %d, want 9", openTick.Slot)
 	}
+	if openTick.Elapsed != 50*time.Millisecond {
+		t.Fatalf("open elapsed = %s, want 50ms", openTick.Elapsed)
+	}
 	if openTick.ShouldSkip {
 		t.Fatal("open tick ShouldSkip = true, want false")
 	}
@@ -28,6 +31,9 @@ func TestSlotClockTickAndSkip(t *testing.T) {
 	skipTick := clock.Tick(startedAt.Add(1060 * time.Millisecond))
 	if skipTick.Slot != 9 {
 		t.Fatalf("skip slot = %d, want 9", skipTick.Slot)
+	}
+	if skipTick.Elapsed != 260*time.Millisecond {
+		t.Fatalf("skip elapsed = %s, want 260ms", skipTick.Elapsed)
 	}
 	if !skipTick.ShouldSkip {
 		t.Fatal("skip tick ShouldSkip = false, want true")

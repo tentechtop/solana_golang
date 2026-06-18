@@ -471,7 +471,10 @@ func StakePoolBridgeProgramData() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return svm.EncodeRegisterBytecode(code, nil)
+	return svm.EncodeGovernedRegisterBytecode(code, nil, svm.ProgramManifest{
+		ComputeUnitLimit: svm.DefaultComputeUnitLimit,
+		RequiredSyscalls: []svm.SyscallID{svm.SyscallStakePoolExecute},
+	})
 }
 
 // attachStakePoolSyscall 注入池化质押 syscall + VM 只通过受控入口调度固定 Stake Program。

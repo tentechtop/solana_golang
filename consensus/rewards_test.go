@@ -88,15 +88,17 @@ func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 		qcs[index] = testRewardQC(snapshot, slot, slot, []int{voterIndex})
 	}
 	before := mustFindAccount(t, state, validators[missedIndex].AccountAddress).Account.Lamports
+	rewardSlot := DefaultMissedVoteJailThreshold + DefaultRewardFinalityDepth
 
 	nextState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
-		Slot:          32,
-		Height:        64,
+		Slot:          rewardSlot,
+		Height:        rewardSlot,
 		EpochID:       1,
 		EpochSnapshot: snapshot,
 		Leader:        validators[voterIndex],
 		RewardQCs:     qcs,
 		Config: RewardConfig{
+			MaxVoteRewardDelaySlots:                 rewardSlot,
 			MinActiveValidatorsAfterPerformanceJail: 1,
 		},
 	})
@@ -113,6 +115,41 @@ func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 	}
 	if containsRewardType(rewards, RewardTypeSlash) || !containsRewardType(rewards, RewardTypeJail) {
 		t.Fatalf("rewards = %+v, want jail without slash", rewards)
+	}
+}
+
+func TestApplyBlockRewardsKeepsOneActiveValidatorForPerformanceJail(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{30, 30, 30}, []uint16{0, 0, 0})
+	for _, validator := range validators {
+		validatorState := mustStakeState(t, state, validator.AccountAddress)
+		validatorState.MissedVoteCount = DefaultMissedVoteJailThreshold
+		state = replaceStakeState(t, state, validator.AccountAddress, validatorState)
+	}
+
+	nextState, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          65,
+		Height:        65,
+		EpochID:       1,
+		EpochSnapshot: snapshot,
+		Leader:        validators[0],
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+
+	activeCount := 0
+	jailedCount := 0
+	for _, validator := range validators {
+		validatorState := mustStakeState(t, nextState, validator.AccountAddress)
+		if validatorState.Status == stake.ValidatorStatusActive {
+			activeCount++
+		}
+		if validatorState.Status == stake.ValidatorStatusJailed {
+			jailedCount++
+		}
+	}
+	if activeCount != 1 || jailedCount != 2 {
+		t.Fatalf("active=%d jailed=%d, want active=1 jailed=2", activeCount, jailedCount)
 	}
 }
 

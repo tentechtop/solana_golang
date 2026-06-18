@@ -73,6 +73,10 @@ func (clock *SlotClock) Tick(now time.Time) SlotTick {
 	if slot < clock.initialSlot {
 		slot = ^uint64(0)
 	}
+	slotElapsed := elapsed - time.Duration(slotOffset)*clock.slotDuration
+	if slotElapsed < 0 {
+		slotElapsed = 0
+	}
 
 	slotStartedAt := clock.SlotStart(slot)
 	slotDeadline := slotStartedAt.Add(clock.skipTimeout)
@@ -80,7 +84,7 @@ func (clock *SlotClock) Tick(now time.Time) SlotTick {
 		Slot:          slot,
 		SlotStartedAt: slotStartedAt,
 		SlotDeadline:  slotDeadline,
-		Elapsed:       elapsed,
+		Elapsed:       slotElapsed,
 		ShouldSkip:    !now.Before(slotDeadline),
 		Started:       started,
 	}

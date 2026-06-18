@@ -357,6 +357,22 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetMetrics, getMetricsHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
 }
+
+// RegisterPublicHandlers 注册公网 RPC 方法 + 防止管理和私钥代签接口暴露给 APP。
+func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
+	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
+	_ = router.Register(MethodGetAccountType, getAccountTypeHandler(backend))
+	_ = router.Register(MethodGetLatestBlockhash, getLatestBlockhashHandler(backend))
+	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
+	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
+	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
+	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
+	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
+	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
+	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
+	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
+}
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {

@@ -68,12 +68,20 @@ type posNode struct {
 	lastVotedSlot     uint64
 	registeredSelf    bool
 	knownPeerIDs      []string
+	workerGroup       sync.WaitGroup
 }
 
 type rawKeyPair struct {
 	publicKey  []byte
 	privateKey []byte
 	peerID     string
+}
+
+type localValidatorKeyPairs struct {
+	staker    structure.SolanaKeyPair
+	validator structure.SolanaKeyPair
+	consensus structure.SolanaKeyPair
+	bls       consensus.BLSKeyPair
 }
 
 func PeerIDFromSeed(seedText string) (string, error) {
@@ -122,11 +130,13 @@ func Run(configPath string) error {
 	defer signal.Stop(signals)
 	<-signals
 	logger.Info("posnode shutdown requested")
+	cancel()
+	node.waitForWorkers(3 * time.Second)
 	return nil
 }
 
 func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
-	executor, err := newRuntimeExecutorWithPrivacyMode(config.PrivacyExecutionMode, logger)
+	executor, err := newRuntimeExecutorWithConfig(config, logger)
 	if err != nil {
 		return nil, fmt.Errorf("posnode: create executor: %w", err)
 	}
@@ -134,19 +144,7 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	stakerKeyPair, err := loadStructureKeyPair(config.StakerSeed, config.StakerKeyPath, config, "staker")
-	if err != nil {
-		return nil, err
-	}
-	validatorKeyPair, err := loadStructureKeyPair(config.ValidatorSeed, config.ValidatorKeyPath, config, "validator")
-	if err != nil {
-		return nil, err
-	}
-	consensusKeyPair, err := loadStructureKeyPair(config.ConsensusSeed, config.ConsensusKeyPath, config, "consensus")
-	if err != nil {
-		return nil, err
-	}
-	blsKeyPair, err := loadBLSKeyPair(config.ConsensusSeed, config.BLSKeyPath, config)
+	localKeys, err := loadLocalValidatorKeyPairs(config)
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +154,10 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		startedAt:         time.Now(),
 		executor:          executor,
 		peerKeyPair:       peerKeyPair,
-		stakerKeyPair:     stakerKeyPair,
-		validatorKeyPair:  validatorKeyPair,
-		consensusKeyPair:  consensusKeyPair,
-		blsKeyPair:        blsKeyPair,
+		stakerKeyPair:     localKeys.staker,
+		validatorKeyPair:  localKeys.validator,
+		consensusKeyPair:  localKeys.consensus,
+		blsKeyPair:        localKeys.bls,
 		seenTransactions:  make(map[string]struct{}),
 		seenProposals:     make(map[string]struct{}),
 		seenQCs:           make(map[string]uint64),
@@ -191,6 +189,9 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.String("peer_id", node.peerKeyPair.peerID),
 		slog.String("node_role", string(node.config.ResolvedNodeRole)),
 		slog.Uint64("node_capabilities", uint64(node.config.ResolvedNodeCapabilities)),
+		slog.Bool("validator_enabled", node.config.validatorEnabled()),
+		slog.Bool("consensus_enabled", node.config.consensusEnabled()),
+		slog.Bool("transaction_forward_enabled", node.config.transactionForwardEnabled()),
 		slog.String("staker", node.stakerKeyPair.PublicKey.String()),
 		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
 		slog.String("consensus", node.consensusKeyPair.PublicKey.String()),
@@ -204,15 +205,73 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.String("data_root_path", node.config.DataRootPath),
 		slog.String("data_path", node.config.DataPath),
 	)
-	if node.config.AutoRegister {
+	if node.config.AutoRegister && node.config.validatorEnabled() {
 		go node.autoRegisterLoop(ctx)
 	}
 	if err := node.startRPC(); err != nil {
 		return err
 	}
-	go node.blockSyncLoop(ctx)
-	go node.slotLoop(ctx)
+	node.startWorker(func() {
+		node.blockSyncLoop(ctx)
+	})
+	if node.config.consensusEnabled() {
+		node.startWorker(func() {
+			node.slotLoop(ctx)
+		})
+	}
 	return nil
+}
+
+// loadLocalValidatorKeyPairs 加载本地验证者密钥 + 公网 RPC 节点不应持有共识私钥。
+func loadLocalValidatorKeyPairs(config nodeConfig) (localValidatorKeyPairs, error) {
+	if !config.validatorEnabled() {
+		return localValidatorKeyPairs{}, nil
+	}
+	stakerKeyPair, err := loadStructureKeyPair(config.StakerSeed, config.StakerKeyPath, config, "staker")
+	if err != nil {
+		return localValidatorKeyPairs{}, err
+	}
+	validatorKeyPair, err := loadStructureKeyPair(config.ValidatorSeed, config.ValidatorKeyPath, config, "validator")
+	if err != nil {
+		return localValidatorKeyPairs{}, err
+	}
+	consensusKeyPair, err := loadStructureKeyPair(config.ConsensusSeed, config.ConsensusKeyPath, config, "consensus")
+	if err != nil {
+		return localValidatorKeyPairs{}, err
+	}
+	blsKeyPair, err := loadBLSKeyPair(config.ConsensusSeed, config.BLSKeyPath, config)
+	if err != nil {
+		return localValidatorKeyPairs{}, err
+	}
+	return localValidatorKeyPairs{
+		staker:    stakerKeyPair,
+		validator: validatorKeyPair,
+		consensus: consensusKeyPair,
+		bls:       blsKeyPair,
+	}, nil
+}
+
+// startWorker 跟踪后台任务 + 关闭时需要等待 goroutine 退出后再关闭数据库。
+func (node *posNode) startWorker(run func()) {
+	node.workerGroup.Add(1)
+	go func() {
+		defer node.workerGroup.Done()
+		run()
+	}()
+}
+
+// waitForWorkers 等待后台任务退出 + 防止进程退出时 goroutine 继续访问已关闭存储。
+func (node *posNode) waitForWorkers(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		node.workerGroup.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		node.logger.Warn("posnode worker shutdown timed out", slog.Duration("timeout", timeout))
+	}
 }
 
 func (node *posNode) startRPC() error {
@@ -220,7 +279,11 @@ func (node *posNode) startRPC() error {
 		return nil
 	}
 	address := fmt.Sprintf("%s:%d", node.config.RPCListenIP, node.config.RPCPort)
-	server := rpc.NewServer(rpc.ServerConfig{Address: address, Logger: node.logger}, rpc.NewDefaultRouter(node))
+	router := rpc.NewDefaultRouter(node)
+	if node.config.publicRPCMode() {
+		router = rpc.NewPublicRouter(node)
+	}
+	server := rpc.NewServer(rpc.ServerConfig{Address: address, Logger: node.logger}, router)
 	node.rpcServer = server
 	go func() {
 		if err := server.ListenAndServe(); err != nil {
@@ -442,6 +505,14 @@ func newRuntimeExecutor(logger *slog.Logger) (runtime.FixedExecutor, error) {
 }
 
 func newRuntimeExecutorWithPrivacyMode(privacyExecutionMode runtime.PrivacyExecutionMode, logger *slog.Logger) (runtime.FixedExecutor, error) {
+	return newRuntimeExecutorWithPolicy(privacyExecutionMode, bpfloader.DeploymentPolicy{}, logger)
+}
+
+func newRuntimeExecutorWithConfig(config nodeConfig, logger *slog.Logger) (runtime.FixedExecutor, error) {
+	return newRuntimeExecutorWithPolicy(config.PrivacyExecutionMode, deploymentPolicyFromConfig(config.ContractDeploymentPolicy), logger)
+}
+
+func newRuntimeExecutorWithPolicy(privacyExecutionMode runtime.PrivacyExecutionMode, deploymentPolicy bpfloader.DeploymentPolicy, logger *slog.Logger) (runtime.FixedExecutor, error) {
 	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
 	executor.Logger = logger
 	executor.PrivacyExecutionMode = privacyExecutionMode
@@ -450,7 +521,7 @@ func newRuntimeExecutorWithPrivacyMode(privacyExecutionMode runtime.PrivacyExecu
 		return runtime.FixedExecutor{}, fmt.Errorf("posnode: program execution policy: %w", err)
 	}
 	executor.ProgramExecutionPolicy = programExecutionPolicy
-	if err := registerProgramsWithPrivacyMode(&executor, privacyExecutionMode); err != nil {
+	if err := registerProgramsWithPrivacyModeAndLoaderPolicy(&executor, privacyExecutionMode, deploymentPolicy); err != nil {
 		return runtime.FixedExecutor{}, err
 	}
 	virtualMachineProgram := vmprogram.NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
@@ -466,6 +537,10 @@ func registerPrograms(executor *runtime.FixedExecutor) error {
 }
 
 func registerProgramsWithPrivacyMode(executor *runtime.FixedExecutor, privacyExecutionMode runtime.PrivacyExecutionMode) error {
+	return registerProgramsWithPrivacyModeAndLoaderPolicy(executor, privacyExecutionMode, bpfloader.DeploymentPolicy{})
+}
+
+func registerProgramsWithPrivacyModeAndLoaderPolicy(executor *runtime.FixedExecutor, privacyExecutionMode runtime.PrivacyExecutionMode, deploymentPolicy bpfloader.DeploymentPolicy) error {
 	privacyHandler, err := privacyProgramHandler(privacyExecutionMode)
 	if err != nil {
 		return err
@@ -489,7 +564,7 @@ func registerProgramsWithPrivacyMode(executor *runtime.FixedExecutor, privacyExe
 		},
 		{
 			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.BPFLoader, Name: "bpf_loader"},
-			handler: bpfloader.NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader).Execute,
+			handler: bpfloader.NewProgramWithPolicy(structure.DefaultBuiltinProgramIDs.BPFLoader, deploymentPolicy).Execute,
 		},
 	}
 	for _, registration := range registrations {
@@ -498,6 +573,20 @@ func registerProgramsWithPrivacyMode(executor *runtime.FixedExecutor, privacyExe
 		}
 	}
 	return nil
+}
+
+func deploymentPolicyFromConfig(config contractDeploymentPolicyConfig) bpfloader.DeploymentPolicy {
+	policy := bpfloader.DeploymentPolicy{
+		AllowedDeployers:             append([]structure.PublicKey(nil), config.ResolvedAllowedDeployers...),
+		MinDeploymentDepositLamports: config.MinDeploymentDepositLamports,
+	}
+	if config.RequireManifest != nil {
+		policy.RequireManifest = *config.RequireManifest
+	}
+	if config.AllowUpgradeableContracts != nil {
+		policy.AllowUpgradeableContracts = *config.AllowUpgradeableContracts
+	}
+	return policy.Normalize()
 }
 
 func privacyProgramHandler(privacyExecutionMode runtime.PrivacyExecutionMode) (runtime.ProgramHandler, error) {
@@ -735,6 +824,9 @@ func (node *posNode) slotLoop(ctx context.Context) {
 }
 
 func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
+	if !node.config.consensusEnabled() {
+		return
+	}
 	if !tick.Started {
 		return
 	}
@@ -771,6 +863,9 @@ func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
 }
 
 func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
+	if !node.config.consensusEnabled() {
+		return
+	}
 	now := time.Now()
 	if node.slotDeadlinePassed(slot, now) {
 		node.logger.Warn("posnode produce skipped after slot deadline",
@@ -791,7 +886,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		return
 	}
 	node.mutex.Unlock()
-	if node.hasAheadValidatorPeer(ctx, head.Height) {
+	if node.hasAheadValidatorPeer(ctx, head.Height, node.slotProductionDeadline(slot)) {
 		node.logger.Info("posnode production paused for block sync",
 			slog.Uint64("slot", slot),
 			slog.Uint64("local_height", head.Height),
@@ -1082,7 +1177,7 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		return nil
 	}
 	node.mutex.Lock()
-	if proposal.Header.Slot <= node.lastVotedSlot {
+	if node.config.consensusEnabled() && proposal.Header.Slot <= node.lastVotedSlot {
 		node.mutex.Unlock()
 		return nil
 	}
@@ -1170,7 +1265,14 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
 	node.metrics.proposalsAccepted.Add(1)
 	node.retryOrphanChildren(ctx, proposalHash)
+	if !node.config.consensusEnabled() {
+		return nil
+	}
 	node.mutex.Lock()
+	if proposal.Header.Slot <= node.lastVotedSlot {
+		node.mutex.Unlock()
+		return nil
+	}
 	node.lastVotedSlot = proposal.Header.Slot
 	stakeValue := uint64(0)
 	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
@@ -1206,6 +1308,9 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 }
 
 func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, blockHash structure.Hash) {
+	if !node.config.consensusEnabled() {
+		return
+	}
 	now := time.Now()
 	if node.slotDeadlinePassed(slot, now) {
 		node.logger.Warn("posnode leader self vote skipped after slot deadline",
@@ -1345,6 +1450,13 @@ func (node *posNode) broadcastTransaction(ctx context.Context, transaction struc
 		node.logger.Debug("posnode transaction broadcast skipped",
 			slog.String("tx_id", transactionID),
 			slog.String("reason", "host unavailable"),
+		)
+		return
+	}
+	if !node.config.transactionForwardEnabled() {
+		node.logger.Debug("posnode transaction broadcast skipped",
+			slog.String("tx_id", transactionID),
+			slog.String("reason", "transaction forwarding disabled"),
 		)
 		return
 	}

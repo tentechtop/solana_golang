@@ -486,7 +486,10 @@ func assetContractProgramData() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return svm.EncodeRegisterBytecode(code, nil)
+	return svm.EncodeGovernedRegisterBytecode(code, nil, svm.ProgramManifest{
+		ComputeUnitLimit: svm.DefaultComputeUnitLimit,
+		RequiredSyscalls: []svm.SyscallID{svm.SyscallAssetExecute},
+	})
 }
 
 func attachAssetSyscall(runtimeValue *svm.Runtime, context runtime.InstructionContext) error {

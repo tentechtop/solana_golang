@@ -1,0 +1,156 @@
+{
+  "node_mode": "posnode",
+  "chain_id": "pos-seven-node-testnet",
+  "environment": "stage",
+  "production": false,
+  "node_name": "node-local-win",
+  "data_path": "F:/workSpace2029/solana_golang/data/testnet7/posnode-local-win",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 5110,
+  "advertised_ip": "192.168.181.1",
+  "advertised_port": 5110,
+  "rpc_enabled": true,
+  "rpc_listen_ip": "0.0.0.0",
+  "rpc_port": 8899,
+  "allow_insecure_p2p": false,
+  "peer_seed": "node-local-win",
+  "staker_seed": "staker-local-win",
+  "validator_seed": "validator-local-win",
+  "consensus_seed": "consensus-local-win",
+  "stake_lamports": 10000000,
+  "privacy_execution_mode": "vm_syscall",
+  "slot_millis": 1000,
+  "genesis_start_unix_millis": 1781755200000,
+  "epoch_slots": 600,
+  "finality_depth": 2,
+  "turbine_fanout": 2,
+  "auto_register": false,
+  "mempool_max_transactions": 5000,
+  "mempool_transaction_ttl_millis": 180000,
+  "transaction_leader_forward_slots": 4,
+  "transaction_forward_validators": true,
+  "bootstrap_peers": [
+    {
+      "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+      "ip": "101.35.87.31",
+      "port": 5101,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "Bfc7jv5vEuMBu3uwXbn6zyPSD7D2mWPZ65eK8owskGvZ",
+      "ip": "192.168.181.136",
+      "port": 5101,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "BQNzv1JJmbFkZdFrE6ZYpmFtgWs45j2Caqo6E7232ecQ",
+      "ip": "192.168.181.137",
+      "port": 5101,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "4V6gbmpjwkTwjxQZ9PQ5WLFHEy1Vr8JWHFut4EPpvECn",
+      "ip": "192.168.181.138",
+      "port": 5101,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "A1ja592wjq8bBpUH21ceVZVY5cSR9Yd1Brxv7MqwLams",
+      "ip": "192.168.181.139",
+      "port": 5101,
+      "network": "tcp"
+    },
+    {
+      "peer_id": "EPqwecxfEdeeB3ZtKCVVjEohLYZXQ1XHZapdkeBYirB1",
+      "ip": "192.168.120.223",
+      "port": 5101,
+      "network": "tcp"
+    }
+  ],
+  "genesis": {
+    "initial_supply_lamports": 1000000000000000000,
+    "treasury_address": "4vgAxQAXeKXhyrJyQ5XDXzr1wR92NaS631GEkDjdhRn9",
+    "privacy_execution_mode": "vm_syscall",
+    "funded_accounts": [
+      {
+        "seed": "staker-101",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-136",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-137",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-138",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-139",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-223",
+        "lamports": 100000000000000000
+      },
+      {
+        "seed": "staker-local-win",
+        "lamports": 100000000000000000
+      }
+    ],
+    "initial_validators": [
+      {
+        "staker_seed": "staker-101",
+        "validator_seed": "validator-101",
+        "consensus_seed": "consensus-101",
+        "peer_id": "7w8LNHyGG77Mpue6JrkuEXpPqjcwQys8UvBM8cFJrm5A",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-136",
+        "validator_seed": "validator-136",
+        "consensus_seed": "consensus-136",
+        "peer_id": "Bfc7jv5vEuMBu3uwXbn6zyPSD7D2mWPZ65eK8owskGvZ",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-137",
+        "validator_seed": "validator-137",
+        "consensus_seed": "consensus-137",
+        "peer_id": "BQNzv1JJmbFkZdFrE6ZYpmFtgWs45j2Caqo6E7232ecQ",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-138",
+        "validator_seed": "validator-138",
+        "consensus_seed": "consensus-138",
+        "peer_id": "4V6gbmpjwkTwjxQZ9PQ5WLFHEy1Vr8JWHFut4EPpvECn",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-139",
+        "validator_seed": "validator-139",
+        "consensus_seed": "consensus-139",
+        "peer_id": "A1ja592wjq8bBpUH21ceVZVY5cSR9Yd1Brxv7MqwLams",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-223",
+        "validator_seed": "validator-223",
+        "consensus_seed": "consensus-223",
+        "peer_id": "EPqwecxfEdeeB3ZtKCVVjEohLYZXQ1XHZapdkeBYirB1",
+        "stake_lamports": 10000000
+      },
+      {
+        "staker_seed": "staker-local-win",
+        "validator_seed": "validator-local-win",
+        "consensus_seed": "consensus-local-win",
+        "peer_id": "GVbQfQwJK1M1q1wVV6LnzLq9Nwvu3XSBvsJLBJAC935y",
+        "stake_lamports": 10000000
+      }
+    ]
+  }
+}

@@ -2,10 +2,12 @@ package posnode
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"solana_golang/consensus"
+	"solana_golang/structure"
 )
 
 func TestSlotDeadlinePassedUsesSharedBoundary(t *testing.T) {
@@ -63,6 +65,31 @@ func TestPeerStatusTimeoutUsesControlPlaneBounds(t *testing.T) {
 	}
 }
 
+func TestProductionSyncGateTimeoutKeepsSlotDeadlineBudget(t *testing.T) {
+	shortDeadline := time.Now().Add(40 * time.Millisecond)
+	if got := productionSyncGateTimeout(shortDeadline); got != 0 {
+		t.Fatalf("short deadline sync gate timeout = %s, want 0", got)
+	}
+
+	normalDeadline := time.Now().Add(400 * time.Millisecond)
+	if got := productionSyncGateTimeout(normalDeadline); got != productionSyncGateMaxTimeout {
+		t.Fatalf("normal deadline sync gate timeout = %s, want %s", got, productionSyncGateMaxTimeout)
+	}
+}
+
+func TestRotateLimitedPeerIDsUsesSeedAndLimit(t *testing.T) {
+	peers := []string{"a", "b", "c", "d"}
+	got := rotateLimitedPeerIDs(peers, 2, 2)
+	if fmt.Sprint(got) != "[c d]" {
+		t.Fatalf("rotated peers = %v, want [c d]", got)
+	}
+
+	got = rotateLimitedPeerIDs(peers, 3, 3)
+	if fmt.Sprint(got) != "[d a b]" {
+		t.Fatalf("wrapped peers = %v, want [d a b]", got)
+	}
+}
+
 func TestVoteForProposalRejectsExpiredSlot(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
 	node.config.GenesisStartMs = time.Now().Add(-time.Minute).UnixMilli()
@@ -89,4 +116,93 @@ func TestVoteForProposalRejectsExpiredSlot(t *testing.T) {
 	if got := node.ledger.Head().Height; got != headBefore.Height {
 		t.Fatalf("head height = %d, want %d", got, headBefore.Height)
 	}
+}
+
+func TestPublicRPCNodeCommitsProposalWithoutVoting(t *testing.T) {
+	producerNode := newConsensusStatusTestNode(t)
+	publicNode := newConsensusStatusTestNode(t)
+	disableValidator := false
+	publicNode.config.ValidatorEnabled = &disableValidator
+	publicNode.config.ConsensusEnabled = &disableValidator
+	prepareProposalTestNode(t, producerNode)
+	prepareProposalTestNode(t, publicNode)
+
+	proposal := produceProposalForLocalLeader(t, producerNode)
+	headBefore := publicNode.ledger.Head()
+	if err := publicNode.voteForProposal(context.Background(), proposal); err != nil {
+		t.Fatalf("voteForProposal() error = %v", err)
+	}
+	headAfter := publicNode.ledger.Head()
+	if headAfter.Height != headBefore.Height+1 {
+		t.Fatalf("head height = %d, want %d", headAfter.Height, headBefore.Height+1)
+	}
+	if got := publicNode.metrics.proposalsAccepted.Load(); got != 1 {
+		t.Fatalf("proposalsAccepted = %d, want 1", got)
+	}
+	if got := publicNode.metrics.votesSent.Load(); got != 0 {
+		t.Fatalf("votesSent = %d, want 0", got)
+	}
+	if publicNode.lastVotedSlot != 0 {
+		t.Fatalf("lastVotedSlot = %d, want 0", publicNode.lastVotedSlot)
+	}
+}
+
+func prepareProposalTestNode(t *testing.T, node *posNode) {
+	t.Helper()
+	executor, err := newRuntimeExecutor(node.logger)
+	if err != nil {
+		t.Fatalf("newRuntimeExecutor() error = %v", err)
+	}
+	head := node.ledger.Head()
+	node.executor = executor
+	node.blockhashQueue = structure.NewBlockhashQueue(150)
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     head.BlockHash,
+		Slot:          head.Slot,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+		TimestampUnix: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("blockhash add: %v", err)
+	}
+}
+
+func produceProposalForLocalLeader(t *testing.T, node *posNode) consensus.BlockProposal {
+	t.Helper()
+	slot := firstLocalLeaderSlot(t, node)
+	head := node.ledger.Head()
+	request := consensus.ProduceBlockRequest{
+		Slot:           slot,
+		ParentSlot:     head.Slot,
+		Height:         head.Height + 1,
+		EpochSnapshot:  node.epochSnapshot,
+		Schedule:       node.leaderSchedule,
+		ParentHash:     head.BlockHash,
+		PreviousQCHash: head.QCHash,
+		ParentState:    node.ledger.State(),
+		BlockhashQueue: node.blockhashQueue,
+		LeaderKeyPair:  node.consensusKeyPair,
+		RewardConfig:   consensus.DefaultRewardConfig(),
+	}
+	producer := consensus.BlockProducer{ChainID: node.config.ChainID, Executor: node.executor}
+	proposal, _, err := producer.ProduceBlock(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ProduceBlock() error = %v", err)
+	}
+	return proposal
+}
+
+func firstLocalLeaderSlot(t *testing.T, node *posNode) uint64 {
+	t.Helper()
+	localValidatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	for slot := node.epochSnapshot.StartSlot; slot <= node.epochSnapshot.EndSlot; slot++ {
+		leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+		if err != nil {
+			t.Fatalf("LeaderForSlot(%d) error = %v", slot, err)
+		}
+		if leaderID == localValidatorID {
+			return slot
+		}
+	}
+	t.Fatalf("local validator %s has no leader slot", localValidatorID)
+	return 0
 }

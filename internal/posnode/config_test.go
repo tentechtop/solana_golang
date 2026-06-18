@@ -144,6 +144,63 @@ func TestNormalizeNodeConfigParsesNodeAttributes(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigPublicRPCDefaultsToGatewayOnly(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "public_rpc"
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.ResolvedNodeRole != p2p.PeerRolePublicRPC {
+		t.Fatalf("ResolvedNodeRole = %q, want public_rpc", normalized.ResolvedNodeRole)
+	}
+	if normalized.ResolvedNodeCapabilities&p2p.PeerCapabilityValidator != 0 {
+		t.Fatal("ResolvedNodeCapabilities includes validator, want gateway only")
+	}
+	if normalized.validatorEnabled() {
+		t.Fatal("validatorEnabled() = true, want false")
+	}
+	if normalized.consensusEnabled() {
+		t.Fatal("consensusEnabled() = true, want false")
+	}
+	if !normalized.transactionForwardEnabled() {
+		t.Fatal("transactionForwardEnabled() = false, want true")
+	}
+}
+
+func TestNormalizeNodeConfigPublicRPCRejectsConsensus(t *testing.T) {
+	enabled := true
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "public_rpc"
+	config.ConsensusEnabled = &enabled
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want public rpc consensus rejection")
+	}
+}
+
+func TestNormalizeNodeConfigProductionPublicRPCNeedsOnlyPeerKeyPath(t *testing.T) {
+	allowInsecure := false
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "public_rpc"
+	config.Production = true
+	config.AllowInsecureP2P = &allowInsecure
+	config.PeerSeed = ""
+	config.PeerKeyPath = "peer.json"
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+	config = withProductionGenesisPublicKeys(config)
+
+	if _, err := normalizeNodeConfig(config); err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+}
+
 func TestNormalizeNodeConfigDefaultsPrivacyExecutionMode(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 
@@ -205,6 +262,29 @@ func TestNormalizeNodeConfigChainIdentityChangesWithPrivacyExecutionMode(t *test
 	}
 }
 
+func TestNormalizeNodeConfigChainIdentityChangesWithContractDeploymentPolicy(t *testing.T) {
+	firstConfig := minimalNodeConfigForValidation()
+	firstConfig.DataPath = "data/contract-policy-identity"
+	firstConfig.GenesisStartMs = 1_700_000_000_000
+
+	secondConfig := minimalNodeConfigForValidation()
+	secondConfig.DataPath = firstConfig.DataPath
+	secondConfig.GenesisStartMs = firstConfig.GenesisStartMs
+	secondConfig.ContractDeploymentPolicy.MinDeploymentDepositLamports = 99
+
+	firstNormalized, err := normalizeNodeConfig(firstConfig)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig(first) error = %v", err)
+	}
+	secondNormalized, err := normalizeNodeConfig(secondConfig)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig(second) error = %v", err)
+	}
+	if firstNormalized.ChainIdentityHash == secondNormalized.ChainIdentityHash {
+		t.Fatal("ChainIdentityHash mismatch check failed, want different hashes for contract deployment policy")
+	}
+}
+
 func TestBuildBlockchainGenesisConfigCarriesPrivacyExecutionMode(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 	config.Genesis.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeVMSyscall
@@ -222,6 +302,57 @@ func TestBuildBlockchainGenesisConfigCarriesPrivacyExecutionMode(t *testing.T) {
 	}
 	if !strings.Contains(genesis.ProgramExecutionPolicy, "vm_bridge=privacy:") {
 		t.Fatalf("ProgramExecutionPolicy = %q, want privacy vm bridge", genesis.ProgramExecutionPolicy)
+	}
+}
+
+func TestNormalizeNodeConfigDefaultsProductionContractDeploymentPolicy(t *testing.T) {
+	allowInsecure := false
+	config := minimalNodeConfigForValidation()
+	config.Production = true
+	config.TreasuryKeyPath = "treasury.json"
+	config.AllowInsecureP2P = &allowInsecure
+	config.PeerKeyPath = "peer.json"
+	config.StakerKeyPath = "staker.json"
+	config.ValidatorKeyPath = "validator.json"
+	config.ConsensusKeyPath = "consensus.json"
+	config.BLSKeyPath = "bls.json"
+	config = withProductionGenesisPublicKeys(config)
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.ContractDeploymentPolicy.RequireManifest == nil || !*normalized.ContractDeploymentPolicy.RequireManifest {
+		t.Fatal("RequireManifest = false, want production default true")
+	}
+	if normalized.ContractDeploymentPolicy.MinDeploymentDepositLamports != defaultProductionContractDeploymentStake {
+		t.Fatalf("MinDeploymentDepositLamports = %d, want %d", normalized.ContractDeploymentPolicy.MinDeploymentDepositLamports, defaultProductionContractDeploymentStake)
+	}
+}
+
+func TestNormalizeNodeConfigRejectsInvalidContractDeployer(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.ContractDeploymentPolicy.AllowedDeployers = []string{"not-base58"}
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want invalid contract deployer rejection")
+	}
+}
+
+func TestNormalizeNodeConfigResolvesContractDeployer(t *testing.T) {
+	deployer := mustStructureKeyPair("contract-deployer")
+	config := minimalNodeConfigForValidation()
+	config.ContractDeploymentPolicy.AllowedDeployers = []string{deployer.PublicKey.String()}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if len(normalized.ContractDeploymentPolicy.ResolvedAllowedDeployers) != 1 {
+		t.Fatalf("ResolvedAllowedDeployers length = %d, want 1", len(normalized.ContractDeploymentPolicy.ResolvedAllowedDeployers))
+	}
+	if normalized.ContractDeploymentPolicy.ResolvedAllowedDeployers[0] != deployer.PublicKey {
+		t.Fatal("resolved deployer mismatch")
 	}
 }
 

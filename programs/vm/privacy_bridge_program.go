@@ -66,7 +66,10 @@ func PrivacyBridgeProgramData() ([]byte, error) {
 			privacyBridgeProgramDataErr = err
 			return
 		}
-		privacyBridgeProgramData, privacyBridgeProgramDataErr = svm.EncodeRegisterBytecode(code, nil)
+		privacyBridgeProgramData, privacyBridgeProgramDataErr = svm.EncodeGovernedRegisterBytecode(code, nil, svm.ProgramManifest{
+			ComputeUnitLimit: svm.DefaultComputeUnitLimit,
+			RequiredSyscalls: []svm.SyscallID{svm.SyscallPrivacyExecute},
+		})
 	})
 	if privacyBridgeProgramDataErr != nil {
 		return nil, privacyBridgeProgramDataErr

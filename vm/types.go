@@ -5,9 +5,11 @@ import "solana_golang/utils"
 const (
 	AddressSize                   = 32
 	DefaultComputeUnitLimit       = 200_000
+	MaxComputeUnitLimit           = 1_400_000
 	DefaultMaxDataIncreasePerCall = 10 * 1024
 	MaxProgramDataSize            = 1024 * 1024
 	MaxReadOnlyDataSize           = 64 * 1024
+	MaxProgramSyscallCount        = 64
 	MaxInstructionDataSize        = 1232
 	MaxReturnDataSize             = 1024
 	MaxLogMessageSize             = 1024

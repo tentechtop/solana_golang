@@ -57,12 +57,17 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 	}
 
 	accountStates := cloneLoadedAccountsToMap(loadedTransaction.Accounts)
+	computeUnitsConsumed := uint64(0)
 	for instructionIndex, instruction := range loadedTransaction.Message.Instructions {
-		if err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, normalizedInput, programRegistry); err != nil {
+		instructionComputeUnits, err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, normalizedInput, programRegistry)
+		computeUnitsConsumed += instructionComputeUnits
+		if err != nil {
 			result.Status = structure.TransactionStatusFailed
 			result.Error = instructionFailure(uint16(instructionIndex), structure.InstructionErrorCodeGeneric, err.Error())
 			result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
 			result.WrittenAccounts = writtenAccountsFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
+			result.ComputeUnitsConsumed = computeUnitsConsumed
+			result.CostUnits = computeUnitsConsumed
 			return result, result.Validate()
 		}
 		result.LogMessages = append(result.LogMessages, SimulationLogInstructionSuccess)
@@ -72,6 +77,8 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 	result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
 	result.WrittenAccounts = writtenAccountsFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
 	result.LogMessages = append(result.LogMessages, SimulationLogTransactionSuccess)
+	result.ComputeUnitsConsumed = computeUnitsConsumed
+	result.CostUnits = computeUnitsConsumed
 	return result, result.Validate()
 }
 
@@ -312,7 +319,7 @@ func executeSimulatedInstruction(
 	accounts map[structure.PublicKey]structure.Account,
 	input TransactionSimulationInput,
 	registry ProgramRegistry,
-) error {
+) (uint64, error) {
 	return ExecuteInstructionSandbox(instructionIndex, instruction, message, accounts, input, registry)
 }
 

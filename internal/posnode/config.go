@@ -12,13 +12,15 @@ import (
 	"solana_golang/p2p"
 	"solana_golang/programs/stake"
 	runtimepkg "solana_golang/runtime"
+	"solana_golang/structure"
 )
 
 const (
-	defaultChainID       = "pos-localnet"
-	defaultSlotMillis    = 1000
-	defaultEpochSlots    = 8
-	defaultInitialSupply = uint64(1_000_000_000_000_000_000)
+	defaultChainID                           = "pos-localnet"
+	defaultSlotMillis                        = 1000
+	defaultEpochSlots                        = 8
+	defaultInitialSupply                     = uint64(1_000_000_000_000_000_000)
+	defaultProductionContractDeploymentStake = uint64(10_000_000)
 )
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
@@ -48,6 +50,8 @@ type nodeConfig struct {
 	BLSKeyPath                    string                          `json:"bls_key_path,omitempty"`
 	NodeRole                      string                          `json:"node_role,omitempty"`
 	NodeCapabilities              []string                        `json:"node_capabilities,omitempty"`
+	ValidatorEnabled              *bool                           `json:"validator_enabled,omitempty"`
+	ConsensusEnabled              *bool                           `json:"consensus_enabled,omitempty"`
 	ResolvedNodeRole              p2p.PeerRole                    `json:"-"`
 	ResolvedNodeCapabilities      p2p.PeerCapability              `json:"-"`
 	StakeLamports                 uint64                          `json:"stake_lamports"`
@@ -63,11 +67,13 @@ type nodeConfig struct {
 	MempoolMaxTransactions        int                             `json:"mempool_max_transactions"`
 	MempoolTransactionTTLMillis   int64                           `json:"mempool_transaction_ttl_millis"`
 	TransactionLeaderForwardSlots int                             `json:"transaction_leader_forward_slots"`
+	TransactionForwardEnabled     *bool                           `json:"transaction_forward_enabled,omitempty"`
 	TransactionForwardValidators  *bool                           `json:"transaction_forward_validators,omitempty"`
 	TreasuryKeyPath               string                          `json:"treasury_key_path,omitempty"`
 	AllowHardcodedTreasury        *bool                           `json:"allow_hardcoded_treasury,omitempty"`
 	AutoTransfer                  *autoTransferConfig             `json:"auto_transfer,omitempty"`
 	PrivacyExecutionMode          runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
+	ContractDeploymentPolicy      contractDeploymentPolicyConfig  `json:"contract_deployment_policy,omitempty"`
 	GenesisHash                   string                          `json:"-"`
 	ChainIdentityHash             string                          `json:"-"`
 	P2PNetworkID                  string                          `json:"-"`
@@ -114,6 +120,14 @@ type genesisValidatorConfig struct {
 type autoTransferConfig struct {
 	ToSeed   string `json:"to_seed"`
 	Lamports uint64 `json:"lamports"`
+}
+
+type contractDeploymentPolicyConfig struct {
+	AllowedDeployers             []string              `json:"allowed_deployers,omitempty"`
+	MinDeploymentDepositLamports uint64                `json:"min_deployment_deposit_lamports,omitempty"`
+	RequireManifest              *bool                 `json:"require_manifest,omitempty"`
+	AllowUpgradeableContracts    *bool                 `json:"allow_upgradeable_contracts,omitempty"`
+	ResolvedAllowedDeployers     []structure.PublicKey `json:"-"`
 }
 
 func loadNodeConfig(path string) (nodeConfig, error) {
@@ -207,7 +221,13 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if config.TransactionLeaderForwardSlots < 0 || config.TransactionLeaderForwardSlots > 64 {
 		return nodeConfig{}, fmt.Errorf("posnode: transaction leader forward slots must be 0..64")
 	}
-	if isProductionNodeConfig(config) && strings.TrimSpace(config.TreasuryKeyPath) == "" {
+	if err := normalizeNodeAttributes(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := validateNodeRoleControls(config); err != nil {
+		return nodeConfig{}, err
+	}
+	if isProductionNodeConfig(config) && config.requiresTreasuryKeyPath() && strings.TrimSpace(config.TreasuryKeyPath) == "" {
 		return nodeConfig{}, fmt.Errorf("posnode: production treasury key path is required")
 	}
 	if isProductionNodeConfig(config) && !config.hasProductionKeyPaths() {
@@ -217,6 +237,9 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 		return nodeConfig{}, fmt.Errorf("posnode: insecure p2p disabled in production")
 	}
 	if err := normalizePrivacyExecutionModeConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := normalizeContractDeploymentPolicyConfig(&config); err != nil {
 		return nodeConfig{}, err
 	}
 	if config.Genesis.InitialSupplyLamports == 0 {
@@ -231,13 +254,35 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if !config.hasNodeKeyMaterial() {
 		return nodeConfig{}, fmt.Errorf("posnode: node key material is required")
 	}
-	if err := normalizeNodeAttributes(&config); err != nil {
-		return nodeConfig{}, err
-	}
 	if err := normalizeBootstrapPeerAttributes(config.BootstrapPeers); err != nil {
 		return nodeConfig{}, err
 	}
 	return enrichNodeChainIdentity(config)
+}
+
+func normalizeContractDeploymentPolicyConfig(config *nodeConfig) error {
+	policy := config.ContractDeploymentPolicy
+	policy.ResolvedAllowedDeployers = nil
+	for index, value := range policy.AllowedDeployers {
+		addressText := strings.TrimSpace(value)
+		if addressText == "" {
+			return fmt.Errorf("posnode: contract deployment allowed_deployers[%d] is empty", index)
+		}
+		address, err := structure.PublicKeyFromBase58(addressText)
+		if err != nil {
+			return fmt.Errorf("posnode: contract deployment allowed_deployers[%d]: %w", index, err)
+		}
+		policy.ResolvedAllowedDeployers = append(policy.ResolvedAllowedDeployers, address)
+	}
+	if policy.RequireManifest == nil && isProductionNodeConfig(*config) {
+		requireManifest := true
+		policy.RequireManifest = &requireManifest
+	}
+	if policy.MinDeploymentDepositLamports == 0 && isProductionNodeConfig(*config) && len(policy.ResolvedAllowedDeployers) == 0 {
+		policy.MinDeploymentDepositLamports = defaultProductionContractDeploymentStake
+	}
+	config.ContractDeploymentPolicy = policy
+	return nil
 }
 
 func normalizePrivacyExecutionModeConfig(config *nodeConfig) error {
@@ -298,6 +343,8 @@ func parsePeerRoleConfig(value string, defaultRole p2p.PeerRole) (p2p.PeerRole, 
 		return defaultRole, nil
 	case "full":
 		return p2p.PeerRoleFull, nil
+	case "public_rpc", "public-rpc", "rpc", "rpc_gateway", "rpc-gateway":
+		return p2p.PeerRolePublicRPC, nil
 	case "validator":
 		return p2p.PeerRoleValidator, nil
 	case "bootnode", "bootstrap":
@@ -355,6 +402,8 @@ func defaultNodeCapabilities(role p2p.PeerRole) p2p.PeerCapability {
 	switch role {
 	case p2p.PeerRoleValidator:
 		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay | p2p.PeerCapabilityValidator
+	case p2p.PeerRolePublicRPC:
+		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
 	case p2p.PeerRoleBootnode:
 		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
 	case p2p.PeerRoleArchive:
@@ -367,6 +416,8 @@ func defaultNodeCapabilities(role p2p.PeerRole) p2p.PeerCapability {
 func defaultPeerCapabilities(role p2p.PeerRole) p2p.PeerCapability {
 	switch role {
 	case p2p.PeerRoleBootnode:
+		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
+	case p2p.PeerRolePublicRPC:
 		return p2p.PeerCapabilityDHT | p2p.PeerCapabilityRelay
 	case p2p.PeerRoleArchive:
 		return p2p.PeerCapabilityArchive | p2p.PeerCapabilityRelay
@@ -393,11 +444,55 @@ func (config nodeConfig) allowInsecureP2P() bool {
 	return *config.AllowInsecureP2P
 }
 
+func (config nodeConfig) publicRPCMode() bool {
+	return config.ResolvedNodeRole == p2p.PeerRolePublicRPC
+}
+
+func (config nodeConfig) validatorEnabled() bool {
+	if config.ValidatorEnabled != nil {
+		return *config.ValidatorEnabled
+	}
+	return !config.publicRPCMode()
+}
+
+func (config nodeConfig) consensusEnabled() bool {
+	if config.ConsensusEnabled != nil {
+		return *config.ConsensusEnabled
+	}
+	return config.validatorEnabled()
+}
+
+func (config nodeConfig) transactionForwardEnabled() bool {
+	if config.TransactionForwardEnabled == nil {
+		return true
+	}
+	return *config.TransactionForwardEnabled
+}
+
 func (config nodeConfig) forwardTransactionsToValidators() bool {
 	if config.TransactionForwardValidators == nil {
 		return true
 	}
 	return *config.TransactionForwardValidators
+}
+
+func validateNodeRoleControls(config nodeConfig) error {
+	if config.publicRPCMode() && config.validatorEnabled() {
+		return fmt.Errorf("posnode: public_rpc role cannot enable validator")
+	}
+	if config.publicRPCMode() && config.consensusEnabled() {
+		return fmt.Errorf("posnode: public_rpc role cannot enable consensus")
+	}
+	if !config.validatorEnabled() && config.consensusEnabled() {
+		return fmt.Errorf("posnode: consensus requires validator_enabled")
+	}
+	if config.AutoRegister && !config.validatorEnabled() {
+		return fmt.Errorf("posnode: auto_register requires validator_enabled")
+	}
+	if !config.validatorEnabled() && config.ResolvedNodeCapabilities&p2p.PeerCapabilityValidator != 0 {
+		return fmt.Errorf("posnode: validator capability requires validator_enabled")
+	}
+	return nil
 }
 
 func (config nodeConfig) allowHardcodedTreasury() bool {
@@ -418,9 +513,18 @@ func isProductionNodeConfig(config nodeConfig) bool {
 	return environment == "production" || environment == "prod"
 }
 
+func (config nodeConfig) requiresTreasuryKeyPath() bool {
+	return !config.publicRPCMode()
+}
+
 func (config nodeConfig) hasProductionKeyPaths() bool {
-	return strings.TrimSpace(config.PeerKeyPath) != "" &&
-		strings.TrimSpace(config.StakerKeyPath) != "" &&
+	if strings.TrimSpace(config.PeerKeyPath) == "" {
+		return false
+	}
+	if !config.validatorEnabled() {
+		return true
+	}
+	return strings.TrimSpace(config.StakerKeyPath) != "" &&
 		strings.TrimSpace(config.ValidatorKeyPath) != "" &&
 		strings.TrimSpace(config.ConsensusKeyPath) != "" &&
 		strings.TrimSpace(config.BLSKeyPath) != ""
@@ -429,6 +533,9 @@ func (config nodeConfig) hasProductionKeyPaths() bool {
 func (config nodeConfig) hasNodeKeyMaterial() bool {
 	if strings.TrimSpace(config.PeerSeed) == "" && strings.TrimSpace(config.PeerKeyPath) == "" {
 		return false
+	}
+	if !config.validatorEnabled() {
+		return true
 	}
 	if strings.TrimSpace(config.StakerSeed) == "" && strings.TrimSpace(config.StakerKeyPath) == "" {
 		return false

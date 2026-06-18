@@ -413,14 +413,16 @@ func TestStageBusinessMissedVotesJailAndExcludeValidator(t *testing.T) {
 		slot := uint64(index + 1)
 		qcs[index] = testRewardQC(snapshot, slot, slot, []int{voterIndex})
 	}
+	rewardSlot := DefaultMissedVoteJailThreshold + DefaultRewardFinalityDepth
 	nextState, _, err := ApplyBlockRewards(state, BlockRewardInput{
-		Slot:          32,
-		Height:        64,
+		Slot:          rewardSlot,
+		Height:        rewardSlot,
 		EpochID:       1,
 		EpochSnapshot: snapshot,
 		Leader:        validators[voterIndex],
 		RewardQCs:     qcs,
 		Config: RewardConfig{
+			MaxVoteRewardDelaySlots:                 rewardSlot,
 			MinActiveValidatorsAfterPerformanceJail: 1,
 		},
 	})

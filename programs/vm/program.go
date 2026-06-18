@@ -77,6 +77,9 @@ func executeProgramAccount(
 	if err != nil {
 		return fmt.Errorf("vm program: execute %s: %w", programID.String(), err)
 	}
+	if context.ComputeUnitsUsed != nil {
+		*context.ComputeUnitsUsed += result.UnitsConsumed
+	}
 	return writeResultAccounts(result.Accounts, context)
 }
 

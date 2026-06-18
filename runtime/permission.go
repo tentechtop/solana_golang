@@ -15,8 +15,9 @@ func ExecuteInstructionSandbox(
 	accounts map[structure.PublicKey]structure.Account,
 	input TransactionSimulationInput,
 	registry ProgramRegistry,
-) error {
+) (uint64, error) {
 	sandboxAccounts := cloneAccountMap(accounts)
+	computeUnitsUsed := uint64(0)
 	if err := registry.Execute(InstructionContext{
 		InstructionIndex: instructionIndex,
 		Instruction:      instruction,
@@ -28,14 +29,15 @@ func ExecuteInstructionSandbox(
 		ComputeBudget:    input.ComputeBudget,
 		BuiltinPrograms:  input.BuiltinPrograms,
 		Logger:           input.Logger,
+		ComputeUnitsUsed: &computeUnitsUsed,
 	}); err != nil {
-		return err
+		return normalizeInstructionComputeUnits(computeUnitsUsed), err
 	}
 	if err := ValidateInstructionWrites(instruction, message, accounts, sandboxAccounts, input.BuiltinPrograms); err != nil {
-		return err
+		return normalizeInstructionComputeUnits(computeUnitsUsed), err
 	}
 	replaceAccountMap(accounts, sandboxAccounts)
-	return nil
+	return normalizeInstructionComputeUnits(computeUnitsUsed), nil
 }
 
 // ValidateInstructionWrites 校验指令写集 + runtime 统一拦截未声明 writable 的账户变更。
@@ -149,4 +151,11 @@ func accountsEqual(left structure.Account, right structure.Account) bool {
 		left.Executable == right.Executable &&
 		left.RentEpoch == right.RentEpoch &&
 		bytes.Equal(left.Data, right.Data)
+}
+
+func normalizeInstructionComputeUnits(units uint64) uint64 {
+	if units != 0 {
+		return units
+	}
+	return structure.DefaultBuiltinInstructionCU
 }

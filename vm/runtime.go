@@ -40,11 +40,14 @@ func (runtime Runtime) Execute(invocation Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if err := VerifyProgram(program, normalizedRuntime.Syscalls); err != nil {
+		return Result{}, err
+	}
 	accountSet, err := NewAccountSet(invocation.ProgramID, invocation.Accounts, normalizedRuntime.MaxDataIncrease)
 	if err != nil {
 		return Result{}, err
 	}
-	meter := NewComputeMeter(firstNonZero(invocation.ComputeLimit, normalizedRuntime.ComputeLimit))
+	meter := NewComputeMeter(effectiveComputeLimit(invocation.ComputeLimit, normalizedRuntime.ComputeLimit, program))
 	invocation.Sysvars = normalizeSysvars(invocation.Sysvars, invocation.CurrentSlot)
 	context := &Context{
 		Invocation: invocation,
@@ -98,4 +101,15 @@ func firstNonZero(values ...uint64) uint64 {
 		}
 	}
 	return 0
+}
+
+func effectiveComputeLimit(invocationLimit uint64, runtimeLimit uint64, program Program) uint64 {
+	limit := firstNonZero(invocationLimit, runtimeLimit, DefaultComputeUnitLimit)
+	if program.Manifest == nil || program.Manifest.ComputeUnitLimit == 0 {
+		return limit
+	}
+	if program.Manifest.ComputeUnitLimit < limit {
+		return program.Manifest.ComputeUnitLimit
+	}
+	return limit
 }

@@ -25,6 +25,13 @@ func NewDefaultRouter(backend LedgerBackend) *Router {
 	RegisterDefaultHandlers(router, backend)
 	return router
 }
+
+// NewPublicRouter 创建公网 RPC 路由 + 只注册钱包和 APP 必需的安全方法。
+func NewPublicRouter(backend LedgerBackend) *Router {
+	router := NewRouter()
+	RegisterPublicHandlers(router, backend)
+	return router
+}
 func (r *Router) Register(method string, handler HandlerFunc) error {
 	method = strings.TrimSpace(method)
 	if method == "" {

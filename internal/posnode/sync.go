@@ -21,6 +21,9 @@ const (
 	peerStatusTimeoutSlotMultiplier = 3
 	minPeerStatusTimeout            = time.Second
 	maxPeerStatusTimeout            = 5 * time.Second
+	productionSyncGateMaxTimeout    = 80 * time.Millisecond
+	productionSyncGateMinRemaining  = 50 * time.Millisecond
+	productionSyncGateMaxPeers      = 2
 )
 
 func (node *posNode) handleBlockByHashRequest(ctx context.Context, message p2p.Message) (p2p.Message, error) {
@@ -638,7 +641,7 @@ func (node *posNode) determineBranchSyncStartHeight(
 	return calculateSyncStartHeightFromAncestor(ancestor.Height), nil
 }
 
-func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint64) bool {
+func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint64, slotDeadline time.Time) bool {
 	if node.host == nil {
 		return false
 	}
@@ -648,8 +651,16 @@ func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint
 		)
 		return false
 	}
-	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
-		statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
+	for _, peerID := range node.productionSyncGatePeerIDs(localHeight) {
+		statusTimeout := productionSyncGateTimeout(slotDeadline)
+		if statusTimeout == 0 {
+			node.logger.Debug("posnode production sync gate skipped near slot deadline",
+				slog.Uint64("local_height", localHeight),
+				slog.Time("slot_deadline", slotDeadline),
+			)
+			return false
+		}
+		statusContext, cancel := context.WithTimeout(ctx, statusTimeout)
 		status, err := node.requestStatus(statusContext, peerID)
 		cancel()
 		if err != nil {
@@ -660,6 +671,55 @@ func (node *posNode) hasAheadValidatorPeer(ctx context.Context, localHeight uint
 		}
 	}
 	return false
+}
+
+// productionSyncGatePeerIDs 选择出块前探测节点 + 只探测少量已连接验证者避免拖过 slot deadline。
+func (node *posNode) productionSyncGatePeerIDs(localHeight uint64) []string {
+	peerIDs := node.validatorPeerIDsSnapshot(true)
+	if node.host == nil || len(peerIDs) == 0 {
+		return nil
+	}
+	connectedPeerIDs := make([]string, 0, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if _, connected := node.host.ConnectionState(peerID); connected {
+			connectedPeerIDs = append(connectedPeerIDs, peerID)
+		}
+	}
+	return rotateLimitedPeerIDs(connectedPeerIDs, localHeight, productionSyncGateMaxPeers)
+}
+
+// rotateLimitedPeerIDs 轮转抽样节点 + 避免长期固定探测同一批慢节点影响 leader 出块。
+func rotateLimitedPeerIDs(peerIDs []string, seed uint64, limit int) []string {
+	if len(peerIDs) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(peerIDs) <= limit {
+		result := make([]string, len(peerIDs))
+		copy(result, peerIDs)
+		return result
+	}
+	result := make([]string, 0, limit)
+	startIndex := int(seed % uint64(len(peerIDs)))
+	for offset := 0; offset < len(peerIDs) && len(result) < limit; offset++ {
+		result = append(result, peerIDs[(startIndex+offset)%len(peerIDs)])
+	}
+	return result
+}
+
+func productionSyncGateTimeout(slotDeadline time.Time) time.Duration {
+	remaining := time.Until(slotDeadline)
+	if remaining <= productionSyncGateMinRemaining {
+		return 0
+	}
+	timeout := productionSyncGateMaxTimeout
+	remainingBudget := remaining - productionSyncGateMinRemaining
+	if remainingBudget < timeout {
+		timeout = remainingBudget
+	}
+	if timeout <= 0 {
+		return 0
+	}
+	return timeout
 }
 
 func (node *posNode) smallValidatorNetwork() bool {
