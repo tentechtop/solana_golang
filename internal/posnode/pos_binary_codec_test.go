@@ -123,11 +123,47 @@ func TestPOSBinaryStateSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPOSBinaryStatusResponseRoundTrip(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	status := node.statusSnapshot()
+	status.Metrics.BlocksProduced = 7
+	status.Metrics.QCFormed = 5
+	payload, err := marshalStatusResponseBinary(status)
+	if err != nil {
+		t.Fatalf("marshalStatusResponseBinary() error = %v", err)
+	}
+	if len(payload) == 0 || payload[0] == '{' {
+		t.Fatalf("payload is not binary: %q", payload)
+	}
+	decoded, err := unmarshalStatusResponseBinary(payload)
+	if err != nil {
+		t.Fatalf("unmarshalStatusResponseBinary() error = %v", err)
+	}
+	if decoded.ChainIdentityHash != status.ChainIdentityHash {
+		t.Fatalf("chain identity = %s, want %s", decoded.ChainIdentityHash, status.ChainIdentityHash)
+	}
+	if decoded.HeadHeight != status.HeadHeight || decoded.HeadHash != status.HeadHash {
+		t.Fatalf("head = %d/%s, want %d/%s", decoded.HeadHeight, decoded.HeadHash, status.HeadHeight, status.HeadHash)
+	}
+	if decoded.Consensus.ValidatorCount != status.Consensus.ValidatorCount {
+		t.Fatalf("validator count = %d, want %d", decoded.Consensus.ValidatorCount, status.Consensus.ValidatorCount)
+	}
+	if decoded.Metrics.BlocksProduced != 7 || decoded.Metrics.QCFormed != 5 {
+		t.Fatalf("metrics = %+v", decoded.Metrics)
+	}
+}
+
 func TestPOSBinaryRejectsLegacyJSONPayload(t *testing.T) {
 	if _, err := unmarshalTransactionEnvelopeBinary([]byte(`{"transaction":"abc"}`)); err == nil {
 		t.Fatal("unmarshalTransactionEnvelopeBinary(JSON) error = nil, want error")
 	}
 	if _, err := unmarshalBlockResponseBinary(p2p.ProtocolPoSBlockByHeightV1, []byte(`{"found":false}`)); err == nil {
 		t.Fatal("unmarshalBlockResponseBinary(JSON) error = nil, want error")
+	}
+}
+
+func TestPOSBinaryRejectsOversizedBlockLocatorRequest(t *testing.T) {
+	if _, err := marshalBlockLocatorRequestBinary(blockLocatorRequestEnvelope{MaxEntries: posMaxListEntries + 1}); err == nil {
+		t.Fatal("marshalBlockLocatorRequestBinary(oversized) error = nil, want error")
 	}
 }

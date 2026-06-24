@@ -32,3 +32,19 @@ func TestVoteRouteDefaultsOriginAndHops(t *testing.T) {
 		t.Fatalf("MaxHops = %d, want %d", next.MaxHops, defaultVoteMaxHops)
 	}
 }
+
+func TestPrioritizePeerIDsMovesLeadersToFront(t *testing.T) {
+	connectedPeerIDs := []string{"peer-c", "peer-a", "peer-b", "peer-d"}
+	leaderPeerIDs := []string{"peer-b", "peer-x", "peer-a", "peer-b"}
+
+	got := prioritizePeerIDs(connectedPeerIDs, leaderPeerIDs)
+	want := []string{"peer-b", "peer-a", "peer-c", "peer-d"}
+	if len(got) != len(want) {
+		t.Fatalf("peer count = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("peer %d = %s, want %s; all peers = %+v", index, got[index], want[index], got)
+		}
+	}
+}

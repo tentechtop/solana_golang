@@ -217,6 +217,9 @@ func marshalBlockLocatorRequestBinary(request blockLocatorRequestEnvelope) ([]by
 	if request.MaxEntries < 0 {
 		return nil, fmt.Errorf("posnode: negative block locator entries")
 	}
+	if request.MaxEntries > posMaxListEntries {
+		return nil, fmt.Errorf("posnode: block locator entries exceed limit")
+	}
 	writer.WriteUint32(uint32(request.MaxEntries))
 	return writer.Bytes(), nil
 }

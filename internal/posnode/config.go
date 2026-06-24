@@ -3,8 +3,11 @@ package posnode
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"solana_golang/programs/stake"
 	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
+	"solana_golang/utils"
 )
 
 const (
@@ -22,12 +26,14 @@ const (
 	defaultEpochSlots                        = 8
 	defaultInitialSupply                     = uint64(1_000_000_000_000_000_000)
 	defaultProductionContractDeploymentStake = uint64(10_000_000)
+	defaultBootstrapJoinRPCPort              = 8899
 )
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
 type nodeConfig struct {
 	ConfigPath                    string                          `json:"-"`
 	ChainID                       string                          `json:"chain_id"`
+	ChainIDExplicit               bool                            `json:"-"`
 	Environment                   string                          `json:"environment"`
 	Production                    bool                            `json:"production"`
 	NodeName                      string                          `json:"node_name"`
@@ -35,6 +41,7 @@ type nodeConfig struct {
 	DataRootPath                  string                          `json:"-"`
 	ListenIP                      string                          `json:"listen_ip"`
 	ListenPort                    int                             `json:"listen_port"`
+	Network                       string                          `json:"network,omitempty"`
 	AdvertisedIP                  string                          `json:"advertised_ip,omitempty"`
 	AdvertisedPort                int                             `json:"advertised_port,omitempty"`
 	RPCEnabled                    bool                            `json:"rpc_enabled"`
@@ -42,6 +49,7 @@ type nodeConfig struct {
 	RPCPort                       int                             `json:"rpc_port"`
 	AllowInsecureP2P              *bool                           `json:"allow_insecure_p2p,omitempty"`
 	PeerSeed                      string                          `json:"peer_seed"`
+	StakerAddress                 string                          `json:"staker_address,omitempty"`
 	StakerSeed                    string                          `json:"staker_seed"`
 	ValidatorSeed                 string                          `json:"validator_seed"`
 	ConsensusSeed                 string                          `json:"consensus_seed"`
@@ -60,6 +68,8 @@ type nodeConfig struct {
 	ResolvedNodeCapabilities      p2p.PeerCapability              `json:"-"`
 	StakeLamports                 uint64                          `json:"stake_lamports"`
 	BootstrapPeers                []peerConfig                    `json:"bootstrap_peers"`
+	BootstrapCoordinator          bootstrapCoordinatorConfig      `json:"bootstrap_coordinator,omitempty"`
+	BootstrapJoin                 bootstrapJoinConfig             `json:"bootstrap_join,omitempty"`
 	Genesis                       genesisConfig                   `json:"genesis"`
 	SlotMillis                    int                             `json:"slot_millis"`
 	GenesisStartMs                int64                           `json:"genesis_start_unix_millis"`
@@ -74,10 +84,12 @@ type nodeConfig struct {
 	TransactionForwardEnabled     *bool                           `json:"transaction_forward_enabled,omitempty"`
 	TransactionForwardValidators  *bool                           `json:"transaction_forward_validators,omitempty"`
 	TreasuryKeyPath               string                          `json:"treasury_key_path,omitempty"`
+	ValidatorPairing              validatorPairingConfig          `json:"validator_pairing,omitempty"`
 	AllowHardcodedTreasury        *bool                           `json:"allow_hardcoded_treasury,omitempty"`
 	AutoTransfer                  *autoTransferConfig             `json:"auto_transfer,omitempty"`
 	PrivacyExecutionMode          runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
 	ContractDeploymentPolicy      contractDeploymentPolicyConfig  `json:"contract_deployment_policy,omitempty"`
+	FaultInjection                faultInjectionConfig            `json:"fault_injection,omitempty"`
 	GenesisHash                   string                          `json:"-"`
 	ChainIdentityHash             string                          `json:"-"`
 	P2PNetworkID                  string                          `json:"-"`
@@ -91,6 +103,8 @@ type peerConfig struct {
 	Role                 string             `json:"role,omitempty"`
 	Roles                []string           `json:"roles,omitempty"`
 	Capabilities         []string           `json:"capabilities,omitempty"`
+	RPCURL               string             `json:"rpc_url,omitempty"`
+	RPCPort              int                `json:"rpc_port,omitempty"`
 	ResolvedRole         p2p.PeerRole       `json:"-"`
 	ResolvedRoles        []p2p.PeerRole     `json:"-"`
 	ResolvedCapabilities p2p.PeerCapability `json:"-"`
@@ -123,6 +137,30 @@ type genesisValidatorConfig struct {
 	CommissionBps      uint16 `json:"commission_bps,omitempty"`
 }
 
+type bootstrapCoordinatorConfig struct {
+	Enabled                 bool   `json:"enabled,omitempty"`
+	MinValidators           int    `json:"min_validators,omitempty"`
+	FaultTolerance          int    `json:"fault_tolerance,omitempty"`
+	GenesisStartDelayMillis int64  `json:"genesis_start_delay_millis,omitempty"`
+	RegistryPath            string `json:"registry_path,omitempty"`
+}
+
+type bootstrapJoinConfig struct {
+	Enabled                bool   `json:"enabled,omitempty"`
+	RPCURL                 string `json:"rpc_url,omitempty"`
+	PollIntervalMillis     int64  `json:"poll_interval_millis,omitempty"`
+	TimeoutMillis          int64  `json:"timeout_millis,omitempty"`
+	RegisteredAtUnixMilli  int64  `json:"registered_at_unix_milli,omitempty"`
+	StakerSignature        string `json:"staker_signature,omitempty"`
+}
+
+type validatorPairingConfig struct {
+	Enabled         *bool  `json:"enabled,omitempty"`
+	TokenTTLMillis  int64  `json:"token_ttl_millis,omitempty"`
+	KeystoreDir     string `json:"keystore_dir,omitempty"`
+	AutoWriteConfig *bool  `json:"auto_write_config,omitempty"`
+}
+
 type autoTransferConfig struct {
 	ToSeed   string `json:"to_seed"`
 	Lamports uint64 `json:"lamports"`
@@ -136,6 +174,12 @@ type contractDeploymentPolicyConfig struct {
 	ResolvedAllowedDeployers     []structure.PublicKey `json:"-"`
 }
 
+type faultInjectionConfig struct {
+	ProposalDelayMillis int64 `json:"proposal_delay_millis,omitempty"`
+	DoubleVoteOnce      bool  `json:"double_vote_once,omitempty"`
+	DoubleProposalOnce  bool  `json:"double_proposal_once,omitempty"`
+}
+
 func loadNodeConfig(path string) (nodeConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -146,11 +190,19 @@ func loadNodeConfig(path string) (nodeConfig, error) {
 		return nodeConfig{}, fmt.Errorf("posnode: decode config: %w", err)
 	}
 	config.ConfigPath = filepath.Clean(strings.TrimSpace(path))
+	config.ChainIDExplicit = strings.TrimSpace(config.ChainID) != ""
 	return normalizeNodeConfig(config)
 }
 
 func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
-	if strings.TrimSpace(config.ChainID) == "" {
+	config.ChainID = strings.TrimSpace(config.ChainID)
+	if config.ChainID != "" {
+		config.ChainIDExplicit = true
+	}
+	if err := normalizeBootstrapConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if config.ChainID == "" {
 		config.ChainID = defaultChainID
 	}
 	if strings.TrimSpace(config.NodeName) == "" {
@@ -165,6 +217,11 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if strings.TrimSpace(config.ListenIP) == "" {
 		return nodeConfig{}, fmt.Errorf("posnode: listen ip is empty")
 	}
+	network, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return nodeConfig{}, fmt.Errorf("posnode: invalid p2p network: %w", err)
+	}
+	config.Network = string(network)
 	if strings.TrimSpace(config.AdvertisedIP) != "" && config.AdvertisedPort == 0 {
 		config.AdvertisedPort = config.ListenPort
 	}
@@ -249,13 +306,19 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if err := normalizeContractDeploymentPolicyConfig(&config); err != nil {
 		return nodeConfig{}, err
 	}
+	if err := normalizeValidatorPairingConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := normalizeFaultInjectionConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
 	if config.Genesis.InitialSupplyLamports == 0 {
 		config.Genesis.InitialSupplyLamports = defaultInitialSupply
 	}
-	if len(config.Genesis.FundedAccounts) == 0 {
+	if len(config.Genesis.FundedAccounts) == 0 && !config.BootstrapJoin.Enabled && !config.bootstrapPairingPending() && !config.BootstrapCoordinator.Enabled {
 		return nodeConfig{}, fmt.Errorf("posnode: genesis funded accounts are empty")
 	}
-	if isProductionNodeConfig(config) && !config.hasProductionGenesisPublicKeys() {
+	if isProductionNodeConfig(config) && !config.BootstrapJoin.Enabled && !config.hasProductionGenesisPublicKeys() {
 		return nodeConfig{}, fmt.Errorf("posnode: production genesis public keys are required")
 	}
 	if !config.hasNodeKeyMaterial() {
@@ -265,6 +328,196 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 		return nodeConfig{}, err
 	}
 	return enrichNodeChainIdentity(config)
+}
+
+func normalizeBootstrapConfig(config *nodeConfig) error {
+	if config.BootstrapCoordinator.Enabled && config.BootstrapJoin.Enabled {
+		return fmt.Errorf("posnode: bootstrap coordinator and bootstrap join cannot both be enabled")
+	}
+	if !config.BootstrapJoin.Enabled && shouldInferBootstrapJoin(*config) {
+		config.BootstrapJoin.Enabled = true
+	}
+	if config.BootstrapCoordinator.Enabled {
+		if strings.TrimSpace(config.NodeRole) == "" && len(config.NodeRoles) == 0 {
+			config.NodeRole = "bootnode"
+		}
+		if config.ValidatorEnabled == nil {
+			disabled := false
+			config.ValidatorEnabled = &disabled
+		}
+		if config.ConsensusEnabled == nil {
+			disabled := false
+			config.ConsensusEnabled = &disabled
+		}
+		if err := normalizeBootstrapCoordinatorConfig(&config.BootstrapCoordinator); err != nil {
+			return err
+		}
+	}
+	if config.BootstrapJoin.Enabled {
+		if strings.TrimSpace(config.NodeRole) == "" && len(config.NodeRoles) == 0 {
+			config.NodeRole = "validator"
+		}
+		if config.ValidatorEnabled == nil {
+			enabled := true
+			config.ValidatorEnabled = &enabled
+		}
+		if config.ConsensusEnabled == nil {
+			enabled := true
+			config.ConsensusEnabled = &enabled
+		}
+		if err := normalizeBootstrapJoinConfig(&config.BootstrapJoin, config.BootstrapPeers); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shouldInferBootstrapJoin 判断是否自动加入引导流程 + 让空创世配置只依赖引导节点完成启动。
+func shouldInferBootstrapJoin(config nodeConfig) bool {
+	if config.BootstrapCoordinator.Enabled || config.BootstrapJoin.Enabled {
+		return false
+	}
+	if config.bootstrapPairingPending() {
+		return false
+	}
+	if strings.TrimSpace(config.BootstrapJoin.RPCURL) != "" {
+		return true
+	}
+	if len(config.BootstrapPeers) == 0 {
+		return false
+	}
+	return len(config.Genesis.FundedAccounts) == 0 && len(config.Genesis.InitialValidators) == 0
+}
+
+func normalizeBootstrapCoordinatorConfig(config *bootstrapCoordinatorConfig) error {
+	if config.FaultTolerance < 0 {
+		return fmt.Errorf("posnode: bootstrap fault_tolerance must be non-negative")
+	}
+	if config.MinValidators == 0 {
+		if config.FaultTolerance > 0 {
+			config.MinValidators = config.FaultTolerance*3 + 1
+		} else {
+			config.MinValidators = 4
+		}
+	}
+	if config.MinValidators < 1 {
+		return fmt.Errorf("posnode: bootstrap min_validators must be positive")
+	}
+	if config.FaultTolerance > 0 && config.MinValidators < config.FaultTolerance*3+1 {
+		return fmt.Errorf("posnode: bootstrap min_validators must satisfy 3f + 1")
+	}
+	if config.GenesisStartDelayMillis == 0 {
+		config.GenesisStartDelayMillis = 30_000
+	}
+	if config.GenesisStartDelayMillis < 1_000 {
+		return fmt.Errorf("posnode: bootstrap genesis_start_delay_millis must be >= 1000")
+	}
+	config.RegistryPath = strings.TrimSpace(config.RegistryPath)
+	return nil
+}
+
+func normalizeBootstrapJoinConfig(config *bootstrapJoinConfig, peers []peerConfig) error {
+	rpcURL, err := normalizeBootstrapRPCURL(config.RPCURL)
+	if err != nil {
+		return err
+	}
+	if rpcURL == "" {
+		rpcURL, err = bootstrapJoinRPCURLFromPeers(peers)
+		if err != nil {
+			return err
+		}
+	}
+	config.RPCURL = rpcURL
+	if config.RPCURL == "" {
+		return fmt.Errorf("posnode: bootstrap_join rpc_url is required or bootstrap_peers must provide an address")
+	}
+	if config.PollIntervalMillis == 0 {
+		config.PollIntervalMillis = 2_000
+	}
+	if config.PollIntervalMillis < 200 || config.PollIntervalMillis > 60_000 {
+		return fmt.Errorf("posnode: bootstrap_join poll_interval_millis must be 200..60000")
+	}
+	if config.TimeoutMillis < 0 {
+		return fmt.Errorf("posnode: bootstrap_join timeout_millis must be non-negative")
+	}
+	if config.RegisteredAtUnixMilli < 0 {
+		return fmt.Errorf("posnode: bootstrap_join registered_at_unix_milli must be non-negative")
+	}
+	config.StakerSignature = strings.TrimSpace(config.StakerSignature)
+	return nil
+}
+
+// bootstrapJoinRPCURLFromPeers 从引导节点推导 RPC 地址 + 让用户无需重复配置 bootstrap_join.rpc_url。
+func bootstrapJoinRPCURLFromPeers(peers []peerConfig) (string, error) {
+	for index, peer := range peers {
+		rpcURL, err := normalizeBootstrapRPCURL(peer.RPCURL)
+		if err != nil {
+			return "", fmt.Errorf("posnode: bootstrap peer %d rpc_url: %w", index, err)
+		}
+		if rpcURL != "" {
+			return rpcURL, nil
+		}
+		rpcPort := peer.RPCPort
+		if rpcPort == 0 {
+			rpcPort = defaultBootstrapJoinRPCPort
+		}
+		if strings.TrimSpace(peer.IP) == "" {
+			continue
+		}
+		rpcURL, err = buildBootstrapRPCURL(peer.IP, rpcPort)
+		if err != nil {
+			return "", fmt.Errorf("posnode: bootstrap peer %d rpc endpoint: %w", index, err)
+		}
+		return rpcURL, nil
+	}
+	return "", nil
+}
+
+// normalizeBootstrapRPCURL 规范化引导 RPC 地址 + 防止非法 scheme、凭据和查询串进入启动链路。
+func normalizeBootstrapRPCURL(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", nil
+	}
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "http://" + rawURL
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse rpc url: %w", err)
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return "", fmt.Errorf("rpc url scheme must be http or https")
+	}
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("rpc url must not contain user info")
+	}
+	if strings.TrimSpace(parsedURL.Host) == "" {
+		return "", fmt.Errorf("rpc url host is empty")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return "", fmt.Errorf("rpc url must not contain query or fragment")
+	}
+	if parsedURL.Path == "" {
+		parsedURL.Path = "/"
+	}
+	return parsedURL.String(), nil
+}
+
+// buildBootstrapRPCURL 生成默认引导 RPC 地址 + 让只配置 P2P 引导节点时使用约定 RPC 端口。
+func buildBootstrapRPCURL(host string, port int) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("rpc host is empty")
+	}
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("rpc port is invalid")
+	}
+	return (&url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   "/",
+	}).String(), nil
 }
 
 func normalizeContractDeploymentPolicyConfig(config *nodeConfig) error {
@@ -290,6 +543,40 @@ func normalizeContractDeploymentPolicyConfig(config *nodeConfig) error {
 	}
 	config.ContractDeploymentPolicy = policy
 	return nil
+}
+
+func normalizeFaultInjectionConfig(config *nodeConfig) error {
+	if config.FaultInjection.ProposalDelayMillis < 0 {
+		return fmt.Errorf("posnode: fault injection proposal delay must be non-negative")
+	}
+	if config.FaultInjection.ProposalDelayMillis > maxFaultInjectionProposalDelayMillis {
+		return fmt.Errorf("posnode: fault injection proposal delay exceeds %d ms", maxFaultInjectionProposalDelayMillis)
+	}
+	if !config.FaultInjection.enabled() {
+		return nil
+	}
+	if isProductionNodeConfig(*config) {
+		return fmt.Errorf("posnode: fault injection is forbidden in production")
+	}
+	if !config.consensusEnabled() {
+		return fmt.Errorf("posnode: fault injection requires consensus_enabled")
+	}
+	return nil
+}
+
+func normalizeValidatorPairingConfig(config *nodeConfig) error {
+	if config.ValidatorPairing.TokenTTLMillis == 0 {
+		config.ValidatorPairing.TokenTTLMillis = 15 * 60 * 1000
+	}
+	if config.ValidatorPairing.TokenTTLMillis < 60_000 || config.ValidatorPairing.TokenTTLMillis > 24*60*60*1000 {
+		return fmt.Errorf("posnode: validator_pairing token_ttl_millis must be 60000..86400000")
+	}
+	config.ValidatorPairing.KeystoreDir = strings.TrimSpace(config.ValidatorPairing.KeystoreDir)
+	return nil
+}
+
+func (config faultInjectionConfig) enabled() bool {
+	return config.ProposalDelayMillis > 0 || config.DoubleVoteOnce || config.DoubleProposalOnce
 }
 
 func normalizePrivacyExecutionModeConfig(config *nodeConfig) error {
@@ -332,6 +619,19 @@ func normalizeNodeAttributes(config *nodeConfig) error {
 
 func normalizeBootstrapPeerAttributes(peers []peerConfig) error {
 	for index := range peers {
+		network, err := normalizeP2PNetwork(peers[index].Network)
+		if err != nil {
+			return fmt.Errorf("posnode: invalid bootstrap peer %s network: %w", peers[index].PeerID, err)
+		}
+		peers[index].Network = string(network)
+		if peers[index].RPCPort < 0 || peers[index].RPCPort > 65535 {
+			return fmt.Errorf("posnode: invalid bootstrap peer %s rpc_port", peers[index].PeerID)
+		}
+		rpcURL, err := normalizeBootstrapRPCURL(peers[index].RPCURL)
+		if err != nil {
+			return fmt.Errorf("posnode: invalid bootstrap peer %s rpc_url: %w", peers[index].PeerID, err)
+		}
+		peers[index].RPCURL = rpcURL
 		role, roles, roleCapabilities, err := parsePeerRolesConfig(peers[index].Role, peers[index].Roles, p2p.PeerRoleValidator)
 		if err != nil {
 			return fmt.Errorf("posnode: invalid bootstrap peer %s role: %w", peers[index].PeerID, err)
@@ -346,6 +646,38 @@ func normalizeBootstrapPeerAttributes(peers []peerConfig) error {
 		peers[index].ResolvedCapabilities = capabilities | roleCapabilities
 	}
 	return nil
+}
+
+// 功能目的：统一解析 P2P 传输协议；实现原因：监听、广告地址和节点拨号必须使用相同协议边界。
+func normalizeP2PNetwork(value string) (utils.MultiAddressProtocol, error) {
+	network := strings.TrimSpace(value)
+	if network == "" {
+		return utils.ProtocolTCP, nil
+	}
+	return utils.ParseMultiAddressProtocol(network)
+}
+
+func (config nodeConfig) p2pProtocol() utils.MultiAddressProtocol {
+	protocol, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return utils.ProtocolTCP
+	}
+	return protocol
+}
+
+func (config peerConfig) p2pProtocol() utils.MultiAddressProtocol {
+	protocol, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return utils.ProtocolTCP
+	}
+	return protocol
+}
+
+func preferredP2PProtocols(primary utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	if primary == utils.ProtocolTCP {
+		return []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
+	}
+	return []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP}
 }
 
 func parsePeerRolesConfig(
@@ -529,6 +861,42 @@ func (config nodeConfig) consensusEnabled() bool {
 	return config.validatorEnabled()
 }
 
+func (config nodeConfig) validatorPairingEnabled() bool {
+	if config.ValidatorPairing.Enabled != nil {
+		return *config.ValidatorPairing.Enabled
+	}
+	return config.RPCEnabled &&
+		!config.validatorEnabled() &&
+		!config.consensusEnabled() &&
+		!config.publicRPCMode() &&
+		!config.BootstrapCoordinator.Enabled &&
+		containsPeerRole(config.ResolvedNodeRoles, p2p.PeerRoleFull)
+}
+
+func (config nodeConfig) bootstrapPairingPending() bool {
+	if config.ValidatorPairing.Enabled == nil || !*config.ValidatorPairing.Enabled {
+		return false
+	}
+	if config.ValidatorEnabled == nil || *config.ValidatorEnabled {
+		return false
+	}
+	if config.ConsensusEnabled == nil || *config.ConsensusEnabled {
+		return false
+	}
+	return strings.TrimSpace(config.BootstrapJoin.RPCURL) != ""
+}
+
+func (config nodeConfig) validatorPairingAutoWriteConfig() bool {
+	if config.ValidatorPairing.AutoWriteConfig == nil {
+		return true
+	}
+	return *config.ValidatorPairing.AutoWriteConfig
+}
+
+func (config nodeConfig) bootstrapCoordinatorOnly() bool {
+	return config.BootstrapCoordinator.Enabled && !config.validatorEnabled() && !config.consensusEnabled()
+}
+
 func (config nodeConfig) transactionForwardEnabled() bool {
 	if config.TransactionForwardEnabled == nil {
 		return true
@@ -544,6 +912,18 @@ func (config nodeConfig) forwardTransactionsToValidators() bool {
 }
 
 func validateNodeRoleControls(config nodeConfig) error {
+	if config.BootstrapCoordinator.Enabled && config.validatorEnabled() {
+		return fmt.Errorf("posnode: bootstrap coordinator cannot enable validator")
+	}
+	if config.BootstrapCoordinator.Enabled && config.consensusEnabled() {
+		return fmt.Errorf("posnode: bootstrap coordinator cannot enable consensus")
+	}
+	if config.BootstrapJoin.Enabled && !config.validatorEnabled() {
+		return fmt.Errorf("posnode: bootstrap join requires validator_enabled")
+	}
+	if config.BootstrapJoin.Enabled && !config.consensusEnabled() {
+		return fmt.Errorf("posnode: bootstrap join requires consensus_enabled")
+	}
 	if config.publicRPCMode() && config.validatorEnabled() {
 		return fmt.Errorf("posnode: public_rpc role cannot enable validator")
 	}
@@ -555,6 +935,11 @@ func validateNodeRoleControls(config nodeConfig) error {
 	}
 	if config.AutoRegister && !config.validatorEnabled() {
 		return fmt.Errorf("posnode: auto_register requires validator_enabled")
+	}
+	if config.AutoRegister &&
+		strings.TrimSpace(config.StakerSeed) == "" &&
+		strings.TrimSpace(config.StakerKeyPath) == "" {
+		return fmt.Errorf("posnode: auto_register requires local staker key material")
 	}
 	if !config.validatorEnabled() && config.ResolvedNodeCapabilities&p2p.PeerCapabilityValidator != 0 {
 		return fmt.Errorf("posnode: validator capability requires validator_enabled")
@@ -590,7 +975,7 @@ func isProductionNodeConfig(config nodeConfig) bool {
 }
 
 func (config nodeConfig) requiresTreasuryKeyPath() bool {
-	return !config.publicRPCMode()
+	return config.validatorEnabled() || config.consensusEnabled()
 }
 
 func (config nodeConfig) hasProductionKeyPaths() bool {
@@ -600,7 +985,7 @@ func (config nodeConfig) hasProductionKeyPaths() bool {
 	if !config.validatorEnabled() {
 		return true
 	}
-	return strings.TrimSpace(config.StakerKeyPath) != "" &&
+	return (strings.TrimSpace(config.StakerAddress) != "" || strings.TrimSpace(config.StakerKeyPath) != "") &&
 		strings.TrimSpace(config.ValidatorKeyPath) != "" &&
 		strings.TrimSpace(config.ConsensusKeyPath) != "" &&
 		strings.TrimSpace(config.BLSKeyPath) != ""
@@ -613,7 +998,9 @@ func (config nodeConfig) hasNodeKeyMaterial() bool {
 	if !config.validatorEnabled() {
 		return true
 	}
-	if strings.TrimSpace(config.StakerSeed) == "" && strings.TrimSpace(config.StakerKeyPath) == "" {
+	if strings.TrimSpace(config.StakerAddress) == "" &&
+		strings.TrimSpace(config.StakerSeed) == "" &&
+		strings.TrimSpace(config.StakerKeyPath) == "" {
 		return false
 	}
 	if strings.TrimSpace(config.ValidatorSeed) == "" && strings.TrimSpace(config.ValidatorKeyPath) == "" {

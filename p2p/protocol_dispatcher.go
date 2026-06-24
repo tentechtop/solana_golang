@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -247,6 +248,16 @@ func (dispatcher *protocolDispatcher) handleJob(parent context.Context, workerID
 	if err != nil {
 		host.metrics.messagesRejected.Add(1)
 		host.metrics.protocolJobsFailed.Add(1)
+		if host.protocolJobFailureIsExpectedUnregisteredProtocol(err, job.message.Type) {
+			host.logger.Debug("p2p protocol job ignored",
+				slog.String("peer_id", job.message.FromPeerID),
+				slog.String("message_id", job.message.ID),
+				slog.Uint64("protocol_id", uint64(job.message.Type)),
+				slog.Uint64("worker_id", uint64(workerID)),
+				slog.Any("error", err),
+			)
+			return
+		}
 		host.logger.Warn("p2p protocol job failed",
 			slog.String("peer_id", job.message.FromPeerID),
 			slog.String("message_id", job.message.ID),
@@ -270,6 +281,39 @@ func (dispatcher *protocolDispatcher) handleJob(parent context.Context, workerID
 		}
 	}
 	host.metrics.protocolJobsHandled.Add(1)
+}
+
+func (host *Host) protocolJobFailureIsExpectedUnregisteredProtocol(err error, protocolID ProtocolID) bool {
+	if !errors.Is(err, ErrProtocolNotFound) {
+		return false
+	}
+	if host == nil {
+		return false
+	}
+	_, ignored := host.ignoredUnregisteredProtocols[protocolID]
+	return ignored
+}
+
+// isKnownProtocolID 判断协议号是否属于内置协议 + 非验证者节点未注册某些内置协议时只需要调试日志。
+func isKnownProtocolID(protocolID ProtocolID) bool {
+	for _, spec := range DefaultProtocolSpecs() {
+		if spec.ID == protocolID {
+			return true
+		}
+	}
+	switch protocolID {
+	case ProtocolPoSBlockByHashV1,
+		ProtocolPoSBlockByHeightV1,
+		ProtocolPoSStateSnapshotV1,
+		ProtocolPoSStatusV1,
+		ProtocolPoSEvidenceV1,
+		ProtocolPoSBlockLocatorV1,
+		ProtocolPoSCommonAncestorV1,
+		ProtocolPoSRPCForwardV1:
+		return true
+	default:
+		return false
+	}
 }
 
 func (dispatcher *protocolDispatcher) queueDepths() (uint64, uint64, uint64) {

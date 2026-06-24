@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"solana_golang/blockchain"
+	"solana_golang/consensus"
 	"solana_golang/structure"
 )
 
@@ -35,6 +36,43 @@ func TestAddTransactionAcceptsSignedUserTransaction(t *testing.T) {
 	}
 	if got := node.metrics.transactionsIn.Load(); got != 1 {
 		t.Fatalf("transactionsIn = %d, want 1", got)
+	}
+}
+
+func TestAddTransactionClearsStaleSeenID(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	transaction := newMempoolTransfer(t, "stale-seen-source", "stale-seen-destination", 100)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.seenTransactions[transactionID] = struct{}{}
+
+	if err := node.addTransaction(transaction); err != nil {
+		t.Fatalf("addTransaction() error = %v", err)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	if _, exists := node.seenTransactions[transactionID]; !exists {
+		t.Fatal("transaction id was not restored to seen index")
+	}
+}
+
+func TestMempoolTransactionByIDClearsStaleSeenID(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	transaction := newMempoolTransfer(t, "stale-lookup-source", "stale-lookup-destination", 100)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.seenTransactions[transactionID] = struct{}{}
+
+	if _, exists := node.mempoolTransactionByID(transactionID); exists {
+		t.Fatal("mempoolTransactionByID() found stale transaction")
+	}
+	if _, exists := node.seenTransactions[transactionID]; exists {
+		t.Fatal("stale transaction id still marked as seen")
 	}
 }
 
@@ -102,6 +140,29 @@ func TestSelectMempoolTransactionsRemovesExpiredSeenID(t *testing.T) {
 	}
 }
 
+func TestPruneMempoolRemovesExpiredSeenID(t *testing.T) {
+	node := newMempoolTestNode(10, 1)
+	transaction := newMempoolTransfer(t, "maintenance-source", "maintenance-destination", 100)
+	transaction.SubmitTime = time.Now().UnixMilli()
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.mempool = append(node.mempool, transaction)
+	node.seenTransactions[transactionID] = struct{}{}
+
+	removed := node.pruneMempool(time.Now().Add(time.Minute).UnixMilli(), 1)
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
+	}
+	if _, exists := node.seenTransactions[transactionID]; exists {
+		t.Fatal("expired transaction id still marked as seen")
+	}
+}
+
 func TestSelectMempoolTransactionsRetainsSelectedUntilCommit(t *testing.T) {
 	node := newMempoolTestNode(10, 60_000)
 	transaction := newMempoolTransfer(t, "selected-source", "selected-destination", 100)
@@ -132,6 +193,74 @@ func TestSelectMempoolTransactionsRetainsSelectedUntilCommit(t *testing.T) {
 	}
 	if _, exists := node.seenTransactions[transactionID]; exists {
 		t.Fatal("committed transaction id still marked as seen")
+	}
+}
+
+func TestSelectMempoolTransactionsIncludesConflictingAccounts(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	firstTransaction := newMempoolTransfer(t, "conflict-source", "conflict-destination-1", 100)
+	secondTransaction := newMempoolTransfer(t, "conflict-source", "conflict-destination-2", 200)
+	firstTransactionID, err := firstTransaction.TxIDString()
+	if err != nil {
+		t.Fatalf("first TxIDString() error = %v", err)
+	}
+	secondTransactionID, err := secondTransaction.TxIDString()
+	if err != nil {
+		t.Fatalf("second TxIDString() error = %v", err)
+	}
+
+	node.mempool = append(node.mempool, firstTransaction, secondTransaction)
+	node.seenTransactions[firstTransactionID] = struct{}{}
+	node.seenTransactions[secondTransactionID] = struct{}{}
+	selected, removed := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), 1)
+	if len(selected) != 2 {
+		t.Fatalf("selected = %d, want 2", len(selected))
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %+v, want empty", removed)
+	}
+	if len(node.mempool) != 2 {
+		t.Fatalf("mempool size = %d, want 2", len(node.mempool))
+	}
+}
+
+func TestRemoveRejectedMempoolTransactionsRecordsFailedStatus(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	transaction := newMempoolTransfer(t, "rejected-source", "rejected-destination", 100)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.mempool = append(node.mempool, transaction)
+	node.seenTransactions[transactionID] = struct{}{}
+
+	node.removeRejectedMempoolTransactions([]consensus.RejectedTransaction{
+		{
+			TransactionID: transactionID,
+			Transaction:   transaction,
+			Status:        structure.TransactionStatusFailed,
+			Error:         "recent blockhash is not valid",
+		},
+	}, 12)
+
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
+	}
+	if _, exists := node.seenTransactions[transactionID]; exists {
+		t.Fatal("rejected transaction id still marked as seen")
+	}
+	detail, found := node.lookupRejectedTransaction(transactionID)
+	if !found {
+		t.Fatal("rejected transaction detail not found")
+	}
+	if detail.Location != "rejected" || detail.Status != "failed" || detail.Error != "recent blockhash is not valid" {
+		t.Fatalf("rejected detail = %+v", detail)
+	}
+	if detail.Slot != 12 {
+		t.Fatalf("rejected slot = %d, want 12", detail.Slot)
+	}
+	if got := node.metrics.transactionsDrop.Load(); got != 1 {
+		t.Fatalf("transactionsDrop = %d, want 1", got)
 	}
 }
 
@@ -188,6 +317,49 @@ func TestAddTransactionRejectsInvalidRecentBlockhash(t *testing.T) {
 	}
 	if got := node.metrics.transactionsDrop.Load(); got != 1 {
 		t.Fatalf("transactionsDrop = %d, want 1", got)
+	}
+}
+
+func TestAddTransactionAcceptsRecentBlockhashWhenWallClockSlotAdvanced(t *testing.T) {
+	node := newMempoolTestNode(10, 60_000)
+	source := mustStructureKeyPair("routing-solana-source")
+	destination := mustStructureKeyPair("routing-solana-destination")
+	ledger, err := blockchain.NewLedgerFromGenesis(nil, blockchain.GenesisConfig{
+		ChainID: "mempool-routing-solana",
+		FundedAccounts: []blockchain.GenesisAccount{
+			{Address: source.PublicKey, Lamports: 1_000_000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLedgerFromGenesis() error = %v", err)
+	}
+	node.ledger = ledger
+	node.config.SlotMillis = 400
+	node.config.GenesisStartMs = time.Now().
+		Add(-time.Duration(structure.MaxRecentBlockhashAgeSlots+5) * time.Duration(node.config.SlotMillis) * time.Millisecond).
+		UnixMilli()
+
+	head := ledger.Head()
+	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
+		Blockhash:     head.BlockHash,
+		Slot:          head.Slot,
+		FeeCalculator: structure.DefaultFeeCalculator(),
+	}); err != nil {
+		t.Fatalf("add head blockhash: %v", err)
+	}
+	transaction, err := blockchain.NewTransferTransaction(source, destination.PublicKey, 100, head.BlockHash)
+	if err != nil {
+		t.Fatalf("NewTransferTransaction() error = %v", err)
+	}
+
+	if err := node.addTransaction(transaction); err != nil {
+		t.Fatalf("addTransaction() error = %v", err)
+	}
+	if len(node.mempool) != 1 {
+		t.Fatalf("mempool size = %d, want 1", len(node.mempool))
+	}
+	if got := node.metrics.transactionsDrop.Load(); got != 0 {
+		t.Fatalf("transactionsDrop = %d, want 0", got)
 	}
 }
 

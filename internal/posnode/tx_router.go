@@ -88,8 +88,23 @@ func (node *posNode) transactionRouteTargets(ctx context.Context) ([]string, []s
 }
 
 func (node *posNode) transactionForwardTargets(ctx context.Context, excludedPeerID string) []string {
-	seenPreferred := map[string]struct{}{}
-	return node.transactionLayeredFallbackPeerIDs(ctx, seenPreferred, excludedPeerID)
+	preferredPeerIDs := node.preferredTransactionPeerIDs()
+	resolvedPreferred := make([]string, 0, len(preferredPeerIDs))
+	seenPreferred := make(map[string]struct{}, len(preferredPeerIDs))
+	for _, peerID := range preferredPeerIDs {
+		if peerID == "" || peerID == node.peerKeyPair.peerID || peerID == excludedPeerID {
+			continue
+		}
+		if _, exists := seenPreferred[peerID]; exists {
+			continue
+		}
+		seenPreferred[peerID] = struct{}{}
+		if node.ensureRoutablePeer(ctx, peerID) {
+			resolvedPreferred = append(resolvedPreferred, peerID)
+		}
+	}
+	fallbackPeerIDs := node.transactionLayeredFallbackPeerIDs(ctx, seenPreferred, excludedPeerID)
+	return append(resolvedPreferred, fallbackPeerIDs...)
 }
 
 func (node *posNode) voteRouteTargets(ctx context.Context, vote consensus.Vote, fromPeerID string, originPeerID string) []string {
@@ -110,14 +125,15 @@ func (node *posNode) voteRouteTargets(ctx context.Context, vote consensus.Vote, 
 func (node *posNode) leaderPeerForSlot(slot uint64) (string, consensus.ValidatorID, bool) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
-	if err := node.ensureEpochForSlotLocked(slot); err != nil {
-		return "", "", false
-	}
-	leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
 	if err != nil {
 		return "", "", false
 	}
-	leader, exists := node.epochSnapshot.ValidatorByID(leaderID)
+	leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
+	if err != nil {
+		return "", "", false
+	}
+	leader, exists := epochContextValue.Snapshot.ValidatorByID(leaderID)
 	if !exists {
 		return "", "", false
 	}
@@ -138,9 +154,13 @@ func (node *posNode) validatorIDByPeerID(peerID string) (consensus.ValidatorID, 
 func (node *posNode) transactionLayeredFallbackPeerIDs(ctx context.Context, excluded map[string]struct{}, excludedPeerID string) []string {
 	node.mutex.Lock()
 	startSlot := node.currentRoutingSlotLocked()
-	leaderID, err := node.leaderSchedule.LeaderForSlot(startSlot)
+	epochContextValue, contextErr := node.epochContextForSlotLocked(startSlot)
+	leaderID := consensus.ValidatorID("")
+	if contextErr == nil {
+		leaderID, contextErr = epochContextValue.Schedule.LeaderForSlot(startSlot)
+	}
 	node.mutex.Unlock()
-	if err == nil {
+	if contextErr == nil {
 		peerIDs, _, childErr := node.turbineChildPeerIDsForRoot(ctx, startSlot, leaderID, excludedPeerID)
 		if childErr == nil && len(peerIDs) > 0 {
 			return filterExcludedPeerIDs(peerIDs, excluded)
@@ -192,26 +212,27 @@ func (node *posNode) transactionFastPathForSlotLocked(startSlot uint64, excludeL
 		fastPath.PreferredPeerIDs = node.filterTransactionRoutePeersLocked(validatorPeerIDs, excludeLocalPeer)
 		return fastPath
 	}
-	if err := node.ensureEpochForSlotLocked(startSlot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(startSlot)
+	if err != nil {
 		validatorPeerIDs := node.validatorPeerIDsLocked()
 		fastPath.ValidatorPeerIDs = append(fastPath.ValidatorPeerIDs, validatorPeerIDs...)
 		fastPath.PreferredPeerIDs = node.filterTransactionRoutePeersLocked(validatorPeerIDs, excludeLocalPeer)
 		return fastPath
 	}
 
-	validatorPeerIDs := node.validatorPeerIDsLocked()
+	validatorPeerIDs := validatorPeerIDsFromSnapshot(epochContextValue.Snapshot)
 	fastPath.ValidatorPeerIDs = append(fastPath.ValidatorPeerIDs, validatorPeerIDs...)
-	peerIDs := make([]string, 0, len(node.epochSnapshot.Validators)+forwardSlots+1)
+	peerIDs := make([]string, 0, len(epochContextValue.Snapshot.Validators)+forwardSlots+1)
 	for offset := 0; offset <= forwardSlots; offset++ {
 		slot := startSlot + uint64(offset)
-		if slot > node.epochSnapshot.EndSlot {
+		if slot > epochContextValue.Snapshot.EndSlot {
 			break
 		}
-		leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+		leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
 		if err != nil {
 			continue
 		}
-		leader, exists := node.epochSnapshot.ValidatorByID(leaderID)
+		leader, exists := epochContextValue.Snapshot.ValidatorByID(leaderID)
 		if exists {
 			fastPath.LeaderSlots = append(fastPath.LeaderSlots, leaderSlotJSON{
 				Slot:        slot,
@@ -244,8 +265,12 @@ func (node *posNode) filterTransactionRoutePeersLocked(peerIDs []string, exclude
 }
 
 func (node *posNode) validatorPeerIDsLocked() []string {
-	peerIDs := make([]string, 0, len(node.epochSnapshot.Validators))
-	for _, validator := range node.epochSnapshot.Validators {
+	return validatorPeerIDsFromSnapshot(node.epochSnapshot)
+}
+
+func validatorPeerIDsFromSnapshot(snapshot consensus.EpochSnapshot) []string {
+	peerIDs := make([]string, 0, len(snapshot.Validators))
+	for _, validator := range snapshot.Validators {
 		if validator.P2PPeerID != "" {
 			peerIDs = append(peerIDs, validator.P2PPeerID)
 		}
@@ -269,6 +294,9 @@ func (node *posNode) currentRoutingSlotLocked() uint64 {
 }
 
 func (node *posNode) ensureRoutablePeer(ctx context.Context, targetPeerID string) bool {
+	if node.host == nil {
+		return false
+	}
 	if _, exists := node.host.Peer(targetPeerID); exists {
 		node.addKnownPeerID(targetPeerID)
 		return true
@@ -381,17 +409,21 @@ func (node *posNode) upcomingLeadersLocked(startSlot uint64, limit int) []leader
 	if limit <= 0 {
 		return nil
 	}
+	epochContextValue, err := node.epochContextForSlotLocked(startSlot)
+	if err != nil {
+		return nil
+	}
 	leaders := make([]leaderSlotJSON, 0, limit)
 	for offset := 0; offset < limit; offset++ {
 		slot := startSlot + uint64(offset)
-		if slot > node.epochSnapshot.EndSlot {
+		if slot > epochContextValue.Snapshot.EndSlot {
 			break
 		}
-		leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+		leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
 		if err != nil {
 			continue
 		}
-		leader, exists := node.epochSnapshot.ValidatorByID(leaderID)
+		leader, exists := epochContextValue.Snapshot.ValidatorByID(leaderID)
 		if !exists {
 			continue
 		}

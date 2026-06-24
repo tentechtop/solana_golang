@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	protocolAddressTransparent byte = 0x00
-	protocolAddressPrivacy     byte = 0x01
-	protocolAddressSize             = structure.PublicKeySize + 1
+	protocolAddressTransparent     byte = 0x00
+	protocolAddressPrivacy         byte = 0x01
+	protocolAddressSize                 = structure.PublicKeySize + 1
+	rpcTransactionBroadcastTimeout      = 2 * time.Second
 )
 
 type privacyChangeArtifacts struct {
@@ -52,11 +53,21 @@ func (node *posNode) GetBalance(ctx context.Context, address string) (rpc.Balanc
 func (node *posNode) GetLatestBlockhash(ctx context.Context) (rpc.LatestBlockhashResult, error) {
 	_ = ctx
 	head := node.ledger.Head()
+	if err := node.ensureHeadBlockhashAvailable(head); err != nil {
+		return rpc.LatestBlockhashResult{}, err
+	}
+	if ^uint64(0)-head.Slot < structure.MaxRecentBlockhashAgeSlots {
+		return rpc.LatestBlockhashResult{}, fmt.Errorf("posnode: latest blockhash slot overflows last valid slot")
+	}
+	if ^uint64(0)-head.Height < structure.MaxRecentBlockhashAgeSlots {
+		return rpc.LatestBlockhashResult{}, fmt.Errorf("posnode: latest blockhash height overflows last valid block height")
+	}
 	return rpc.LatestBlockhashResult{
-		Blockhash:     head.BlockHash.String(),
-		Slot:          head.Slot,
-		Height:        head.Height,
-		LastValidSlot: head.Slot + structure.MaxRecentBlockhashAgeSlots,
+		Blockhash:            head.BlockHash.String(),
+		Slot:                 head.Slot,
+		Height:               head.Height,
+		LastValidSlot:        head.Slot + structure.MaxRecentBlockhashAgeSlots,
+		LastValidBlockHeight: head.Height + structure.MaxRecentBlockhashAgeSlots,
 	}, nil
 }
 
@@ -138,6 +149,10 @@ func (node *posNode) GetTransaction(ctx context.Context, signature string) (rpc.
 		return rpc.TransactionDetailResult{}, fmt.Errorf("posnode: lookup committed transaction: %w", err)
 	}
 	if !found {
+		rejectedResult, rejected := node.lookupRejectedTransaction(signature)
+		if rejected {
+			return rejectedResult, nil
+		}
 		return rpc.TransactionDetailResult{
 			Signature: signature,
 			Found:     false,
@@ -180,6 +195,15 @@ func (node *posNode) GetAddressTransactions(ctx context.Context, address string,
 		return rpc.AccountTransactionHistoryResult{}, err
 	}
 	return accountTransactionHistoryResult(publicKey, page, node.ledger.Head().FinalizedHeight), nil
+}
+
+func (node *posNode) GetContractPrograms(ctx context.Context, limit int) (rpc.ContractProgramListResult, error) {
+	_ = ctx
+	records, err := node.ledger.ContractPrograms(limit)
+	if err != nil {
+		return rpc.ContractProgramListResult{}, fmt.Errorf("posnode: list contract programs: %w", err)
+	}
+	return contractProgramListResult(records), nil
 }
 
 func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error) {
@@ -698,7 +722,7 @@ func (node *posNode) GetLocalValidatorIdentity(ctx context.Context) (rpc.LocalVa
 	}
 	result := rpc.LocalValidatorIdentityResult{
 		NodeName:                 node.config.NodeName,
-		StakerAddress:            node.stakerKeyPair.PublicKey.String(),
+		StakerAddress:            node.stakerAddress.String(),
 		ValidatorAddress:         node.validatorKeyPair.PublicKey.String(),
 		ConsensusPublicKey:       node.consensusKeyPair.PublicKey.String(),
 		BLSPublicKey:             utils.Base58Encode(node.blsKeyPair.PublicKey),
@@ -734,8 +758,11 @@ func (node *posNode) GetLocalValidatorIdentity(ctx context.Context) (rpc.LocalVa
 	result.CommissionBps = state.CommissionBps
 	result.VoteCredits = state.VoteCredits
 	result.RewardLamports = state.RewardLamports
+	result.SelfRewardLamports = state.SelfRewardLamports
+	result.CommissionRewardLamports = state.CommissionRewardLamports
 	result.LastRewardedSlot = state.LastRewardedSlot
 	result.LastRewardEpoch = state.LastRewardEpoch
+	result.LastSlashedSlot = state.LastSlashedSlot
 	return result, nil
 }
 
@@ -910,7 +937,8 @@ func (node *posNode) JailValidator(ctx context.Context, stakerSeed string, valid
 
 func (node *posNode) GetValidatorSet(ctx context.Context) (rpc.ValidatorSetResult, error) {
 	_ = ctx
-	validatorSet, err := node.ledger.ValidatorSetFromState()
+	head := node.ledger.Head()
+	validatorSet, err := node.ledger.ValidatorSetFromStateAtEpoch(head.EpochID)
 	if err != nil {
 		return rpc.ValidatorSetResult{}, err
 	}
@@ -925,22 +953,44 @@ func (node *posNode) GetValidatorSet(ctx context.Context) (rpc.ValidatorSetResul
 		if err != nil {
 			return rpc.ValidatorSetResult{}, err
 		}
+		selfPendingStakeLamports, err := stake.SelfPendingStake(stakeState)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
+		selfUnlockingStakeLamports, err := stake.SelfUnlockingStake(stakeState)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
 		delegatedLamports, err := stake.TotalDelegatedStake(stakeState)
 		if err != nil {
 			return rpc.ValidatorSetResult{}, err
 		}
 		result.Validators[index] = rpc.ValidatorInfo{
-			ValidatorID:        string(validator.ValidatorID),
-			AccountAddress:     validator.AccountAddress.String(),
-			ConsensusPublicKey: validator.ConsensusPublicKey.String(),
-			P2PPeerID:          validator.P2PPeerID,
-			StakeLamports:      validator.StakeLamports,
-			SelfStakeLamports:  selfStakeLamports,
-			DelegatedLamports:  delegatedLamports,
-			DelegatorCount:     len(stakeState.Delegations),
-			Status:             validatorStatusText(validator.Status),
-			CommissionBps:      validator.CommissionBps,
-			Delegations:        delegationInfos(stakeState.Delegations),
+			ValidatorID:                string(validator.ValidatorID),
+			AccountAddress:             validator.AccountAddress.String(),
+			StakerAddress:              stakeState.StakerAccount.String(),
+			ConsensusPublicKey:         validator.ConsensusPublicKey.String(),
+			P2PPeerID:                  validator.P2PPeerID,
+			StakeLamports:              validator.StakeLamports,
+			SelfStakeLamports:          selfStakeLamports,
+			SelfPendingStakeLamports:   selfPendingStakeLamports,
+			SelfUnlockingStakeLamports: selfUnlockingStakeLamports,
+			SelfRewardLamports:         stakeState.SelfRewardLamports,
+			CommissionRewardLamports:   stakeState.CommissionRewardLamports,
+			DelegatedLamports:          delegatedLamports,
+			DelegatorCount:             len(stakeState.Delegations),
+			Status:                     validatorStatusText(validator.Status),
+			CommissionBps:              validator.CommissionBps,
+			VoteCredits:                stakeState.VoteCredits,
+			RewardLamports:             stakeState.RewardLamports,
+			LastRewardedSlot:           stakeState.LastRewardedSlot,
+			LastRewardEpoch:            stakeState.LastRewardEpoch,
+			JailUntilEpoch:             stakeState.JailUntilEpoch,
+			ActivationEpoch:            stakeState.ActivationEpoch,
+			DeactivationEpoch:          stakeState.DeactivationEpoch,
+			LastEffectiveStakeLamports: stakeState.LastEffectiveStake,
+			LastSlashedSlot:            stakeState.LastSlashedSlot,
+			Delegations:                delegationInfos(stakeState.Delegations),
 		}
 	}
 	return result, nil
@@ -993,16 +1043,38 @@ func (node *posNode) GetPeerNetwork(ctx context.Context) (rpc.PeerNetworkResult,
 
 func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 	_ = ctx
+	if node.ledger == nil {
+		ready := false
+		if node.bootstrapCoordinator != nil {
+			status, err := node.bootstrapCoordinator.GetBootstrapStatus(ctx)
+			if err != nil {
+				return rpc.HealthResult{}, err
+			}
+			ready = status.Ready && len(node.connectedBootstrapValidatorPeerIDs()) > 0
+		}
+		return rpc.HealthResult{OK: ready}, nil
+	}
 	head := node.ledger.Head()
 	node.mutex.Lock()
 	mempoolSize := len(node.mempool)
 	node.mutex.Unlock()
+	livenessGate := node.refreshLivenessGate(time.Now())
 	return rpc.HealthResult{
-		OK:              true,
-		HeadHeight:      head.Height,
-		HeadSlot:        head.Slot,
-		FinalizedHeight: head.FinalizedHeight,
-		MempoolSize:     mempoolSize,
+		OK:                                livenessGateHealthOK(livenessGate),
+		HeadHeight:                        head.Height,
+		HeadSlot:                          head.Slot,
+		FinalizedHeight:                   head.FinalizedHeight,
+		MempoolSize:                       mempoolSize,
+		LivenessState:                     livenessGate.State,
+		LivenessMode:                      livenessGate.Mode,
+		LivenessReason:                    livenessGate.Reason,
+		LivenessQuorumReady:               livenessGate.QuorumReady,
+		LivenessProductionEnabled:         livenessGate.ProductionEnabled,
+		ReachableStakeLamports:            livenessGate.ReachableStakeLamports,
+		RequiredStakeLamports:             livenessGate.RequiredStakeLamports,
+		TotalActiveStakeLamports:          livenessGate.TotalActiveStakeLamports,
+		RecentReachabilityWindowMillis:    livenessGate.RecentReachabilityWindowMillis,
+		LastReachableStakeUpdateUnixMilli: livenessGate.LastReachableStakeUpdateUnixMilli,
 	}, nil
 }
 
@@ -1058,7 +1130,16 @@ func (node *posNode) submitTransaction(ctx context.Context, transaction structur
 	if err != nil {
 		return "", err
 	}
-	if node.mempoolAlreadyHasTransaction(transactionID) {
+	if existingTransaction, exists := node.mempoolTransactionByID(transactionID); exists {
+		node.scheduleRPCTransactionBroadcast(ctx, existingTransaction, transactionID)
+		return transactionID, nil
+	}
+	committed, err := node.transactionAlreadyCommitted(transactionID)
+	if err != nil {
+		return "", err
+	}
+	if committed {
+		node.clearTransactionTracking(transactionID)
 		return transactionID, nil
 	}
 	if err := node.ensureHeadBlockhashAvailable(head); err != nil {
@@ -1071,8 +1152,28 @@ func (node *posNode) submitTransaction(ctx context.Context, transaction structur
 	if err := node.addTransaction(transaction); err != nil {
 		return "", err
 	}
-	node.broadcastTransaction(ctx, transaction)
+	node.scheduleRPCTransactionBroadcast(ctx, transaction, transactionID)
 	return transactionID, nil
+}
+
+// scheduleRPCTransactionBroadcast 后台扩散已接收交易 + RPC sendTransaction 必须在入池后快速返回签名。
+func (node *posNode) scheduleRPCTransactionBroadcast(ctx context.Context, transaction structure.Transaction, transactionID string) {
+	if node.host == nil || !node.config.transactionForwardEnabled() {
+		return
+	}
+	node.startWorker(func() {
+		baseContext := context.Background()
+		if ctx != nil {
+			baseContext = context.WithoutCancel(ctx)
+		}
+		broadcastContext, cancel := context.WithTimeout(baseContext, rpcTransactionBroadcastTimeout)
+		defer cancel()
+		node.broadcastTransaction(broadcastContext, transaction)
+		node.logger.Debug("posnode rpc transaction broadcast scheduled",
+			slog.String("tx_id", transactionID),
+			slog.Duration("timeout", rpcTransactionBroadcastTimeout),
+		)
+	})
 }
 
 // preflightTransaction 预执行 RPC 交易 + 避免把必然失败的交易返回成已提交签名。
@@ -1155,13 +1256,6 @@ func applyPreflightWrites(state consensus.ChainState, writes []structure.Address
 		nextAccounts = append(nextAccounts, structure.AddressedAccount{Address: write.Address, Account: write.Account.Clone()})
 	}
 	return consensus.ChainState{Accounts: nextAccounts}
-}
-
-func (node *posNode) mempoolAlreadyHasTransaction(transactionID string) bool {
-	node.mutex.Lock()
-	defer node.mutex.Unlock()
-	_, exists := node.seenTransactions[transactionID]
-	return exists
 }
 
 // ensureHeadBlockhashAvailable 补齐链头 blockhash 窗口 + RPC 使用链头哈希构造交易时必须可立即校验。
@@ -1414,6 +1508,25 @@ func accountTransactionHistoryResult(address structure.PublicKey, page blockchai
 		Records:    records,
 		NextCursor: page.NextCursor,
 		HasMore:    page.HasMore,
+	}
+}
+
+func contractProgramListResult(records []blockchain.ContractProgramRecord) rpc.ContractProgramListResult {
+	programs := make([]rpc.ContractProgramResult, len(records))
+	for index, record := range records {
+		programs[index] = rpc.ContractProgramResult{
+			Address:    record.Address.String(),
+			Owner:      record.Owner.String(),
+			Executable: true,
+			Lamports:   fmt.Sprintf("%d", record.Lamports),
+			DataLength: record.DataLength,
+			CodeHash:   record.CodeHash,
+			RentEpoch:  record.RentEpoch,
+		}
+	}
+	return rpc.ContractProgramListResult{
+		Scope:    "executable_bpfloader_programs",
+		Programs: programs,
 	}
 }
 

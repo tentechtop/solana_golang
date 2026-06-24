@@ -121,6 +121,7 @@ type statusResponseEnvelope struct {
 	HeadQCHash        string              `json:"head_qc_hash,omitempty"`
 	FinalizedHeight   uint64              `json:"finalized_height"`
 	FinalizedHash     string              `json:"finalized_hash"`
+	FinalizedSlot     uint64              `json:"finalized_slot"`
 	FinalityDepth     uint64              `json:"finality_depth"`
 	EpochID           uint64              `json:"epoch_id"`
 	MempoolSize       int                 `json:"mempool_size"`
@@ -128,11 +129,13 @@ type statusResponseEnvelope struct {
 	KnownPeerCount    int                 `json:"known_peer_count"`
 	P2PSecure         bool                `json:"p2p_secure_session"`
 	P2PInsecure       bool                `json:"p2p_insecure_allowed"`
+	RPCForwarding     bool                `json:"rpc_forwarding"`
 	StateRecovery     bool                `json:"state_recovery_enabled"`
 	CurrentLeader     string              `json:"current_leader,omitempty"`
 	UpcomingLeaders   []leaderSlotJSON    `json:"upcoming_leaders,omitempty"`
 	Turbine           turbinePositionJSON `json:"turbine"`
 	TransactionFast   transactionFastJSON `json:"transaction_fast_path"`
+	Liveness          livenessGateJSON    `json:"liveness"`
 	Consensus         consensusStatusJSON `json:"consensus"`
 	Metrics           nodeMetricsSnapshot `json:"metrics"`
 }
@@ -177,7 +180,29 @@ type consensusStatusJSON struct {
 	ValidatorCount   int                            `json:"validator_count"`
 	LocalValidatorID string                         `json:"local_validator_id,omitempty"`
 	LocalValidator   consensusValidatorStatusJSON   `json:"local_validator"`
+	Liveness         livenessGateJSON               `json:"liveness"`
 	Validators       []consensusValidatorStatusJSON `json:"validators,omitempty"`
+}
+
+type livenessGateJSON struct {
+	State                             string   `json:"state"`
+	Mode                              string   `json:"mode"`
+	Reason                            string   `json:"reason,omitempty"`
+	Applicable                        bool     `json:"applicable"`
+	QuorumReady                       bool     `json:"quorum_ready"`
+	ProductionEnabled                 bool     `json:"production_enabled"`
+	UserTransactionPackagingEnabled   bool     `json:"user_transaction_packaging_enabled"`
+	ReachableStakeLamports            uint64   `json:"reachable_stake_lamports"`
+	RequiredStakeLamports             uint64   `json:"required_stake_lamports"`
+	TotalActiveStakeLamports          uint64   `json:"total_active_stake_lamports"`
+	ReachableStakeWeightBps           uint64   `json:"reachable_stake_weight_bps"`
+	ReachableValidatorCount           int      `json:"reachable_validator_count"`
+	ValidatorCount                    int      `json:"validator_count"`
+	ReachableValidatorIDs             []string `json:"reachable_validator_ids,omitempty"`
+	RecentReachabilityWindowMillis    int64    `json:"recent_reachability_window_millis"`
+	LastReachableStakeUpdateUnixMilli int64    `json:"last_reachable_stake_update_unix_milli"`
+	MinimumQuorumNumerator            uint64   `json:"minimum_quorum_numerator"`
+	MinimumQuorumDenominator          uint64   `json:"minimum_quorum_denominator"`
 }
 
 type consensusValidatorStatusJSON struct {
@@ -202,6 +227,7 @@ type consensusValidatorStatusJSON struct {
 	DeactivationEpoch          uint64   `json:"deactivation_epoch"`
 	LastEffectiveStakeLamports uint64   `json:"last_effective_stake_lamports"`
 	JailUntilEpoch             uint64   `json:"jail_until_epoch"`
+	LastSlashedSlot            uint64   `json:"last_slashed_slot"`
 	CommissionBps              uint16   `json:"commission_bps"`
 }
 

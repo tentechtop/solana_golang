@@ -36,6 +36,36 @@ func TestSlotSkipTimeoutUsesNinetyPercentWindow(t *testing.T) {
 	}
 }
 
+func TestSlotProductionBudgetUsesBoundedRemainingTime(t *testing.T) {
+	shortSlotNode := &posNode{config: nodeConfig{SlotMillis: 400}}
+	if got := shortSlotNode.slotProductionMinRemaining(); got != 400*time.Millisecond/3 {
+		t.Fatalf("short slot production remaining = %s, want %s", got, 400*time.Millisecond/3)
+	}
+
+	longSlotNode := &posNode{config: nodeConfig{SlotMillis: 5000}}
+	if got := longSlotNode.slotProductionMinRemaining(); got != 750*time.Millisecond {
+		t.Fatalf("long slot production remaining = %s, want 750ms", got)
+	}
+}
+
+func TestSlotProductionBudgetAvailableRequiresVoteBudget(t *testing.T) {
+	startedAt := time.UnixMilli(1_700_000_000_000)
+	node := &posNode{
+		config: nodeConfig{
+			SlotMillis:     400,
+			GenesisStartMs: startedAt.UnixMilli(),
+		},
+	}
+	slotStart := node.slotStartTime(2)
+
+	if !node.slotProductionBudgetAvailable(2, slotStart.Add(226*time.Millisecond)) {
+		t.Fatal("slotProductionBudgetAvailable() early = false, want true")
+	}
+	if node.slotProductionBudgetAvailable(2, slotStart.Add(227*time.Millisecond)) {
+		t.Fatal("slotProductionBudgetAvailable() at exact budget boundary = true, want false")
+	}
+}
+
 func TestSlotTickIntervalBoundsShortAndLongSlots(t *testing.T) {
 	shortSlotNode := &posNode{config: nodeConfig{SlotMillis: 400}}
 	if got := shortSlotNode.slotTickInterval(); got != 100*time.Millisecond {
@@ -118,7 +148,7 @@ func TestVoteForProposalRejectsExpiredSlot(t *testing.T) {
 	}
 }
 
-func TestPublicRPCNodeCommitsProposalWithoutVoting(t *testing.T) {
+func TestPublicRPCNodeStoresProposalWithoutVoting(t *testing.T) {
 	producerNode := newConsensusStatusTestNode(t)
 	publicNode := newConsensusStatusTestNode(t)
 	disableValidator := false
@@ -133,11 +163,11 @@ func TestPublicRPCNodeCommitsProposalWithoutVoting(t *testing.T) {
 		t.Fatalf("voteForProposal() error = %v", err)
 	}
 	headAfter := publicNode.ledger.Head()
-	if headAfter.Height != headBefore.Height+1 {
-		t.Fatalf("head height = %d, want %d", headAfter.Height, headBefore.Height+1)
+	if headAfter.Height != headBefore.Height {
+		t.Fatalf("head height = %d, want %d", headAfter.Height, headBefore.Height)
 	}
-	if got := publicNode.metrics.proposalsAccepted.Load(); got != 1 {
-		t.Fatalf("proposalsAccepted = %d, want 1", got)
+	if got := publicNode.metrics.proposalsAccepted.Load(); got != 0 {
+		t.Fatalf("proposalsAccepted = %d, want 0", got)
 	}
 	if got := publicNode.metrics.votesSent.Load(); got != 0 {
 		t.Fatalf("votesSent = %d, want 0", got)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"sort"
+	"time"
 
 	"solana_golang/consensus"
 	"solana_golang/programs/stake"
@@ -18,9 +19,12 @@ type consensusStakeRecord struct {
 
 func (node *posNode) GetConsensusStatus(ctx context.Context) (any, error) {
 	_ = ctx
+	livenessGate := node.refreshLivenessGate(time.Now())
 	node.mutex.Lock()
-	defer node.mutex.Unlock()
-	return node.consensusStatusForSlotLocked(node.currentRoutingSlotLocked()), nil
+	status := node.consensusStatusForSlotLocked(node.currentRoutingSlotLocked())
+	status.Liveness = livenessGate
+	node.mutex.Unlock()
+	return status, nil
 }
 
 func (node *posNode) consensusStatusForSlotLocked(slot uint64) consensusStatusJSON {
@@ -32,26 +36,35 @@ func (node *posNode) consensusStatusForSlotLocked(slot uint64) consensusStatusJS
 			ValidatorID:  string(localValidatorID),
 			TurbineLayer: -1,
 		},
+		Liveness: node.livenessGate,
 	}
 	if node.config.EpochSlots == 0 || len(node.epochSnapshot.Validators) == 0 {
 		return status
 	}
-	if err := node.ensureEpochForSlotLocked(slot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
+	if err != nil {
 		return status
 	}
 
 	status.Available = true
-	status.EpochID = node.epochSnapshot.EpochID
-	status.EpochStartSlot = node.epochSnapshot.StartSlot
-	status.EpochEndSlot = node.epochSnapshot.EndSlot
-	status.TotalActiveStake = node.epochSnapshot.TotalActiveStake
+	status.EpochID = epochContextValue.EpochID
+	status.EpochStartSlot = epochContextValue.Snapshot.StartSlot
+	status.EpochEndSlot = epochContextValue.Snapshot.EndSlot
+	status.TotalActiveStake = epochContextValue.Snapshot.TotalActiveStake
 	stakeRecords := node.consensusStakeRecords(status.EpochID)
-	currentValidators := currentValidatorMap(node.epochSnapshot)
-	tree, treeAvailable := node.turbineTreeForStatusLocked(slot)
+	currentValidators := currentValidatorMap(epochContextValue.Snapshot)
+	tree, treeAvailable := node.turbineTreeForStatusLocked(slot, epochContextValue)
 	validatorIDs := sortedConsensusValidatorIDs(currentValidators, stakeRecords)
 	status.Validators = make([]consensusValidatorStatusJSON, 0, len(validatorIDs))
 	for _, validatorID := range validatorIDs {
-		validatorStatus := node.consensusValidatorStatus(validatorID, currentValidators, stakeRecords, tree, treeAvailable)
+		validatorStatus := node.consensusValidatorStatus(
+			validatorID,
+			currentValidators,
+			stakeRecords,
+			tree,
+			treeAvailable,
+			status.TotalActiveStake,
+		)
 		status.Validators = append(status.Validators, validatorStatus)
 		if validatorID == localValidatorID {
 			status.LocalValidator = validatorStatus
@@ -61,12 +74,12 @@ func (node *posNode) consensusStatusForSlotLocked(slot uint64) consensusStatusJS
 	return status
 }
 
-func (node *posNode) turbineTreeForStatusLocked(slot uint64) (consensus.TurbineTree, bool) {
-	leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+func (node *posNode) turbineTreeForStatusLocked(slot uint64, epochContextValue epochContext) (consensus.TurbineTree, bool) {
+	leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
 	if err != nil {
 		return consensus.TurbineTree{}, false
 	}
-	tree, err := consensus.NewTurbineTree(node.epochSnapshot, slot, leaderID, node.config.TurbineFanout)
+	tree, err := consensus.NewTurbineTree(epochContextValue.Snapshot, slot, leaderID, node.config.TurbineFanout)
 	if err != nil {
 		return consensus.TurbineTree{}, false
 	}
@@ -87,11 +100,14 @@ func (node *posNode) consensusStakeRecords(epochID uint64) map[consensus.Validat
 		if err != nil {
 			continue
 		}
-		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+		validatorID := consensus.NewValidatorID(stakeState.ConsensusPublicKey)
+		effectiveStake, active, err := validatorEffectiveStakeForEpoch(stakeState, validatorID, epochID)
 		if err != nil {
 			continue
 		}
-		validatorID := consensus.NewValidatorID(stakeState.ConsensusPublicKey)
+		if !active {
+			effectiveStake = 0
+		}
 		records[validatorID] = consensusStakeRecord{
 			AccountAddress: account.Address,
 			State:          stakeState,
@@ -134,6 +150,7 @@ func (node *posNode) consensusValidatorStatus(
 	stakeRecords map[consensus.ValidatorID]consensusStakeRecord,
 	tree consensus.TurbineTree,
 	treeAvailable bool,
+	totalActiveStake uint64,
 ) consensusValidatorStatusJSON {
 	validator, inCurrentEpoch := currentValidators[validatorID]
 	stakeRecord, hasStakeRecord := stakeRecords[validatorID]
@@ -142,7 +159,7 @@ func (node *posNode) consensusValidatorStatus(
 		InCurrentEpoch:         inCurrentEpoch,
 		TurbineLayer:           -1,
 		EffectiveStakeLamports: stakeRecord.EffectiveStake,
-		WeightBps:              stakeWeightBps(stakeRecord.EffectiveStake, node.epochSnapshot.TotalActiveStake),
+		WeightBps:              stakeWeightBps(stakeRecord.EffectiveStake, totalActiveStake),
 	}
 	if inCurrentEpoch {
 		result.AccountAddress = validator.AccountAddress.String()
@@ -150,7 +167,7 @@ func (node *posNode) consensusValidatorStatus(
 		result.P2PPeerID = validator.P2PPeerID
 		result.Status = validatorStatusText(validator.Status)
 		result.EffectiveStakeLamports = validator.StakeLamports
-		result.WeightBps = stakeWeightBps(validator.StakeLamports, node.epochSnapshot.TotalActiveStake)
+		result.WeightBps = stakeWeightBps(validator.StakeLamports, totalActiveStake)
 		result.CommissionBps = validator.CommissionBps
 	}
 	if hasStakeRecord {
@@ -165,7 +182,10 @@ func (node *posNode) consensusValidatorStatus(
 		result.DeactivationEpoch = stakeRecord.State.DeactivationEpoch
 		result.LastEffectiveStakeLamports = stakeRecord.State.LastEffectiveStake
 		result.JailUntilEpoch = stakeRecord.State.JailUntilEpoch
+		result.LastSlashedSlot = stakeRecord.State.LastSlashedSlot
 		result.CommissionBps = stakeRecord.State.CommissionBps
+		result.EffectiveStakeLamports = stakeRecord.EffectiveStake
+		result.WeightBps = stakeWeightBps(stakeRecord.EffectiveStake, totalActiveStake)
 	}
 	if treeAvailable {
 		node.applyTurbineStatus(&result, validatorID, tree)

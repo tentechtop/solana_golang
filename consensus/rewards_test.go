@@ -120,8 +120,17 @@ func TestApplyBlockRewardsDistributesDelegationPayouts(t *testing.T) {
 		t.Fatalf("delegator payout = %d, want 37", delegatorAfter-delegatorBefore)
 	}
 	settledState := mustStakeState(t, nextState, validator.AccountAddress)
+	if settledState.SelfRewardLamports != 37 {
+		t.Fatalf("self reward = %d, want 37", settledState.SelfRewardLamports)
+	}
+	if settledState.CommissionRewardLamports != 8 {
+		t.Fatalf("commission reward = %d, want 8", settledState.CommissionRewardLamports)
+	}
 	if settledState.Delegations[0].RewardLamports != 37 {
 		t.Fatalf("delegation reward = %d, want 37", settledState.Delegations[0].RewardLamports)
+	}
+	if settledState.RewardLamports != 82 {
+		t.Fatalf("total reward = %d, want 82", settledState.RewardLamports)
 	}
 	if !containsRewardType(rewards, RewardTypeCommission) || !containsRewardType(rewards, RewardTypeVotePayout) {
 		t.Fatalf("rewards = %+v, want commission and vote payout", rewards)
@@ -168,7 +177,7 @@ func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 	}
 }
 
-func TestApplyBlockRewardsKeepsOneActiveValidatorForPerformanceJail(t *testing.T) {
+func TestApplyBlockRewardsKeepsTwoActiveValidatorsForPerformanceJail(t *testing.T) {
 	state, snapshot, validators := newRewardTestState(t, []uint64{30, 30, 30}, []uint16{0, 0, 0})
 	for _, validator := range validators {
 		validatorState := mustStakeState(t, state, validator.AccountAddress)
@@ -198,8 +207,35 @@ func TestApplyBlockRewardsKeepsOneActiveValidatorForPerformanceJail(t *testing.T
 			jailedCount++
 		}
 	}
-	if activeCount != 1 || jailedCount != 2 {
-		t.Fatalf("active=%d jailed=%d, want active=1 jailed=2", activeCount, jailedCount)
+	if activeCount != 2 || jailedCount != 1 {
+		t.Fatalf("active=%d jailed=%d, want active=2 jailed=1", activeCount, jailedCount)
+	}
+}
+
+func TestApplyBlockRewardsDoesNotPerformanceJailBelowTwoValidators(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{50, 50}, []uint16{0, 0})
+	for _, validator := range validators {
+		validatorState := mustStakeState(t, state, validator.AccountAddress)
+		validatorState.MissedVoteCount = DefaultMissedVoteJailThreshold
+		state = replaceStakeState(t, state, validator.AccountAddress, validatorState)
+	}
+
+	nextState, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          65,
+		Height:        65,
+		EpochID:       1,
+		EpochSnapshot: snapshot,
+		Leader:        validators[0],
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+
+	for _, validator := range validators {
+		validatorState := mustStakeState(t, nextState, validator.AccountAddress)
+		if validatorState.Status != stake.ValidatorStatusActive {
+			t.Fatalf("validator %s status = %d, want active", validator.ValidatorID, validatorState.Status)
+		}
 	}
 }
 
@@ -354,6 +390,178 @@ func TestApplyBlockRewardsSlashesSignedDoubleVoteEvidence(t *testing.T) {
 	}
 }
 
+func TestApplyBlockRewardsSlashesStakeWhenAccountOnlyHasRentReserve(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{40, 60}, []uint16{0, 0})
+	slashedIndex := lowestStakeValidatorIndex(snapshot)
+	slashedValidator := validators[slashedIndex]
+	consensusKey := rewardConsensusKeyForValidator(t, slashedValidator, len(validators))
+	evidenceSlot := uint64(11)
+	evidence := SlashingEvidence{
+		Type: SlashingEvidenceTypeDoubleVote,
+		DoubleVote: &SignedDoubleVoteEvidence{
+			FirstVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        11,
+				BlockHash:          mustHashFromTestText("rent-reserve-slash-a"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000201,
+			}),
+			SecondVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        11,
+				BlockHash:          mustHashFromTestText("rent-reserve-slash-b"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000202,
+			}),
+		},
+	}
+	beforeAccount := mustFindAccount(t, state, slashedValidator.AccountAddress).Account
+	minimumBalance, err := beforeAccount.MinimumBalance(structure.DefaultRentConfig)
+	if err != nil {
+		t.Fatalf("MinimumBalance() error = %v", err)
+	}
+	state = replaceAccountLamports(t, state, slashedValidator.AccountAddress, minimumBalance)
+
+	nextState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          12,
+		Height:        12,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[highestStakeValidatorIndex(snapshot)],
+		Evidence:      []SlashingEvidence{evidence},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+
+	slashedState := mustStakeState(t, nextState, slashedValidator.AccountAddress)
+	if slashedState.ActiveStake != 20*stake.MinimumStakeLamports {
+		t.Fatalf("active stake = %d, want %d", slashedState.ActiveStake, 20*stake.MinimumStakeLamports)
+	}
+	if slashedState.LastSlashedSlot != evidenceSlot {
+		t.Fatalf("last slashed slot = %d, want %d", slashedState.LastSlashedSlot, evidenceSlot)
+	}
+	afterAccount := mustFindAccount(t, nextState, slashedValidator.AccountAddress).Account
+	if afterAccount.Lamports != minimumBalance {
+		t.Fatalf("account lamports = %d, want rent reserve %d", afterAccount.Lamports, minimumBalance)
+	}
+	slashReward := firstRewardType(rewards, RewardTypeSlash)
+	if slashReward.Lamports != 20*stake.MinimumStakeLamports {
+		t.Fatalf("slash reward lamports = %d, want %d", slashReward.Lamports, 20*stake.MinimumStakeLamports)
+	}
+}
+
+func TestApplyBlockRewardsRepairsDelegationBucketInvariants(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{40, 60}, []uint16{0, 0})
+	validator := validators[0]
+	stakeState := mustStakeState(t, state, validator.AccountAddress)
+	stakeState.ActiveStake = 10 * stake.MinimumStakeLamports
+	stakeState.UnlockingStake = 30 * stake.MinimumStakeLamports
+	stakeState.LastEffectiveStake = stakeState.ActiveStake
+	stakeState.Delegations = []stake.DelegationState{{
+		DelegatorAccount: mustKeyPair(t, "reward-repair-delegator").PublicKey,
+		ActiveStake:      25 * stake.MinimumStakeLamports,
+		UnlockingStake:   5 * stake.MinimumStakeLamports,
+	}}
+	state = replaceStakeState(t, state, validator.AccountAddress, stakeState)
+
+	nextState, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          12,
+		Height:        12,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[1],
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	repairedState := mustStakeState(t, nextState, validator.AccountAddress)
+	if repairedState.Delegations[0].ActiveStake != repairedState.ActiveStake {
+		t.Fatalf("delegation active = %d, want %d", repairedState.Delegations[0].ActiveStake, repairedState.ActiveStake)
+	}
+	if _, err := stake.SelfActiveStake(repairedState); err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
+	}
+}
+
+func TestCalculateSlashLamportsDefaultsToHalf(t *testing.T) {
+	state := stake.ValidatorState{ActiveStake: 4 * stake.MinimumStakeLamports}
+	slashLamports, err := calculateSlashLamports(state, DefaultMaliciousSlashBasisPoints)
+	if err != nil {
+		t.Fatalf("calculateSlashLamports() error = %v", err)
+	}
+	want := 2 * stake.MinimumStakeLamports
+	if slashLamports != want {
+		t.Fatalf("slash lamports = %d, want %d", slashLamports, want)
+	}
+}
+
+func TestCalculateSlashLamportsBurnsAllBelowMinimum(t *testing.T) {
+	state := stake.ValidatorState{ActiveStake: stake.MinimumStakeLamports}
+	slashLamports, err := calculateSlashLamports(state, DefaultMaliciousSlashBasisPoints)
+	if err != nil {
+		t.Fatalf("calculateSlashLamports() error = %v", err)
+	}
+	if slashLamports != stake.MinimumStakeLamports {
+		t.Fatalf("slash lamports = %d, want full stake %d", slashLamports, stake.MinimumStakeLamports)
+	}
+}
+
+func TestApplyBlockRewardsFullSlashEjectsValidatorBelowMinimum(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{1, 3}, []uint16{0, 0})
+	slashedIndex := lowestStakeValidatorIndex(snapshot)
+	consensusKey := rewardConsensusKeyForValidator(t, validators[slashedIndex], len(validators))
+	evidenceSlot := uint64(9)
+	evidence := SlashingEvidence{
+		Type: SlashingEvidenceTypeDoubleVote,
+		DoubleVote: &SignedDoubleVoteEvidence{
+			FirstVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        9,
+				BlockHash:          mustHashFromTestText("full-slash-a"),
+				VoterID:            string(validators[slashedIndex].ValidatorID),
+				Stake:              validators[slashedIndex].StakeLamports,
+				CreatedAtUnixMilli: 1710000000101,
+			}),
+			SecondVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeSkip,
+				Slot:               evidenceSlot,
+				VoterID:            string(validators[slashedIndex].ValidatorID),
+				Stake:              validators[slashedIndex].StakeLamports,
+				CreatedAtUnixMilli: 1710000000102,
+			}),
+		},
+	}
+
+	nextState, rewards, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          10,
+		Height:        10,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[highestStakeValidatorIndex(snapshot)],
+		Evidence:      []SlashingEvidence{evidence},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	slashedState := mustStakeState(t, nextState, validators[slashedIndex].AccountAddress)
+	if slashedState.ActiveStake != 0 || slashedState.LastEffectiveStake != 0 {
+		t.Fatalf("slashed stake active=%d effective=%d, want 0/0", slashedState.ActiveStake, slashedState.LastEffectiveStake)
+	}
+	if slashedState.Status != stake.ValidatorStatusJailed {
+		t.Fatalf("slashed status = %d, want jailed", slashedState.Status)
+	}
+	slashReward := firstRewardType(rewards, RewardTypeSlash)
+	if slashReward.Lamports != stake.MinimumStakeLamports {
+		t.Fatalf("slash lamports = %d, want %d", slashReward.Lamports, stake.MinimumStakeLamports)
+	}
+}
+
 func newRewardTestState(t *testing.T, stakeWeights []uint64, commissions []uint16) (ChainState, EpochSnapshot, []ValidatorState) {
 	t.Helper()
 	accounts := make([]structure.AddressedAccount, 0, len(stakeWeights)*2+2)
@@ -468,6 +676,30 @@ func replaceStakeState(
 		return nextState
 	}
 	t.Fatalf("stake account %s not found", address.String())
+	return ChainState{}
+}
+
+func replaceAccountLamports(
+	t *testing.T,
+	state ChainState,
+	address structure.PublicKey,
+	lamports uint64,
+) ChainState {
+	t.Helper()
+	nextState := state.clone()
+	for index, account := range nextState.Accounts {
+		if account.Address != address {
+			continue
+		}
+		nextAccount := account.Account.Clone()
+		nextAccount.Lamports = lamports
+		if err := nextAccount.ValidateWithRent(structure.DefaultRentConfig); err != nil {
+			t.Fatalf("replace account lamports: %v", err)
+		}
+		nextState.Accounts[index] = structure.AddressedAccount{Address: address, Account: nextAccount}
+		return nextState
+	}
+	t.Fatalf("account %s not found", address.String())
 	return ChainState{}
 }
 

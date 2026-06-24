@@ -24,7 +24,7 @@
     "consensus_seed":  "consensus-223",
     "stake_lamports":  10000000,
     "slot_millis":  400,
-    "genesis_start_unix_millis":  1781771251384,
+    "genesis_start_unix_millis":  1781775194934,
     "epoch_slots":  600,
     "finality_depth":  2,
     "turbine_fanout":  2,

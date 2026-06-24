@@ -92,6 +92,17 @@ func normalizeBroadcastConcurrency(concurrency int) int {
 	return concurrency
 }
 
+func normalizeIgnoredUnregisteredProtocols(protocolIDs []ProtocolID) map[ProtocolID]struct{} {
+	ignoredProtocols := make(map[ProtocolID]struct{}, len(protocolIDs))
+	for _, protocolID := range protocolIDs {
+		if !isKnownProtocolID(protocolID) {
+			continue
+		}
+		ignoredProtocols[protocolID] = struct{}{}
+	}
+	return ignoredProtocols
+}
+
 // normalizeLogger 归一化日志器 + 使用默认日志器避免空指针分支散落业务代码。
 func normalizeLogger(logger *slog.Logger) *slog.Logger {
 	return utils.EnsureLogger(logger)

@@ -15,7 +15,7 @@ import (
 const (
 	remoteRoot    = "/opt/solana_golang"
 	remoteBinary  = remoteRoot + "/bin/rpcnode"
-	defaultConfig = "deploy/rpcnode-101.json"
+	defaultConfig = "deploy/generated-4/rpcnode-101.json"
 )
 
 func buildServiceText(remoteConfig string) string {
@@ -62,7 +62,11 @@ func main() {
 	commandsBeforeUpload := []string{
 		"systemctl stop posnode.service >/dev/null 2>&1 || true",
 		"systemctl disable posnode.service >/dev/null 2>&1 || true",
+		"systemctl stop posnode-18v-boot.service >/dev/null 2>&1 || true",
+		"systemctl disable posnode-18v-boot.service >/dev/null 2>&1 || true",
 		"systemctl stop " + shellQuote(serviceName) + " >/dev/null 2>&1 || true",
+		"pkill -x posnode >/dev/null 2>&1 || true",
+		"pkill -x rpcnode >/dev/null 2>&1 || true",
 		"install -d -m 0755 /opt/solana_golang/bin /opt/solana_golang/config /opt/solana_golang/data",
 	}
 	for _, command := range commandsBeforeUpload {

@@ -196,6 +196,56 @@ func TestLedgerRejectsCommittedTransactionReplay(t *testing.T) {
 	}
 }
 
+func TestLedgerContractProgramsReturnsExecutableBPFPrograms(t *testing.T) {
+	ledger, err := NewLedgerFromGenesis(nil, testGenesis(t))
+	if err != nil {
+		t.Fatalf("NewLedgerFromGenesis() error = %v", err)
+	}
+	programOne := testKeyPair(t, "contract-program-one").PublicKey
+	programTwo := testKeyPair(t, "contract-program-two").PublicKey
+	nonExecutableProgram := testKeyPair(t, "contract-program-draft").PublicKey
+	systemExecutable := testKeyPair(t, "contract-system-executable").PublicKey
+
+	nextState := ledger.State()
+	nextState.Accounts = append(nextState.Accounts,
+		structure.AddressedAccount{Address: programTwo, Account: testContractAccount(t, []byte("code-two"), structure.DefaultBuiltinProgramIDs.BPFLoader, true)},
+		structure.AddressedAccount{Address: programOne, Account: testContractAccount(t, []byte("code-one"), structure.DefaultBuiltinProgramIDs.BPFLoader, true)},
+		structure.AddressedAccount{Address: nonExecutableProgram, Account: testContractAccount(t, []byte("draft"), structure.DefaultBuiltinProgramIDs.BPFLoader, false)},
+		structure.AddressedAccount{Address: systemExecutable, Account: testContractAccount(t, []byte("system"), structure.DefaultBuiltinProgramIDs.System, true)},
+	)
+	proposal, _ := testProposalFromHead(t, ledger.Head(), nextState, 1, 1, "contract-programs")
+	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	programs, err := ledger.ContractPrograms(10)
+	if err != nil {
+		t.Fatalf("ContractPrograms() error = %v", err)
+	}
+	if len(programs) != 2 {
+		t.Fatalf("programs length = %d, want 2", len(programs))
+	}
+	if programs[0].Address.String() > programs[1].Address.String() {
+		t.Fatalf("programs are not sorted: %s > %s", programs[0].Address.String(), programs[1].Address.String())
+	}
+	for _, program := range programs {
+		if program.Owner != structure.DefaultBuiltinProgramIDs.BPFLoader {
+			t.Fatalf("owner = %s, want BPFLoader", program.Owner.String())
+		}
+		if program.CodeHash == "" || program.DataLength == 0 {
+			t.Fatalf("program = %+v, want code hash and data length", program)
+		}
+	}
+
+	limitedPrograms, err := ledger.ContractPrograms(1)
+	if err != nil {
+		t.Fatalf("ContractPrograms(limit) error = %v", err)
+	}
+	if len(limitedPrograms) != 1 || limitedPrograms[0].Address != programs[0].Address {
+		t.Fatalf("limited programs = %+v, want first sorted program", limitedPrograms)
+	}
+}
+
 func TestLedgerTransactionByIDPersistsAcrossReload(t *testing.T) {
 	db, err := database.NewDatabase(database.DatabaseConfig{
 		Path:   t.TempDir(),
@@ -944,6 +994,129 @@ func TestLedgerImportFinalizedSnapshotAndContinueCommit(t *testing.T) {
 	}
 }
 
+func TestLedgerImportFinalizedSnapshotAdvancesCheckpointOnMainChain(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedger() error = %v", err)
+	}
+	genesisHead := ledger.Head()
+	genesisState := ledger.State()
+	blockOne, stateOne := testProposalFromHead(t, genesisHead, genesisState, 1, 1, "advance-main-one")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	blockTwo, stateTwo := testProposalFromHead(t, headOne, stateOne, 2, 2, "advance-main-two")
+	headTwo, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockTwo, NextState: stateTwo})
+	if err != nil {
+		t.Fatalf("commit block two: %v", err)
+	}
+	blockThree, stateThree := testProposalFromHead(t, headTwo, stateTwo, 3, 3, "advance-main-three")
+	headThree, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockThree, NextState: stateThree})
+	if err != nil {
+		t.Fatalf("commit block three: %v", err)
+	}
+	if headThree.FinalizedHeight != 1 {
+		t.Fatalf("initial finalized height = %d, want 1", headThree.FinalizedHeight)
+	}
+
+	advancedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: blockTwo, State: stateTwo})
+	if err != nil {
+		t.Fatalf("ImportFinalizedSnapshot(main chain) error = %v", err)
+	}
+	if advancedHead.Height != headThree.Height || advancedHead.BlockHash != headThree.BlockHash {
+		t.Fatalf("head changed to %+v, want height/hash from %+v", advancedHead, headThree)
+	}
+	blockTwoHash, err := blockTwo.Hash()
+	if err != nil {
+		t.Fatalf("block two hash: %v", err)
+	}
+	if advancedHead.FinalizedHeight != 2 || advancedHead.FinalizedHash != blockTwoHash {
+		t.Fatalf("finalized checkpoint = %+v, want block two %s", advancedHead, blockTwoHash.String())
+	}
+	if ledger.Head().StateRoot != headThree.StateRoot {
+		t.Fatalf("state root changed after finalized checkpoint advance")
+	}
+}
+
+func TestLedgerImportFinalizedSnapshotRewindsConflictingOptimisticHead(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
+	if err != nil {
+		t.Fatalf("LoadOrCreateLedger() error = %v", err)
+	}
+	genesisHead := ledger.Head()
+	genesisState := ledger.State()
+	blockOne, stateOne := testProposalFromHead(t, genesisHead, genesisState, 1, 1, "rewind-one")
+	headOne, err := ledger.CommitBlock(CommitBlockRequest{Proposal: blockOne, NextState: stateOne})
+	if err != nil {
+		t.Fatalf("commit block one: %v", err)
+	}
+	oldTwo, oldState := testProposalFromHead(t, headOne, stateOne, 2, 2, "rewind-old-two")
+	oldHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: oldTwo, NextState: oldState})
+	if err != nil {
+		t.Fatalf("commit old two: %v", err)
+	}
+	oldThree, oldState := testProposalFromHead(t, oldHead, oldState, 3, 3, "rewind-old-three")
+	oldHead, err = ledger.CommitBlock(CommitBlockRequest{Proposal: oldThree, NextState: oldState})
+	if err != nil {
+		t.Fatalf("commit old three: %v", err)
+	}
+	if oldHead.FinalizedHeight != 1 {
+		t.Fatalf("initial finalized height = %d, want 1", oldHead.FinalizedHeight)
+	}
+
+	forkTwo, forkState := testProposalFromParent(t, headOne, stateOne, 20, 2, "rewind-finalized-two")
+	forkHash, err := forkTwo.Hash()
+	if err != nil {
+		t.Fatalf("fork hash: %v", err)
+	}
+	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: forkTwo, State: forkState})
+	if err != nil {
+		t.Fatalf("ImportFinalizedSnapshot(conflicting) error = %v", err)
+	}
+	if importedHead.Height != 2 || importedHead.BlockHash != forkHash {
+		t.Fatalf("imported head = %+v, want fork height 2 hash %s", importedHead, forkHash.String())
+	}
+	if importedHead.FinalizedHeight != 2 || importedHead.FinalizedHash != forkHash {
+		t.Fatalf("imported finalized = %+v, want fork finalized %s", importedHead, forkHash.String())
+	}
+	if _, _, found, err := ledger.BlockByHeight(3); err != nil || found {
+		t.Fatalf("BlockByHeight(3) found=%v err=%v, want old optimistic height removed", found, err)
+	}
+	if _, found, err := ledger.MainChainHashAtHeight(3); err != nil || found {
+		t.Fatalf("MainChainHashAtHeight(3) found=%v err=%v, want old optimistic height removed", found, err)
+	}
+
+	nextProposal, nextState := testProposalFromHead(t, importedHead, forkState, 21, 3, "rewind-after-import")
+	nextHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: nextProposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock(after conflicting import) error = %v", err)
+	}
+	if nextHead.Height != 3 || nextHead.FinalizedHeight != 2 {
+		t.Fatalf("next head = %+v, want height 3 finalized 2", nextHead)
+	}
+}
+
 func TestLedgerFinalityDepthConfig(t *testing.T) {
 	db, err := database.NewDatabase(database.DatabaseConfig{
 		Path:   t.TempDir(),
@@ -973,6 +1146,57 @@ func TestLedgerFinalityDepthConfig(t *testing.T) {
 	}
 	if head.FinalizedHeight != 1 {
 		t.Fatalf("finalized height = %d, want 1", head.FinalizedHeight)
+	}
+}
+
+func TestValidatorSetFromFinalizedStateIgnoresSpeculativeHeadStake(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ledger, err := NewLedgerFromGenesisWithConfig(db, testGenesis(t), LedgerConfig{FinalityDepth: 3})
+	if err != nil {
+		t.Fatalf("NewLedgerFromGenesisWithConfig() error = %v", err)
+	}
+	genesisSet, err := ledger.ValidatorSetFromFinalizedStateAtEpoch(0)
+	if err != nil {
+		t.Fatalf("ValidatorSetFromFinalizedStateAtEpoch(genesis) error = %v", err)
+	}
+	genesisStake := singleValidatorStakeLamports(t, genesisSet)
+
+	speculativeState := ledger.State()
+	increaseFirstValidatorStake(t, &speculativeState, stake.MinimumStakeLamports)
+	proposal, nextState := testProposalFromHead(t, ledger.Head(), speculativeState, 1, 1, "speculative-stake")
+	head, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState})
+	if err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+	if head.FinalizedHeight != 0 {
+		t.Fatalf("finalized height = %d, want genesis only", head.FinalizedHeight)
+	}
+
+	currentSet, err := ledger.ValidatorSetFromStateAtEpoch(0)
+	if err != nil {
+		t.Fatalf("ValidatorSetFromStateAtEpoch() error = %v", err)
+	}
+	currentStake := singleValidatorStakeLamports(t, currentSet)
+	if currentStake != genesisStake+stake.MinimumStakeLamports {
+		t.Fatalf("current stake = %d, want %d", currentStake, genesisStake+stake.MinimumStakeLamports)
+	}
+
+	finalizedSet, err := ledger.ValidatorSetFromFinalizedStateAtEpoch(0)
+	if err != nil {
+		t.Fatalf("ValidatorSetFromFinalizedStateAtEpoch() error = %v", err)
+	}
+	finalizedStake := singleValidatorStakeLamports(t, finalizedSet)
+	if finalizedStake != genesisStake {
+		t.Fatalf("finalized stake = %d, want %d", finalizedStake, genesisStake)
 	}
 }
 
@@ -1018,6 +1242,44 @@ func TestLoadOrCreateLedgerRecoversCorruptedAccountTable(t *testing.T) {
 	if recoveredAccount.Account.Lamports != account.Account.Lamports {
 		t.Fatalf("recovered lamports = %d, want %d", recoveredAccount.Account.Lamports, account.Account.Lamports)
 	}
+}
+
+func increaseFirstValidatorStake(t *testing.T, state *consensus.ChainState, lamports uint64) {
+	t.Helper()
+	for index := range state.Accounts {
+		if state.Accounts[index].Account.Owner != structure.DefaultBuiltinProgramIDs.Stake {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(state.Accounts[index].Account.Data)
+		if err != nil {
+			continue
+		}
+		if ^uint64(0)-stakeState.ActiveStake < lamports {
+			t.Fatalf("validator active stake overflow")
+		}
+		if ^uint64(0)-state.Accounts[index].Account.Lamports < lamports {
+			t.Fatalf("validator account lamports overflow")
+		}
+		stakeState.ActiveStake += lamports
+		stakeState.LastEffectiveStake = stakeState.ActiveStake
+		data, err := stakeState.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		state.Accounts[index].Account.Data = data
+		state.Accounts[index].Account.Lamports += lamports
+		return
+	}
+	t.Fatal("validator stake account not found")
+}
+
+func singleValidatorStakeLamports(t *testing.T, set consensus.ValidatorSet) uint64 {
+	t.Helper()
+	validators := set.Validators()
+	if len(validators) != 1 {
+		t.Fatalf("validator count = %d, want 1", len(validators))
+	}
+	return validators[0].StakeLamports
 }
 
 func testGenesis(t *testing.T) GenesisConfig {
@@ -1094,6 +1356,19 @@ func testHash(t *testing.T, seed string) structure.Hash {
 		t.Fatalf("hash: %v", err)
 	}
 	return hash
+}
+
+func testContractAccount(t *testing.T, data []byte, owner structure.PublicKey, executable bool) structure.Account {
+	t.Helper()
+	minimumLamports, err := structure.MinimumBalanceForRentExemption(len(data))
+	if err != nil {
+		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
+	}
+	account, err := structure.NewAccount(minimumLamports, data, owner, executable, 0)
+	if err != nil {
+		t.Fatalf("NewAccount(contract) error = %v", err)
+	}
+	return account
 }
 
 func testRewardLedgerQC(slot uint64, height uint64, blockHash structure.Hash, stake uint64, voters []string, offset int64) consensus.QuorumCertificate {

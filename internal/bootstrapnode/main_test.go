@@ -49,6 +49,44 @@ func TestNewStaticPeerParsesValidatorCapabilities(t *testing.T) {
 	}
 }
 
+func TestNewStaticPeerUsesConfiguredQUICNetwork(t *testing.T) {
+	keyPair, err := rawKeyPairFromSeed("validator-peer-quic")
+	if err != nil {
+		t.Fatalf("rawKeyPairFromSeed() error = %v", err)
+	}
+	peer, err := newStaticPeer(peerConfig{
+		PeerID:  keyPair.peerID,
+		IP:      "127.0.0.1",
+		Port:    5101,
+		Network: "quic",
+		Role:    "validator",
+	})
+	if err != nil {
+		t.Fatalf("newStaticPeer() error = %v", err)
+	}
+	if len(peer.Addresses) != 1 {
+		t.Fatalf("Addresses length = %d, want 1", len(peer.Addresses))
+	}
+	if peer.Addresses[0].Protocol != utils.ProtocolQUIC {
+		t.Fatalf("Protocol = %q, want quic", peer.Addresses[0].Protocol)
+	}
+}
+
+func TestNormalizeConfigDefaultsNetworkToTCP(t *testing.T) {
+	normalized, err := normalizeConfig(bootstrapConfig{
+		NodeName:   "boot",
+		ListenIP:   "0.0.0.0",
+		ListenPort: 5100,
+		PeerSeed:   "boot-seed",
+	})
+	if err != nil {
+		t.Fatalf("normalizeConfig() error = %v", err)
+	}
+	if normalized.Network != string(utils.ProtocolTCP) {
+		t.Fatalf("Network = %q, want tcp", normalized.Network)
+	}
+}
+
 func TestLoadPeerKeyPairFromKeystore(t *testing.T) {
 	seed := utils.SHA256([]byte("bootstrap-keystore"))
 	path := filepath.Join(t.TempDir(), "peer.json")

@@ -208,6 +208,15 @@ func (host *Host) dispatchParsedConnectionMessage(ctx context.Context, connectio
 	if host.requests.fulfill(message) {
 		return connectionStop{}
 	}
+	if message.IsResponse() {
+		host.logger.Debug("p2p unmatched response dropped",
+			slog.String("connection_id", connection.ID()),
+			slog.String("message_id", message.ID),
+			slog.String("request_id", message.RequestID),
+			slog.Uint64("protocol_id", uint64(message.Type)),
+		)
+		return connectionStop{}
+	}
 	if err := host.enqueueProtocolMessage(connection, message); err != nil {
 		host.metrics.messagesRejected.Add(1)
 		host.logger.Warn("p2p message rejected",

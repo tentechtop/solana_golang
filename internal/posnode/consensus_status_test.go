@@ -1,6 +1,7 @@
 package posnode
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -53,6 +54,45 @@ func TestGetConsensusStatusRPC(t *testing.T) {
 	}
 	if status.LocalValidator.PendingStakeLamports != stake.MinimumStakeLamports {
 		t.Fatalf("pending stake = %d, want %d", status.LocalValidator.PendingStakeLamports, stake.MinimumStakeLamports)
+	}
+}
+
+func TestGetValidatorSetUsesCurrentHeadEpoch(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	jailLocalValidatorForTest(t, node, 1)
+	commitConsensusStatusStateAtEpoch(t, node.ledger, node.ledger.State(), 2)
+
+	result, err := node.GetValidatorSet(context.Background())
+	if err != nil {
+		t.Fatalf("GetValidatorSet() error = %v", err)
+	}
+	localValidatorID := string(consensus.NewValidatorID(node.consensusKeyPair.PublicKey))
+	for _, validator := range result.Validators {
+		if validator.ValidatorID != localValidatorID {
+			continue
+		}
+		if validator.StakeLamports == 0 || validator.Status != "active" {
+			t.Fatalf("validator = %+v, want active stake", validator)
+		}
+		return
+	}
+	t.Fatalf("local validator %s missing from current epoch validator set", localValidatorID)
+}
+
+func TestConsensusStatusZerosEffectiveStakeForJailedLocalValidator(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	jailLocalValidatorForTest(t, node, 1)
+
+	status := node.statusSnapshot()
+	local := status.Consensus.LocalValidator
+	if local.Status != "jailed" {
+		t.Fatalf("local status = %q, want jailed", local.Status)
+	}
+	if local.EffectiveStakeLamports != 0 {
+		t.Fatalf("effective stake = %d, want 0", local.EffectiveStakeLamports)
+	}
+	if local.WeightBps != 0 {
+		t.Fatalf("weight bps = %d, want 0", local.WeightBps)
 	}
 }
 
@@ -154,6 +194,16 @@ func addPendingStakeForValidator(t *testing.T, ledger *blockchain.Ledger, valida
 
 func commitConsensusStatusState(t *testing.T, ledger *blockchain.Ledger, state consensus.ChainState) {
 	t.Helper()
+	commitConsensusStatusStateAtEpoch(t, ledger, state, ledger.Head().EpochID)
+}
+
+func commitConsensusStatusStateAtEpoch(
+	t *testing.T,
+	ledger *blockchain.Ledger,
+	state consensus.ChainState,
+	epochID uint64,
+) {
+	t.Helper()
 	head := ledger.Head()
 	stateRoot, err := state.RootHash()
 	if err != nil {
@@ -167,7 +217,7 @@ func commitConsensusStatusState(t *testing.T, ledger *blockchain.Ledger, state c
 			ParentHash:     head.BlockHash,
 			PreviousQCHash: head.QCHash,
 			LeaderID:       consensus.NewValidatorID(mustStructureKeyPair("consensus-status-consensus-a").PublicKey),
-			EpochID:        head.EpochID,
+			EpochID:        epochID,
 			StateRoot:      stateRoot,
 			AccountRoot:    stateRoot,
 		},

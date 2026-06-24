@@ -32,6 +32,7 @@ const (
 	InstructionDelegate
 	InstructionUndelegate
 	InstructionWithdrawDelegation
+	InstructionUpdateCommission
 )
 
 type ValidatorStatus uint8
@@ -60,29 +61,31 @@ type Instruction struct {
 
 // ValidatorState 描述质押账户数据 + 由共识组合层转换为 consensus.ValidatorState。
 type ValidatorState struct {
-	ConsensusPublicKey  structure.PublicKey
-	BLSPublicKey        []byte
-	StakerAccount       structure.PublicKey
-	P2PPeerID           string
-	CommissionBps       uint16
-	ActiveStake         uint64
-	PendingStake        uint64
-	UnlockingStake      uint64
-	UnlockEpoch         uint64
-	Status              ValidatorStatus
-	VoteCredits         uint64
-	LastVoteSlot        uint64
-	LastRewardedSlot    uint64
-	LastRewardEpoch     uint64
-	RewardLamports      uint64
-	MissedVoteCount     uint64
-	MissedProposalCount uint64
-	JailUntilEpoch      uint64
-	ActivationEpoch     uint64
-	DeactivationEpoch   uint64
-	LastEffectiveStake  uint64
-	LastSlashedSlot     uint64
-	Delegations         []DelegationState
+	ConsensusPublicKey       structure.PublicKey
+	BLSPublicKey             []byte
+	StakerAccount            structure.PublicKey
+	P2PPeerID                string
+	CommissionBps            uint16
+	ActiveStake              uint64
+	PendingStake             uint64
+	UnlockingStake           uint64
+	UnlockEpoch              uint64
+	Status                   ValidatorStatus
+	VoteCredits              uint64
+	LastVoteSlot             uint64
+	LastRewardedSlot         uint64
+	LastRewardEpoch          uint64
+	RewardLamports           uint64
+	SelfRewardLamports       uint64
+	CommissionRewardLamports uint64
+	MissedVoteCount          uint64
+	MissedProposalCount      uint64
+	JailUntilEpoch           uint64
+	ActivationEpoch          uint64
+	DeactivationEpoch        uint64
+	LastEffectiveStake       uint64
+	LastSlashedSlot          uint64
+	Delegations              []DelegationState
 }
 
 // DelegationState 描述普通用户委托 + 与验证者自质押分离以便按份额自动分配收益。
@@ -134,6 +137,8 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 		return executeUndelegate(instruction, context)
 	case InstructionWithdrawDelegation:
 		return executeWithdrawDelegation(instruction, context)
+	case InstructionUpdateCommission:
+		return executeUpdateCommission(instruction, context)
 	default:
 		return fmt.Errorf("stake: unsupported instruction type %d", instruction.Type)
 	}
@@ -211,6 +216,12 @@ func NewWithdrawDelegationInstruction(currentEpoch uint64) (Instruction, error) 
 	return instruction, instruction.Validate()
 }
 
+// NewUpdateCommissionInstruction 创建佣金调整指令 + 允许验证者钱包链上修改委托奖励分成。
+func NewUpdateCommissionInstruction(commissionBps uint16) (Instruction, error) {
+	instruction := Instruction{Type: InstructionUpdateCommission, CommissionBps: commissionBps}
+	return instruction, instruction.Validate()
+}
+
 func (instruction Instruction) Validate() error {
 	if instruction.P2PPeerID != "" && len(instruction.P2PPeerID) > MaxPeerIDLength {
 		return fmt.Errorf("stake: p2p peer id too long")
@@ -231,7 +242,7 @@ func (instruction Instruction) Validate() error {
 			return fmt.Errorf("stake: slash amount is zero")
 		}
 		return nil
-	case InstructionWithdrawUnstaked, InstructionExitValidator, InstructionJailValidator, InstructionWithdrawDelegation:
+	case InstructionWithdrawUnstaked, InstructionExitValidator, InstructionJailValidator, InstructionWithdrawDelegation, InstructionUpdateCommission:
 		return nil
 	default:
 		return fmt.Errorf("stake: invalid instruction type %d", instruction.Type)
@@ -348,6 +359,8 @@ func (state ValidatorState) MarshalBinary() ([]byte, error) {
 		writer.WriteUint64(delegation.DeactivationEpoch)
 		writer.WriteUint64(delegation.RewardLamports)
 	}
+	writer.WriteUint64(state.SelfRewardLamports)
+	writer.WriteUint64(state.CommissionRewardLamports)
 	return writer.Bytes(), nil
 }
 
@@ -470,6 +483,18 @@ func UnmarshalValidatorStateBinary(data []byte) (ValidatorState, error) {
 		}
 		state.Delegations = append(state.Delegations, delegation)
 	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.SelfRewardLamports, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode self reward lamports: %w", err)
+	}
+	if reader.Remaining() == 0 {
+		return state, state.Validate()
+	}
+	if state.CommissionRewardLamports, err = reader.ReadUint64(); err != nil {
+		return ValidatorState{}, fmt.Errorf("stake: decode commission reward lamports: %w", err)
+	}
 	if err := reader.EnsureEOF(); err != nil {
 		return ValidatorState{}, fmt.Errorf("stake: decode validator eof: %w", err)
 	}
@@ -524,6 +549,13 @@ func (state ValidatorState) validate(checkLastEffectiveStake bool) error {
 	}
 	if delegatedStake > totalBondedStake {
 		return fmt.Errorf("stake: delegated stake exceeds total stake")
+	}
+	rewardBreakdown, err := RewardBreakdownLamports(state)
+	if err != nil {
+		return err
+	}
+	if rewardBreakdown > state.RewardLamports {
+		return fmt.Errorf("stake: reward breakdown exceeds total reward")
 	}
 	if state.Status != ValidatorStatusActive && state.Status != ValidatorStatusExiting && state.Status != ValidatorStatusJailed {
 		return fmt.Errorf("stake: invalid validator status %d", state.Status)
@@ -814,6 +846,18 @@ func executeWithdrawDelegation(instruction Instruction, context runtime.Instruct
 	return writeValidatorState("withdraw_delegation", validatorAddress, validatorAccount, state, context)
 }
 
+func executeUpdateCommission(instruction Instruction, context runtime.InstructionContext) error {
+	stakerAddress, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
+	if err != nil {
+		return err
+	}
+	if stakerAddress != state.StakerAccount {
+		return fmt.Errorf("stake: only staker can update commission")
+	}
+	state.CommissionBps = instruction.CommissionBps
+	return writeValidatorState("update_commission", validatorAddress, validatorAccount, state, context)
+}
+
 func executeExitValidator(context runtime.InstructionContext) error {
 	_, validatorAddress, state, validatorAccount, err := loadWritableValidator(context)
 	if err != nil {
@@ -980,6 +1024,8 @@ func logValidatorStateWrite(action string, address structure.PublicKey, state Va
 		slog.Uint64("deactivation_epoch", state.DeactivationEpoch),
 		slog.Uint64("effective_stake", state.LastEffectiveStake),
 		slog.Uint64("vote_credits", state.VoteCredits),
+		slog.Uint64("self_reward_lamports", state.SelfRewardLamports),
+		slog.Uint64("commission_reward_lamports", state.CommissionRewardLamports),
 		slog.Uint64("missed_vote_count", state.MissedVoteCount),
 		slog.Uint64("missed_proposal_count", state.MissedProposalCount),
 		slog.Uint64("last_slashed_slot", state.LastSlashedSlot),
@@ -1104,17 +1150,43 @@ func compactDelegations(delegations []DelegationState) []DelegationState {
 
 // SelfActiveStake 返回验证者自有 active stake + 防止验证者提走普通用户委托资金。
 func SelfActiveStake(state ValidatorState) (uint64, error) {
-	delegatedActive := uint64(0)
-	for _, delegation := range state.Delegations {
-		if ^uint64(0)-delegatedActive < delegation.ActiveStake {
-			return 0, fmt.Errorf("stake: delegated active overflow")
+	return selfStakeBucket(state.ActiveStake, state.Delegations, func(delegation DelegationState) uint64 {
+		return delegation.ActiveStake
+	}, "active")
+}
+
+// SelfPendingStake 返回验证者自有 pending stake + 避免把委托人的待生效资金展示为验证者自质押。
+func SelfPendingStake(state ValidatorState) (uint64, error) {
+	return selfStakeBucket(state.PendingStake, state.Delegations, func(delegation DelegationState) uint64 {
+		return delegation.PendingStake
+	}, "pending")
+}
+
+// SelfUnlockingStake 返回验证者自有 unlocking stake + 避免把委托人的解锁中资金展示为验证者自质押。
+func SelfUnlockingStake(state ValidatorState) (uint64, error) {
+	return selfStakeBucket(state.UnlockingStake, state.Delegations, func(delegation DelegationState) uint64 {
+		return delegation.UnlockingStake
+	}, "unlocking")
+}
+
+func selfStakeBucket(
+	total uint64,
+	delegations []DelegationState,
+	value func(DelegationState) uint64,
+	name string,
+) (uint64, error) {
+	delegatedValue := uint64(0)
+	for _, delegation := range delegations {
+		delegationValue := value(delegation)
+		if ^uint64(0)-delegatedValue < delegationValue {
+			return 0, fmt.Errorf("stake: delegated %s overflow", name)
 		}
-		delegatedActive += delegation.ActiveStake
+		delegatedValue += delegationValue
 	}
-	if delegatedActive > state.ActiveStake {
-		return 0, fmt.Errorf("stake: delegated active exceeds validator active stake")
+	if delegatedValue > total {
+		return 0, fmt.Errorf("stake: delegated %s exceeds validator %s stake", name, name)
 	}
-	return state.ActiveStake - delegatedActive, nil
+	return total - delegatedValue, nil
 }
 
 // TotalDelegatedStake 返回总委托质押 + 奖励分配和校验共用同一口径。
@@ -1133,6 +1205,35 @@ func TotalDelegatedStake(state ValidatorState) (uint64, error) {
 	return total, nil
 }
 
+// TotalDelegationRewards 汇总委托收益 + 让 RPC 和状态校验使用同一套溢出规则。
+func TotalDelegationRewards(delegations []DelegationState) (uint64, error) {
+	total := uint64(0)
+	for _, delegation := range delegations {
+		if ^uint64(0)-total < delegation.RewardLamports {
+			return 0, fmt.Errorf("stake: delegation reward overflow")
+		}
+		total += delegation.RewardLamports
+	}
+	return total, nil
+}
+
+// RewardBreakdownLamports 汇总独立收益字段 + 防止自质押、佣金、委托收益超过总收益。
+func RewardBreakdownLamports(state ValidatorState) (uint64, error) {
+	total := state.SelfRewardLamports
+	if ^uint64(0)-total < state.CommissionRewardLamports {
+		return 0, fmt.Errorf("stake: reward breakdown overflow")
+	}
+	total += state.CommissionRewardLamports
+	delegationRewards, err := TotalDelegationRewards(state.Delegations)
+	if err != nil {
+		return 0, err
+	}
+	if ^uint64(0)-total < delegationRewards {
+		return 0, fmt.Errorf("stake: reward breakdown overflow")
+	}
+	return total + delegationRewards, nil
+}
+
 // TotalStake 返回单个委托总额 + 包含 active、pending 和 unlocking。
 func (delegation DelegationState) TotalStake() (uint64, error) {
 	total := delegation.ActiveStake
@@ -1146,7 +1247,15 @@ func (delegation DelegationState) TotalStake() (uint64, error) {
 	return total + delegation.UnlockingStake, nil
 }
 
-// ApplySlash 扣减验证者和委托质押 + 保证总桶和委托明细保持一致。
+type stakeSlashBucket uint8
+
+const (
+	stakeSlashBucketPending stakeSlashBucket = iota + 1
+	stakeSlashBucketActive
+	stakeSlashBucketUnlocking
+)
+
+// ApplySlash 扣减验证者和委托质押 + 总 bucket 与委托明细必须同步变化以保持可验证状态。
 func ApplySlash(state ValidatorState, amount uint64) (ValidatorState, error) {
 	totalStake, err := validatorTotalStake(state)
 	if err != nil {
@@ -1156,20 +1265,17 @@ func ApplySlash(state ValidatorState, amount uint64) (ValidatorState, error) {
 		return ValidatorState{}, fmt.Errorf("stake: slash exceeds total stake")
 	}
 	remainingSlash := amount
-	state.PendingStake, remainingSlash = subtractStakeBucket(state.PendingStake, remainingSlash)
-	state.ActiveStake, remainingSlash = subtractStakeBucket(state.ActiveStake, remainingSlash)
-	state.UnlockingStake, _ = subtractStakeBucket(state.UnlockingStake, remainingSlash)
-	remainingDelegationSlash := amount
-	for index := range state.Delegations {
-		delegation := &state.Delegations[index]
-		delegation.PendingStake, remainingDelegationSlash = subtractStakeBucket(delegation.PendingStake, remainingDelegationSlash)
-		delegation.ActiveStake, remainingDelegationSlash = subtractStakeBucket(delegation.ActiveStake, remainingDelegationSlash)
-		delegation.UnlockingStake, remainingDelegationSlash = subtractStakeBucket(delegation.UnlockingStake, remainingDelegationSlash)
-		if remainingDelegationSlash == 0 {
-			break
-		}
+	remainingSlash = slashStakeBucket(&state, stakeSlashBucketPending, remainingSlash)
+	remainingSlash = slashStakeBucket(&state, stakeSlashBucketActive, remainingSlash)
+	remainingSlash = slashStakeBucket(&state, stakeSlashBucketUnlocking, remainingSlash)
+	if remainingSlash != 0 {
+		return ValidatorState{}, fmt.Errorf("stake: slash remainder is non-zero")
 	}
 	state.Delegations = compactDelegations(state.Delegations)
+	state, _, err = NormalizeDelegationBuckets(state)
+	if err != nil {
+		return ValidatorState{}, err
+	}
 	nextTotalStake, err := validatorTotalStake(state)
 	if err != nil {
 		return ValidatorState{}, err
@@ -1178,6 +1284,145 @@ func ApplySlash(state ValidatorState, amount uint64) (ValidatorState, error) {
 		state.LastEffectiveStake = nextTotalStake
 	}
 	return state, nil
+}
+
+// NormalizeDelegationBuckets 修复委托 bucket 上限 + 历史状态迁移和罚没后都必须满足派生自质押不为负。
+func NormalizeDelegationBuckets(state ValidatorState) (ValidatorState, bool, error) {
+	if err := validateDelegations(state.Delegations); err != nil {
+		return ValidatorState{}, false, err
+	}
+	changed := false
+	if trimExcessDelegationBucket(&state, stakeSlashBucketPending) {
+		changed = true
+	}
+	if trimExcessDelegationBucket(&state, stakeSlashBucketActive) {
+		changed = true
+	}
+	if trimExcessDelegationBucket(&state, stakeSlashBucketUnlocking) {
+		changed = true
+	}
+	if changed {
+		state.Delegations = compactDelegations(state.Delegations)
+	}
+	totalStake, err := validatorTotalStake(state)
+	if err != nil {
+		return ValidatorState{}, false, err
+	}
+	if state.LastEffectiveStake > totalStake {
+		state.LastEffectiveStake = totalStake
+		changed = true
+	}
+	return state, changed, nil
+}
+
+func slashStakeBucket(state *ValidatorState, bucket stakeSlashBucket, remainingSlash uint64) uint64 {
+	if remainingSlash == 0 {
+		return 0
+	}
+	for index := range state.Delegations {
+		validatorAvailable := validatorBucketValue(*state, bucket)
+		delegationValue := delegationBucketValue(state.Delegations[index], bucket)
+		if validatorAvailable == 0 || delegationValue == 0 {
+			continue
+		}
+		slashLamports := minUint64Stake(remainingSlash, minUint64Stake(delegationValue, validatorAvailable))
+		setDelegationBucketValue(&state.Delegations[index], bucket, delegationValue-slashLamports)
+		subtractValidatorBucketValue(state, bucket, slashLamports)
+		remainingSlash -= slashLamports
+		if remainingSlash == 0 {
+			return 0
+		}
+	}
+	validatorAvailable := validatorBucketValue(*state, bucket)
+	slashLamports := minUint64Stake(remainingSlash, validatorAvailable)
+	subtractValidatorBucketValue(state, bucket, slashLamports)
+	return remainingSlash - slashLamports
+}
+
+func trimExcessDelegationBucket(state *ValidatorState, bucket stakeSlashBucket) bool {
+	delegatedValue := delegatedBucketValue(state.Delegations, bucket)
+	validatorValue := validatorBucketValue(*state, bucket)
+	if delegatedValue <= validatorValue {
+		return false
+	}
+	excessValue := delegatedValue - validatorValue
+	for index := range state.Delegations {
+		if excessValue == 0 {
+			return true
+		}
+		currentValue := delegationBucketValue(state.Delegations[index], bucket)
+		trimmedValue := minUint64Stake(currentValue, excessValue)
+		setDelegationBucketValue(&state.Delegations[index], bucket, currentValue-trimmedValue)
+		excessValue -= trimmedValue
+	}
+	return true
+}
+
+func delegatedBucketValue(delegations []DelegationState, bucket stakeSlashBucket) uint64 {
+	total := uint64(0)
+	for _, delegation := range delegations {
+		value := delegationBucketValue(delegation, bucket)
+		if ^uint64(0)-total < value {
+			return ^uint64(0)
+		}
+		total += value
+	}
+	return total
+}
+
+func validatorBucketValue(state ValidatorState, bucket stakeSlashBucket) uint64 {
+	switch bucket {
+	case stakeSlashBucketPending:
+		return state.PendingStake
+	case stakeSlashBucketActive:
+		return state.ActiveStake
+	case stakeSlashBucketUnlocking:
+		return state.UnlockingStake
+	default:
+		return 0
+	}
+}
+
+func delegationBucketValue(delegation DelegationState, bucket stakeSlashBucket) uint64 {
+	switch bucket {
+	case stakeSlashBucketPending:
+		return delegation.PendingStake
+	case stakeSlashBucketActive:
+		return delegation.ActiveStake
+	case stakeSlashBucketUnlocking:
+		return delegation.UnlockingStake
+	default:
+		return 0
+	}
+}
+
+func subtractValidatorBucketValue(state *ValidatorState, bucket stakeSlashBucket, lamports uint64) {
+	switch bucket {
+	case stakeSlashBucketPending:
+		state.PendingStake -= lamports
+	case stakeSlashBucketActive:
+		state.ActiveStake -= lamports
+	case stakeSlashBucketUnlocking:
+		state.UnlockingStake -= lamports
+	}
+}
+
+func setDelegationBucketValue(delegation *DelegationState, bucket stakeSlashBucket, lamports uint64) {
+	switch bucket {
+	case stakeSlashBucketPending:
+		delegation.PendingStake = lamports
+	case stakeSlashBucketActive:
+		delegation.ActiveStake = lamports
+	case stakeSlashBucketUnlocking:
+		delegation.UnlockingStake = lamports
+	}
+}
+
+func minUint64Stake(left uint64, right uint64) uint64 {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func cloneBytes(value []byte) []byte {

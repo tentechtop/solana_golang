@@ -53,10 +53,11 @@ func (node *posNode) turbineChildPeerIDsForRoot(ctx context.Context, slot uint64
 func (node *posNode) turbineParentPeerID(slot uint64, rootID consensus.ValidatorID) (string, turbinePositionJSON, bool) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
-	if err := node.ensureEpochForSlotLocked(slot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
+	if err != nil {
 		return "", turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}, false
 	}
-	tree, err := consensus.NewTurbineTree(node.epochSnapshot, slot, rootID, node.config.TurbineFanout)
+	tree, err := consensus.NewTurbineTree(epochContextValue.Snapshot, slot, rootID, node.config.TurbineFanout)
 	if err != nil {
 		return "", turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}, false
 	}
@@ -71,10 +72,11 @@ func (node *posNode) turbineParentPeerID(slot uint64, rootID consensus.Validator
 func (node *posNode) turbineChildNodes(slot uint64, leaderID consensus.ValidatorID) ([]consensus.TurbineNode, turbinePositionJSON, error) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
-	if err := node.ensureEpochForSlotLocked(slot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
+	if err != nil {
 		return nil, turbinePositionJSON{}, err
 	}
-	tree, err := consensus.NewTurbineTree(node.epochSnapshot, slot, leaderID, node.config.TurbineFanout)
+	tree, err := consensus.NewTurbineTree(epochContextValue.Snapshot, slot, leaderID, node.config.TurbineFanout)
 	if err != nil {
 		return nil, turbinePositionJSON{}, err
 	}
@@ -88,14 +90,15 @@ func (node *posNode) turbinePositionForSlotLocked(slot uint64) turbinePositionJS
 	if node.config.EpochSlots == 0 || len(node.epochSnapshot.Validators) == 0 {
 		return turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}
 	}
-	if err := node.ensureEpochForSlotLocked(slot); err != nil {
-		return turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}
-	}
-	leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
 	if err != nil {
 		return turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}
 	}
-	tree, err := consensus.NewTurbineTree(node.epochSnapshot, slot, leaderID, node.config.TurbineFanout)
+	leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
+	if err != nil {
+		return turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}
+	}
+	tree, err := consensus.NewTurbineTree(epochContextValue.Snapshot, slot, leaderID, node.config.TurbineFanout)
 	if err != nil {
 		return turbinePositionJSON{Slot: slot, Fanout: node.config.TurbineFanout, Layer: -1}
 	}

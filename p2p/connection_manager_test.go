@@ -550,6 +550,55 @@ func TestProtocolQueueDoesNotBlockHeartbeatResponse(t *testing.T) {
 	close(release)
 }
 
+func TestHostDropsUnmatchedResponse(t *testing.T) {
+	localPeerID := testPeerID(57)
+	remotePeerID := testPeerID(58)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	handlerCalled := make(chan struct{}, 1)
+	err = host.RegisterResultHandler(ProtocolSpec{
+		ID:          ProtocolPoSStatusV1,
+		Name:        "/test/pos-status/1.0.0",
+		HasResponse: true,
+		Priority:    MessagePriorityHigh,
+		Class:       ProtocolClassData,
+	}, func(ctx context.Context, message Message) (Message, error) {
+		handlerCalled <- struct{}{}
+		return responseFor(message, localPeerID, ProtocolPoSStatusV1, nil)
+	})
+	if err != nil {
+		t.Fatalf("RegisterResultHandler() error = %v", err)
+	}
+
+	request, err := NewRequestMessage(localPeerID, ProtocolPoSStatusV1, nil)
+	if err != nil {
+		t.Fatalf("NewRequestMessage() error = %v", err)
+	}
+	response, err := NewResponseMessage(remotePeerID, ProtocolPoSStatusV1, request.ID, []byte("late-response"))
+	if err != nil {
+		t.Fatalf("NewResponseMessage() error = %v", err)
+	}
+	response.ToPeerID = localPeerID
+	connection := newScriptedConnection(utils.ProtocolTCP, remotePeerID, []Message{response})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go host.HandleConnection(ctx, connection)
+
+	select {
+	case <-handlerCalled:
+		t.Fatal("unmatched response reached protocol handler")
+	case <-ctx.Done():
+	}
+}
+
 func TestProtocolQueueSchedulesHighPriorityBeforeLowPriority(t *testing.T) {
 	localPeerID := testPeerID(55)
 	remotePeerID := testPeerID(56)

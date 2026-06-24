@@ -46,6 +46,34 @@ func TestNormalizeNodeConfigAllowsProductionSecureP2P(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigRejectsProductionFaultInjection(t *testing.T) {
+	allowInsecure := false
+	config := minimalNodeConfigForValidation()
+	config.Production = true
+	config.TreasuryKeyPath = "treasury.json"
+	config.AllowInsecureP2P = &allowInsecure
+	config.PeerKeyPath = "peer.json"
+	config.StakerKeyPath = "staker.json"
+	config.ValidatorKeyPath = "validator.json"
+	config.ConsensusKeyPath = "consensus.json"
+	config.BLSKeyPath = "bls.json"
+	config.FaultInjection.DoubleVoteOnce = true
+	config = withProductionGenesisPublicKeys(config)
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want production fault injection rejection")
+	}
+}
+
+func TestNormalizeNodeConfigRejectsInvalidFaultInjectionDelay(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.FaultInjection.ProposalDelayMillis = -1
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want invalid fault delay rejection")
+	}
+}
+
 func TestNormalizeNodeConfigRejectsProductionWithoutKeyPaths(t *testing.T) {
 	allowInsecure := false
 	config := minimalNodeConfigForValidation()
@@ -68,6 +96,41 @@ func TestNormalizeNodeConfigDefaultsAdvertisedPort(t *testing.T) {
 	}
 	if normalized.AdvertisedPort != normalized.ListenPort {
 		t.Fatalf("advertised port = %d, want listen port %d", normalized.AdvertisedPort, normalized.ListenPort)
+	}
+}
+
+func TestNormalizeNodeConfigDefaultsNetworkToTCP(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.Network != "tcp" {
+		t.Fatalf("Network = %q, want tcp", normalized.Network)
+	}
+}
+
+func TestNormalizeNodeConfigUsesConfiguredQUICNetwork(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.Network = "quic"
+	config.BootstrapPeers = []peerConfig{{
+		PeerID:  testPeerIDForNode(8),
+		IP:      "127.0.0.1",
+		Port:    5101,
+		Network: "quic",
+		Role:    "validator",
+	}}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.Network != "quic" {
+		t.Fatalf("Network = %q, want quic", normalized.Network)
+	}
+	if normalized.BootstrapPeers[0].Network != "quic" {
+		t.Fatalf("BootstrapPeers[0].Network = %q, want quic", normalized.BootstrapPeers[0].Network)
 	}
 }
 
@@ -422,12 +485,116 @@ func TestNormalizeNodeConfigParsesBootstrapPeerAttributes(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigInfersBootstrapJoinFromBootstrapPeer(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.ChainID = ""
+	config.Genesis = genesisConfig{}
+	config.BootstrapPeers = []peerConfig{{
+		IP:      "101.35.87.31",
+		Port:    5101,
+		Role:    "bootnode",
+		RPCPort: 8899,
+	}}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if !normalized.BootstrapJoin.Enabled {
+		t.Fatal("BootstrapJoin.Enabled = false, want inferred join")
+	}
+	if normalized.BootstrapJoin.RPCURL != "http://101.35.87.31:8899/" {
+		t.Fatalf("BootstrapJoin.RPCURL = %q, want derived bootstrap rpc url", normalized.BootstrapJoin.RPCURL)
+	}
+	if normalized.ChainIDExplicit {
+		t.Fatal("ChainIDExplicit = true, want false for bootstrap discovery")
+	}
+}
+
+func TestNormalizeNodeConfigInfersBootstrapJoinDefaultRPCPort(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.ChainID = ""
+	config.Genesis = genesisConfig{}
+	config.BootstrapPeers = []peerConfig{{
+		IP:   "101.35.87.31",
+		Port: 5101,
+		Role: "bootnode",
+	}}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.BootstrapJoin.RPCURL != "http://101.35.87.31:8899/" {
+		t.Fatalf("BootstrapJoin.RPCURL = %q, want default bootstrap rpc port", normalized.BootstrapJoin.RPCURL)
+	}
+}
+
 func TestNormalizeNodeConfigRejectsInvalidNodeCapability(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 	config.NodeCapabilities = []string{"archive", "bad-capability"}
 
 	if _, err := normalizeNodeConfig(config); err == nil {
 		t.Fatal("normalizeNodeConfig() error = nil, want invalid capability rejection")
+	}
+}
+
+func TestNormalizeNodeConfigValidatorAllowsStakerAddressWithoutPrivateKey(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.StakerAddress = mustStructureKeyPair("paired-staker").PublicKey.String()
+	config.StakerSeed = ""
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.StakerAddress == "" {
+		t.Fatal("StakerAddress = empty, want paired staker address")
+	}
+	if !normalized.validatorEnabled() {
+		t.Fatal("validatorEnabled() = false, want true")
+	}
+}
+
+func TestNormalizeNodeConfigAutoRegisterRequiresStakerPrivateKey(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.StakerAddress = mustStructureKeyPair("paired-staker").PublicKey.String()
+	config.StakerSeed = ""
+	config.AutoRegister = true
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want auto register staker key rejection")
+	}
+}
+
+func TestValidatorPairingDefaultOnlyForFullNonValidator(t *testing.T) {
+	disabled := false
+	config := minimalNodeConfigForValidation()
+	config.NodeRole = "full"
+	config.RPCEnabled = true
+	config.RPCPort = 19002
+	config.ValidatorEnabled = &disabled
+	config.ConsensusEnabled = &disabled
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig(full) error = %v", err)
+	}
+	if !normalized.validatorPairingEnabled() {
+		t.Fatal("validatorPairingEnabled(full) = false, want true")
+	}
+
+	publicConfig := config
+	publicConfig.NodeRole = "public_rpc"
+	normalizedPublic, err := normalizeNodeConfig(publicConfig)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig(public) error = %v", err)
+	}
+	if normalizedPublic.validatorPairingEnabled() {
+		t.Fatal("validatorPairingEnabled(public_rpc) = true, want false")
 	}
 }
 

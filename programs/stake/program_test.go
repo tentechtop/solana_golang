@@ -80,15 +80,40 @@ func TestDelegationInstructionsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpdateCommissionInstructionRoundTrip(t *testing.T) {
+	instruction, err := NewUpdateCommissionInstruction(250)
+	if err != nil {
+		t.Fatalf("NewUpdateCommissionInstruction() error = %v", err)
+	}
+	encoded, err := instruction.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(update commission) error = %v", err)
+	}
+	decoded, err := UnmarshalInstructionBinary(encoded)
+	if err != nil {
+		t.Fatalf("UnmarshalInstructionBinary(update commission) error = %v", err)
+	}
+	if decoded.Type != InstructionUpdateCommission || decoded.CommissionBps != 250 {
+		t.Fatalf("decoded update commission = %+v", decoded)
+	}
+	if _, err := NewUpdateCommissionInstruction(10001); err == nil {
+		t.Fatal("NewUpdateCommissionInstruction(10001) error = nil, want range rejection")
+	}
+}
+
 func TestDelegationStateRoundTripAndMature(t *testing.T) {
 	state := testValidatorState(t)
 	state.ActiveStake = MinimumStakeLamports
 	state.PendingStake = MinimumStakeLamports
 	state.ActivationEpoch = 3
+	state.RewardLamports = 33
+	state.SelfRewardLamports = 10
+	state.CommissionRewardLamports = 3
 	state.Delegations = []DelegationState{{
 		DelegatorAccount: testPublicKey(t, 9),
 		PendingStake:     MinimumStakeLamports,
 		ActivationEpoch:  3,
+		RewardLamports:   20,
 	}}
 
 	encoded, err := state.MarshalBinary()
@@ -102,6 +127,9 @@ func TestDelegationStateRoundTripAndMature(t *testing.T) {
 	if len(decoded.Delegations) != 1 {
 		t.Fatalf("delegation count = %d, want 1", len(decoded.Delegations))
 	}
+	if decoded.SelfRewardLamports != 10 || decoded.CommissionRewardLamports != 3 || decoded.Delegations[0].RewardLamports != 20 {
+		t.Fatalf("reward breakdown = %+v, want self 10 commission 3 delegation 20", decoded)
+	}
 	if err := MatureStakeForEpoch(&decoded, 3); err != nil {
 		t.Fatalf("MatureStakeForEpoch() error = %v", err)
 	}
@@ -114,6 +142,44 @@ func TestDelegationStateRoundTripAndMature(t *testing.T) {
 	}
 	if selfActiveStake != MinimumStakeLamports {
 		t.Fatalf("self active = %d, want %d", selfActiveStake, MinimumStakeLamports)
+	}
+}
+
+func TestValidateRejectsRewardBreakdownOverflow(t *testing.T) {
+	state := testValidatorState(t)
+	state.RewardLamports = 9
+	state.SelfRewardLamports = 10
+	if err := state.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want reward breakdown rejection")
+	}
+}
+
+func TestSelfStakeBucketsExcludeDelegationBuckets(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = 3 * MinimumStakeLamports
+	state.PendingStake = 2 * MinimumStakeLamports
+	state.UnlockingStake = 2 * MinimumStakeLamports
+	state.Delegations = []DelegationState{{
+		DelegatorAccount: testPublicKey(t, 9),
+		ActiveStake:      MinimumStakeLamports,
+		PendingStake:     MinimumStakeLamports,
+		UnlockingStake:   MinimumStakeLamports,
+	}}
+
+	selfActiveStake, err := SelfActiveStake(state)
+	if err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
+	}
+	selfPendingStake, err := SelfPendingStake(state)
+	if err != nil {
+		t.Fatalf("SelfPendingStake() error = %v", err)
+	}
+	selfUnlockingStake, err := SelfUnlockingStake(state)
+	if err != nil {
+		t.Fatalf("SelfUnlockingStake() error = %v", err)
+	}
+	if selfActiveStake != 2*MinimumStakeLamports || selfPendingStake != MinimumStakeLamports || selfUnlockingStake != MinimumStakeLamports {
+		t.Fatalf("self buckets active=%d pending=%d unlocking=%d, want 20000000/10000000/10000000", selfActiveStake, selfPendingStake, selfUnlockingStake)
 	}
 }
 
@@ -142,6 +208,58 @@ func TestApplySlashKeepsDelegationBucketsConsistent(t *testing.T) {
 	}
 	if err := slashed.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestApplySlashPreservesDelegationBucketLimits(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = 50 * MinimumStakeLamports
+	state.UnlockingStake = 20 * MinimumStakeLamports
+	state.LastEffectiveStake = state.ActiveStake
+	state.Delegations = []DelegationState{{
+		DelegatorAccount: testPublicKey(t, 9),
+		ActiveStake:      40 * MinimumStakeLamports,
+		UnlockingStake:   10 * MinimumStakeLamports,
+	}}
+
+	slashed, err := ApplySlash(state, 30*MinimumStakeLamports)
+	if err != nil {
+		t.Fatalf("ApplySlash() error = %v", err)
+	}
+	if slashed.ActiveStake != 20*MinimumStakeLamports {
+		t.Fatalf("active stake = %d, want %d", slashed.ActiveStake, 20*MinimumStakeLamports)
+	}
+	if slashed.Delegations[0].ActiveStake != 10*MinimumStakeLamports {
+		t.Fatalf("delegation active = %d, want %d", slashed.Delegations[0].ActiveStake, 10*MinimumStakeLamports)
+	}
+	if _, err := SelfActiveStake(slashed); err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
+	}
+}
+
+func TestNormalizeDelegationBucketsRepairsExcessDelegatedActive(t *testing.T) {
+	state := testValidatorState(t)
+	state.ActiveStake = 12 * MinimumStakeLamports
+	state.UnlockingStake = 20 * MinimumStakeLamports
+	state.LastEffectiveStake = state.ActiveStake
+	state.Delegations = []DelegationState{{
+		DelegatorAccount: testPublicKey(t, 9),
+		ActiveStake:      30 * MinimumStakeLamports,
+		UnlockingStake:   2 * MinimumStakeLamports,
+	}}
+
+	normalized, changed, err := NormalizeDelegationBuckets(state)
+	if err != nil {
+		t.Fatalf("NormalizeDelegationBuckets() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want repair")
+	}
+	if normalized.Delegations[0].ActiveStake != normalized.ActiveStake {
+		t.Fatalf("delegation active = %d, want %d", normalized.Delegations[0].ActiveStake, normalized.ActiveStake)
+	}
+	if _, err := SelfActiveStake(normalized); err != nil {
+		t.Fatalf("SelfActiveStake() error = %v", err)
 	}
 }
 

@@ -19,8 +19,8 @@ const (
 	DefaultMissedVoteJailEpochs                    = uint64(1)
 	DefaultMissedProposalJailThreshold             = uint64(24)
 	DefaultMissedProposalJailEpochs                = uint64(1)
-	DefaultMinActiveValidatorsAfterPerformanceJail = uint64(1)
-	DefaultMaliciousSlashBasisPoints               = uint16(500)
+	DefaultMinActiveValidatorsAfterPerformanceJail = uint64(2)
+	DefaultMaliciousSlashBasisPoints               = uint16(5000)
 	DefaultMaliciousJailEpochs                     = uint64(4)
 	MaxRewardQCsPerBlock                           = 128
 	MaxSlashingEvidencePerBlock                    = 128
@@ -129,6 +129,9 @@ func ApplyBlockRewards(state ChainState, input BlockRewardInput) (ChainState, []
 		return ChainState{}, nil, err
 	}
 	if err := applySlashingEvidence(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
+		return ChainState{}, nil, err
+	}
+	if err := normalizeStakeDelegationBuckets(&nextState, normalizedInput.RentConfig); err != nil {
 		return ChainState{}, nil, err
 	}
 	if err := applyEpochRewardSettlement(&nextState, accountIndexByAddress, normalizedInput, &rewards); err != nil {
@@ -413,6 +416,27 @@ func applySlashingEvidence(
 	return nil
 }
 
+func normalizeStakeDelegationBuckets(state *ChainState, rentConfig structure.RentConfig) error {
+	for _, entry := range sortedStakeAccountEntries(*state) {
+		account := state.Accounts[entry.Index].Account.Clone()
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Data)
+		if err != nil {
+			return err
+		}
+		normalizedState, changed, err := stake.NormalizeDelegationBuckets(stakeState)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		if err := writeStakeState(state, entry.Index, account, normalizedState, rentConfig); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func normalizeSlashingEvidence(
 	evidences []SlashingEvidence,
 	snapshot EpochSnapshot,
@@ -495,7 +519,7 @@ func applySingleSlashingEvidence(
 	if err != nil {
 		return err
 	}
-	burnedLamports, nextAccount, nextStakeState, err := burnSlashFromValidator(account, stakeState, slashLamports, input)
+	slashedLamports, nextAccount, nextStakeState, err := burnSlashFromValidator(account, stakeState, slashLamports, input)
 	if err != nil {
 		return err
 	}
@@ -516,7 +540,7 @@ func applySingleSlashingEvidence(
 	}
 	nextStakeState.LastEffectiveStake = effectiveStake
 	validatorID := string(NewValidatorID(nextStakeState.ConsensusPublicKey))
-	if burnedLamports > 0 {
+	if slashedLamports > 0 {
 		*rewards = append(*rewards, BlockReward{
 			Type:           RewardTypeSlash,
 			ValidatorID:    validatorID,
@@ -524,7 +548,7 @@ func applySingleSlashingEvidence(
 			StakerAddress:  nextStakeState.StakerAccount,
 			EpochID:        input.EpochID,
 			Slot:           item.Slot,
-			Lamports:       burnedLamports,
+			Lamports:       slashedLamports,
 		})
 	}
 	*rewards = append(*rewards, BlockReward{
@@ -708,6 +732,10 @@ func settleRewardedValidator(
 		if err := account.CreditLamports(commissionLamports); err != nil {
 			return err
 		}
+		if ^uint64(0)-stakeState.CommissionRewardLamports < commissionLamports {
+			return fmt.Errorf("consensus: commission reward overflow")
+		}
+		stakeState.CommissionRewardLamports += commissionLamports
 		*rewards = append(*rewards, BlockReward{
 			Type:           RewardTypeCommission,
 			ValidatorID:    validatorID,
@@ -764,6 +792,10 @@ func distributeStakePayout(
 		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, stakeState.StakerAccount, selfPayout, input); err != nil {
 			return err
 		}
+		if ^uint64(0)-stakeState.SelfRewardLamports < selfPayout {
+			return fmt.Errorf("consensus: self reward overflow")
+		}
+		stakeState.SelfRewardLamports += selfPayout
 		appendVotePayoutReward(rewards, validatorID, stakeState.StakerAccount, stakeState.StakerAccount, input, selfPayout, rewardCredits)
 		distributed += selfPayout
 	}
@@ -796,6 +828,10 @@ func distributeStakePayout(
 		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, stakeState.StakerAccount, remainder, input); err != nil {
 			return err
 		}
+		if ^uint64(0)-stakeState.SelfRewardLamports < remainder {
+			return fmt.Errorf("consensus: self reward overflow")
+		}
+		stakeState.SelfRewardLamports += remainder
 		appendVotePayoutReward(rewards, validatorID, stakeState.StakerAccount, stakeState.StakerAccount, input, remainder, rewardCredits)
 		return nil
 	}
@@ -1030,10 +1066,20 @@ func calculateSlashLamports(state stake.ValidatorState, basisPoints uint16) (uin
 	if err != nil {
 		return 0, err
 	}
+	if basisPoints == 0 || totalStake == 0 {
+		return 0, nil
+	}
 	if basisPoints != 0 && totalStake > ^uint64(0)/uint64(basisPoints) {
 		return 0, fmt.Errorf("consensus: slash amount overflow")
 	}
-	return totalStake * uint64(basisPoints) / rewardBasisPointsDenominator, nil
+	slashLamports := totalStake * uint64(basisPoints) / rewardBasisPointsDenominator
+	if slashLamports >= totalStake {
+		return totalStake, nil
+	}
+	if totalStake-slashLamports < stake.MinimumStakeLamports {
+		return totalStake, nil
+	}
+	return slashLamports, nil
 }
 
 func burnSlashFromValidator(
@@ -1045,25 +1091,31 @@ func burnSlashFromValidator(
 	if requestedSlash == 0 {
 		return 0, account, state, nil
 	}
+	totalStake, err := validatorTotalStake(state)
+	if err != nil {
+		return 0, structure.Account{}, stake.ValidatorState{}, err
+	}
+	if requestedSlash > totalStake {
+		return 0, structure.Account{}, stake.ValidatorState{}, fmt.Errorf("consensus: slash exceeds validator stake")
+	}
 	minimumBalance, err := account.MinimumBalance(input.RentConfig)
 	if err != nil {
 		return 0, structure.Account{}, stake.ValidatorState{}, err
 	}
-	if account.Lamports <= minimumBalance {
-		return 0, account, state, nil
+	if account.Lamports > minimumBalance {
+		burnedLamports := requestedSlash
+		if burnedLamports > account.Lamports-minimumBalance {
+			burnedLamports = account.Lamports - minimumBalance
+		}
+		if err := account.DebitLamports(burnedLamports, input.RentConfig); err != nil {
+			return 0, structure.Account{}, stake.ValidatorState{}, err
+		}
 	}
-	burnedLamports := requestedSlash
-	if burnedLamports > account.Lamports-minimumBalance {
-		burnedLamports = account.Lamports - minimumBalance
-	}
-	if err := account.DebitLamports(burnedLamports, input.RentConfig); err != nil {
-		return 0, structure.Account{}, stake.ValidatorState{}, err
-	}
-	nextState, err := stake.ApplySlash(state, burnedLamports)
+	nextState, err := stake.ApplySlash(state, requestedSlash)
 	if err != nil {
 		return 0, structure.Account{}, stake.ValidatorState{}, err
 	}
-	return burnedLamports, account, nextState, nil
+	return requestedSlash, account, nextState, nil
 }
 
 func validatorTotalStake(state stake.ValidatorState) (uint64, error) {

@@ -13,6 +13,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"solana_golang/internal/poswire"
 	"solana_golang/p2p"
 	"solana_golang/rpc"
+	"solana_golang/structure"
 	"solana_golang/utils"
 )
 
@@ -33,6 +35,11 @@ const (
 	defaultRPCRequestMillis   = int64(8000)
 	defaultSoftwareVersion    = "rpcnode/0.1.0"
 	maxPeerKeystoreBytes      = 8192
+	transactionFanoutPeers    = 64
+	transactionFanoutWorkers  = 64
+	transactionFanoutTimeout  = 6 * time.Second
+	stableBlockhashProbePeers = 4
+	stableBlockhashMinSlots   = uint64(32)
 )
 
 type rpcNodeConfig struct {
@@ -43,6 +50,7 @@ type rpcNodeConfig struct {
 	ListenIP                string       `json:"listen_ip"`
 	AdvertisedIP            string       `json:"advertised_ip"`
 	ListenPort              int          `json:"listen_port"`
+	Network                 string       `json:"network,omitempty"`
 	PeerSeed                string       `json:"peer_seed"`
 	PeerKeyPath             string       `json:"peer_key_path,omitempty"`
 	AllowInsecureP2P        *bool        `json:"allow_insecure_p2p,omitempty"`
@@ -65,6 +73,7 @@ type peerConfig struct {
 	PeerID       string   `json:"peer_id"`
 	IP           string   `json:"ip"`
 	Port         int      `json:"port"`
+	Network      string   `json:"network,omitempty"`
 	Role         string   `json:"role,omitempty"`
 	Roles        []string `json:"roles,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
@@ -91,6 +100,7 @@ type rpcNode struct {
 	rpcServer     *rpc.Server
 	knownPeerIDs  []string
 	nextPeerIndex atomic.Uint64
+	fanoutLimiter chan struct{}
 }
 
 // PeerIDFromSeed 派生 PeerID + 命令行部署前需要确认公网入口身份稳定。
@@ -117,7 +127,12 @@ func Run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("rpcnode: load peer key: %w", err)
 	}
-	node := &rpcNode{config: config, logger: logger, keyPair: keyPair}
+	node := &rpcNode{
+		config:        config,
+		logger:        logger,
+		keyPair:       keyPair,
+		fanoutLimiter: make(chan struct{}, transactionFanoutWorkers),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serverErrors := make(chan error, 2)
@@ -150,7 +165,8 @@ func (node *rpcNode) start(ctx context.Context, serverErrors chan<- error) error
 		return err
 	}
 	node.knownPeerIDs = knownPeerIDs
-	listenAddress, err := utils.BuildMultiAddress(utils.MultiAddressIP4, node.config.ListenIP, utils.ProtocolTCP, node.config.ListenPort, node.keyPair.peerID)
+	p2pProtocol := node.config.p2pProtocol()
+	listenAddress, err := utils.BuildMultiAddress(utils.MultiAddressIP4, node.config.ListenIP, p2pProtocol, node.config.ListenPort, node.keyPair.peerID)
 	if err != nil {
 		_ = host.Close()
 		return fmt.Errorf("rpcnode: build listen address: %w", err)
@@ -238,6 +254,11 @@ func normalizeConfig(config rpcNodeConfig) (rpcNodeConfig, error) {
 	if config.ListenPort < 1 || config.ListenPort > 65535 {
 		return rpcNodeConfig{}, fmt.Errorf("rpcnode: invalid listen port")
 	}
+	network, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return rpcNodeConfig{}, fmt.Errorf("rpcnode: invalid p2p network: %w", err)
+	}
+	config.Network = string(network)
 	if config.PeerSeed == "" && config.PeerKeyPath == "" {
 		return rpcNodeConfig{}, fmt.Errorf("rpcnode: peer key material is empty")
 	}
@@ -324,22 +345,47 @@ func validateRPCNodeRoles(roleValue string, roleValues []string) error {
 	return nil
 }
 
+// 功能目的：统一解析 P2P 传输协议；实现原因：RPC 网关监听、广告和拨号必须保持同一协议语义。
+func normalizeP2PNetwork(value string) (utils.MultiAddressProtocol, error) {
+	network := strings.TrimSpace(value)
+	if network == "" {
+		return utils.ProtocolTCP, nil
+	}
+	return utils.ParseMultiAddressProtocol(network)
+}
+
+func (config rpcNodeConfig) p2pProtocol() utils.MultiAddressProtocol {
+	protocol, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return utils.ProtocolTCP
+	}
+	return protocol
+}
+
+func preferredP2PProtocols(primary utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	if primary == utils.ProtocolTCP {
+		return []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
+	}
+	return []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP}
+}
+
 func newHost(config rpcNodeConfig, keyPair rawKeyPair, logger *slog.Logger) (*p2p.Host, error) {
 	hostConfig := p2p.HostConfig{
-		PeerID:             keyPair.peerID,
-		Role:               p2p.PeerRolePublicRPC,
-		Capabilities:       rpcNodeCapabilities(),
-		AllowInsecure:      config.allowInsecure(),
-		Production:         config.Production,
-		Environment:        config.Environment,
-		PreferredProtocols: []utils.MultiAddressProtocol{utils.ProtocolTCP},
-		RequestTimeout:     time.Duration(config.RPCRequestTimeoutMillis) * time.Millisecond,
-		MaxPeers:           config.MaxPeers,
-		MaxConnections:     config.MaxConnections,
-		Logger:             logger,
+		PeerID:                       keyPair.peerID,
+		Role:                         p2p.PeerRolePublicRPC,
+		Capabilities:                 rpcNodeCapabilities(),
+		AllowInsecure:                config.allowInsecure(),
+		Production:                   config.Production,
+		Environment:                  config.Environment,
+		PreferredProtocols:           preferredP2PProtocols(config.p2pProtocol()),
+		RequestTimeout:               time.Duration(config.RPCRequestTimeoutMillis) * time.Millisecond,
+		IgnoredUnregisteredProtocols: rpcNodeIgnoredUnregisteredProtocols(),
+		MaxPeers:                     config.MaxPeers,
+		MaxConnections:               config.MaxConnections,
+		Logger:                       logger,
 	}
 	if config.AdvertisedIP != "" {
-		address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.AdvertisedIP, utils.ProtocolTCP, config.ListenPort, keyPair.peerID)
+		address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.AdvertisedIP, config.p2pProtocol(), config.ListenPort, keyPair.peerID)
 		if err != nil {
 			return nil, fmt.Errorf("rpcnode: build advertised address: %w", err)
 		}
@@ -360,6 +406,22 @@ func newHost(config rpcNodeConfig, keyPair rawKeyPair, logger *slog.Logger) (*p2
 		return nil, fmt.Errorf("rpcnode: create host: %w", err)
 	}
 	return host, nil
+}
+
+func rpcNodeIgnoredUnregisteredProtocols() []p2p.ProtocolID {
+	return []p2p.ProtocolID{
+		p2p.ProtocolPoSTransactionV1,
+		p2p.ProtocolPoSProposalV1,
+		p2p.ProtocolPoSVoteV1,
+		p2p.ProtocolPoSQCV1,
+		p2p.ProtocolPoSBlockByHashV1,
+		p2p.ProtocolPoSBlockByHeightV1,
+		p2p.ProtocolPoSStateSnapshotV1,
+		p2p.ProtocolPoSStatusV1,
+		p2p.ProtocolPoSEvidenceV1,
+		p2p.ProtocolPoSBlockLocatorV1,
+		p2p.ProtocolPoSCommonAncestorV1,
+	}
 }
 
 func addStaticPeers(host *p2p.Host, configs []peerConfig) ([]string, error) {
@@ -389,7 +451,11 @@ func newStaticPeer(config peerConfig) (p2p.Peer, error) {
 	if config.Port < 1 || config.Port > 65535 {
 		return p2p.Peer{}, fmt.Errorf("rpcnode: static peer %s invalid port", peerID)
 	}
-	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, ipAddress, utils.ProtocolTCP, config.Port, peerID)
+	network, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return p2p.Peer{}, fmt.Errorf("rpcnode: static peer %s network: %w", peerID, err)
+	}
+	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, ipAddress, network, config.Port, peerID)
 	if err != nil {
 		return p2p.Peer{}, fmt.Errorf("rpcnode: build static peer address: %w", err)
 	}
@@ -715,6 +781,7 @@ func forwardedMethods() []string {
 		rpc.MethodGetBlock,
 		rpc.MethodGetTransaction,
 		rpc.MethodGetAddressTransactions,
+		rpc.MethodGetContractPrograms,
 		rpc.MethodGetPrivacyState,
 		rpc.MethodGetPrivacyBalance,
 		rpc.MethodGetValidatorSet,
@@ -747,10 +814,20 @@ func (node *rpcNode) forwardMethod(ctx context.Context, method string, params js
 }
 
 func (node *rpcNode) forwardRawRPC(ctx context.Context, method string, params json.RawMessage) (poswire.RPCForwardResponse, error) {
+	if method == rpc.MethodGetLatestBlockhash {
+		return node.forwardStableLatestBlockhash(ctx, params)
+	}
+	if method == rpc.MethodSendTransaction {
+		return node.forwardSignedTransaction(ctx, method, params)
+	}
 	peerID, err := node.selectValidatorPeer()
 	if err != nil {
 		return poswire.RPCForwardResponse{}, err
 	}
+	return node.forwardRawRPCToPeer(ctx, peerID, method, params)
+}
+
+func (node *rpcNode) forwardRawRPCToPeer(ctx context.Context, peerID string, method string, params json.RawMessage) (poswire.RPCForwardResponse, error) {
 	payload, err := poswire.MarshalRPCForwardRequest(poswire.RPCForwardRequest{
 		Method: method,
 		Params: params,
@@ -769,6 +846,248 @@ func (node *rpcNode) forwardRawRPC(ctx context.Context, method string, params js
 		return poswire.RPCForwardResponse{}, fmt.Errorf("rpcnode: forward rpc to validator %s: %w", peerID, err)
 	}
 	return poswire.UnmarshalRPCForwardResponse(response.Payload, int(node.config.RPCMaxBodyBytes)+1024)
+}
+
+type upstreamBlockhashStatus struct {
+	FinalizedHash   string `json:"finalized_hash"`
+	FinalizedHeight uint64 `json:"finalized_height"`
+	FinalizedSlot   uint64 `json:"finalized_slot"`
+	HeadHash        string `json:"head_hash"`
+	HeadHeight      uint64 `json:"head_height"`
+	HeadSlot        uint64 `json:"head_slot"`
+}
+
+func (node *rpcNode) forwardStableLatestBlockhash(ctx context.Context, params json.RawMessage) (poswire.RPCForwardResponse, error) {
+	peerIDs := node.connectedValidatorPeerIDs()
+	if len(peerIDs) == 0 {
+		return poswire.RPCForwardResponse{}, fmt.Errorf("no connected validator peer")
+	}
+	startIndex := node.nextPeerIndex.Add(1)
+	orderedPeerIDs := rotatePeerIDs(peerIDs, startIndex)
+	var bestResult rpc.LatestBlockhashResult
+	var bestFound bool
+	for index, peerID := range orderedPeerIDs {
+		if index >= stableBlockhashProbePeers {
+			break
+		}
+		response, err := node.forwardRawRPCToPeer(ctx, peerID, rpc.MethodGetNodeStatus, json.RawMessage("[]"))
+		if err != nil || response.Error != nil {
+			continue
+		}
+		status := upstreamBlockhashStatus{}
+		if err := json.Unmarshal(response.Result, &status); err != nil {
+			continue
+		}
+		result, ok := stableLatestBlockhashFromStatus(status)
+		if !ok {
+			continue
+		}
+		if !bestFound || result.Height > bestResult.Height {
+			bestResult = result
+			bestFound = true
+		}
+	}
+	if bestFound {
+		resultBytes, err := json.Marshal(bestResult)
+		if err != nil {
+			return poswire.RPCForwardResponse{}, fmt.Errorf("rpcnode: marshal stable blockhash: %w", err)
+		}
+		return poswire.RPCForwardResponse{Result: resultBytes}, nil
+	}
+	return node.forwardRawRPCToPeer(ctx, orderedPeerIDs[0], rpc.MethodGetLatestBlockhash, params)
+}
+
+func stableLatestBlockhashFromStatus(status upstreamBlockhashStatus) (rpc.LatestBlockhashResult, bool) {
+	finalizedHash := strings.TrimSpace(status.FinalizedHash)
+	if finalizedHash == "" || status.FinalizedHeight == 0 {
+		return rpc.LatestBlockhashResult{}, false
+	}
+	if status.FinalizedSlot == 0 {
+		return rpc.LatestBlockhashResult{}, false
+	}
+	if ^uint64(0)-status.FinalizedSlot < structure.MaxRecentBlockhashAgeSlots {
+		return rpc.LatestBlockhashResult{}, false
+	}
+	lastValidSlot := status.FinalizedSlot + structure.MaxRecentBlockhashAgeSlots
+	if status.HeadSlot > 0 {
+		if status.HeadSlot < status.FinalizedSlot || status.HeadSlot > lastValidSlot {
+			return rpc.LatestBlockhashResult{}, false
+		}
+		if lastValidSlot-status.HeadSlot < stableBlockhashMinSlots {
+			return rpc.LatestBlockhashResult{}, false
+		}
+	}
+	return rpc.LatestBlockhashResult{
+		Blockhash:     finalizedHash,
+		Slot:          status.FinalizedSlot,
+		Height:        status.FinalizedHeight,
+		LastValidSlot: lastValidSlot,
+	}, true
+}
+
+func (node *rpcNode) forwardSignedTransaction(ctx context.Context, method string, params json.RawMessage) (poswire.RPCForwardResponse, error) {
+	peerIDs := node.connectedValidatorPeerIDs()
+	if len(peerIDs) == 0 {
+		return poswire.RPCForwardResponse{}, fmt.Errorf("no connected validator peer")
+	}
+	startIndex := node.nextPeerIndex.Add(1) - 1
+	orderedPeerIDs := rotatePeerIDs(peerIDs, startIndex)
+	var firstRetryableError *poswire.RPCForwardError
+	var lastTransportError error
+	for peerIndex, peerID := range orderedPeerIDs {
+		response, err := node.forwardRawRPCToPeer(ctx, peerID, method, params)
+		if err != nil {
+			lastTransportError = err
+			node.logger.Warn("rpcnode send transaction forward failed",
+				slog.String("peer_id", peerID),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		if response.Error == nil {
+			signature := rpcForwardResultText(response.Result)
+			node.logger.Info("rpcnode send transaction accepted",
+				slog.String("peer_id", peerID),
+				slog.String("signature", signature),
+			)
+			node.fanoutSignedTransaction(ctx, method, params, orderedPeerIDs, peerIndex, signature)
+			return response, nil
+		}
+		if !isRetryableTransactionForwardError(response.Error) {
+			return response, nil
+		}
+		if firstRetryableError == nil {
+			firstRetryableError = response.Error
+		}
+		node.logger.Warn("rpcnode send transaction retrying validator",
+			slog.String("peer_id", peerID),
+			slog.String("reason", rpcForwardErrorText(response.Error)),
+		)
+	}
+	if firstRetryableError != nil {
+		return poswire.RPCForwardResponse{Error: firstRetryableError}, nil
+	}
+	if lastTransportError != nil {
+		return poswire.RPCForwardResponse{}, lastTransportError
+	}
+	return poswire.RPCForwardResponse{}, fmt.Errorf("no validator accepted transaction")
+}
+
+func (node *rpcNode) fanoutSignedTransaction(ctx context.Context, method string, params json.RawMessage, peerIDs []string, acceptedIndex int, signature string) {
+	targets := transactionFanoutTargets(peerIDs, acceptedIndex, transactionFanoutPeers)
+	if len(targets) == 0 {
+		return
+	}
+	if node.fanoutLimiter != nil {
+		select {
+		case node.fanoutLimiter <- struct{}{}:
+			defer func() { <-node.fanoutLimiter }()
+		case <-ctx.Done():
+			return
+		}
+	}
+	paramsCopy := append(json.RawMessage(nil), params...)
+	contextValue, cancel := context.WithTimeout(ctx, transactionFanoutTimeout)
+	defer cancel()
+	successCount := node.runTransactionFanoutWorkers(contextValue, method, paramsCopy, targets)
+	node.logger.Info("rpcnode transaction fanout completed",
+		slog.String("signature", signature),
+		slog.Int("targets", len(targets)),
+		slog.Int("accepted", successCount),
+	)
+}
+
+func (node *rpcNode) runTransactionFanoutWorkers(ctx context.Context, method string, params json.RawMessage, targets []string) int {
+	workerCount := minInt(transactionFanoutWorkers, len(targets))
+	jobs := make(chan string)
+	var waitGroup sync.WaitGroup
+	var successCount atomic.Int64
+	for workerIndex := 0; workerIndex < workerCount; workerIndex++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for peerID := range jobs {
+				response, err := node.forwardRawRPCToPeer(ctx, peerID, method, params)
+				if err != nil || response.Error != nil {
+					continue
+				}
+				successCount.Add(1)
+			}
+		}()
+	}
+	for _, peerID := range targets {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			waitGroup.Wait()
+			return int(successCount.Load())
+		case jobs <- peerID:
+		}
+	}
+	close(jobs)
+	waitGroup.Wait()
+	return int(successCount.Load())
+}
+
+func transactionFanoutTargets(peerIDs []string, acceptedIndex int, limit int) []string {
+	if len(peerIDs) <= 1 || limit <= 0 || acceptedIndex < 0 || acceptedIndex >= len(peerIDs) {
+		return nil
+	}
+	targets := make([]string, 0, minInt(limit, len(peerIDs)-1))
+	for offset := 1; offset < len(peerIDs) && len(targets) < limit; offset++ {
+		targetIndex := (acceptedIndex + offset) % len(peerIDs)
+		targets = append(targets, peerIDs[targetIndex])
+	}
+	return targets
+}
+
+func rotatePeerIDs(peerIDs []string, startIndex uint64) []string {
+	if len(peerIDs) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(peerIDs))
+	offset := int(startIndex % uint64(len(peerIDs)))
+	result = append(result, peerIDs[offset:]...)
+	result = append(result, peerIDs[:offset]...)
+	return result
+}
+
+func rpcForwardResultText(result []byte) string {
+	if len(result) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(result, &text); err == nil {
+		return text
+	}
+	return string(result)
+}
+
+func isRetryableTransactionForwardError(forwardError *poswire.RPCForwardError) bool {
+	errorText := strings.ToLower(rpcForwardErrorText(forwardError))
+	return strings.Contains(errorText, "recent blockhash is not valid") ||
+		strings.Contains(errorText, "mempool is full")
+}
+
+func rpcForwardErrorText(forwardError *poswire.RPCForwardError) string {
+	if forwardError == nil {
+		return ""
+	}
+	if len(forwardError.Data) == 0 {
+		return forwardError.Message
+	}
+	var dataText string
+	if err := json.Unmarshal(forwardError.Data, &dataText); err == nil {
+		return dataText
+	}
+	return string(forwardError.Data)
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func (node *rpcNode) selectValidatorPeer() (string, error) {
@@ -842,6 +1161,7 @@ func (node *rpcNode) nodeStatus(ctx context.Context) map[string]any {
 		"head_height":           uint64(0),
 		"head_slot":             uint64(0),
 		"finalized_height":      uint64(0),
+		"finalized_slot":        uint64(0),
 		"mempool_size":          0,
 		"validator_count":       0,
 		"transaction_fast_path": map[string]any{"fast_path_available": false},
@@ -877,6 +1197,7 @@ func copyUpstreamStatusFields(status map[string]any, upstream map[string]any) {
 		"head_height",
 		"head_slot",
 		"finalized_height",
+		"finalized_slot",
 		"mempool_size",
 		"validator_count",
 		"transaction_fast_path",

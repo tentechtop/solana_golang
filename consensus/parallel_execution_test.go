@@ -72,6 +72,41 @@ func TestExecuteTransactionsParallelSerializesConflictingWritableAccounts(t *tes
 	assertParallelTestLamports(t, output.State, target, 2)
 }
 
+func TestExecuteTransactionsParallelReportsRejectedTransactions(t *testing.T) {
+	confirmedTarget := parallelTestPublicKey(31)
+	rejectedTarget := parallelTestPublicKey(32)
+	executor := parallelRejectingTestExecutor{}
+
+	output, err := executeTransactionsParallel(context.Background(), parallelExecutionInput{
+		ChainID:          "parallel-test",
+		Slot:             1,
+		Epoch:            1,
+		Transactions:     []structure.Transaction{parallelTestTransaction(5, rejectedTarget), parallelTestTransaction(6, confirmedTarget)},
+		State:            parallelTestState(confirmedTarget, rejectedTarget),
+		ProcessedTxIDs:   map[string]struct{}{},
+		Executor:         executor,
+		MaxIncludedCount: MaxProposalTransactions,
+		WorkerCount:      2,
+		RejectFailed:     false,
+		MarkIncluded:     false,
+		FailureLabel:     "parallel",
+		ExecutionMode:    runtimepkg.ExecutionModeFixedInstruction,
+	})
+	if err != nil {
+		t.Fatalf("executeTransactionsParallel() error = %v", err)
+	}
+	if len(output.Transactions) != 1 {
+		t.Fatalf("transactions = %d, want 1", len(output.Transactions))
+	}
+	if len(output.RejectedTransactions) != 1 {
+		t.Fatalf("rejected transactions = %d, want 1", len(output.RejectedTransactions))
+	}
+	if output.RejectedTransactions[0].Error != "parallel rejection" {
+		t.Fatalf("rejected error = %q", output.RejectedTransactions[0].Error)
+	}
+	assertParallelTestLamports(t, output.State, confirmedTarget, 1)
+}
+
 type parallelTestExecutor struct {
 	delay     time.Duration
 	mutex     sync.Mutex
@@ -134,6 +169,45 @@ func (executor *parallelTestExecutor) MaxActive() int {
 	executor.mutex.Lock()
 	defer executor.mutex.Unlock()
 	return executor.maxActive
+}
+
+type parallelRejectingTestExecutor struct{}
+
+func (executor parallelRejectingTestExecutor) ExecuteTransaction(
+	contextValue context.Context,
+	request runtimepkg.TransactionRequest,
+) (runtimepkg.TransactionResult, error) {
+	targetAddress, err := parallelTestTargetAddress(request.Simulation.Transaction)
+	if err != nil {
+		return runtimepkg.TransactionResult{}, err
+	}
+	if request.Simulation.Transaction.Instructions[0].Data[0] == 5 {
+		return runtimepkg.TransactionResult{
+			Mode: request.Mode,
+			Execution: structure.TransactionExecutionResult{
+				Status: structure.TransactionStatusFailed,
+				Error: &structure.TransactionError{
+					Code:    structure.TransactionErrorCodeInstructionError,
+					Message: "parallel rejection",
+				},
+			},
+		}, nil
+	}
+	account, err := parallelTestAccount(request.Simulation.Accounts, targetAddress)
+	if err != nil {
+		return runtimepkg.TransactionResult{}, err
+	}
+	account.Lamports++
+	return runtimepkg.TransactionResult{
+		Mode: request.Mode,
+		Execution: structure.TransactionExecutionResult{
+			Status:       structure.TransactionStatusConfirmed,
+			PostBalances: []uint64{account.Lamports},
+			WrittenAccounts: []structure.AddressedAccount{
+				{Address: targetAddress, Account: account},
+			},
+		},
+	}, nil
 }
 
 func parallelTestTransaction(seed byte, targetAddress structure.PublicKey) structure.Transaction {

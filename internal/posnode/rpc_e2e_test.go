@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
@@ -116,6 +117,57 @@ func TestHTTPJSONRPCRejectsPreflightFailedTransaction(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONRPCGetLatestBlockhashUsesHeadHash(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	firstProposal, firstState := blockchainTestProposalFromHead(t, node.ledger.Head(), node.ledger.State(), 1, 1, "rpc-blockhash-1")
+	if _, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: firstProposal, NextState: firstState}); err != nil {
+		t.Fatalf("CommitBlock(first) error = %v", err)
+	}
+	secondProposal, secondState := blockchainTestProposalFromHead(t, node.ledger.Head(), node.ledger.State(), 2, 2, "rpc-blockhash-2")
+	if _, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: secondProposal, NextState: secondState}); err != nil {
+		t.Fatalf("CommitBlock(second) error = %v", err)
+	}
+	thirdProposal, thirdState := blockchainTestProposalFromHead(t, node.ledger.Head(), node.ledger.State(), 3, 3, "rpc-blockhash-3")
+	thirdHead, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: thirdProposal, NextState: thirdState})
+	if err != nil {
+		t.Fatalf("CommitBlock(third) error = %v", err)
+	}
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetLatestBlockhash, []any{})
+	latest := decodePosNodeRPCResult[rpc.LatestBlockhashResult](t, response)
+	if latest.Blockhash != thirdHead.BlockHash.String() {
+		t.Fatalf("blockhash = %s, want head %s", latest.Blockhash, thirdHead.BlockHash.String())
+	}
+	if latest.Height != thirdHead.Height {
+		t.Fatalf("height = %d, want %d", latest.Height, thirdHead.Height)
+	}
+	if latest.LastValidSlot != latest.Slot+structure.MaxRecentBlockhashAgeSlots {
+		t.Fatalf("last valid slot = %d, want slot + max age", latest.LastValidSlot)
+	}
+	if latest.LastValidBlockHeight != latest.Height+structure.MaxRecentBlockhashAgeSlots {
+		t.Fatalf("last valid block height = %d, want height + max age", latest.LastValidBlockHeight)
+	}
+}
+
+func TestHTTPJSONRPCGetLatestBlockhashReturnsHeadHashWhenWallClockSlotAdvanced(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	node.config.SlotMillis = 400
+	node.config.GenesisStartMs = time.Now().
+		Add(-time.Duration(structure.MaxRecentBlockhashAgeSlots+5) * time.Duration(node.config.SlotMillis) * time.Millisecond).
+		UnixMilli()
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetLatestBlockhash, []any{})
+	latest := decodePosNodeRPCResult[rpc.LatestBlockhashResult](t, response)
+	head := node.ledger.Head()
+	if latest.Blockhash != head.BlockHash.String() {
+		t.Fatalf("blockhash = %s, want head %s", latest.Blockhash, head.BlockHash.String())
+	}
+	if latest.LastValidBlockHeight != latest.Height+structure.MaxRecentBlockhashAgeSlots {
+		t.Fatalf("last valid block height = %d, want height + max age", latest.LastValidBlockHeight)
+	}
+}
+
 func TestHTTPJSONRPCGetTransactionReturnsMempoolDetails(t *testing.T) {
 	node, source, destination := newRPCIntegrationTestNode(t)
 	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
@@ -143,6 +195,42 @@ func TestHTTPJSONRPCGetTransactionReturnsMempoolDetails(t *testing.T) {
 	assertRPCTransactionFeeDetails(t, detail, expectedFee)
 	if detail.InstructionCount != 1 {
 		t.Fatalf("detail instruction count = %d, want 1", detail.InstructionCount)
+	}
+}
+
+func TestHTTPJSONRPCGetTransactionReturnsRejectedDetails(t *testing.T) {
+	node, source, destination := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+
+	transaction := newRPCTransferTransaction(t, node, source, destination.PublicKey, 10_000)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	node.mempool = append(node.mempool, transaction)
+	node.seenTransactions[transactionID] = struct{}{}
+	node.removeRejectedMempoolTransactions([]consensus.RejectedTransaction{
+		{
+			TransactionID: transactionID,
+			Transaction:   transaction,
+			Status:        structure.TransactionStatusFailed,
+			Error:         "recent blockhash is not valid",
+		},
+	}, 15)
+
+	detailResponse := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetTransaction, []any{transactionID})
+	detail := decodePosNodeRPCResult[rpc.TransactionDetailResult](t, detailResponse)
+	if !detail.Found {
+		t.Fatal("detail found = false, want true")
+	}
+	if detail.Location != "rejected" {
+		t.Fatalf("detail location = %s, want rejected", detail.Location)
+	}
+	if detail.Status != "failed" {
+		t.Fatalf("detail status = %s, want failed", detail.Status)
+	}
+	if detail.Error != "recent blockhash is not valid" {
+		t.Fatalf("detail error = %q", detail.Error)
 	}
 }
 
@@ -217,6 +305,42 @@ func TestHTTPJSONRPCGetTransactionReturnsCommittedBlockDetails(t *testing.T) {
 	}
 	expectedFee := mustEstimateTransactionFeeDetails(t, transaction)
 	assertRPCTransactionFeeDetails(t, detail, expectedFee)
+}
+
+func TestHTTPJSONRPCSendTransactionTreatsCommittedTransactionAsSuccess(t *testing.T) {
+	node, source, destination := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewDefaultRouter(node))
+	transaction := newRPCTransferTransaction(t, node, source, destination.PublicKey, 10_000)
+	transactionID, err := transaction.TxIDString()
+	if err != nil {
+		t.Fatalf("TxIDString() error = %v", err)
+	}
+	nextState := node.ledger.State()
+	sourceFound := false
+	for index := range nextState.Accounts {
+		if nextState.Accounts[index].Address != source.PublicKey {
+			continue
+		}
+		nextState.Accounts[index].Account.Lamports = 0
+		sourceFound = true
+	}
+	if !sourceFound {
+		t.Fatal("source account not found")
+	}
+	proposal, _ := blockchainTestProposalFromHead(t, node.ledger.Head(), nextState, 1, 1, "rpc-committed-idempotent")
+	proposal.Transactions = []structure.Transaction{transaction}
+	if _, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodSendTransaction, []any{encodeRPCTransaction(t, transaction)})
+	signature := decodePosNodeRPCResult[string](t, response)
+	if signature != transactionID {
+		t.Fatalf("sendTransaction signature = %s, want %s", signature, transactionID)
+	}
+	if len(node.mempool) != 0 {
+		t.Fatalf("mempool size = %d, want 0", len(node.mempool))
+	}
 }
 
 func TestHTTPJSONRPCGetAddressTransactionsReturnsCommittedHistory(t *testing.T) {
@@ -302,6 +426,88 @@ func TestHTTPJSONRPCGetAddressTransactionsReturnsCommittedHistory(t *testing.T) 
 	}
 }
 
+func TestHTTPJSONRPCGetContractProgramsReturnsExecutableAccounts(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewPublicRouter(node))
+	program := mustStructureKeyPair("rpc-contract-program")
+	addContractProgramAccountToLedger(t, node.ledger, program.PublicKey, []byte("contract-bytecode"))
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetContractPrograms, []any{uint64(10)})
+	result := decodePosNodeRPCResult[rpc.ContractProgramListResult](t, response)
+	if result.Scope != "executable_bpfloader_programs" {
+		t.Fatalf("scope = %s, want executable_bpfloader_programs", result.Scope)
+	}
+	if len(result.Programs) != 1 {
+		t.Fatalf("programs length = %d, want 1", len(result.Programs))
+	}
+	listedProgram := result.Programs[0]
+	if listedProgram.Address != program.PublicKey.String() {
+		t.Fatalf("address = %s, want %s", listedProgram.Address, program.PublicKey.String())
+	}
+	if !listedProgram.Executable || listedProgram.DataLength == 0 || listedProgram.CodeHash == "" {
+		t.Fatalf("listed program = %+v, want executable program metadata", listedProgram)
+	}
+}
+
+func TestHTTPJSONRPCGetValidatorSetReturnsRewardCounters(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewPublicRouter(node))
+	validator := mustStructureKeyPair("rpc-validator-reward-account")
+	staker := mustStructureKeyPair("rpc-validator-reward-staker")
+	delegator := mustStructureKeyPair("rpc-validator-reward-delegator")
+	consensusKey := mustStructureKeyPair("rpc-validator-reward-consensus")
+	addValidatorStakeAccountToLedger(t, node.ledger, validator.PublicKey, stakeprogram.ValidatorState{
+		ConsensusPublicKey:       consensusKey.PublicKey,
+		StakerAccount:            staker.PublicKey,
+		P2PPeerID:                "rpc-validator-reward-peer",
+		Status:                   stakeprogram.ValidatorStatusActive,
+		ActiveStake:              stakeprogram.MinimumStakeLamports,
+		PendingStake:             122,
+		UnlockingStake:           244,
+		VoteCredits:              7,
+		LastRewardedSlot:         55,
+		LastRewardEpoch:          3,
+		RewardLamports:           12_345,
+		SelfRewardLamports:       8_000,
+		CommissionRewardLamports: 4_000,
+		ActivationEpoch:          1,
+		Delegations: []stakeprogram.DelegationState{
+			{
+				DelegatorAccount: delegator.PublicKey,
+				ActiveStake:      1_000,
+				PendingStake:     11,
+				UnlockingStake:   22,
+				RewardLamports:   345,
+			},
+		},
+	})
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetValidatorSet, []any{})
+	result := decodePosNodeRPCResult[rpc.ValidatorSetResult](t, response)
+	if len(result.Validators) != 1 {
+		t.Fatalf("validators length = %d, want 1", len(result.Validators))
+	}
+	validatorInfo := result.Validators[0]
+	if validatorInfo.RewardLamports != 12_345 || validatorInfo.VoteCredits != 7 {
+		t.Fatalf("validator reward counters = %+v, want reward and credits", validatorInfo)
+	}
+	if validatorInfo.StakerAddress != staker.PublicKey.String() {
+		t.Fatalf("staker address = %s, want %s", validatorInfo.StakerAddress, staker.PublicKey.String())
+	}
+	if validatorInfo.SelfPendingStakeLamports != 111 || validatorInfo.SelfUnlockingStakeLamports != 222 {
+		t.Fatalf("self stake buckets = %+v, want pending 111 unlocking 222", validatorInfo)
+	}
+	if validatorInfo.SelfRewardLamports != 8_000 {
+		t.Fatalf("self reward = %d, want 8000", validatorInfo.SelfRewardLamports)
+	}
+	if validatorInfo.CommissionRewardLamports != 4_000 {
+		t.Fatalf("commission reward = %d, want 4000", validatorInfo.CommissionRewardLamports)
+	}
+	if validatorInfo.LastRewardedSlot != 55 || validatorInfo.LastRewardEpoch != 3 {
+		t.Fatalf("validator reward watermark = %+v, want slot 55 epoch 3", validatorInfo)
+	}
+}
+
 func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
 	owner := mustStructureKeyPair("rpc-privacy-owner")
 	other := mustStructureKeyPair("rpc-privacy-other")
@@ -317,10 +523,13 @@ func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
 		t.Fatalf("NewLedgerFromGenesis() error = %v", err)
 	}
 	ledger.SetLogger(logger)
+	consensusDisabled := false
 	node := &posNode{
 		config: nodeConfig{
 			MempoolMaxTransactions:      10,
 			MempoolTransactionTTLMillis: 60_000,
+			ValidatorEnabled:            &consensusDisabled,
+			ConsensusEnabled:            &consensusDisabled,
 		},
 		logger:           logger,
 		ledger:           ledger,
@@ -586,10 +795,13 @@ func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.SolanaKeyPair,
 		t.Fatalf("NewLedgerFromGenesis() error = %v", err)
 	}
 	ledger.SetLogger(logger)
+	consensusDisabled := false
 	node := &posNode{
 		config: nodeConfig{
 			MempoolMaxTransactions:      10,
 			MempoolTransactionTTLMillis: 60_000,
+			ValidatorEnabled:            &consensusDisabled,
+			ConsensusEnabled:            &consensusDisabled,
 		},
 		logger:           logger,
 		ledger:           ledger,
@@ -626,6 +838,24 @@ func addPrivacyStateWithNotesToLedger(t *testing.T, ledger *blockchain.Ledger, s
 	nextState := ledger.State()
 	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{Address: stateAddress, Account: account})
 	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, ledger.Head().Slot+1, ledger.Head().Height+1, "rpc-privacy-state-account")
+	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+}
+
+func addContractProgramAccountToLedger(t *testing.T, ledger *blockchain.Ledger, programAddress structure.PublicKey, data []byte) {
+	t.Helper()
+	rentLamports, err := structure.MinimumBalanceForRentExemption(len(data))
+	if err != nil {
+		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
+	}
+	account, err := structure.NewAccount(rentLamports, data, structure.DefaultBuiltinProgramIDs.BPFLoader, true, 0)
+	if err != nil {
+		t.Fatalf("NewAccount(contract program) error = %v", err)
+	}
+	nextState := ledger.State()
+	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{Address: programAddress, Account: account})
+	proposal, _ := blockchainTestProposalFromHead(t, ledger.Head(), nextState, ledger.Head().Slot+1, ledger.Head().Height+1, "rpc-contract-program")
 	if _, err := ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
 		t.Fatalf("CommitBlock() error = %v", err)
 	}

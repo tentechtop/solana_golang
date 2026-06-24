@@ -30,10 +30,19 @@ type parallelExecutionInput struct {
 }
 
 type parallelExecutionOutput struct {
-	State        ChainState
-	Transactions []structure.Transaction
-	Receipts     []structure.Hash
-	FeeDetails   []structure.FeeDetails
+	State                ChainState
+	Transactions         []structure.Transaction
+	Receipts             []structure.Hash
+	FeeDetails           []structure.FeeDetails
+	RejectedTransactions []RejectedTransaction
+}
+
+// RejectedTransaction 描述未入块交易 + 让节点能清理确定失败的 mempool 项。
+type RejectedTransaction struct {
+	TransactionID string
+	Transaction   structure.Transaction
+	Status        structure.TransactionStatus
+	Error         string
 }
 
 type scheduledTransaction struct {
@@ -258,11 +267,17 @@ func applyParallelBatchResults(
 		if executionResult.Result.Execution.Status != structure.TransactionStatusConfirmed {
 			if input.RejectFailed {
 				return ChainState{}, parallelExecutionOutput{}, fmt.Errorf(
-					"consensus: %s transaction %d failed",
+					"consensus: %s transaction %d failed: %s",
 					input.FailureLabel,
 					executionResult.OriginalIndex,
+					transactionExecutionFailureMessage(executionResult.Result.Execution),
 				)
 			}
+			rejectedTransaction, err := buildRejectedTransaction(executionResult)
+			if err != nil {
+				return ChainState{}, parallelExecutionOutput{}, err
+			}
+			output.RejectedTransactions = append(output.RejectedTransactions, rejectedTransaction)
 			continue
 		}
 		transactionID, err := executionResult.Transaction.TxIDString()
@@ -285,6 +300,26 @@ func applyParallelBatchResults(
 		output.Receipts = append(output.Receipts, receiptHash)
 	}
 	return nextState, output, nil
+}
+
+func buildRejectedTransaction(executionResult parallelExecutionResult) (RejectedTransaction, error) {
+	transactionID, err := executionResult.Transaction.TxIDString()
+	if err != nil {
+		return RejectedTransaction{}, fmt.Errorf("consensus: rejected transaction id %d: %w", executionResult.OriginalIndex, err)
+	}
+	return RejectedTransaction{
+		TransactionID: transactionID,
+		Transaction:   executionResult.Transaction.Clone(),
+		Status:        executionResult.Result.Execution.Status,
+		Error:         transactionExecutionFailureMessage(executionResult.Result.Execution),
+	}, nil
+}
+
+func transactionExecutionFailureMessage(result structure.TransactionExecutionResult) string {
+	if result.Error == nil {
+		return "transaction rejected"
+	}
+	return result.Error.Error()
 }
 
 type parallelExecutionError struct {

@@ -7,37 +7,43 @@ import (
 )
 
 const (
-	MethodGetBalance                = "getBalance"
-	MethodGetAccountType            = "getAccountType"
-	MethodGetLatestBlockhash        = "getLatestBlockhash"
-	MethodSendTransaction           = "sendTransaction"
-	MethodGetBlock                  = "getBlock"
-	MethodGetTransaction            = "getTransaction"
-	MethodGetAddressTransactions    = "getAddressTransactions"
-	MethodTreasuryTransfer          = "treasuryTransfer"
-	MethodTransfer                  = "transfer"
-	MethodGetPrivacyState           = "getPrivacyState"
-	MethodGetPrivacyBalance         = "getPrivacyBalance"
-	MethodPrivacyDeposit            = "privacyDeposit"
-	MethodPrivacyDepositToState     = "privacyDepositToState"
-	MethodPrivacyDepositToReceiver  = "privacyDepositToReceiver"
-	MethodPrivacyWithdraw           = "privacyWithdraw"
-	MethodPrivacyTransfer           = "privacyTransfer"
-	MethodPrivacyTransferToReceiver = "privacyTransferToReceiver"
-	MethodPrivacyAuthorizeAudit     = "privacyAuthorizeAudit"
-	MethodRegisterValidator         = "registerValidator"
-	MethodRegisterValidatorIdentity = "registerValidatorIdentity"
-	MethodStake                     = "stake"
-	MethodUnstake                   = "unstake"
-	MethodSlashValidator            = "slashValidator"
-	MethodJailValidator             = "jailValidator"
-	MethodGetLocalValidatorIdentity = "getLocalValidatorIdentity"
-	MethodGetValidatorSet           = "getValidatorSet"
-	MethodGetNodeStatus             = "getNodeStatus"
-	MethodGetPeerNetwork            = "getPeerNetwork"
-	MethodGetConsensusStatus        = "getConsensusStatus"
-	MethodGetMetrics                = "getMetrics"
-	MethodGetHealth                 = "getHealth"
+	MethodGetBalance                 = "getBalance"
+	MethodGetAccountType             = "getAccountType"
+	MethodGetLatestBlockhash         = "getLatestBlockhash"
+	MethodSendTransaction            = "sendTransaction"
+	MethodGetBlock                   = "getBlock"
+	MethodGetTransaction             = "getTransaction"
+	MethodGetAddressTransactions     = "getAddressTransactions"
+	MethodGetContractPrograms        = "getContractPrograms"
+	MethodTreasuryTransfer           = "treasuryTransfer"
+	MethodTransfer                   = "transfer"
+	MethodGetPrivacyState            = "getPrivacyState"
+	MethodGetPrivacyBalance          = "getPrivacyBalance"
+	MethodPrivacyDeposit             = "privacyDeposit"
+	MethodPrivacyDepositToState      = "privacyDepositToState"
+	MethodPrivacyDepositToReceiver   = "privacyDepositToReceiver"
+	MethodPrivacyWithdraw            = "privacyWithdraw"
+	MethodPrivacyTransfer            = "privacyTransfer"
+	MethodPrivacyTransferToReceiver  = "privacyTransferToReceiver"
+	MethodPrivacyAuthorizeAudit      = "privacyAuthorizeAudit"
+	MethodRegisterValidator          = "registerValidator"
+	MethodRegisterValidatorIdentity  = "registerValidatorIdentity"
+	MethodStake                      = "stake"
+	MethodUnstake                    = "unstake"
+	MethodSlashValidator             = "slashValidator"
+	MethodJailValidator              = "jailValidator"
+	MethodGetLocalValidatorIdentity  = "getLocalValidatorIdentity"
+	MethodGetValidatorSet            = "getValidatorSet"
+	MethodGetNodeStatus              = "getNodeStatus"
+	MethodGetPeerNetwork             = "getPeerNetwork"
+	MethodGetConsensusStatus         = "getConsensusStatus"
+	MethodGetMetrics                 = "getMetrics"
+	MethodGetHealth                  = "getHealth"
+	MethodGetValidatorPairing        = "getValidatorPairing"
+	MethodCompleteValidatorPairing   = "completeValidatorPairing"
+	MethodBootstrapRegisterValidator = "bootstrapRegisterValidator"
+	MethodGetBootstrapManifest       = "getBootstrapManifest"
+	MethodGetBootstrapStatus         = "getBootstrapStatus"
 )
 
 // LedgerBackend 定义链业务后端 + 让 RPC 层只负责协议转换和参数校验。
@@ -66,6 +72,10 @@ type TransactionLookupBackend interface {
 
 type AccountHistoryBackend interface {
 	GetAddressTransactions(ctx context.Context, address string, cursor string, limit int) (AccountTransactionHistoryResult, error)
+}
+
+type ContractProgramBackend interface {
+	GetContractPrograms(ctx context.Context, limit int) (ContractProgramListResult, error)
 }
 
 type PrivacyBackend interface {
@@ -118,15 +128,38 @@ type MetricsBackend interface {
 	GetMetrics(ctx context.Context) (any, error)
 }
 
+type ValidatorPairingBackend interface {
+	GetValidatorPairing(ctx context.Context) (ValidatorPairingResult, error)
+	CompleteValidatorPairing(ctx context.Context, request ValidatorPairingCompleteRequest) (ValidatorPairingCompleteResult, error)
+}
+
+type BootstrapBackend interface {
+	BootstrapRegisterValidator(ctx context.Context, request BootstrapValidatorRegistrationRequest) (BootstrapRegisterValidatorResult, error)
+	GetBootstrapManifest(ctx context.Context) (BootstrapManifestResult, error)
+	GetBootstrapStatus(ctx context.Context) (BootstrapStatusResult, error)
+}
+
+type PublicRPCForwardBackend interface {
+	ForwardPublicRPC(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *Error, error)
+}
+
+type BootstrapNodeBackend interface {
+	BootstrapBackend
+	PublicRPCForwardBackend
+	NodeStatusBackend
+	PeerNetworkBackend
+}
+
 type BalanceResult struct {
 	Value uint64 `json:"value"`
 }
 
 type LatestBlockhashResult struct {
-	Blockhash     string `json:"blockhash"`
-	Slot          uint64 `json:"slot"`
-	Height        uint64 `json:"height"`
-	LastValidSlot uint64 `json:"last_valid_slot"`
+	Blockhash            string `json:"blockhash"`
+	Slot                 uint64 `json:"slot"`
+	Height               uint64 `json:"height"`
+	LastValidSlot        uint64 `json:"last_valid_slot"`
+	LastValidBlockHeight uint64 `json:"last_valid_block_height"`
 }
 
 type AccountTypeResult struct {
@@ -148,6 +181,7 @@ type TransactionDetailResult struct {
 	Found                     bool     `json:"found"`
 	Location                  string   `json:"location"`
 	Status                    string   `json:"status"`
+	Error                     string   `json:"error,omitempty"`
 	Sender                    string   `json:"sender,omitempty"`
 	RecentBlockhash           string   `json:"recent_blockhash,omitempty"`
 	FeeLamports               uint64   `json:"fee_lamports"`
@@ -187,6 +221,21 @@ type AccountTransactionHistoryResult struct {
 	Records    []AccountTransactionRecordResult `json:"records"`
 	NextCursor string                           `json:"next_cursor,omitempty"`
 	HasMore    bool                             `json:"has_more"`
+}
+
+type ContractProgramResult struct {
+	Address    string `json:"address"`
+	Owner      string `json:"owner"`
+	Executable bool   `json:"executable"`
+	Lamports   string `json:"lamports"`
+	DataLength int    `json:"data_length"`
+	CodeHash   string `json:"code_hash"`
+	RentEpoch  uint64 `json:"rent_epoch"`
+}
+
+type ContractProgramListResult struct {
+	Scope    string                  `json:"scope"`
+	Programs []ContractProgramResult `json:"programs"`
 }
 
 type TransactionSubmitResult struct {
@@ -239,17 +288,31 @@ type PrivacyBalanceResult struct {
 }
 
 type ValidatorInfo struct {
-	ValidatorID        string           `json:"validator_id"`
-	AccountAddress     string           `json:"account_address"`
-	ConsensusPublicKey string           `json:"consensus_public_key"`
-	P2PPeerID          string           `json:"p2p_peer_id"`
-	StakeLamports      uint64           `json:"stake_lamports"`
-	SelfStakeLamports  uint64           `json:"self_stake_lamports"`
-	DelegatedLamports  uint64           `json:"delegated_lamports"`
-	DelegatorCount     int              `json:"delegator_count"`
-	Status             string           `json:"status"`
-	CommissionBps      uint16           `json:"commission_bps"`
-	Delegations        []DelegationInfo `json:"delegations,omitempty"`
+	ValidatorID                string           `json:"validator_id"`
+	AccountAddress             string           `json:"account_address"`
+	StakerAddress              string           `json:"staker_address"`
+	ConsensusPublicKey         string           `json:"consensus_public_key"`
+	P2PPeerID                  string           `json:"p2p_peer_id"`
+	StakeLamports              uint64           `json:"stake_lamports"`
+	SelfStakeLamports          uint64           `json:"self_stake_lamports"`
+	SelfPendingStakeLamports   uint64           `json:"self_pending_stake_lamports"`
+	SelfUnlockingStakeLamports uint64           `json:"self_unlocking_stake_lamports"`
+	SelfRewardLamports         uint64           `json:"self_reward_lamports"`
+	CommissionRewardLamports   uint64           `json:"commission_reward_lamports"`
+	DelegatedLamports          uint64           `json:"delegated_lamports"`
+	DelegatorCount             int              `json:"delegator_count"`
+	Status                     string           `json:"status"`
+	CommissionBps              uint16           `json:"commission_bps"`
+	VoteCredits                uint64           `json:"vote_credits"`
+	RewardLamports             uint64           `json:"reward_lamports"`
+	LastRewardedSlot           uint64           `json:"last_rewarded_slot"`
+	LastRewardEpoch            uint64           `json:"last_reward_epoch"`
+	JailUntilEpoch             uint64           `json:"jail_until_epoch"`
+	ActivationEpoch            uint64           `json:"activation_epoch"`
+	DeactivationEpoch          uint64           `json:"deactivation_epoch"`
+	LastEffectiveStakeLamports uint64           `json:"last_effective_stake_lamports"`
+	LastSlashedSlot            uint64           `json:"last_slashed_slot"`
+	Delegations                []DelegationInfo `json:"delegations,omitempty"`
 }
 
 type DelegationInfo struct {
@@ -287,8 +350,11 @@ type LocalValidatorIdentityResult struct {
 	CommissionBps            uint16 `json:"commission_bps"`
 	VoteCredits              uint64 `json:"vote_credits"`
 	RewardLamports           uint64 `json:"reward_lamports"`
+	SelfRewardLamports       uint64 `json:"self_reward_lamports"`
+	CommissionRewardLamports uint64 `json:"commission_reward_lamports"`
 	LastRewardedSlot         uint64 `json:"last_rewarded_slot"`
 	LastRewardEpoch          uint64 `json:"last_reward_epoch"`
+	LastSlashedSlot          uint64 `json:"last_slashed_slot"`
 }
 
 // PeerConnectionInfo 保存连接细节 + 让前端展示当前连通性和最近活跃时间。
@@ -335,11 +401,170 @@ type PeerNetworkResult struct {
 }
 
 type HealthResult struct {
-	OK              bool   `json:"ok"`
-	HeadHeight      uint64 `json:"head_height"`
-	HeadSlot        uint64 `json:"head_slot"`
-	FinalizedHeight uint64 `json:"finalized_height"`
-	MempoolSize     int    `json:"mempool_size"`
+	OK                                bool   `json:"ok"`
+	HeadHeight                        uint64 `json:"head_height"`
+	HeadSlot                          uint64 `json:"head_slot"`
+	FinalizedHeight                   uint64 `json:"finalized_height"`
+	MempoolSize                       int    `json:"mempool_size"`
+	LivenessState                     string `json:"liveness_state,omitempty"`
+	LivenessMode                      string `json:"liveness_mode,omitempty"`
+	LivenessReason                    string `json:"liveness_reason,omitempty"`
+	LivenessQuorumReady               bool   `json:"liveness_quorum_ready"`
+	LivenessProductionEnabled         bool   `json:"liveness_production_enabled"`
+	ReachableStakeLamports            uint64 `json:"reachable_stake_lamports"`
+	RequiredStakeLamports             uint64 `json:"required_stake_lamports"`
+	TotalActiveStakeLamports          uint64 `json:"total_active_stake_lamports"`
+	RecentReachabilityWindowMillis    int64  `json:"recent_reachability_window_millis"`
+	LastReachableStakeUpdateUnixMilli int64  `json:"last_reachable_stake_update_unix_milli"`
+}
+
+type BootstrapValidatorRegistrationRequest struct {
+	ChainID               string `json:"chain_id"`
+	NodeName              string `json:"node_name"`
+	PeerID                string `json:"peer_id"`
+	AdvertisedIP          string `json:"advertised_ip"`
+	AdvertisedPort        int    `json:"advertised_port"`
+	Network               string `json:"network"`
+	StakerAddress         string `json:"staker_address"`
+	ValidatorAddress      string `json:"validator_address"`
+	ConsensusPublicKey    string `json:"consensus_public_key"`
+	BLSPublicKeyBase64    string `json:"bls_public_key_base64"`
+	StakeLamports         uint64 `json:"stake_lamports"`
+	CommissionBps         uint16 `json:"commission_bps"`
+	RegisteredAtUnixMilli int64  `json:"registered_at_unix_milli"`
+	StakerSignature       string `json:"staker_signature"`
+	Signature             string `json:"signature"`
+}
+
+type BootstrapRegisterValidatorResult struct {
+	Accepted              bool   `json:"accepted"`
+	Ready                 bool   `json:"ready"`
+	ValidatorCount        int    `json:"validator_count"`
+	MinValidators         int    `json:"min_validators"`
+	GenesisStartUnixMilli int64  `json:"genesis_start_unix_millis,omitempty"`
+	ChainIdentityHash     string `json:"chain_identity_hash,omitempty"`
+	GenesisHash           string `json:"genesis_hash,omitempty"`
+}
+
+type BootstrapPeerConfigResult struct {
+	PeerID       string   `json:"peer_id"`
+	IP           string   `json:"ip"`
+	Port         int      `json:"port"`
+	Network      string   `json:"network"`
+	Role         string   `json:"role,omitempty"`
+	Roles        []string `json:"roles,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+type BootstrapGenesisAccountResult struct {
+	Address  string `json:"address,omitempty"`
+	Seed     string `json:"seed,omitempty"`
+	Lamports uint64 `json:"lamports"`
+}
+
+type BootstrapGenesisValidatorResult struct {
+	StakerAddress      string `json:"staker_address"`
+	ValidatorAddress   string `json:"validator_address"`
+	ConsensusPublicKey string `json:"consensus_public_key"`
+	BLSPublicKeyBase64 string `json:"bls_public_key_base64"`
+	PeerID             string `json:"peer_id"`
+	StakeLamports      uint64 `json:"stake_lamports"`
+	CommissionBps      uint16 `json:"commission_bps,omitempty"`
+}
+
+type BootstrapGenesisResult struct {
+	InitialSupplyLamports uint64                            `json:"initial_supply_lamports"`
+	TreasuryAddress       string                            `json:"treasury_address,omitempty"`
+	PrivacyExecutionMode  string                            `json:"privacy_execution_mode,omitempty"`
+	FundedAccounts        []BootstrapGenesisAccountResult   `json:"funded_accounts"`
+	InitialValidators     []BootstrapGenesisValidatorResult `json:"initial_validators"`
+}
+
+type BootstrapContractDeploymentPolicyResult struct {
+	AllowedDeployers             []string `json:"allowed_deployers,omitempty"`
+	MinDeploymentDepositLamports uint64   `json:"min_deployment_deposit_lamports,omitempty"`
+	RequireManifest              bool     `json:"require_manifest"`
+	AllowUpgradeableContracts    bool     `json:"allow_upgradeable_contracts"`
+}
+
+type BootstrapManifestResult struct {
+	Ready                         bool                                    `json:"ready"`
+	ValidatorCount                int                                     `json:"validator_count"`
+	MinValidators                 int                                     `json:"min_validators"`
+	ChainID                       string                                  `json:"chain_id,omitempty"`
+	ChainIdentityHash             string                                  `json:"chain_identity_hash,omitempty"`
+	GenesisHash                   string                                  `json:"genesis_hash,omitempty"`
+	GenesisStartUnixMilli         int64                                   `json:"genesis_start_unix_millis,omitempty"`
+	SlotMillis                    int                                     `json:"slot_millis,omitempty"`
+	EpochSlots                    uint64                                  `json:"epoch_slots,omitempty"`
+	FinalityDepth                 uint64                                  `json:"finality_depth,omitempty"`
+	TurbineFanout                 int                                     `json:"turbine_fanout,omitempty"`
+	TransactionLeaderForwardSlots int                                     `json:"transaction_leader_forward_slots,omitempty"`
+	TransactionForwardValidators  bool                                    `json:"transaction_forward_validators"`
+	PrivacyExecutionMode          string                                  `json:"privacy_execution_mode,omitempty"`
+	ContractDeploymentPolicy      BootstrapContractDeploymentPolicyResult `json:"contract_deployment_policy"`
+	Genesis                       BootstrapGenesisResult                  `json:"genesis"`
+	BootstrapPeers                []BootstrapPeerConfigResult             `json:"bootstrap_peers"`
+}
+
+type BootstrapStatusResult struct {
+	Ready                 bool     `json:"ready"`
+	ValidatorCount        int      `json:"validator_count"`
+	MinValidators         int      `json:"min_validators"`
+	RegisteredPeerIDs     []string `json:"registered_peer_ids"`
+	GenesisStartUnixMilli int64    `json:"genesis_start_unix_millis,omitempty"`
+	ChainIdentityHash     string   `json:"chain_identity_hash,omitempty"`
+	GenesisHash           string   `json:"genesis_hash,omitempty"`
+}
+
+type ValidatorPairingResult struct {
+	Enabled           bool                           `json:"enabled"`
+	State             string                         `json:"state"`
+	Mode              string                         `json:"mode,omitempty"`
+	RPCURL            string                         `json:"rpc_url,omitempty"`
+	BootstrapRPCURL   string                         `json:"bootstrap_rpc_url,omitempty"`
+	ChainID           string                         `json:"chain_id,omitempty"`
+	ChainIdentityHash string                         `json:"chain_identity_hash,omitempty"`
+	GenesisHash       string                         `json:"genesis_hash,omitempty"`
+	NodeName          string                         `json:"node_name,omitempty"`
+	NodePeerID        string                         `json:"node_peer_id,omitempty"`
+	AdvertisedIP      string                         `json:"advertised_ip,omitempty"`
+	AdvertisedPort    int                            `json:"advertised_port,omitempty"`
+	Network           string                         `json:"network,omitempty"`
+	ValidatorAddress  string                         `json:"validator_address,omitempty"`
+	ConsensusAddress  string                         `json:"consensus_address,omitempty"`
+	BLSPublicKey      string                         `json:"bls_public_key,omitempty"`
+	RegisteredAtUnixMS int64                         `json:"registered_at_unix_millis,omitempty"`
+	ExpiresAtUnixMS   int64                          `json:"expires_at_unix_millis,omitempty"`
+	Completed         ValidatorPairingCompleteResult `json:"completed,omitempty"`
+}
+
+type ValidatorPairingCompleteRequest struct {
+	Token                    string `json:"token"`
+	StakerAddress            string `json:"staker_address"`
+	ValidatorAddress         string `json:"validator_address"`
+	ConsensusAddress         string `json:"consensus_address"`
+	BLSPublicKey             string `json:"bls_public_key"`
+	NodePeerID               string `json:"node_peer_id"`
+	StakeLamports            uint64 `json:"stake_lamports"`
+	Signature                string `json:"signature"`
+	BootstrapStakerSignature string `json:"bootstrap_staker_signature,omitempty"`
+}
+
+type ValidatorPairingCompleteResult struct {
+	State                    string `json:"state,omitempty"`
+	StakerAddress            string `json:"staker_address,omitempty"`
+	ValidatorAddress         string `json:"validator_address,omitempty"`
+	ConsensusAddress         string `json:"consensus_address,omitempty"`
+	BLSPublicKey             string `json:"bls_public_key,omitempty"`
+	NodePeerID               string `json:"node_peer_id,omitempty"`
+	StakeLamports            uint64 `json:"stake_lamports,omitempty"`
+	Signature                string `json:"signature,omitempty"`
+	BootstrapStakerSignature string `json:"bootstrap_staker_signature,omitempty"`
+	ConfigUpdated            bool   `json:"config_updated"`
+	RestartRequired          bool   `json:"restart_required"`
+	ConfigPath               string `json:"config_path,omitempty"`
+	ActivationNote           string `json:"activation_note,omitempty"`
 }
 
 func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
@@ -350,6 +575,7 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
+	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
 	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
 	_ = router.Register(MethodTransfer, transferHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
@@ -374,6 +600,8 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetConsensusStatus, getConsensusStatusHandler(backend))
 	_ = router.Register(MethodGetMetrics, getMetricsHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
+	_ = router.Register(MethodGetValidatorPairing, getValidatorPairingHandler(backend))
+	_ = router.Register(MethodCompleteValidatorPairing, completeValidatorPairingHandler(backend))
 }
 
 // RegisterPublicHandlers 注册公网 RPC 方法 + 防止管理和私钥代签接口暴露给 APP。
@@ -385,6 +613,7 @@ func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
+	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
 	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
@@ -392,6 +621,108 @@ func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetPeerNetwork, getPeerNetworkHandler(backend))
 	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
 }
+
+func RegisterBootstrapHandlers(router *Router, backend BootstrapNodeBackend) {
+	_ = router.Register(MethodBootstrapRegisterValidator, bootstrapRegisterValidatorHandler(backend))
+	_ = router.Register(MethodGetBootstrapManifest, getBootstrapManifestHandler(backend))
+	_ = router.Register(MethodGetBootstrapStatus, getBootstrapStatusHandler(backend))
+	RegisterPublicForwardHandlers(router, backend)
+	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
+	_ = router.Register(MethodGetPeerNetwork, getPeerNetworkHandler(backend))
+	_ = router.Register(MethodGetHealth, getHealthHandler(backend))
+}
+
+func RegisterPublicForwardHandlers(router *Router, backend PublicRPCForwardBackend) {
+	for _, method := range publicForwardMethods() {
+		methodName := method
+		_ = router.Register(methodName, publicForwardHandler(backend, methodName))
+	}
+}
+
+func publicForwardMethods() []string {
+	return []string{
+		MethodGetBalance,
+		MethodGetAccountType,
+		MethodGetLatestBlockhash,
+		MethodSendTransaction,
+		MethodGetBlock,
+		MethodGetTransaction,
+		MethodGetAddressTransactions,
+		MethodGetContractPrograms,
+		MethodGetPrivacyState,
+		MethodGetPrivacyBalance,
+		MethodGetValidatorSet,
+	}
+}
+
+func publicForwardHandler(backend PublicRPCForwardBackend, method string) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		if backend == nil {
+			return nil, ErrMethodUnavailable
+		}
+		result, rpcError, err := backend.ForwardPublicRPC(ctx, method, params)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("forward public rpc: %v", err))
+		}
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		if len(result) == 0 {
+			return json.RawMessage("null"), nil
+		}
+		return result, nil
+	}
+}
+
+func bootstrapRegisterValidatorHandler(backend BootstrapBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		if backend == nil {
+			return nil, ErrMethodUnavailable
+		}
+		request, rpcError := parseBootstrapRegisterValidatorParams(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := backend.BootstrapRegisterValidator(ctx, request)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("bootstrap register validator: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getBootstrapManifestHandler(backend BootstrapBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		if backend == nil {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := backend.GetBootstrapManifest(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get bootstrap manifest: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getBootstrapStatusHandler(backend BootstrapBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		if backend == nil {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := backend.GetBootstrapStatus(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get bootstrap status: %v", err))
+		}
+		return result, nil
+	}
+}
+
 func getBalanceHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		if backend == nil {
@@ -554,6 +885,24 @@ func getAddressTransactionsHandler(backend LedgerBackend) HandlerFunc {
 		result, err := accountHistoryBackend.GetAddressTransactions(ctx, address, cursor, int(limit))
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get address transactions: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getContractProgramsHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		contractProgramBackend, ok := backend.(ContractProgramBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		limit, rpcError := parseContractProgramsParams(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := contractProgramBackend.GetContractPrograms(ctx, limit)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get contract programs: %v", err))
 		}
 		return result, nil
 	}
@@ -1032,7 +1381,7 @@ func getValidatorSetHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
-func getNodeStatusHandler(backend LedgerBackend) HandlerFunc {
+func getNodeStatusHandler(backend any) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		statusBackend, ok := backend.(NodeStatusBackend)
 		if !ok {
@@ -1049,7 +1398,7 @@ func getNodeStatusHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
-func getPeerNetworkHandler(backend LedgerBackend) HandlerFunc {
+func getPeerNetworkHandler(backend any) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		peerNetworkBackend, ok := backend.(PeerNetworkBackend)
 		if !ok {
@@ -1066,7 +1415,7 @@ func getPeerNetworkHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
-func getConsensusStatusHandler(backend LedgerBackend) HandlerFunc {
+func getConsensusStatusHandler(backend any) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		statusBackend, ok := backend.(ConsensusStatusBackend)
 		if !ok {
@@ -1083,7 +1432,7 @@ func getConsensusStatusHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
-func getMetricsHandler(backend LedgerBackend) HandlerFunc {
+func getMetricsHandler(backend any) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		metricsBackend, ok := backend.(MetricsBackend)
 		if !ok {
@@ -1100,7 +1449,7 @@ func getMetricsHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
-func getHealthHandler(backend LedgerBackend) HandlerFunc {
+func getHealthHandler(backend any) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		statusBackend, ok := backend.(NodeStatusBackend)
 		if !ok {
@@ -1112,6 +1461,41 @@ func getHealthHandler(backend LedgerBackend) HandlerFunc {
 		result, err := statusBackend.GetHealth(ctx)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get health: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getValidatorPairingHandler(backend any) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		pairingBackend, ok := backend.(ValidatorPairingBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := pairingBackend.GetValidatorPairing(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get validator pairing: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func completeValidatorPairingHandler(backend any) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		pairingBackend, ok := backend.(ValidatorPairingBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		request, rpcError := parseCompleteValidatorPairingParams(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := pairingBackend.CompleteValidatorPairing(ctx, request)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("complete validator pairing: %v", err))
 		}
 		return result, nil
 	}
@@ -1173,6 +1557,60 @@ type registerValidatorIdentityParams struct {
 	StakeLamports      uint64
 }
 
+func parseCompleteValidatorPairingParams(params json.RawMessage) (ValidatorPairingCompleteRequest, *Error) {
+	values, rpcError := parseParamsArray(params)
+	if rpcError != nil {
+		return ValidatorPairingCompleteRequest{}, rpcError
+	}
+	if len(values) != 1 {
+		return ValidatorPairingCompleteRequest{}, invalidParamsError("completeValidatorPairing requires one request object")
+	}
+	request := ValidatorPairingCompleteRequest{}
+	if err := json.Unmarshal(values[0], &request); err != nil {
+		return ValidatorPairingCompleteRequest{}, invalidParamsError("completeValidatorPairing request must be an object")
+	}
+	if request.Token == "" ||
+		request.StakerAddress == "" ||
+		request.ValidatorAddress == "" ||
+		request.ConsensusAddress == "" ||
+		request.BLSPublicKey == "" ||
+		request.NodePeerID == "" ||
+		request.Signature == "" ||
+		request.StakeLamports == 0 {
+		return ValidatorPairingCompleteRequest{}, invalidParamsError("completeValidatorPairing has empty required fields")
+	}
+	return request, nil
+}
+
+func parseBootstrapRegisterValidatorParams(params json.RawMessage) (BootstrapValidatorRegistrationRequest, *Error) {
+	values, rpcError := parseParamsArray(params)
+	if rpcError != nil {
+		return BootstrapValidatorRegistrationRequest{}, rpcError
+	}
+	if len(values) != 1 {
+		return BootstrapValidatorRegistrationRequest{}, invalidParamsError("bootstrapRegisterValidator requires one registration object")
+	}
+	request := BootstrapValidatorRegistrationRequest{}
+	if err := json.Unmarshal(values[0], &request); err != nil {
+		return BootstrapValidatorRegistrationRequest{}, invalidParamsError("bootstrapRegisterValidator registration must be an object")
+	}
+	// 功能目的：允许空链 ID 发现模式；实现原因：引导节点负责绑定权威链，身份字段仍必须完整。
+	if request.NodeName == "" ||
+		request.PeerID == "" ||
+		request.AdvertisedIP == "" ||
+		request.AdvertisedPort == 0 ||
+		request.StakerAddress == "" ||
+		request.ValidatorAddress == "" ||
+		request.ConsensusPublicKey == "" ||
+		request.BLSPublicKeyBase64 == "" ||
+		request.StakeLamports == 0 ||
+		request.RegisteredAtUnixMilli == 0 ||
+		request.Signature == "" {
+		return BootstrapValidatorRegistrationRequest{}, invalidParamsError("bootstrapRegisterValidator registration has empty required fields")
+	}
+	return request, nil
+}
+
 func parseGetBalanceParams(params json.RawMessage) (getBalanceParams, *Error) {
 	values, rpcError := parseParamsArray(params)
 	if rpcError != nil {
@@ -1214,6 +1652,30 @@ func parseGetBlockParams(params json.RawMessage) (getBlockParams, *Error) {
 		return getBlockParams{}, invalidParamsError("getBlock slot must be an unsigned integer")
 	}
 	return getBlockParams{Slot: slot}, nil
+}
+
+func parseContractProgramsParams(params json.RawMessage) (int, *Error) {
+	if len(params) == 0 || string(params) == "null" {
+		return 0, nil
+	}
+	values, rpcError := parseParamsArray(params)
+	if rpcError != nil {
+		return 0, rpcError
+	}
+	if len(values) == 0 {
+		return 0, nil
+	}
+	if len(values) > 1 {
+		return 0, invalidParamsError("getContractPrograms accepts at most one limit parameter")
+	}
+	limit, rpcError := parseUint64Param(values[0], "getContractPrograms limit")
+	if rpcError != nil {
+		return 0, rpcError
+	}
+	if limit > uint64(^uint(0)>>1) {
+		return 0, invalidParamsError("getContractPrograms limit is too large")
+	}
+	return int(limit), nil
 }
 
 func parseNoParams(params json.RawMessage) *Error {

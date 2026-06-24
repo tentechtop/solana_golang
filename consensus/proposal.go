@@ -43,6 +43,13 @@ type BlockProposal struct {
 	LeaderSignature structure.Signature
 }
 
+// BlockProductionResult 描述本地出块结果 + 将未入块失败交易返回给节点清理 mempool。
+type BlockProductionResult struct {
+	Proposal             BlockProposal
+	State                ChainState
+	RejectedTransactions []RejectedTransaction
+}
+
 // ChainState 保存本地账户状态 + 单进程测试中代替数据库快照。
 type ChainState struct {
 	Accounts []structure.AddressedAccount
@@ -67,11 +74,22 @@ func (producer BlockProducer) ProduceBlock(
 	contextValue context.Context,
 	request ProduceBlockRequest,
 ) (BlockProposal, ChainState, error) {
-	if err := request.validate(); err != nil {
+	result, err := producer.ProduceBlockWithReport(contextValue, request)
+	if err != nil {
 		return BlockProposal{}, ChainState{}, err
 	}
+	return result.Proposal, result.State, nil
+}
+
+func (producer BlockProducer) ProduceBlockWithReport(
+	contextValue context.Context,
+	request ProduceBlockRequest,
+) (BlockProductionResult, error) {
+	if err := request.validate(); err != nil {
+		return BlockProductionResult{}, err
+	}
 	if producer.Executor == nil {
-		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: nil transaction executor")
+		return BlockProductionResult{}, fmt.Errorf("consensus: nil transaction executor")
 	}
 
 	executionOutput, err := executeTransactionsParallel(contextValue, parallelExecutionInput{
@@ -91,7 +109,7 @@ func (producer BlockProducer) ProduceBlock(
 		ExecutionMode:    runtime.ExecutionModeFixedInstruction,
 	})
 	if err != nil {
-		return BlockProposal{}, ChainState{}, err
+		return BlockProductionResult{}, err
 	}
 	nextState := executionOutput.State
 	includedTransactions := executionOutput.Transactions
@@ -99,11 +117,11 @@ func (producer BlockProducer) ProduceBlock(
 	feeDetails := executionOutput.FeeDetails
 	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
 	if err != nil {
-		return BlockProposal{}, ChainState{}, err
+		return BlockProductionResult{}, err
 	}
 	leader, exists := request.EpochSnapshot.ValidatorByID(leaderID)
 	if !exists {
-		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: block leader not in epoch snapshot")
+		return BlockProductionResult{}, fmt.Errorf("consensus: block leader not in epoch snapshot")
 	}
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
 		Slot:          request.Slot,
@@ -119,29 +137,34 @@ func (producer BlockProducer) ProduceBlock(
 		Config:        request.RewardConfig,
 	})
 	if err != nil {
-		return BlockProposal{}, ChainState{}, err
+		return BlockProductionResult{}, err
 	}
 
 	header, err := buildProposalHeader(producer.ChainID, request, includedTransactions, receipts, rewards, nextState)
 	if err != nil {
-		return BlockProposal{}, ChainState{}, err
+		return BlockProductionResult{}, err
 	}
 	signData, err := header.SignBytes()
 	if err != nil {
-		return BlockProposal{}, ChainState{}, err
+		return BlockProductionResult{}, err
 	}
 	signature, err := request.LeaderKeyPair.Sign(signData)
 	if err != nil {
-		return BlockProposal{}, ChainState{}, fmt.Errorf("consensus: sign proposal: %w", err)
+		return BlockProductionResult{}, fmt.Errorf("consensus: sign proposal: %w", err)
 	}
-	return BlockProposal{
+	proposal := BlockProposal{
 		Header:          header,
 		Transactions:    includedTransactions,
 		RewardQCs:       append([]QuorumCertificate(nil), request.RewardQCs...),
 		Evidence:        append([]SlashingEvidence(nil), request.Evidence...),
 		Rewards:         append([]BlockReward(nil), rewards...),
 		LeaderSignature: signature,
-	}, nextState, nil
+	}
+	return BlockProductionResult{
+		Proposal:             proposal,
+		State:                nextState,
+		RejectedTransactions: executionOutput.RejectedTransactions,
+	}, nil
 }
 
 // VerifyProposal 验证提案 + 复算执行结果后返回提案落地后的状态。

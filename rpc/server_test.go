@@ -36,6 +36,21 @@ func (b testPublicBackend) GetNodeStatus(context.Context) (any, error) {
 func (b testPublicBackend) GetHealth(context.Context) (HealthResult, error) {
 	return HealthResult{OK: true, HeadHeight: 9, HeadSlot: 10}, nil
 }
+func (b testPublicBackend) GetContractPrograms(context.Context, int) (ContractProgramListResult, error) {
+	return ContractProgramListResult{
+		Scope: "executable_bpfloader_programs",
+		Programs: []ContractProgramResult{
+			{
+				Address:    "program-address",
+				Owner:      "loader-address",
+				Executable: true,
+				Lamports:   "123",
+				DataLength: 64,
+				CodeHash:   "code-hash",
+			},
+		},
+	}, nil
+}
 
 func TestServerGetBalance(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
@@ -112,6 +127,27 @@ func TestPublicRouterKeepsReadOnlyNodeStatus(t *testing.T) {
 	result := decoded.Result.(map[string]any)
 	if result["head_height"].(float64) != 9 {
 		t.Fatalf("result = %#v, want node status", decoded.Result)
+	}
+}
+
+func TestPublicRouterExposesContractPrograms(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getContractPrograms","params":[10]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["scope"].(string) != "executable_bpfloader_programs" {
+		t.Fatalf("result = %#v, want contract scope", decoded.Result)
+	}
+	programs := result["programs"].([]any)
+	if len(programs) != 1 {
+		t.Fatalf("programs length = %d, want 1", len(programs))
 	}
 }
 

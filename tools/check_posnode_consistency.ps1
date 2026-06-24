@@ -121,12 +121,12 @@ function Get-PropertyValue {
 function Get-ArrayValue {
     param([object]$Value)
     if ($null -eq $Value) {
-        return @()
+        return ,@()
     }
     if (($Value -is [System.Collections.IEnumerable]) -and ($Value -isnot [string])) {
-        return @($Value)
+        return ,@($Value)
     }
-    return @($Value)
+    return ,@($Value)
 }
 
 function Get-StringProperty {
@@ -324,16 +324,23 @@ function New-NodeSnapshot {
     if ($null -eq $consensus) {
         $consensus = Invoke-PosNodeRpc -Url $Url -Method "getConsensusStatus"
     }
+    $metricsHeadHeight = Get-UInt64Property -InputObject $metrics -Name "head_height"
+    $metricsHeadSlot = Get-UInt64Property -InputObject $metrics -Name "head_slot"
+    $metricsHeadHash = Get-StringProperty -InputObject $metrics -Name "block_hash"
+    $metricsFinalizedHeight = Get-UInt64Property -InputObject $metrics -Name "finalized_height"
+    $metricsFinalizedHash = Get-StringProperty -InputObject $metrics -Name "finalized_hash"
+    $metricsFinalityDepth = Get-UInt64Property -InputObject $metrics -Name "finality_depth"
+    $useMetricsHead = $metricsHeadHash.Trim().Length -gt 0
     return [pscustomobject]@{
         Url                    = $Url
         NodeName               = Get-StringProperty -InputObject $status -Name "node_name"
         PeerID                 = Get-StringProperty -InputObject $status -Name "peer_id"
-        HeadHeight             = Get-UInt64Property -InputObject $metrics -Name "head_height"
-        HeadSlot               = Get-UInt64Property -InputObject $metrics -Name "head_slot"
-        HeadHash               = Get-StringProperty -InputObject $metrics -Name "block_hash"
-        FinalizedHeight        = Get-UInt64Property -InputObject $status -Name "finalized_height"
-        FinalizedHash          = Get-StringProperty -InputObject $status -Name "finalized_hash"
-        FinalityDepth          = Get-UInt64Property -InputObject $status -Name "finality_depth"
+        HeadHeight             = if ($useMetricsHead) { $metricsHeadHeight } else { Get-UInt64Property -InputObject $status -Name "head_height" }
+        HeadSlot               = if ($useMetricsHead) { $metricsHeadSlot } else { Get-UInt64Property -InputObject $status -Name "head_slot" }
+        HeadHash               = if ($useMetricsHead) { $metricsHeadHash } else { Get-StringProperty -InputObject $status -Name "head_hash" }
+        FinalizedHeight        = if ($useMetricsHead) { $metricsFinalizedHeight } else { Get-UInt64Property -InputObject $status -Name "finalized_height" }
+        FinalizedHash          = if ($useMetricsHead) { $metricsFinalizedHash } else { Get-StringProperty -InputObject $status -Name "finalized_hash" }
+        FinalityDepth          = if ($useMetricsHead) { $metricsFinalityDepth } else { Get-UInt64Property -InputObject $status -Name "finality_depth" }
         P2PSecure              = [bool](Get-PropertyValue -InputObject $status -Name "p2p_secure_session" -Default $false)
         P2PInsecure            = [bool](Get-PropertyValue -InputObject $status -Name "p2p_insecure_allowed" -Default $true)
         StateRecovery          = [bool](Get-PropertyValue -InputObject $status -Name "state_recovery_enabled" -Default $false)
@@ -381,13 +388,32 @@ function Test-SnapshotRound {
     $heights = @($Snapshots | ForEach-Object { [uint64]$_.HeadHeight })
     $maxHeight = ($heights | Measure-Object -Maximum).Maximum
     $minHeight = ($heights | Measure-Object -Minimum).Minimum
-    if (($maxHeight - $minHeight) -gt $MaxHeightDrift) {
-        $errors.Add("head height drift $($maxHeight - $minHeight) exceeds $MaxHeightDrift")
+    $heightDrift = [uint64]($maxHeight - $minHeight)
+    $consensusSlots = @($Snapshots | ForEach-Object { [uint64]$_.ConsensusSlot })
+    $maxConsensusSlot = ($consensusSlots | Measure-Object -Maximum).Maximum
+    $minConsensusSlot = ($consensusSlots | Measure-Object -Minimum).Minimum
+    $consensusSlotDrift = [uint64]($maxConsensusSlot - $minConsensusSlot)
+    if ($heightDrift -gt [uint64]$MaxHeightDrift) {
+        $allowedHeightDrift = [uint64]($consensusSlotDrift + [uint64]$MaxHeightDrift)
+        if ($consensusSlotDrift -eq 0 -or $heightDrift -gt $allowedHeightDrift) {
+            $errors.Add("head height drift $heightDrift exceeds $MaxHeightDrift")
+        } else {
+            $warnings.Add("head height drift $heightDrift is within sampled consensus slot drift $consensusSlotDrift")
+        }
     }
 
-    Add-GroupMismatchErrors -Snapshots $Snapshots -Property "ConsensusEpoch" -Label "epoch" -Errors $errors
-    Add-GroupMismatchErrors -Snapshots $Snapshots -Property "TotalActiveStake" -Label "total active stake" -Errors $errors
-    Add-GroupMismatchErrors -Snapshots $Snapshots -Property "ValidatorFingerprint" -Label "validator stake fingerprint" -Errors $errors
+    $epochValues = @($Snapshots | ForEach-Object { $_.ConsensusEpoch } | Select-Object -Unique)
+    if ($epochValues.Count -gt 1) {
+        if ($consensusSlotDrift -eq 0) {
+            $errors.Add("epoch mismatch: $($epochValues -join ', ')")
+        } else {
+            $warnings.Add("nodes sampled across epoch boundary: $($epochValues -join ', ')")
+        }
+    }
+    foreach ($epochGroup in ($Snapshots | Group-Object ConsensusEpoch)) {
+        Add-GroupMismatchErrors -Snapshots @($epochGroup.Group) -Property "TotalActiveStake" -Label "total active stake at epoch $($epochGroup.Name)" -Errors $errors
+        Add-GroupMismatchErrors -Snapshots @($epochGroup.Group) -Property "ValidatorFingerprint" -Label "validator stake fingerprint at epoch $($epochGroup.Name)" -Errors $errors
+    }
     Add-GroupMismatchErrors -Snapshots $Snapshots -Property "FinalityDepth" -Label "finality depth" -Errors $errors
     Add-GroupMismatchErrors -Snapshots $Snapshots -Property "StateRecovery" -Label "state recovery enabled" -Errors $errors
 
@@ -461,6 +487,24 @@ function Invoke-SelfTest {
     $snapshot = [pscustomobject]@{ Url = "mock://node"; PeerID = "peer-a"; Status = [pscustomobject]@{} }
     Assert-TransactionFastPath -Snapshot $snapshot -Errors $errors
     Assert-SelfTest (($errors.Count -eq 1) -and ($errors[0].Contains("missing transaction_fast_path"))) "missing fast path should be a business error"
+
+    $fastPathStatus = [pscustomobject]@{ transaction_fast_path = [pscustomobject]@{ leader_slots = @(); preferred_peer_ids = @() } }
+    $snapshotA = [pscustomobject]@{
+        Url = "mock://a"; PeerID = "peer-a"; HeadHeight = 10; HeadHash = "h10"; FinalizedHeight = 8; FinalizedHash = "f8"
+        FinalityDepth = 2; StateRecovery = $true; StateRoot = "s10"; QCHeight = 0; QCHash = ""; ConsensusSlot = 100
+        ConsensusEpoch = 1; TotalActiveStake = 2; ValidatorFingerprint = "v"; TurbineFingerprint = "t"; FastLeaderFingerprint = ""; Status = $fastPathStatus
+    }
+    $snapshotB = [pscustomobject]@{
+        Url = "mock://b"; PeerID = "peer-b"; HeadHeight = 16; HeadHash = "h16"; FinalizedHeight = 14; FinalizedHash = "f14"
+        FinalityDepth = 2; StateRecovery = $true; StateRoot = "s16"; QCHeight = 0; QCHash = ""; ConsensusSlot = 106
+        ConsensusEpoch = 2; TotalActiveStake = 2; ValidatorFingerprint = "v"; TurbineFingerprint = "t"; FastLeaderFingerprint = ""; Status = $fastPathStatus
+    }
+    $driftRound = Test-SnapshotRound -Snapshots @($snapshotA, $snapshotB) -Round 1
+    Assert-SelfTest ($driftRound.Errors.Count -eq 0) "slot drift should not fail height drift inside the sampling window"
+    $heightDriftWarnings = @($driftRound.Warnings | Where-Object { $_.Contains("head height drift") })
+    Assert-SelfTest ($heightDriftWarnings.Count -eq 1) "slot drift should keep a warning"
+    $epochDriftWarnings = @($driftRound.Warnings | Where-Object { $_.Contains("epoch boundary") })
+    Assert-SelfTest ($epochDriftWarnings.Count -eq 1) "epoch boundary drift should keep a warning"
 
     Write-Host "consistency self-test passed"
 }

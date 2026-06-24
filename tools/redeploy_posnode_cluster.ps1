@@ -120,7 +120,7 @@ function Invoke-LinuxDeploy {
     $deployEnvironment = @{
         RPCNODE_DEPLOY_HOST = $LinuxHost
         RPCNODE_DEPLOY_USER = $LinuxUser
-        RPCNODE_DEPLOY_CONFIG = "deploy/rpcnode-101.json"
+        RPCNODE_DEPLOY_CONFIG = "deploy/generated-4/rpcnode-101.json"
         RPCNODE_REMOTE_CONFIG = "/opt/solana_golang/config/rpcnode-101.json"
         RPCNODE_SERVICE_NAME = "rpcnode.service"
         RPCNODE_DEPLOY_PASSWORD = [Environment]::GetEnvironmentVariable("POSNODE_DEPLOY_PASSWORD", "Process")

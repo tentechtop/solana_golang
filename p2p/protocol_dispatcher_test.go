@@ -1,6 +1,9 @@
 package p2p
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestProtocolSchedulerUsesOneWorkerPerPartition(t *testing.T) {
 	config := normalizeProtocolSchedulerConfig(ProtocolSchedulerConfig{
@@ -52,6 +55,28 @@ func TestProtocolSchedulerCapsQueueSizes(t *testing.T) {
 			config.NormalQueueSize,
 			config.LowQueueSize,
 		)
+	}
+}
+
+func TestProtocolJobFailureDowngradesKnownUnregisteredProtocol(t *testing.T) {
+	host := &Host{
+		ignoredUnregisteredProtocols: normalizeIgnoredUnregisteredProtocols([]ProtocolID{
+			ProtocolPoSStatusV1,
+			ProtocolID(9999),
+		}),
+	}
+	err := fmt.Errorf("wrapped: %w", ErrProtocolNotFound)
+	if !host.protocolJobFailureIsExpectedUnregisteredProtocol(err, ProtocolPoSStatusV1) {
+		t.Fatal("known unregistered pos status protocol was not downgraded")
+	}
+	if host.protocolJobFailureIsExpectedUnregisteredProtocol(err, ProtocolIdentifyRequestV1) {
+		t.Fatal("known but unconfigured identify protocol was downgraded")
+	}
+	if host.protocolJobFailureIsExpectedUnregisteredProtocol(err, ProtocolID(9999)) {
+		t.Fatal("unknown protocol was downgraded")
+	}
+	if host.protocolJobFailureIsExpectedUnregisteredProtocol(fmt.Errorf("other error"), ProtocolPoSStatusV1) {
+		t.Fatal("non protocol-not-found error was downgraded")
 	}
 }
 

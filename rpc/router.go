@@ -32,6 +32,13 @@ func NewPublicRouter(backend LedgerBackend) *Router {
 	RegisterPublicHandlers(router, backend)
 	return router
 }
+
+func NewBootstrapRouter(backend BootstrapNodeBackend) *Router {
+	router := NewRouter()
+	RegisterBootstrapHandlers(router, backend)
+	return router
+}
+
 func (r *Router) Register(method string, handler HandlerFunc) error {
 	method = strings.TrimSpace(method)
 	if method == "" {

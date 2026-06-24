@@ -6,52 +6,70 @@ import (
 	"log/slog"
 
 	"solana_golang/consensus"
+	"solana_golang/programs/stake"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
 
 const maxPendingEvidence = consensus.MaxSlashingEvidencePerBlock * 2
 
-func (node *posNode) pendingEvidenceSnapshotLocked() []consensus.SlashingEvidence {
+func (node *posNode) pendingEvidenceSnapshotForSlotLocked(
+	slot uint64,
+	state consensus.ChainState,
+) []consensus.SlashingEvidence {
 	if len(node.pendingEvidence) == 0 {
 		return nil
 	}
-	limit := len(node.pendingEvidence)
-	if limit > consensus.MaxSlashingEvidencePerBlock {
-		limit = consensus.MaxSlashingEvidencePerBlock
-	}
-	return append([]consensus.SlashingEvidence(nil), node.pendingEvidence[:limit]...)
-}
-
-func (node *posNode) removePendingEvidence(included []consensus.SlashingEvidence) {
-	if len(included) == 0 {
-		return
-	}
-	includedKeys := make(map[string]struct{}, len(included))
-	for _, evidence := range included {
-		key, err := slashingEvidenceLocalKey(evidence)
+	evidenceSnapshot := make([]consensus.SlashingEvidence, 0, consensus.MaxSlashingEvidencePerBlock)
+	for _, evidence := range node.pendingEvidence {
+		evidenceSlot, err := slashingEvidenceSlot(evidence)
 		if err != nil {
 			continue
 		}
-		includedKeys[key] = struct{}{}
+		if evidenceSlot > slot {
+			continue
+		}
+		if node.slashingEvidenceAppliedToStateLocked(evidence, state) {
+			continue
+		}
+		evidenceSnapshot = append(evidenceSnapshot, evidence)
+		if len(evidenceSnapshot) >= consensus.MaxSlashingEvidencePerBlock {
+			break
+		}
 	}
-	if len(includedKeys) == 0 {
+	return evidenceSnapshot
+}
+
+func (node *posNode) pruneFinalizedPendingEvidence() {
+	head := node.ledger.Head()
+	if head.FinalizedHash.IsZero() {
+		return
+	}
+	finalizedState, err := node.ledger.StateAtBlockHash(head.FinalizedHash)
+	if err != nil {
+		node.logger.Debug("posnode finalized evidence prune skipped", slog.Any("error", err))
 		return
 	}
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 	remaining := node.pendingEvidence[:0]
+	prunedCount := 0
 	for _, evidence := range node.pendingEvidence {
-		key, err := slashingEvidenceLocalKey(evidence)
-		if err != nil {
-			continue
-		}
-		if _, exists := includedKeys[key]; exists {
+		if node.slashingEvidenceAppliedToStateLocked(evidence, finalizedState) {
+			prunedCount++
 			continue
 		}
 		remaining = append(remaining, evidence)
 	}
 	node.pendingEvidence = remaining
+	if prunedCount > 0 {
+		node.logger.Info("posnode finalized slashing evidence pruned",
+			slog.Int("pruned_count", prunedCount),
+			slog.Int("remaining_count", len(node.pendingEvidence)),
+			slog.Uint64("finalized_height", head.FinalizedHeight),
+			slog.String("finalized_hash", head.FinalizedHash.String()),
+		)
+	}
 }
 
 func (node *posNode) observeProposalForEvidence(
@@ -113,11 +131,12 @@ func (node *posNode) observeProposalForEvidence(
 
 func (node *posNode) verifyProposalSignatureForEvidence(proposal consensus.BlockProposal) error {
 	node.mutex.Lock()
-	if err := node.ensureEpochForSlotLocked(proposal.Header.Slot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(proposal.Header.Slot)
+	if err != nil {
 		node.mutex.Unlock()
 		return err
 	}
-	leader, exists := node.epochSnapshot.ValidatorByID(proposal.Header.LeaderID)
+	leader, exists := epochContextValue.Snapshot.ValidatorByID(proposal.Header.LeaderID)
 	node.mutex.Unlock()
 	if !exists {
 		return fmt.Errorf("posnode: proposal leader not in snapshot")
@@ -178,10 +197,17 @@ func (node *posNode) observeSignedVoteForEvidence(ctx context.Context, envelope 
 }
 
 func (node *posNode) addPendingSlashingEvidence(evidence consensus.SlashingEvidence) (bool, error) {
+	evidenceSlot, err := slashingEvidenceSlot(evidence)
+	if err != nil {
+		return false, err
+	}
 	node.mutex.Lock()
-	snapshot := node.epochSnapshot
+	epochContextValue, err := node.epochContextForSlotLocked(evidenceSlot)
 	node.mutex.Unlock()
-	if _, _, err := evidence.Validate(snapshot); err != nil {
+	if err != nil {
+		return false, err
+	}
+	if _, _, err := evidence.Validate(epochContextValue.Snapshot); err != nil {
 		return false, err
 	}
 	key, err := slashingEvidenceLocalKey(evidence)
@@ -202,6 +228,24 @@ func (node *posNode) addPendingSlashingEvidence(evidence consensus.SlashingEvide
 	node.seenEvidence[key] = struct{}{}
 	node.pendingEvidence = append(node.pendingEvidence, evidence)
 	return true, nil
+}
+
+// slashingEvidenceSlot 提取证据 slot + 罚没验证必须绑定作恶发生时的 epoch 快照。
+func slashingEvidenceSlot(evidence consensus.SlashingEvidence) (uint64, error) {
+	switch evidence.Type {
+	case consensus.SlashingEvidenceTypeDoubleProposal:
+		if evidence.DoubleProposal == nil {
+			return 0, fmt.Errorf("posnode: missing double proposal evidence")
+		}
+		return evidence.DoubleProposal.FirstProposal.Header.Slot, nil
+	case consensus.SlashingEvidenceTypeDoubleVote:
+		if evidence.DoubleVote == nil {
+			return 0, fmt.Errorf("posnode: missing double vote evidence")
+		}
+		return evidence.DoubleVote.FirstVote.Vote.Slot, nil
+	default:
+		return 0, fmt.Errorf("posnode: unsupported slashing evidence type %v", evidence.Type)
+	}
 }
 
 func (node *posNode) broadcastEvidence(
@@ -242,6 +286,49 @@ func slashingEvidenceLocalKey(evidence consensus.SlashingEvidence) (string, erro
 		return "", err
 	}
 	return utils.BytesToHex(utils.SHA256(encoded)), nil
+}
+
+func (node *posNode) slashingEvidenceAppliedToStateLocked(
+	evidence consensus.SlashingEvidence,
+	state consensus.ChainState,
+) bool {
+	evidenceSlot, err := slashingEvidenceSlot(evidence)
+	if err != nil {
+		return false
+	}
+	epochContextValue, err := node.epochContextForSlotLocked(evidenceSlot)
+	if err != nil {
+		return false
+	}
+	validator, _, err := evidence.Validate(epochContextValue.Snapshot)
+	if err != nil {
+		return false
+	}
+	stakeState, found, err := stakeStateByAddress(state, validator.AccountAddress)
+	if err != nil || !found {
+		return false
+	}
+	return stakeState.LastSlashedSlot >= evidenceSlot
+}
+
+func stakeStateByAddress(
+	state consensus.ChainState,
+	address structure.PublicKey,
+) (stake.ValidatorState, bool, error) {
+	for _, account := range state.Accounts {
+		if account.Address != address {
+			continue
+		}
+		if len(account.Account.Data) == 0 {
+			return stake.ValidatorState{}, false, nil
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil {
+			return stake.ValidatorState{}, false, err
+		}
+		return stakeState, true, nil
+	}
+	return stake.ValidatorState{}, false, nil
 }
 
 func sameVoteChoice(left consensus.Vote, right consensus.Vote) bool {

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
 	"solana_golang/programs/stake"
+	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
@@ -26,49 +28,51 @@ type output struct {
 }
 
 type nodeConfig struct {
-	ChainID                       string              `json:"chain_id"`
-	Environment                   string              `json:"environment"`
-	Production                    bool                `json:"production"`
-	NodeName                      string              `json:"node_name"`
-	DataPath                      string              `json:"data_path"`
-	DataRootPath                  string              `json:"-"`
-	ListenIP                      string              `json:"listen_ip"`
-	ListenPort                    int                 `json:"listen_port"`
-	AdvertisedIP                  string              `json:"advertised_ip,omitempty"`
-	AdvertisedPort                int                 `json:"advertised_port,omitempty"`
-	RPCEnabled                    bool                `json:"rpc_enabled"`
-	RPCListenIP                   string              `json:"rpc_listen_ip"`
-	RPCPort                       int                 `json:"rpc_port"`
-	AllowInsecureP2P              *bool               `json:"allow_insecure_p2p,omitempty"`
-	PeerSeed                      string              `json:"peer_seed"`
-	StakerSeed                    string              `json:"staker_seed"`
-	ValidatorSeed                 string              `json:"validator_seed"`
-	ConsensusSeed                 string              `json:"consensus_seed"`
-	PeerKeyPath                   string              `json:"peer_key_path,omitempty"`
-	StakerKeyPath                 string              `json:"staker_key_path,omitempty"`
-	ValidatorKeyPath              string              `json:"validator_key_path,omitempty"`
-	ConsensusKeyPath              string              `json:"consensus_key_path,omitempty"`
-	BLSKeyPath                    string              `json:"bls_key_path,omitempty"`
-	StakeLamports                 uint64              `json:"stake_lamports"`
-	BootstrapPeers                []peerConfig        `json:"bootstrap_peers"`
-	Genesis                       genesisConfig       `json:"genesis"`
-	SlotMillis                    int                 `json:"slot_millis"`
-	GenesisStartMs                int64               `json:"genesis_start_unix_millis"`
-	EpochSlots                    uint64              `json:"epoch_slots"`
-	FinalityDepth                 uint64              `json:"finality_depth"`
-	DisableStateRecovery          bool                `json:"disable_state_recovery,omitempty"`
-	TurbineFanout                 int                 `json:"turbine_fanout"`
-	AutoRegister                  bool                `json:"auto_register"`
-	MempoolMaxTransactions        int                 `json:"mempool_max_transactions"`
-	MempoolTransactionTTLMillis   int64               `json:"mempool_transaction_ttl_millis"`
-	TransactionLeaderForwardSlots int                 `json:"transaction_leader_forward_slots"`
-	TransactionForwardValidators  *bool               `json:"transaction_forward_validators,omitempty"`
-	TreasuryKeyPath               string              `json:"treasury_key_path,omitempty"`
-	AllowHardcodedTreasury        *bool               `json:"allow_hardcoded_treasury,omitempty"`
-	AutoTransfer                  *autoTransferConfig `json:"auto_transfer,omitempty"`
-	GenesisHash                   string              `json:"-"`
-	ChainIdentityHash             string              `json:"-"`
-	P2PNetworkID                  string              `json:"-"`
+	ChainID                       string                          `json:"chain_id"`
+	Environment                   string                          `json:"environment"`
+	Production                    bool                            `json:"production"`
+	NodeName                      string                          `json:"node_name"`
+	DataPath                      string                          `json:"data_path"`
+	DataRootPath                  string                          `json:"-"`
+	ListenIP                      string                          `json:"listen_ip"`
+	ListenPort                    int                             `json:"listen_port"`
+	AdvertisedIP                  string                          `json:"advertised_ip,omitempty"`
+	AdvertisedPort                int                             `json:"advertised_port,omitempty"`
+	RPCEnabled                    bool                            `json:"rpc_enabled"`
+	RPCListenIP                   string                          `json:"rpc_listen_ip"`
+	RPCPort                       int                             `json:"rpc_port"`
+	AllowInsecureP2P              *bool                           `json:"allow_insecure_p2p,omitempty"`
+	PeerSeed                      string                          `json:"peer_seed"`
+	StakerSeed                    string                          `json:"staker_seed"`
+	ValidatorSeed                 string                          `json:"validator_seed"`
+	ConsensusSeed                 string                          `json:"consensus_seed"`
+	PeerKeyPath                   string                          `json:"peer_key_path,omitempty"`
+	StakerKeyPath                 string                          `json:"staker_key_path,omitempty"`
+	ValidatorKeyPath              string                          `json:"validator_key_path,omitempty"`
+	ConsensusKeyPath              string                          `json:"consensus_key_path,omitempty"`
+	BLSKeyPath                    string                          `json:"bls_key_path,omitempty"`
+	StakeLamports                 uint64                          `json:"stake_lamports"`
+	BootstrapPeers                []peerConfig                    `json:"bootstrap_peers"`
+	Genesis                       genesisConfig                   `json:"genesis"`
+	SlotMillis                    int                             `json:"slot_millis"`
+	GenesisStartMs                int64                           `json:"genesis_start_unix_millis"`
+	EpochSlots                    uint64                          `json:"epoch_slots"`
+	FinalityDepth                 uint64                          `json:"finality_depth"`
+	DisableStateRecovery          bool                            `json:"disable_state_recovery,omitempty"`
+	TurbineFanout                 int                             `json:"turbine_fanout"`
+	AutoRegister                  bool                            `json:"auto_register"`
+	MempoolMaxTransactions        int                             `json:"mempool_max_transactions"`
+	MempoolTransactionTTLMillis   int64                           `json:"mempool_transaction_ttl_millis"`
+	TransactionLeaderForwardSlots int                             `json:"transaction_leader_forward_slots"`
+	TransactionForwardValidators  *bool                           `json:"transaction_forward_validators,omitempty"`
+	TreasuryKeyPath               string                          `json:"treasury_key_path,omitempty"`
+	AllowHardcodedTreasury        *bool                           `json:"allow_hardcoded_treasury,omitempty"`
+	AutoTransfer                  *autoTransferConfig             `json:"auto_transfer,omitempty"`
+	PrivacyExecutionMode          runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
+	ContractDeploymentPolicy      contractDeploymentPolicyConfig  `json:"contract_deployment_policy,omitempty"`
+	GenesisHash                   string                          `json:"-"`
+	ChainIdentityHash             string                          `json:"-"`
+	P2PNetworkID                  string                          `json:"-"`
 }
 
 type peerConfig struct {
@@ -79,10 +83,11 @@ type peerConfig struct {
 }
 
 type genesisConfig struct {
-	InitialSupplyLamports uint64                   `json:"initial_supply_lamports"`
-	TreasuryAddress       string                   `json:"treasury_address,omitempty"`
-	FundedAccounts        []genesisAccountConfig   `json:"funded_accounts"`
-	InitialValidators     []genesisValidatorConfig `json:"initial_validators"`
+	InitialSupplyLamports uint64                          `json:"initial_supply_lamports"`
+	TreasuryAddress       string                          `json:"treasury_address,omitempty"`
+	FundedAccounts        []genesisAccountConfig          `json:"funded_accounts"`
+	InitialValidators     []genesisValidatorConfig        `json:"initial_validators"`
+	PrivacyExecutionMode  runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
 }
 
 type genesisAccountConfig struct {
@@ -109,6 +114,14 @@ type autoTransferConfig struct {
 	Lamports uint64 `json:"lamports"`
 }
 
+type contractDeploymentPolicyConfig struct {
+	AllowedDeployers             []string              `json:"allowed_deployers,omitempty"`
+	MinDeploymentDepositLamports uint64                `json:"min_deployment_deposit_lamports,omitempty"`
+	RequireManifest              *bool                 `json:"require_manifest,omitempty"`
+	AllowUpgradeableContracts    *bool                 `json:"allow_upgradeable_contracts,omitempty"`
+	ResolvedAllowedDeployers     []structure.PublicKey `json:"-"`
+}
+
 type chainIdentityPayload struct {
 	ChainID                       string `json:"chain_id"`
 	GenesisHash                   string `json:"genesis_hash"`
@@ -119,13 +132,17 @@ type chainIdentityPayload struct {
 	TurbineFanout                 int    `json:"turbine_fanout"`
 	TransactionLeaderForwardSlots int    `json:"transaction_leader_forward_slots"`
 	TransactionForwardValidators  bool   `json:"transaction_forward_validators"`
+	PrivacyExecutionMode          string `json:"privacy_execution_mode"`
+	ProgramExecutionPolicy        string `json:"program_execution_policy"`
+	ContractDeploymentPolicy      string `json:"contract_deployment_policy"`
 }
 
 const (
-	defaultChainID       = "pos-localnet"
-	defaultSlotMillis    = 1000
-	defaultEpochSlots    = 8
-	defaultInitialSupply = uint64(1_000_000_000_000_000_000)
+	defaultChainID                           = "pos-localnet"
+	defaultSlotMillis                        = 1000
+	defaultEpochSlots                        = 8
+	defaultInitialSupply                     = uint64(1_000_000_000_000_000_000)
+	defaultProductionContractDeploymentStake = uint64(10_000_000)
 )
 
 func main() {
@@ -250,6 +267,12 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if len(config.Genesis.FundedAccounts) == 0 {
 		return nodeConfig{}, fmt.Errorf("genesis funded accounts are empty")
 	}
+	if err := normalizePrivacyExecutionModeConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := normalizeContractDeploymentPolicyConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
 	return enrichNodeChainIdentity(config)
 }
 
@@ -262,6 +285,10 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 	if err != nil {
 		return nodeConfig{}, fmt.Errorf("build chain identity genesis: %w", err)
 	}
+	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint(config.Genesis.PrivacyExecutionMode)
+	if err != nil {
+		return nodeConfig{}, err
+	}
 	payload := chainIdentityPayload{
 		ChainID:                       config.ChainID,
 		GenesisHash:                   head.BlockHash.String(),
@@ -272,6 +299,9 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 		TurbineFanout:                 config.TurbineFanout,
 		TransactionLeaderForwardSlots: config.TransactionLeaderForwardSlots,
 		TransactionForwardValidators:  forwardTransactionsToValidators(config),
+		PrivacyExecutionMode:          string(config.Genesis.PrivacyExecutionMode),
+		ProgramExecutionPolicy:        programExecutionPolicy,
+		ContractDeploymentPolicy:      contractDeploymentPolicyFingerprint(config.ContractDeploymentPolicy),
 	}
 	identityBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -294,11 +324,17 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 }
 
 func buildBlockchainGenesisConfig(config nodeConfig) (blockchain.GenesisConfig, error) {
+	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint(config.Genesis.PrivacyExecutionMode)
+	if err != nil {
+		return blockchain.GenesisConfig{}, err
+	}
 	genesis := blockchain.GenesisConfig{
-		ChainID:               config.ChainID,
-		InitialSupplyLamports: config.Genesis.InitialSupplyLamports,
-		FundedAccounts:        make([]blockchain.GenesisAccount, 0, len(config.Genesis.FundedAccounts)),
-		InitialValidators:     make([]blockchain.GenesisValidator, 0, len(config.Genesis.InitialValidators)),
+		ChainID:                config.ChainID,
+		InitialSupplyLamports:  config.Genesis.InitialSupplyLamports,
+		PrivacyExecutionMode:   string(config.Genesis.PrivacyExecutionMode),
+		ProgramExecutionPolicy: programExecutionPolicy,
+		FundedAccounts:         make([]blockchain.GenesisAccount, 0, len(config.Genesis.FundedAccounts)),
+		InitialValidators:      make([]blockchain.GenesisValidator, 0, len(config.Genesis.InitialValidators)),
 	}
 	if config.Genesis.TreasuryAddress != "" {
 		treasuryAddress, err := structure.PublicKeyFromBase58(config.Genesis.TreasuryAddress)
@@ -345,6 +381,92 @@ func buildBlockchainGenesisConfig(config nodeConfig) (blockchain.GenesisConfig, 
 		})
 	}
 	return genesis, nil
+}
+
+func normalizePrivacyExecutionModeConfig(config *nodeConfig) error {
+	rootMode, rootErr := runtimepkg.NormalizePrivacyExecutionMode(config.PrivacyExecutionMode)
+	genesisMode, genesisErr := runtimepkg.NormalizePrivacyExecutionMode(config.Genesis.PrivacyExecutionMode)
+	if config.PrivacyExecutionMode != "" && rootErr != nil {
+		return fmt.Errorf("invalid privacy execution mode: %w", rootErr)
+	}
+	if config.Genesis.PrivacyExecutionMode != "" && genesisErr != nil {
+		return fmt.Errorf("invalid genesis privacy execution mode: %w", genesisErr)
+	}
+	if config.PrivacyExecutionMode != "" && config.Genesis.PrivacyExecutionMode != "" && rootMode != genesisMode {
+		return fmt.Errorf("privacy execution mode mismatch root=%s genesis=%s", rootMode, genesisMode)
+	}
+	if config.Genesis.PrivacyExecutionMode != "" {
+		config.PrivacyExecutionMode = genesisMode
+		config.Genesis.PrivacyExecutionMode = genesisMode
+		return nil
+	}
+	config.PrivacyExecutionMode = rootMode
+	config.Genesis.PrivacyExecutionMode = rootMode
+	return nil
+}
+
+func normalizeContractDeploymentPolicyConfig(config *nodeConfig) error {
+	policy := config.ContractDeploymentPolicy
+	policy.ResolvedAllowedDeployers = nil
+	for index, value := range policy.AllowedDeployers {
+		addressText := strings.TrimSpace(value)
+		if addressText == "" {
+			return fmt.Errorf("contract deployment allowed_deployers[%d] is empty", index)
+		}
+		address, err := structure.PublicKeyFromBase58(addressText)
+		if err != nil {
+			return fmt.Errorf("contract deployment allowed_deployers[%d]: %w", index, err)
+		}
+		policy.ResolvedAllowedDeployers = append(policy.ResolvedAllowedDeployers, address)
+	}
+	if policy.RequireManifest == nil && isProductionNodeConfig(*config) {
+		requireManifest := true
+		policy.RequireManifest = &requireManifest
+	}
+	if policy.MinDeploymentDepositLamports == 0 && isProductionNodeConfig(*config) && len(policy.ResolvedAllowedDeployers) == 0 {
+		policy.MinDeploymentDepositLamports = defaultProductionContractDeploymentStake
+	}
+	config.ContractDeploymentPolicy = policy
+	return nil
+}
+
+func contractDeploymentPolicyFingerprint(config contractDeploymentPolicyConfig) string {
+	requireManifest := false
+	if config.RequireManifest != nil {
+		requireManifest = *config.RequireManifest
+	}
+	allowUpgradeable := false
+	if config.AllowUpgradeableContracts != nil {
+		allowUpgradeable = *config.AllowUpgradeableContracts
+	}
+	deployers := make([]string, 0, len(config.ResolvedAllowedDeployers))
+	for _, deployer := range config.ResolvedAllowedDeployers {
+		deployers = append(deployers, deployer.String())
+	}
+	sort.Strings(deployers)
+	return fmt.Sprintf(
+		"contract_deployment_policy_v1|min_deposit=%d|require_manifest=%t|allow_upgradeable=%t|deployers=%s",
+		config.MinDeploymentDepositLamports,
+		requireManifest,
+		allowUpgradeable,
+		strings.Join(deployers, ","),
+	)
+}
+
+func defaultProgramExecutionPolicyFingerprint(privacyMode runtimepkg.PrivacyExecutionMode) (string, error) {
+	policy, err := runtimepkg.NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, privacyMode)
+	if err != nil {
+		return "", fmt.Errorf("program execution policy: %w", err)
+	}
+	return policy.Fingerprint(), nil
+}
+
+func isProductionNodeConfig(config nodeConfig) bool {
+	if config.Production {
+		return true
+	}
+	environment := strings.TrimSpace(strings.ToLower(config.Environment))
+	return environment == "production" || environment == "prod"
 }
 
 func publicKeyFromAddressOrSeed(addressText string, seedText string, fieldName string) (structure.PublicKey, error) {

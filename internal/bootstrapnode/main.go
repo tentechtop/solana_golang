@@ -33,6 +33,7 @@ type bootstrapConfig struct {
 	ListenIP           string       `json:"listen_ip"`
 	AdvertisedIP       string       `json:"advertised_ip"`
 	ListenPort         int          `json:"listen_port"`
+	Network            string       `json:"network,omitempty"`
 	PeerSeed           string       `json:"peer_seed"`
 	PeerKeyPath        string       `json:"peer_key_path,omitempty"`
 	AllowInsecureP2P   *bool        `json:"allow_insecure_p2p,omitempty"`
@@ -48,6 +49,7 @@ type peerConfig struct {
 	PeerID       string   `json:"peer_id"`
 	IP           string   `json:"ip"`
 	Port         int      `json:"port"`
+	Network      string   `json:"network,omitempty"`
 	Role         string   `json:"role,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 }
@@ -99,7 +101,7 @@ func Run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	listenAddress, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.ListenIP, utils.ProtocolTCP, config.ListenPort, keyPair.peerID)
+	listenAddress, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.ListenIP, config.p2pProtocol(), config.ListenPort, keyPair.peerID)
 	if err != nil {
 		return fmt.Errorf("bootstrapnode: build listen address: %w", err)
 	}
@@ -156,6 +158,11 @@ func normalizeConfig(config bootstrapConfig) (bootstrapConfig, error) {
 	if config.ListenPort < 1 || config.ListenPort > 65535 {
 		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: invalid listen port")
 	}
+	network, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: invalid p2p network: %w", err)
+	}
+	config.Network = string(network)
 	if config.PeerSeed == "" && config.PeerKeyPath == "" {
 		return bootstrapConfig{}, fmt.Errorf("bootstrapnode: peer key material is empty")
 	}
@@ -189,19 +196,43 @@ func normalizeConfig(config bootstrapConfig) (bootstrapConfig, error) {
 	return config, nil
 }
 
+// 功能目的：统一解析 P2P 传输协议；实现原因：引导节点监听、广告和静态 peer 必须使用一致协议边界。
+func normalizeP2PNetwork(value string) (utils.MultiAddressProtocol, error) {
+	network := strings.TrimSpace(value)
+	if network == "" {
+		return utils.ProtocolTCP, nil
+	}
+	return utils.ParseMultiAddressProtocol(network)
+}
+
+func (config bootstrapConfig) p2pProtocol() utils.MultiAddressProtocol {
+	protocol, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return utils.ProtocolTCP
+	}
+	return protocol
+}
+
+func preferredP2PProtocols(primary utils.MultiAddressProtocol) []utils.MultiAddressProtocol {
+	if primary == utils.ProtocolTCP {
+		return []utils.MultiAddressProtocol{utils.ProtocolTCP, utils.ProtocolQUIC}
+	}
+	return []utils.MultiAddressProtocol{utils.ProtocolQUIC, utils.ProtocolTCP}
+}
+
 func newHost(config bootstrapConfig, keyPair rawKeyPair, logger *slog.Logger) (*p2p.Host, error) {
 	hostConfig := p2p.HostConfig{
 		PeerID:             keyPair.peerID,
 		AllowInsecure:      config.allowInsecure(),
 		Production:         config.Production,
 		Environment:        config.Environment,
-		PreferredProtocols: []utils.MultiAddressProtocol{utils.ProtocolTCP},
+		PreferredProtocols: preferredP2PProtocols(config.p2pProtocol()),
 		MaxPeers:           config.MaxPeers,
 		MaxConnections:     config.MaxConnections,
 		Logger:             logger,
 	}
 	if config.AdvertisedIP != "" {
-		address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.AdvertisedIP, utils.ProtocolTCP, config.ListenPort, keyPair.peerID)
+		address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, config.AdvertisedIP, config.p2pProtocol(), config.ListenPort, keyPair.peerID)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrapnode: build advertised address: %w", err)
 		}
@@ -247,7 +278,14 @@ func newStaticPeer(config peerConfig) (p2p.Peer, error) {
 	if peerID == "" || ipAddress == "" {
 		return p2p.Peer{}, fmt.Errorf("bootstrapnode: static peer requires peer_id and ip")
 	}
-	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, ipAddress, utils.ProtocolTCP, config.Port, peerID)
+	if config.Port < 1 || config.Port > 65535 {
+		return p2p.Peer{}, fmt.Errorf("bootstrapnode: static peer %s invalid port", peerID)
+	}
+	network, err := normalizeP2PNetwork(config.Network)
+	if err != nil {
+		return p2p.Peer{}, fmt.Errorf("bootstrapnode: static peer %s network: %w", peerID, err)
+	}
+	address, err := utils.BuildMultiAddress(utils.MultiAddressIP4, ipAddress, network, config.Port, peerID)
 	if err != nil {
 		return p2p.Peer{}, fmt.Errorf("bootstrapnode: build static peer address: %w", err)
 	}

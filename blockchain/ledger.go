@@ -38,6 +38,20 @@ type Ledger struct {
 	closed                bool
 }
 
+const (
+	DefaultContractProgramListLimit = 50
+	MaxContractProgramListLimit     = 200
+)
+
+type ContractProgramRecord struct {
+	Address    structure.PublicKey
+	Owner      structure.PublicKey
+	Lamports   uint64
+	DataLength int
+	CodeHash   string
+	RentEpoch  uint64
+}
+
 // NewLedgerFromGenesis 创建账本 + 空数据库和内存模式都从同一 genesis 状态启动。
 func NewLedgerFromGenesis(db database.Database, genesis GenesisConfig) (*Ledger, error) {
 	return NewLedgerFromGenesisWithConfig(db, genesis, LedgerConfig{})
@@ -832,6 +846,32 @@ func (ledger *Ledger) State() consensus.ChainState {
 	return cloneState(ledger.state)
 }
 
+// ContractPrograms 查询可执行合约账户 + 钱包资产页需要直接展示链上 VM 程序。
+func (ledger *Ledger) ContractPrograms(limit int) ([]ContractProgramRecord, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return nil, ErrLedgerClosed
+	}
+
+	normalizedLimit := normalizeContractProgramLimit(limit)
+	programs := make([]ContractProgramRecord, 0, normalizedLimit)
+	for _, addressedAccount := range ledger.state.Accounts {
+		account := addressedAccount.Account
+		if account.Owner != structure.DefaultBuiltinProgramIDs.BPFLoader || !account.Executable {
+			continue
+		}
+		programs = append(programs, contractProgramRecord(addressedAccount.Address, account))
+	}
+	sort.Slice(programs, func(leftIndex int, rightIndex int) bool {
+		return programs[leftIndex].Address.String() < programs[rightIndex].Address.String()
+	})
+	if len(programs) > normalizedLimit {
+		programs = programs[:normalizedLimit]
+	}
+	return programs, nil
+}
+
 // Head 返回主链头 + 出块和状态同步使用统一入口。
 func (ledger *Ledger) Head() Head {
 	ledger.mutex.RLock()
@@ -855,6 +895,24 @@ func (ledger *Ledger) HeadQC() (consensus.QuorumCertificate, bool, error) {
 	}
 	defer readTx.Close()
 	return readStoredQCByHash(readTx, ledger.head.QCHash)
+}
+
+// BlockQC 读取指定区块的最高 QC + QC 驱动提交必须先确认候选块已被 2/3 stake 认证。
+func (ledger *Ledger) BlockQC(blockHash structure.Hash) (consensus.QuorumCertificate, bool, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return consensus.QuorumCertificate{}, false, ErrLedgerClosed
+	}
+	if ledger.db == nil {
+		return consensus.QuorumCertificate{}, false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return consensus.QuorumCertificate{}, false, fmt.Errorf("blockchain: begin block qc snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return readStoredQCByBlockHash(readTx, blockHash)
 }
 
 // FinalityDepth 返回不可回滚深度 + 供 RPC 和监控确认所有节点使用一致规则。
@@ -902,6 +960,33 @@ func (ledger *Ledger) ValidatorSetFromStateAtEpoch(epochID uint64) (consensus.Va
 	ledger.mutex.RLock()
 	defer ledger.mutex.RUnlock()
 	return ValidatorSetFromStateAtEpoch(ledger.state, epochID)
+}
+
+// ValidatorSetFromFinalizedStateAtEpoch 从 finalized 状态生成验证者集合 + epoch leader schedule 不能依赖未最终确认分叉。
+func (ledger *Ledger) ValidatorSetFromFinalizedStateAtEpoch(epochID uint64) (consensus.ValidatorSet, error) {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	if ledger.closed {
+		return consensus.ValidatorSet{}, ErrLedgerClosed
+	}
+	state := ledger.state
+	finalizedHash := ledger.head.FinalizedHash
+	if ledger.db != nil && !finalizedHash.IsZero() && finalizedHash != ledger.head.BlockHash {
+		readTx, err := ledger.db.BeginReadTransaction()
+		if err != nil {
+			return consensus.ValidatorSet{}, fmt.Errorf("blockchain: begin finalized validator snapshot: %w", err)
+		}
+		defer readTx.Close()
+		finalizedState, err := loadStateSnapshot(readTx, finalizedHash)
+		if err != nil {
+			return consensus.ValidatorSet{}, err
+		}
+		if len(finalizedState.Accounts) == 0 {
+			return consensus.ValidatorSet{}, fmt.Errorf("%w: finalized state snapshot not found", ErrInvalidCommit)
+		}
+		state = finalizedState
+	}
+	return ValidatorSetFromStateAtEpoch(state, epochID)
 }
 
 // ValidatorSetFromState 从状态扫描 active validator + 新节点必须注册质押后才能进入集合。
@@ -1203,8 +1288,19 @@ func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (He
 	if stateRoot != request.Proposal.Header.StateRoot {
 		return Head{}, fmt.Errorf("%w: snapshot state root mismatch", ErrInvalidCommit)
 	}
-	if request.Proposal.Header.Height <= ledger.head.Height {
+	if request.Proposal.Header.Height < ledger.head.FinalizedHeight {
 		return ledger.head, nil
+	}
+	if request.Proposal.Header.Height == ledger.head.FinalizedHeight {
+		if ledger.head.FinalizedHash != blockHash {
+			return Head{}, fmt.Errorf("%w: finalized snapshot conflicts with local finalized hash", ErrInvalidCommit)
+		}
+		return ledger.head, nil
+	}
+	if advanced, head, err := ledger.tryAdvanceFinalizedCheckpointLocked(request.Proposal.Header.Height, blockHash); err != nil {
+		return Head{}, err
+	} else if advanced {
+		return head, nil
 	}
 	nextHead := Head{
 		ChainID:         request.Proposal.Header.ChainID,
@@ -1221,13 +1317,23 @@ func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (He
 	if nextHead.QCHash.IsZero() {
 		nextHead.QCHash = blockHash
 	}
+	transactionIDs, err := transactionIDsForProposal(request.Proposal)
+	if err != nil {
+		return Head{}, err
+	}
+	removedTransactionIDs := []string(nil)
 	if ledger.db != nil {
-		if err := ledger.persistImportedSnapshotLocked(request, blockHash, nextHead); err != nil {
+		removedTransactionIDs, err = ledger.persistImportedSnapshotLocked(request, blockHash, nextHead)
+		if err != nil {
 			return Head{}, err
 		}
 	}
 	ledger.state = cloneState(request.State)
 	ledger.head = nextHead
+	for _, transactionID := range removedTransactionIDs {
+		delete(ledger.committedTransactions, transactionID)
+	}
+	ledger.addCommittedTransactionIDsLocked(transactionIDs, blockHash)
 	ledger.loggerLocked().Info("ledger finalized snapshot imported",
 		slog.String("chain_id", nextHead.ChainID),
 		slog.Uint64("slot", nextHead.Slot),
@@ -1237,6 +1343,56 @@ func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (He
 		slog.Duration("duration", time.Since(startedAt)),
 	)
 	return nextHead, nil
+}
+
+// tryAdvanceFinalizedCheckpointLocked 更新本地主链 finalized 指针 + 同链检查点无需回退账户状态。
+func (ledger *Ledger) tryAdvanceFinalizedCheckpointLocked(height uint64, blockHash structure.Hash) (bool, Head, error) {
+	if height > ledger.head.Height {
+		return false, Head{}, nil
+	}
+	localHash, found, err := ledger.mainChainHashAtHeightLocked(height)
+	if err != nil {
+		return false, Head{}, err
+	}
+	if !found || localHash != blockHash {
+		return false, Head{}, nil
+	}
+	nextHead := ledger.head
+	nextHead.FinalizedHeight = height
+	nextHead.FinalizedHash = blockHash
+	nextHead.UpdatedAtMs = time.Now().UnixMilli()
+	if ledger.db != nil {
+		if err := ledger.persistHeadLocked(nextHead); err != nil {
+			return false, Head{}, err
+		}
+	}
+	ledger.head = nextHead
+	ledger.loggerLocked().Info("ledger finalized checkpoint advanced",
+		slog.Uint64("height", nextHead.Height),
+		slog.String("head_hash", nextHead.BlockHash.String()),
+		slog.Uint64("finalized_height", nextHead.FinalizedHeight),
+		slog.String("finalized_hash", nextHead.FinalizedHash.String()),
+	)
+	return true, nextHead, nil
+}
+
+// mainChainHashAtHeightLocked 读取主链高度哈希 + 快照导入必须判断检查点是否已在本地主链。
+func (ledger *Ledger) mainChainHashAtHeightLocked(height uint64) (structure.Hash, bool, error) {
+	if ledger.db == nil {
+		if height == ledger.head.Height {
+			return ledger.head.BlockHash, true, nil
+		}
+		if height == ledger.head.FinalizedHeight {
+			return ledger.head.FinalizedHash, true, nil
+		}
+		return structure.Hash{}, false, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return structure.Hash{}, false, fmt.Errorf("blockchain: begin main chain checkpoint snapshot: %w", err)
+	}
+	defer readTx.Close()
+	return readMainChainHashAtHeight(readTx, height)
 }
 
 func (request CommitBlockRequest) validate(head Head) error {
@@ -1317,6 +1473,27 @@ func cloneState(state consensus.ChainState) consensus.ChainState {
 	return consensus.ChainState{Accounts: accounts}
 }
 
+func normalizeContractProgramLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultContractProgramListLimit
+	}
+	if limit > MaxContractProgramListLimit {
+		return MaxContractProgramListLimit
+	}
+	return limit
+}
+
+func contractProgramRecord(address structure.PublicKey, account structure.Account) ContractProgramRecord {
+	return ContractProgramRecord{
+		Address:    address,
+		Owner:      account.Owner,
+		Lamports:   account.Lamports,
+		DataLength: account.DataLen(),
+		CodeHash:   utils.SHA256Hex(account.DataBytes()),
+		RentEpoch:  account.RentEpoch,
+	}
+}
+
 func (ledger *Ledger) loggerLocked() *slog.Logger {
 	return utils.EnsureLogger(ledger.logger)
 }
@@ -1366,6 +1543,7 @@ func logBlockCandidate(
 		slog.String("parent_hash", request.Proposal.Header.ParentHash.String()),
 		slog.String("leader_id", string(request.Proposal.Header.LeaderID)),
 		slog.Int("tx_count", len(request.Proposal.Transactions)),
+		slog.Int("evidence_count", len(request.Proposal.Evidence)),
 		slog.Int("reward_count", len(request.Proposal.Rewards)),
 		slog.String("state_root", request.Proposal.Header.StateRoot.String()),
 		slog.Int64("duration_ms", time.Since(startedAt).Milliseconds()),
@@ -1499,30 +1677,92 @@ func (ledger *Ledger) persistCommitLocked(request CommitBlockRequest, blockHash 
 	return ledger.db.DataTransaction(operations)
 }
 
-func (ledger *Ledger) persistImportedSnapshotLocked(request ImportSnapshotRequest, blockHash structure.Hash, head Head) error {
+func (ledger *Ledger) persistImportedSnapshotLocked(
+	request ImportSnapshotRequest,
+	blockHash structure.Hash,
+	head Head,
+) ([]string, error) {
+	rollbackOps, removedTransactionIDs, err := ledger.collectImportedSnapshotRollbackOpsLocked(head.Height)
+	if err != nil {
+		return nil, err
+	}
 	operations, err := ledger.collectBlockStorageOps(request.Proposal, blockHash, request.State)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	operations = append(operations, rollbackOps...)
 	operations = append(operations,
 		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), blockHash[:]),
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
 	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
-		return err
+		return nil, err
 	}
 	if err := appendRewardQCIndexOps(&operations, request.Proposal, blockHash); err != nil {
-		return err
+		return nil, err
 	}
 	if err := appendAccountSnapshotImportOps(ledger.db, &operations, request.State); err != nil {
-		return err
+		return nil, err
 	}
 	headBytes, err := marshalHead(head)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	operations = append(operations, database.NewUpdateOperation(database.TableChain, chainHeadKey, headBytes))
-	return ledger.db.DataTransaction(operations)
+	if err := ledger.db.DataTransaction(operations); err != nil {
+		return nil, err
+	}
+	return removedTransactionIDs, nil
+}
+
+// collectImportedSnapshotRollbackOpsLocked 清理检查点之后的主链索引 + 回退到 finalized snapshot 时不能留下旧主链高度。
+func (ledger *Ledger) collectImportedSnapshotRollbackOpsLocked(newHeight uint64) ([]database.DBOperation, []string, error) {
+	if ledger.db == nil || newHeight >= ledger.head.Height {
+		return nil, nil, nil
+	}
+	readTx, err := ledger.db.BeginReadTransaction()
+	if err != nil {
+		return nil, nil, fmt.Errorf("blockchain: begin imported snapshot rollback snapshot: %w", err)
+	}
+	defer readTx.Close()
+	operationCapacity := 0
+	if ledger.head.Height-newHeight < 1024 {
+		operationCapacity = int(ledger.head.Height - newHeight)
+	}
+	operations := make([]database.DBOperation, 0, operationCapacity)
+	removedTransactionIDs := make([]string, 0)
+	for height := newHeight + 1; height <= ledger.head.Height; height++ {
+		blockHash, found, err := readMainChainHashAtHeight(readTx, height)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			continue
+		}
+		block, err := loadProposalByHash(readTx, blockHash)
+		if err != nil {
+			return nil, nil, err
+		}
+		transactionIDs, err := transactionIDsForProposal(block)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, transactionID := range transactionIDs {
+			removedTransactionIDs = append(removedTransactionIDs, transactionID)
+			operations = append(operations, database.NewDeleteOperation(database.TableTxToBlock, []byte(transactionID)))
+		}
+		if err := appendAddressHistoryDeleteOps(&operations, block, blockHash); err != nil {
+			return nil, nil, err
+		}
+		if err := appendRewardQCDeleteOps(&operations, block); err != nil {
+			return nil, nil, err
+		}
+		operations = append(operations,
+			database.NewDeleteOperation(database.TableHeightToHash, uint64Key(height)),
+			database.NewDeleteOperation(database.TableHashToHeight, blockHash[:]),
+		)
+	}
+	return operations, removedTransactionIDs, nil
 }
 
 // appendAccountSnapshotImportOps 覆盖当前账户表 + 快照导入后读路径必须与 state root 完全一致。

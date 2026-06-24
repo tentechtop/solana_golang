@@ -3,10 +3,13 @@ package posnode
 import "time"
 
 const (
-	slotDeadlineNumerator   = 9
-	slotDeadlineDenominator = 10
-	minSlotTickInterval     = 50 * time.Millisecond
-	maxSlotTickInterval     = 500 * time.Millisecond
+	slotDeadlineNumerator       = 9
+	slotDeadlineDenominator     = 10
+	minSlotTickInterval         = 50 * time.Millisecond
+	maxSlotTickInterval         = 500 * time.Millisecond
+	minSlotProductionRemaining  = 80 * time.Millisecond
+	maxSlotProductionRemaining  = 750 * time.Millisecond
+	slotProductionBudgetDivisor = 3
 )
 
 // slotSkipTimeout 计算 slot 出块窗口 + 与 SlotClock 的 skip 超时保持一致。
@@ -52,6 +55,34 @@ func (node *posNode) slotStartTime(slot uint64) time.Time {
 // slotProductionDeadline 计算出块截止时间 + leader 和 validator 使用同一条过期边界。
 func (node *posNode) slotProductionDeadline(slot uint64) time.Time {
 	return node.slotStartTime(slot).Add(node.slotSkipTimeout())
+}
+
+// slotProductionMinRemaining 计算出块最小剩余时间 + 避免临界点产出无法获得投票的候选块。
+func (node *posNode) slotProductionMinRemaining() time.Duration {
+	slotDuration := node.config.slotDuration()
+	if slotDuration <= 0 {
+		return minSlotProductionRemaining
+	}
+	remaining := slotDuration / slotProductionBudgetDivisor
+	if remaining < minSlotProductionRemaining {
+		return minSlotProductionRemaining
+	}
+	if remaining > maxSlotProductionRemaining {
+		return maxSlotProductionRemaining
+	}
+	return remaining
+}
+
+// slotProductionBudgetAvailable 判断出块预算是否充足 + 交易执行和广播必须留出投票时间。
+func (node *posNode) slotProductionBudgetAvailable(slot uint64, now time.Time) bool {
+	if slot == 0 {
+		return false
+	}
+	if node.config.SlotMillis <= 0 || node.config.GenesisStartMs == 0 {
+		return true
+	}
+	deadline := node.slotProductionDeadline(slot)
+	return now.Add(node.slotProductionMinRemaining()).Before(deadline)
 }
 
 // slotDeadlinePassed 判断 slot 是否过期 + 配置无效时保持测试节点兼容。

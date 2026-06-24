@@ -175,3 +175,96 @@ func TestFaultInjectionCommonAncestorRequestMatchesCurrentHead(t *testing.T) {
 		t.Fatalf("common ancestor response = %+v, want current head height %d hash %s", envelope, head.Height, head.BlockHash.String())
 	}
 }
+
+func TestFaultInjectionDoubleVoteQueuesEvidence(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	node.config.FaultInjection.DoubleVoteOnce = true
+	if err := node.rebuildEpoch(0, 1, node.epochSeed(0)); err != nil {
+		t.Fatalf("rebuildEpoch() error = %v", err)
+	}
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	stakeValue, active, err := node.localValidatorEffectiveStake(node.epochSnapshot.EpochID)
+	if err != nil {
+		t.Fatalf("localValidatorEffectiveStake() error = %v", err)
+	}
+	if !active || stakeValue == 0 {
+		t.Fatalf("active=%v stake=%d, want active local validator", active, stakeValue)
+	}
+
+	vote := consensus.Vote{
+		Type:               consensus.VoteTypeConfirm,
+		Slot:               node.epochSnapshot.StartSlot,
+		BlockHeight:        1,
+		BlockHash:          testHashFromText(t, "fault-double-vote-block"),
+		VoterID:            string(validatorID),
+		Stake:              stakeValue,
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	if err := node.sendLocalVote(context.Background(), vote, false); err != nil {
+		t.Fatalf("sendLocalVote() error = %v", err)
+	}
+
+	node.mutex.Lock()
+	triggered := node.doubleVoteInjected
+	evidences := append([]consensus.SlashingEvidence(nil), node.pendingEvidence...)
+	node.mutex.Unlock()
+	if !triggered {
+		t.Fatal("doubleVoteInjected = false, want true")
+	}
+	if len(evidences) != 1 || evidences[0].Type != consensus.SlashingEvidenceTypeDoubleVote {
+		t.Fatalf("pending evidence = %+v, want one double vote evidence", evidences)
+	}
+	if _, _, err := evidences[0].Validate(node.epochSnapshot); err != nil {
+		t.Fatalf("double vote evidence validate: %v", err)
+	}
+}
+
+func TestFaultInjectionDoubleProposalQueuesEvidence(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	node.config.FaultInjection.DoubleProposalOnce = true
+	proposal := signedFaultProposal(t, node)
+
+	node.injectDoubleProposalFault(context.Background(), proposal)
+
+	node.mutex.Lock()
+	triggered := node.doubleProposalInjected
+	evidences := append([]consensus.SlashingEvidence(nil), node.pendingEvidence...)
+	node.mutex.Unlock()
+	if !triggered {
+		t.Fatal("doubleProposalInjected = false, want true")
+	}
+	if len(evidences) != 1 || evidences[0].Type != consensus.SlashingEvidenceTypeDoubleProposal {
+		t.Fatalf("pending evidence = %+v, want one double proposal evidence", evidences)
+	}
+	if _, _, err := evidences[0].Validate(node.epochSnapshot); err != nil {
+		t.Fatalf("double proposal evidence validate: %v", err)
+	}
+}
+
+func signedFaultProposal(t *testing.T, node *posNode) consensus.BlockProposal {
+	t.Helper()
+	head := node.ledger.Head()
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	header := consensus.BlockHeader{
+		ChainID:            node.config.ChainID,
+		Slot:               node.epochSnapshot.StartSlot,
+		Height:             head.Height + 1,
+		ParentHash:         head.BlockHash,
+		PreviousQCHash:     head.QCHash,
+		LeaderID:           validatorID,
+		EpochID:            node.epochSnapshot.EpochID,
+		TimestampUnixMilli: time.Now().UnixMilli(),
+	}
+	signBytes, err := header.SignBytes()
+	if err != nil {
+		t.Fatalf("SignBytes() error = %v", err)
+	}
+	signature, err := node.consensusKeyPair.Sign(signBytes)
+	if err != nil {
+		t.Fatalf("sign proposal: %v", err)
+	}
+	return consensus.BlockProposal{
+		Header:          header,
+		LeaderSignature: signature,
+	}
+}

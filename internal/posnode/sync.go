@@ -2,6 +2,7 @@ package posnode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -429,7 +430,7 @@ func (node *posNode) blockSyncLoop(ctx context.Context) {
 
 func (node *posNode) syncOneRound(ctx context.Context) {
 	localHead := node.ledger.Head()
-	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+	for _, peerID := range node.syncPeerIDsSnapshot() {
 		status, err := node.requestStatus(ctx, peerID)
 		if err != nil {
 			node.logger.Debug("posnode status sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
@@ -438,12 +439,11 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 		if !peerNeedsBlockSync(localHead, status) {
 			continue
 		}
-		if status.FinalizedHeight > localHead.Height+maxSyncBlocksPerRound {
+		if shouldImportFinalizedSnapshotBeforeBlockSync(status, localHead) {
 			imported, err := node.importFinalizedSnapshotFromPeer(ctx, peerID, status)
 			if err != nil {
 				node.metrics.syncFailures.Add(1)
 				node.logger.Warn("posnode finalized snapshot sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
-				continue
 			}
 			if imported {
 				localHead = node.ledger.Head()
@@ -456,6 +456,29 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 		startHeight, err := node.determineSyncStartHeight(ctx, peerID, localHead, status)
 		if err != nil {
 			node.metrics.syncFailures.Add(1)
+			if shouldImportFinalizedSnapshotAfterSyncStartError(err, status, localHead) {
+				imported, importErr := node.importFinalizedSnapshotFromPeer(ctx, peerID, status)
+				if importErr != nil {
+					node.metrics.syncFailures.Add(1)
+					node.logger.Warn("posnode finalized snapshot recovery failed",
+						slog.String("peer_id", peerID),
+						slog.Any("sync_start_error", err),
+						slog.Any("error", importErr),
+					)
+					continue
+				}
+				if imported {
+					node.logger.Warn("posnode finalized snapshot recovered sync boundary",
+						slog.String("peer_id", peerID),
+						slog.Any("sync_start_error", err),
+						slog.Uint64("peer_finalized_height", status.FinalizedHeight),
+						slog.Uint64("local_height", localHead.Height),
+						slog.Uint64("local_finalized_height", localHead.FinalizedHeight),
+					)
+					localHead = node.ledger.Head()
+					continue
+				}
+			}
 			node.logger.Warn("posnode sync start height failed", slog.String("peer_id", peerID), slog.Any("error", err))
 			continue
 		}
@@ -464,6 +487,30 @@ func (node *posNode) syncOneRound(ctx context.Context) {
 		}
 		if err := node.syncBlocksFromPeer(ctx, peerID, startHeight, status.HeadHeight); err != nil {
 			node.metrics.syncFailures.Add(1)
+			currentHead := node.ledger.Head()
+			if shouldImportFinalizedSnapshotAfterBlockSyncError(err, status, currentHead) {
+				imported, importErr := node.importFinalizedSnapshotFromPeer(ctx, peerID, status)
+				if importErr != nil {
+					node.metrics.syncFailures.Add(1)
+					node.logger.Warn("posnode finalized snapshot recovery after block sync failed",
+						slog.String("peer_id", peerID),
+						slog.Any("block_sync_error", err),
+						slog.Any("error", importErr),
+					)
+					continue
+				}
+				if imported {
+					node.logger.Warn("posnode finalized snapshot recovered block sync",
+						slog.String("peer_id", peerID),
+						slog.Any("block_sync_error", err),
+						slog.Uint64("peer_finalized_height", status.FinalizedHeight),
+						slog.Uint64("local_height", currentHead.Height),
+						slog.Uint64("local_finalized_height", currentHead.FinalizedHeight),
+					)
+					localHead = node.ledger.Head()
+					continue
+				}
+			}
 			node.logger.Warn("posnode block sync failed", slog.String("peer_id", peerID), slog.Any("error", err))
 		}
 		localHead = node.ledger.Head()
@@ -478,6 +525,69 @@ func peerNeedsBlockSync(localHead blockchain.Head, status statusResponseEnvelope
 		return true
 	}
 	return status.HeadHeight == localHead.Height && status.HeadHash != "" && status.HeadHash != localHead.BlockHash.String()
+}
+
+type finalizedBoundarySyncError struct {
+	PeerID          string
+	Scope           string
+	AncestorHeight  uint64
+	FinalizedHeight uint64
+}
+
+func (err finalizedBoundarySyncError) Error() string {
+	if err.Scope == "" {
+		return fmt.Sprintf(
+			"posnode: peer %s common ancestor %d below finalized height %d",
+			err.PeerID,
+			err.AncestorHeight,
+			err.FinalizedHeight,
+		)
+	}
+	return fmt.Sprintf(
+		"posnode: peer %s %s ancestor %d below finalized height %d",
+		err.PeerID,
+		err.Scope,
+		err.AncestorHeight,
+		err.FinalizedHeight,
+	)
+}
+
+func shouldImportFinalizedSnapshotAfterSyncStartError(
+	err error,
+	status statusResponseEnvelope,
+	localHead blockchain.Head,
+) bool {
+	boundaryError := finalizedBoundarySyncError{}
+	if !errors.As(err, &boundaryError) {
+		return false
+	}
+	if status.FinalizedHeight <= localHead.FinalizedHeight {
+		return false
+	}
+	return strings.TrimSpace(status.FinalizedHash) != ""
+}
+
+// shouldImportFinalizedSnapshotBeforeBlockSync 快速同步安全检查点 + peer finalized 已超过本地 head 时逐块回放没有收益。
+func shouldImportFinalizedSnapshotBeforeBlockSync(status statusResponseEnvelope, localHead blockchain.Head) bool {
+	if status.FinalizedHeight <= localHead.Height {
+		return false
+	}
+	return strings.TrimSpace(status.FinalizedHash) != ""
+}
+
+// shouldImportFinalizedSnapshotAfterBlockSyncError 恢复 epoch 视图分裂 + 本地验证失败时以更高 finalized 检查点收敛。
+func shouldImportFinalizedSnapshotAfterBlockSyncError(
+	err error,
+	status statusResponseEnvelope,
+	localHead blockchain.Head,
+) bool {
+	if err == nil {
+		return false
+	}
+	if status.FinalizedHeight <= localHead.FinalizedHeight {
+		return false
+	}
+	return strings.TrimSpace(status.FinalizedHash) != ""
 }
 
 func validatePeerStatusChainIdentity(config nodeConfig, peerID string, status statusResponseEnvelope) error {
@@ -544,7 +654,11 @@ func (node *posNode) determineSyncStartHeight(
 		return 0, fmt.Errorf("posnode: peer %s returned no common ancestor", peerID)
 	}
 	if ancestor.Height < localHead.FinalizedHeight {
-		return 0, fmt.Errorf("posnode: peer %s common ancestor %d below finalized height %d", peerID, ancestor.Height, localHead.FinalizedHeight)
+		return 0, finalizedBoundarySyncError{
+			PeerID:          peerID,
+			AncestorHeight:  ancestor.Height,
+			FinalizedHeight: localHead.FinalizedHeight,
+		}
 	}
 	startHeight := calculateSyncStartHeightFromAncestor(ancestor.Height)
 	if ancestor.Height == localHead.Height && ancestor.BlockHash == localHead.BlockHash {
@@ -578,11 +692,12 @@ func (node *posNode) syncProposalBranch(ctx context.Context, preferredPeerID str
 	if resolved {
 		return nil
 	}
-	peerIDs := make([]string, 0, len(node.validatorPeerIDsSnapshot(true))+1)
+	syncPeerIDs := node.syncPeerIDsSnapshot()
+	peerIDs := make([]string, 0, len(syncPeerIDs)+1)
 	if preferredPeerID != "" {
 		peerIDs = append(peerIDs, preferredPeerID)
 	}
-	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+	for _, peerID := range syncPeerIDs {
 		if peerID == preferredPeerID {
 			continue
 		}
@@ -656,7 +771,12 @@ func (node *posNode) determineBranchSyncStartHeight(
 		return 0, fmt.Errorf("posnode: peer %s returned no branch ancestor", peerID)
 	}
 	if ancestor.Height < localHead.FinalizedHeight {
-		return 0, fmt.Errorf("posnode: peer %s branch ancestor %d below finalized height %d", peerID, ancestor.Height, localHead.FinalizedHeight)
+		return 0, finalizedBoundarySyncError{
+			PeerID:          peerID,
+			Scope:           "branch",
+			AncestorHeight:  ancestor.Height,
+			FinalizedHeight: localHead.FinalizedHeight,
+		}
 	}
 	return calculateSyncStartHeightFromAncestor(ancestor.Height), nil
 }
@@ -676,38 +796,55 @@ func (node *posNode) shouldPauseProductionForSync(ctx context.Context, localHead
 	for _, peerID := range peerIDs {
 		statusTimeout := productionSyncGateTimeout(slotDeadline)
 		if statusTimeout == 0 {
-			node.logger.Debug("posnode production sync gate skipped near slot deadline",
+			node.logger.Warn("posnode production paused near sync gate deadline",
 				slog.Uint64("local_height", localHead.Height),
 				slog.Time("slot_deadline", slotDeadline),
 			)
-			return false
+			return true
 		}
 		statusContext, cancel := context.WithTimeout(ctx, statusTimeout)
 		status, err := node.requestStatus(statusContext, peerID)
 		cancel()
 		if err != nil {
+			node.logger.Warn("posnode production sync gate status failed",
+				slog.String("peer_id", peerID),
+				slog.Uint64("local_height", localHead.Height),
+				slog.Any("error", err),
+			)
 			continue
 		}
 		if peerNeedsBlockSync(localHead, status) {
 			return true
 		}
+		return false
 	}
-	return false
+	node.logger.Warn("posnode production paused because validator status unavailable",
+		slog.Uint64("local_height", localHead.Height),
+		slog.String("local_hash", localHead.BlockHash.String()),
+		slog.Int("peer_count", len(peerIDs)),
+	)
+	return true
 }
 
 // productionSyncGatePeerIDs 选择出块前探测节点 + 只探测少量已连接验证者避免拖过 slot deadline。
 func (node *posNode) productionSyncGatePeerIDs(localHeight uint64) []string {
-	peerIDs := node.validatorPeerIDsSnapshot(true)
-	if node.host == nil || len(peerIDs) == 0 {
+	connectedPeerIDs := node.connectedValidatorPeerIDsSnapshot(true)
+	return rotateLimitedPeerIDs(connectedPeerIDs, localHeight, productionSyncGateMaxPeers)
+}
+
+// connectedValidatorPeerIDsSnapshot 获取已连接验证者节点 + 出块门禁和恢复广播必须只依赖当前在线验证者。
+func (node *posNode) connectedValidatorPeerIDsSnapshot(excludeLocal bool) []string {
+	if node.host == nil {
 		return nil
 	}
+	peerIDs := node.validatorPeerIDsSnapshot(excludeLocal)
 	connectedPeerIDs := make([]string, 0, len(peerIDs))
 	for _, peerID := range peerIDs {
 		if _, connected := node.host.ConnectionState(peerID); connected {
 			connectedPeerIDs = append(connectedPeerIDs, peerID)
 		}
 	}
-	return rotateLimitedPeerIDs(connectedPeerIDs, localHeight, productionSyncGateMaxPeers)
+	return connectedPeerIDs
 }
 
 // rotateLimitedPeerIDs 轮转抽样节点 + 避免长期固定探测同一批慢节点影响 leader 出块。
@@ -746,9 +883,20 @@ func productionSyncGateTimeout(slotDeadline time.Time) time.Duration {
 
 func (node *posNode) requiresConnectedValidatorPeerForProduction() bool {
 	node.mutex.Lock()
-	validatorCount := len(node.epochSnapshot.Validators)
-	node.mutex.Unlock()
-	return validatorCount > 1
+	defer node.mutex.Unlock()
+	return node.requiresConnectedValidatorPeerForProductionLocked()
+}
+
+func (node *posNode) requiresConnectedValidatorPeerForProductionLocked() bool {
+	return len(node.epochSnapshot.Validators) > 1
+}
+
+func (node *posNode) hasMinimumActiveValidatorsForProductionLocked() bool {
+	return hasMinimumActiveValidatorCount(len(node.epochSnapshot.Validators))
+}
+
+func hasMinimumActiveValidatorCount(activeValidatorCount int) bool {
+	return activeValidatorCount >= minActiveValidatorsForProduction
 }
 
 func (node *posNode) importFinalizedSnapshotFromPeer(ctx context.Context, peerID string, status statusResponseEnvelope) (bool, error) {
@@ -844,17 +992,18 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		return nil
 	}
 	node.mutex.Lock()
-	if err := node.ensureEpochForSlotLocked(proposal.Header.Slot); err != nil {
+	epochContextValue, err := node.epochContextForSlotLocked(proposal.Header.Slot)
+	if err != nil {
 		node.mutex.Unlock()
 		return err
 	}
-	leader, exists := node.epochSnapshot.ValidatorByID(proposal.Header.LeaderID)
+	leader, exists := epochContextValue.Snapshot.ValidatorByID(proposal.Header.LeaderID)
 	if !exists {
 		node.mutex.Unlock()
 		return fmt.Errorf("posnode: synced proposal leader not in snapshot")
 	}
-	epochSnapshot := node.epochSnapshot
-	leaderSchedule := node.leaderSchedule
+	epochSnapshot := epochContextValue.Snapshot
+	leaderSchedule := epochContextValue.Schedule
 	blockhashQueue := node.blockhashQueue
 	node.mutex.Unlock()
 
@@ -883,44 +1032,18 @@ func (node *posNode) applySyncedProposal(ctx context.Context, proposal consensus
 		return err
 	}
 	commitRequest := blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}
-	head = node.ledger.Head()
-	if proposal.Header.ParentHash == head.BlockHash && proposal.Header.Height == head.Height+1 {
-		if _, err := node.ledger.CommitBlock(commitRequest); err != nil {
-			return err
-		}
-		node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
-		node.metrics.proposalsAccepted.Add(1)
-		node.retryOrphanChildren(ctx, proposalHash)
-		return nil
-	}
 	if _, err := node.ledger.SaveBlockCandidate(commitRequest); err != nil {
 		return err
 	}
-	decision, err := node.ledger.ReorganizeTo(proposalHash)
-	if err != nil {
-		return err
+	if err := node.promoteBlockIfCertified(ctx, proposalHash); err != nil {
+		node.logger.Warn("posnode synced candidate promotion check failed",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("height", proposal.Header.Height),
+			slog.String("block_hash", proposalHash.String()),
+			slog.Any("error", err),
+		)
 	}
-	node.metrics.forkDecisions.Add(1)
-	if decision.Reorganized {
-		node.metrics.reorgs.Add(1)
-	}
-	node.logger.Info("posnode synced fork decision",
-		slog.Bool("accepted", decision.Accepted),
-		slog.Bool("reorganized", decision.Reorganized),
-		slog.String("reason", decision.Reason),
-		slog.Uint64("slot", proposal.Header.Slot),
-		slog.Uint64("height", proposal.Header.Height),
-		slog.String("block_hash", proposalHash.String()),
-		slog.String("common_ancestor_hash", decision.CommonAncestor.BlockHash.String()),
-		slog.Uint64("common_ancestor_height", decision.CommonAncestor.Height),
-		slog.Any("old_chain_blocks", hashesToStrings(decision.OldBlocks)),
-		slog.Any("new_chain_blocks", hashesToStrings(decision.NewBlocks)),
-	)
-	if decision.Accepted {
-		node.recordCommittedBlockhash(proposal.Header.Slot, proposalHash)
-		node.metrics.proposalsAccepted.Add(1)
-		node.retryOrphanChildren(ctx, proposalHash)
-	}
+	node.retryOrphanChildren(ctx, proposalHash)
 	return nil
 }
 
@@ -933,7 +1056,7 @@ func (node *posNode) ensureParentAvailable(ctx context.Context, parentHash struc
 		node.metrics.syncFailures.Add(1)
 		return consensus.ChainState{}, false
 	}
-	for _, peerID := range node.validatorPeerIDsSnapshot(true) {
+	for _, peerID := range node.syncPeerIDsSnapshot() {
 		statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
 		_, statusErr := node.requestStatus(statusContext, peerID)
 		cancel()
@@ -1022,6 +1145,23 @@ func (node *posNode) validatorPeerIDsSnapshot(excludeLocal bool) []string {
 	return node.filterTransactionRoutePeersLocked(node.validatorPeerIDsLocked(), excludeLocal)
 }
 
+// syncPeerIDsSnapshot 选择状态同步节点 + 本地 epoch 可能过期所以合并引导、已知和验证者节点。
+func (node *posNode) syncPeerIDsSnapshot() []string {
+	node.refreshKnownPeersFromHost()
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	peerIDs := make([]string, 0, len(node.config.BootstrapPeers)+len(node.knownPeerIDs)+len(node.epochSnapshot.Validators))
+	for _, peerConfig := range node.config.BootstrapPeers {
+		if peerConfig.PeerID == "" {
+			continue
+		}
+		peerIDs = append(peerIDs, peerConfig.PeerID)
+	}
+	peerIDs = append(peerIDs, node.knownPeerIDs...)
+	peerIDs = append(peerIDs, node.validatorPeerIDsLocked()...)
+	return node.filterTransactionRoutePeersLocked(peerIDs, true)
+}
+
 func (node *posNode) connectionPeerIDsSnapshot() []string {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
@@ -1079,9 +1219,43 @@ func (node *posNode) orphanProposalCountLocked() int {
 
 func (node *posNode) statusSnapshot() statusResponseEnvelope {
 	node.refreshKnownPeersFromHost()
+	livenessGate := node.refreshLivenessGate(time.Now())
+	if node.ledger == nil {
+		node.mutex.Lock()
+		mempoolSize := len(node.mempool)
+		knownPeerCount := len(node.knownPeerIDs)
+		metrics := node.metrics.snapshot()
+		node.mutex.Unlock()
+		p2pSecure := false
+		if node.host != nil {
+			p2pSecure = node.host.SecureSessionEnabled()
+		}
+		return statusResponseEnvelope{
+			ChainID:           node.config.ChainID,
+			ChainIdentityHash: node.config.ChainIdentityHash,
+			GenesisHash:       node.config.GenesisHash,
+			NodeName:          node.config.NodeName,
+			PeerID:            node.peerKeyPair.peerID,
+			NodeMode:          "bootstrap",
+			NodeRole:          string(node.config.ResolvedNodeRole),
+			NodeRoles:         p2p.PeerRolesNames(node.config.ResolvedNodeRoles, node.config.ResolvedNodeCapabilities),
+			NodeCapabilities:  uint64(node.config.ResolvedNodeCapabilities),
+			CapabilityNames:   p2p.PeerCapabilityNames(node.config.ResolvedNodeCapabilities),
+			ValidatorEnabled:  node.config.validatorEnabled(),
+			ConsensusEnabled:  node.config.consensusEnabled(),
+			MempoolSize:       mempoolSize,
+			KnownPeerCount:    knownPeerCount,
+			P2PSecure:         p2pSecure,
+			P2PInsecure:       node.config.allowInsecureP2P(),
+			RPCForwarding:     false,
+			StateRecovery:     false,
+			Liveness:          livenessGate,
+			Metrics:           metrics,
+		}
+	}
 	head := node.ledger.Head()
+	finalizedSlot := node.finalizedSlotForHead(head)
 	node.mutex.Lock()
-	defer node.mutex.Unlock()
 	currentLeader := ""
 	startSlot := node.currentRoutingSlotLocked()
 	p2pSecure := false
@@ -1096,7 +1270,8 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 	turbine := node.turbinePositionForSlotLocked(startSlot)
 	transactionFastPath := node.transactionFastPathForSlotLocked(startSlot, true)
 	consensusStatus := node.consensusStatusForSlotLocked(startSlot)
-	return statusResponseEnvelope{
+	consensusStatus.Liveness = livenessGate
+	status := statusResponseEnvelope{
 		ChainID:           node.config.ChainID,
 		ChainIdentityHash: node.config.ChainIdentityHash,
 		GenesisHash:       node.config.GenesisHash,
@@ -1115,6 +1290,7 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		HeadQCHash:        head.QCHash.String(),
 		FinalizedHeight:   head.FinalizedHeight,
 		FinalizedHash:     head.FinalizedHash.String(),
+		FinalizedSlot:     finalizedSlot,
 		FinalityDepth:     node.ledger.FinalityDepth(),
 		EpochID:           node.epochSnapshot.EpochID,
 		MempoolSize:       len(node.mempool),
@@ -1122,12 +1298,27 @@ func (node *posNode) statusSnapshot() statusResponseEnvelope {
 		KnownPeerCount:    len(node.knownPeerIDs),
 		P2PSecure:         p2pSecure,
 		P2PInsecure:       node.config.allowInsecureP2P(),
+		RPCForwarding:     node.config.publicRPCMode() && node.config.transactionForwardEnabled(),
 		StateRecovery:     !node.config.DisableStateRecovery,
 		CurrentLeader:     currentLeader,
 		UpcomingLeaders:   node.upcomingLeadersLocked(startSlot, node.config.TransactionLeaderForwardSlots+1),
 		Turbine:           turbine,
 		TransactionFast:   transactionFastPath,
+		Liveness:          livenessGate,
 		Consensus:         consensusStatus,
 		Metrics:           node.metrics.snapshot(),
 	}
+	node.mutex.Unlock()
+	return status
+}
+
+func (node *posNode) finalizedSlotForHead(head blockchain.Head) uint64 {
+	if head.FinalizedHeight == 0 || head.FinalizedHash.IsZero() {
+		return 0
+	}
+	proposal, blockHash, found, err := node.ledger.BlockByHeight(head.FinalizedHeight)
+	if err != nil || !found || blockHash != head.FinalizedHash {
+		return 0
+	}
+	return proposal.Header.Slot
 }

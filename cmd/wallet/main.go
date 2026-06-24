@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,9 +24,11 @@ import (
 )
 
 const (
-	defaultRPCURL      = "http://127.0.0.1:8899"
-	defaultHTTPTimeout = 10 * time.Second
-	maxRPCBodyBytes    = 1 << 20
+	defaultRPCURL                 = "http://127.0.0.1:8899"
+	defaultHTTPTimeout            = 10 * time.Second
+	maxRPCBodyBytes               = 1 << 20
+	minimumStakeLamports          = 10_000_000
+	validatorPairingPayloadPrefix = "posvalpair:"
 )
 
 type keystoreFile struct {
@@ -64,6 +67,62 @@ type transactionSubmitResult struct {
 	Signature string `json:"signature"`
 }
 
+func (result *transactionSubmitResult) UnmarshalJSON(data []byte) error {
+	var signature string
+	if err := json.Unmarshal(data, &signature); err == nil {
+		result.Signature = signature
+		return nil
+	}
+	type transactionSubmitResultAlias transactionSubmitResult
+	var decoded transactionSubmitResultAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*result = transactionSubmitResult(decoded)
+	return nil
+}
+
+type validatorPairingPayload struct {
+	Version           int    `json:"version"`
+	RPCURL            string `json:"rpc_url"`
+	ChainID           string `json:"chain_id"`
+	ChainIdentityHash string `json:"chain_identity_hash"`
+	GenesisHash       string `json:"genesis_hash"`
+	NodeName          string `json:"node_name"`
+	NodePeerID        string `json:"node_peer_id"`
+	ValidatorAddress  string `json:"validator_address"`
+	ConsensusAddress  string `json:"consensus_address"`
+	BLSPublicKey      string `json:"bls_public_key"`
+	Token             string `json:"token"`
+	ExpiresAtUnixMS   int64  `json:"expires_at_unix_millis"`
+}
+
+type validatorPairingCompleteRequest struct {
+	Token            string `json:"token"`
+	StakerAddress    string `json:"staker_address"`
+	ValidatorAddress string `json:"validator_address"`
+	ConsensusAddress string `json:"consensus_address"`
+	BLSPublicKey     string `json:"bls_public_key"`
+	NodePeerID       string `json:"node_peer_id"`
+	StakeLamports    uint64 `json:"stake_lamports"`
+	Signature        string `json:"signature"`
+}
+
+type validatorPairingCompleteResult struct {
+	State            string `json:"state,omitempty"`
+	StakerAddress    string `json:"staker_address,omitempty"`
+	ValidatorAddress string `json:"validator_address,omitempty"`
+	ConsensusAddress string `json:"consensus_address,omitempty"`
+	BLSPublicKey     string `json:"bls_public_key,omitempty"`
+	NodePeerID       string `json:"node_peer_id,omitempty"`
+	StakeLamports    uint64 `json:"stake_lamports,omitempty"`
+	Signature        string `json:"signature,omitempty"`
+	ConfigUpdated    bool   `json:"config_updated"`
+	RestartRequired  bool   `json:"restart_required"`
+	ConfigPath       string `json:"config_path,omitempty"`
+	ActivationNote   string `json:"activation_note,omitempty"`
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "wallet: %v\n", err)
@@ -92,6 +151,8 @@ func run(args []string) error {
 		return runDeployContract(args[1:])
 	case "validator-register":
 		return runValidatorRegister(args[1:])
+	case "validator-pair":
+		return runValidatorPair(args[1:])
 	case "stake":
 		return runStake(args[1:])
 	case "delegate":
@@ -291,6 +352,98 @@ func runValidatorRegister(args []string) error {
 		return fmt.Errorf("build validator register transaction: %w", err)
 	}
 	return submitAndPrint(*rpcURL, transaction)
+}
+
+func runValidatorPair(args []string) error {
+	flags := flag.NewFlagSet("validator-pair", flag.ContinueOnError)
+	payloadText := flags.String("payload", "", "validator pairing qr payload")
+	payloadFile := flags.String("payload-file", "", "file containing validator pairing qr payload")
+	rpcOverride := flags.String("rpc", "", "optional rpc url override")
+	stakerKeyPath := flags.String("staker-key", "", "staker wallet keystore path")
+	lamports := flags.Uint64("lamports", minimumStakeLamports, "initial validator stake lamports")
+	registrationSignature := flags.String("signature", "", "existing validator registration signature")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payload, err := loadValidatorPairingPayload(*payloadText, *payloadFile)
+	if err != nil {
+		return err
+	}
+	rpcURL := strings.TrimSpace(payload.RPCURL)
+	if strings.TrimSpace(*rpcOverride) != "" {
+		rpcURL = strings.TrimSpace(*rpcOverride)
+	}
+	if err := validateWalletRPCURL(rpcURL); err != nil {
+		return err
+	}
+	if payload.ExpiresAtUnixMS <= time.Now().UnixMilli() {
+		return fmt.Errorf("validator pairing payload expired")
+	}
+	if *lamports == 0 {
+		return fmt.Errorf("validator-pair requires positive -lamports")
+	}
+	staker, err := loadEd25519KeyPair(*stakerKeyPath)
+	if err != nil {
+		return err
+	}
+	validatorAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(payload.ValidatorAddress))
+	if err != nil {
+		return fmt.Errorf("decode pairing validator address: %w", err)
+	}
+	consensusAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(payload.ConsensusAddress))
+	if err != nil {
+		return fmt.Errorf("decode pairing consensus address: %w", err)
+	}
+	blsPublicKey, err := utils.Base58Decode(strings.TrimSpace(payload.BLSPublicKey))
+	if err != nil {
+		return fmt.Errorf("decode pairing bls public key: %w", err)
+	}
+	if err := consensus.ValidateBLSPublicKey(blsPublicKey); err != nil {
+		return err
+	}
+	signature := strings.TrimSpace(*registrationSignature)
+	if signature == "" {
+		blockhash, err := latestBlockhash(rpcURL)
+		if err != nil {
+			return err
+		}
+		transaction, err := blockchain.NewRegisterValidatorTransactionWithBLS(
+			staker,
+			validatorAddress,
+			consensusAddress,
+			blsPublicKey,
+			strings.TrimSpace(payload.NodePeerID),
+			*lamports,
+			blockhash,
+		)
+		if err != nil {
+			return fmt.Errorf("build paired validator register transaction: %w", err)
+		}
+		signature, err = submitTransaction(rpcURL, transaction)
+		if err != nil {
+			return err
+		}
+	}
+	completeRequest := validatorPairingCompleteRequest{
+		Token:            payload.Token,
+		StakerAddress:    staker.PublicKey.String(),
+		ValidatorAddress: payload.ValidatorAddress,
+		ConsensusAddress: payload.ConsensusAddress,
+		BLSPublicKey:     payload.BLSPublicKey,
+		NodePeerID:       payload.NodePeerID,
+		StakeLamports:    *lamports,
+		Signature:        signature,
+	}
+	var result validatorPairingCompleteResult
+	if err := rpcCall(rpcURL, "completeValidatorPairing", []any{completeRequest}, &result); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode validator pairing result: %w", err)
+	}
+	fmt.Println(string(encoded))
+	return nil
 }
 
 func runStake(args []string) error {
@@ -519,6 +672,82 @@ func loadBLSPublicKey(path string) ([]byte, error) {
 	return value, nil
 }
 
+func loadValidatorPairingPayload(payloadText string, payloadFile string) (validatorPairingPayload, error) {
+	text := strings.TrimSpace(payloadText)
+	if strings.TrimSpace(payloadFile) != "" {
+		data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(payloadFile)))
+		if err != nil {
+			return validatorPairingPayload{}, fmt.Errorf("read validator pairing payload file: %w", err)
+		}
+		text = strings.TrimSpace(string(data))
+	}
+	if text == "" {
+		return validatorPairingPayload{}, fmt.Errorf("validator-pair requires -payload or -payload-file")
+	}
+	if !strings.HasPrefix(text, validatorPairingPayloadPrefix) {
+		return validatorPairingPayload{}, fmt.Errorf("validator pairing payload prefix is invalid")
+	}
+	encoded := strings.TrimPrefix(text, validatorPairingPayloadPrefix)
+	data, err := utils.Base64RawDecode(encoded)
+	if err != nil {
+		return validatorPairingPayload{}, fmt.Errorf("decode validator pairing payload: %w", err)
+	}
+	payload := validatorPairingPayload{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return validatorPairingPayload{}, fmt.Errorf("parse validator pairing payload: %w", err)
+	}
+	if err := validateValidatorPairingPayload(payload); err != nil {
+		return validatorPairingPayload{}, err
+	}
+	return payload, nil
+}
+
+func validateValidatorPairingPayload(payload validatorPairingPayload) error {
+	if payload.Version != 1 {
+		return fmt.Errorf("unsupported validator pairing payload version %d", payload.Version)
+	}
+	required := map[string]string{
+		"rpc_url":             payload.RPCURL,
+		"chain_id":            payload.ChainID,
+		"chain_identity_hash": payload.ChainIdentityHash,
+		"genesis_hash":        payload.GenesisHash,
+		"node_peer_id":        payload.NodePeerID,
+		"validator_address":   payload.ValidatorAddress,
+		"consensus_address":   payload.ConsensusAddress,
+		"bls_public_key":      payload.BLSPublicKey,
+		"token":               payload.Token,
+	}
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("validator pairing payload missing %s", name)
+		}
+	}
+	if payload.ExpiresAtUnixMS <= 0 {
+		return fmt.Errorf("validator pairing payload has invalid expiry")
+	}
+	return validateWalletRPCURL(payload.RPCURL)
+}
+
+func validateWalletRPCURL(rawURL string) error {
+	parsedURL, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("parse rpc url: %w", err)
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("rpc url scheme must be http or https")
+	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("rpc url must not contain user info")
+	}
+	if strings.TrimSpace(parsedURL.Host) == "" {
+		return fmt.Errorf("rpc url host is empty")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return fmt.Errorf("rpc url must not contain query or fragment")
+	}
+	return nil
+}
+
 func readKeystore(path string) (keystoreFile, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
 	if cleanPath == "." || cleanPath == "" {
@@ -666,12 +895,14 @@ func printUsage() {
 		"  wallet transfer -rpc http://127.0.0.1:8899 -key keys/staker.json -to ADDRESS -lamports 1000",
 		"  wallet deploy-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program-key keys/program.json -bytecode dist/pop.svmbin -deposit-lamports 0",
 		"  wallet validator-register -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -consensus-address ADDRESS -bls-public-key KEY -peer-id PEER -lamports 10000000",
+		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -lamports 10000000",
+		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -signature SIGNATURE",
 		"  wallet stake -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -lamports 10000000",
 		"  wallet delegate -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -lamports 10000000",
 		"  wallet undelegate -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -lamports 10000000 -unlock-epoch 10",
 		"  wallet withdraw-delegation -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -current-epoch 10",
 		"",
-		"minimum stake lamports: " + strconv.FormatUint(10_000_000, 10),
+		"minimum stake lamports: " + strconv.FormatUint(minimumStakeLamports, 10),
 	}
 	fmt.Fprintln(os.Stderr, strings.Join(lines, "\n"))
 }
