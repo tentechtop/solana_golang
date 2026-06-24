@@ -46,24 +46,24 @@ type validatorPairingSession struct {
 }
 
 type validatorPairingPayload struct {
-	Version           int    `json:"version"`
-	Mode              string `json:"mode,omitempty"`
-	RPCURL            string `json:"rpc_url"`
-	BootstrapRPCURL   string `json:"bootstrap_rpc_url,omitempty"`
-	ChainID           string `json:"chain_id"`
-	ChainIdentityHash string `json:"chain_identity_hash"`
-	GenesisHash       string `json:"genesis_hash"`
-	NodeName          string `json:"node_name"`
-	NodePeerID        string `json:"node_peer_id"`
-	AdvertisedIP      string `json:"advertised_ip,omitempty"`
-	AdvertisedPort    int    `json:"advertised_port,omitempty"`
-	Network           string `json:"network,omitempty"`
-	ValidatorAddress  string `json:"validator_address"`
-	ConsensusAddress  string `json:"consensus_address"`
-	BLSPublicKey      string `json:"bls_public_key"`
-	RegisteredAtUnixMS int64 `json:"registered_at_unix_millis,omitempty"`
-	Token             string `json:"token"`
-	ExpiresAtUnixMS   int64  `json:"expires_at_unix_millis"`
+	Version            int    `json:"version"`
+	Mode               string `json:"mode,omitempty"`
+	RPCURL             string `json:"rpc_url"`
+	BootstrapRPCURL    string `json:"bootstrap_rpc_url,omitempty"`
+	ChainID            string `json:"chain_id"`
+	ChainIdentityHash  string `json:"chain_identity_hash"`
+	GenesisHash        string `json:"genesis_hash"`
+	NodeName           string `json:"node_name"`
+	NodePeerID         string `json:"node_peer_id"`
+	AdvertisedIP       string `json:"advertised_ip,omitempty"`
+	AdvertisedPort     int    `json:"advertised_port,omitempty"`
+	Network            string `json:"network,omitempty"`
+	ValidatorAddress   string `json:"validator_address"`
+	ConsensusAddress   string `json:"consensus_address"`
+	BLSPublicKey       string `json:"bls_public_key"`
+	RegisteredAtUnixMS int64  `json:"registered_at_unix_millis,omitempty"`
+	Token              string `json:"token"`
+	ExpiresAtUnixMS    int64  `json:"expires_at_unix_millis"`
 }
 
 func (node *posNode) startValidatorPairing() error {
@@ -122,36 +122,40 @@ func (node *posNode) newValidatorPairingSession() (*validatorPairingSession, err
 	advertisedPort := 0
 	network := ""
 	registeredAtUnixMS := int64(0)
+	chainID := node.config.ChainID
 	chainIdentityHash := node.config.ChainIdentityHash
 	genesisHash := node.config.GenesisHash
 	if node.config.bootstrapPairingPending() {
 		mode = validatorPairingModeBootstrap
+		if !node.config.ChainIDExplicit {
+			chainID = ""
+		}
 		bootstrapRPCURL = strings.TrimSpace(node.config.BootstrapJoin.RPCURL)
 		advertisedIP, advertisedPort = validatorPairingAdvertisedEndpoint(node.config)
-		network = string(node.config.p2pProtocol())
+		network = string(utils.ProtocolTCP)
 		registeredAtUnixMS = time.Now().UnixMilli()
 		chainIdentityHash = ""
 		genesisHash = ""
 	}
 	payload := validatorPairingPayload{
-		Version:           validatorPairingVersion,
-		Mode:              mode,
-		RPCURL:            validatorPairingRPCURL(node.config),
-		BootstrapRPCURL:   bootstrapRPCURL,
-		ChainID:           node.config.ChainID,
-		ChainIdentityHash: chainIdentityHash,
-		GenesisHash:       genesisHash,
-		NodeName:          node.config.NodeName,
-		NodePeerID:        node.peerKeyPair.peerID,
-		AdvertisedIP:      advertisedIP,
-		AdvertisedPort:    advertisedPort,
-		Network:           network,
-		ValidatorAddress:  validatorKey.PublicKey.String(),
-		ConsensusAddress:  consensusKey.PublicKey.String(),
-		BLSPublicKey:      utils.Base58Encode(blsKey.PublicKey),
+		Version:            validatorPairingVersion,
+		Mode:               mode,
+		RPCURL:             validatorPairingRPCURL(node.config),
+		BootstrapRPCURL:    bootstrapRPCURL,
+		ChainID:            chainID,
+		ChainIdentityHash:  chainIdentityHash,
+		GenesisHash:        genesisHash,
+		NodeName:           node.config.NodeName,
+		NodePeerID:         node.peerKeyPair.peerID,
+		AdvertisedIP:       advertisedIP,
+		AdvertisedPort:     advertisedPort,
+		Network:            network,
+		ValidatorAddress:   validatorKey.PublicKey.String(),
+		ConsensusAddress:   consensusKey.PublicKey.String(),
+		BLSPublicKey:       utils.Base58Encode(blsKey.PublicKey),
 		RegisteredAtUnixMS: registeredAtUnixMS,
-		Token:             token,
-		ExpiresAtUnixMS:   expiresAt.UnixMilli(),
+		Token:              token,
+		ExpiresAtUnixMS:    expiresAt.UnixMilli(),
 	}
 	qrText, err := encodeValidatorPairingPayload(payload)
 	if err != nil {
@@ -345,25 +349,25 @@ func (node *posNode) GetValidatorPairing(ctx context.Context) (rpc.ValidatorPair
 		session.state = state
 	}
 	return rpc.ValidatorPairingResult{
-		Enabled:           true,
-		State:             state,
-		Mode:              payloadMode(session.payload),
-		RPCURL:            session.payload.RPCURL,
-		BootstrapRPCURL:   session.payload.BootstrapRPCURL,
-		ChainID:           session.payload.ChainID,
-		ChainIdentityHash: session.payload.ChainIdentityHash,
-		GenesisHash:       session.payload.GenesisHash,
-		NodeName:          session.payload.NodeName,
-		NodePeerID:        session.payload.NodePeerID,
-		AdvertisedIP:      session.payload.AdvertisedIP,
-		AdvertisedPort:    session.payload.AdvertisedPort,
-		Network:           session.payload.Network,
-		ValidatorAddress:  session.payload.ValidatorAddress,
-		ConsensusAddress:  session.payload.ConsensusAddress,
-		BLSPublicKey:      session.payload.BLSPublicKey,
+		Enabled:            true,
+		State:              state,
+		Mode:               payloadMode(session.payload),
+		RPCURL:             session.payload.RPCURL,
+		BootstrapRPCURL:    session.payload.BootstrapRPCURL,
+		ChainID:            session.payload.ChainID,
+		ChainIdentityHash:  session.payload.ChainIdentityHash,
+		GenesisHash:        session.payload.GenesisHash,
+		NodeName:           session.payload.NodeName,
+		NodePeerID:         session.payload.NodePeerID,
+		AdvertisedIP:       session.payload.AdvertisedIP,
+		AdvertisedPort:     session.payload.AdvertisedPort,
+		Network:            session.payload.Network,
+		ValidatorAddress:   session.payload.ValidatorAddress,
+		ConsensusAddress:   session.payload.ConsensusAddress,
+		BLSPublicKey:       session.payload.BLSPublicKey,
 		RegisteredAtUnixMS: session.payload.RegisteredAtUnixMS,
-		ExpiresAtUnixMS:   session.payload.ExpiresAtUnixMS,
-		Completed:         session.completedResult,
+		ExpiresAtUnixMS:    session.payload.ExpiresAtUnixMS,
+		Completed:          session.completedResult,
 	}, nil
 }
 
@@ -407,19 +411,19 @@ func (node *posNode) CompleteValidatorPairing(ctx context.Context, request rpc.V
 		configUpdated = true
 	}
 	result := rpc.ValidatorPairingCompleteResult{
-		State:            "completed",
-		StakerAddress:    strings.TrimSpace(request.StakerAddress),
-		ValidatorAddress: session.payload.ValidatorAddress,
-		ConsensusAddress: session.payload.ConsensusAddress,
-		BLSPublicKey:     session.payload.BLSPublicKey,
-		NodePeerID:       session.payload.NodePeerID,
-		StakeLamports:    request.StakeLamports,
-		Signature:        strings.TrimSpace(request.Signature),
+		State:                    "completed",
+		StakerAddress:            strings.TrimSpace(request.StakerAddress),
+		ValidatorAddress:         session.payload.ValidatorAddress,
+		ConsensusAddress:         session.payload.ConsensusAddress,
+		BLSPublicKey:             session.payload.BLSPublicKey,
+		NodePeerID:               session.payload.NodePeerID,
+		StakeLamports:            request.StakeLamports,
+		Signature:                strings.TrimSpace(request.Signature),
 		BootstrapStakerSignature: strings.TrimSpace(request.BootstrapStakerSignature),
-		ConfigUpdated:    configUpdated,
-		RestartRequired:  true,
-		ConfigPath:       node.config.ConfigPath,
-		ActivationNote:   "validator activates at the next epoch after the registration transaction is finalized",
+		ConfigUpdated:            configUpdated,
+		RestartRequired:          true,
+		ConfigPath:               node.config.ConfigPath,
+		ActivationNote:           "validator activates at the next epoch after the registration transaction is finalized",
 	}
 	if isBootstrapPairingPayload(session.payload) {
 		result.ActivationNote = "validator joins bootstrap after restart; block production starts after the bootstrap threshold is reached"
@@ -688,6 +692,9 @@ func (node *posNode) writeValidatorPairingConfig(request rpc.ValidatorPairingCom
 	configMap["auto_register"] = false
 	configMap["validator_pairing"] = map[string]any{"enabled": false}
 	if isBootstrapPairingPayload(session.payload) {
+		configMap["advertised_ip"] = strings.TrimSpace(session.payload.AdvertisedIP)
+		configMap["advertised_port"] = session.payload.AdvertisedPort
+		configMap["network"] = strings.TrimSpace(session.payload.Network)
 		configMap["bootstrap_join"] = map[string]any{
 			"enabled":                  true,
 			"rpc_url":                  strings.TrimSpace(session.payload.BootstrapRPCURL),

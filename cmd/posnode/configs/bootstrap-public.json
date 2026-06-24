@@ -1,0 +1,43 @@
+{
+  "node_mode": "posnode",
+  "chain_id": "pos-dynamic-testnet",
+  "environment": "stage",
+  "production": false,
+  "node_name": "public-bootstrap",
+  "data_path": "/opt/solana_golang/data/public-bootstrap",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 5101,
+  "network": "tcp",
+  "advertised_ip": "101.35.87.31",
+  "advertised_port": 5101,
+  "rpc_enabled": true,
+  "rpc_listen_ip": "0.0.0.0",
+  "rpc_port": 8899,
+  "allow_insecure_p2p": false,
+  "node_role": "bootnode",
+  "node_roles": ["bootnode"],
+  "node_capabilities": ["relay", "dht"],
+  "validator_enabled": false,
+  "consensus_enabled": false,
+  "peer_seed": "public-bootstrap-peer",
+  "slot_millis": 400,
+  "epoch_slots": 600,
+  "finality_depth": 2,
+  "turbine_fanout": 2,
+  "auto_register": false,
+  "mempool_max_transactions": 5000,
+  "mempool_transaction_ttl_millis": 180000,
+  "transaction_leader_forward_slots": 4,
+  "transaction_forward_validators": true,
+  "bootstrap_coordinator": {
+    "enabled": true,
+    "min_validators": 3,
+    "genesis_start_delay_millis": 30000,
+    "registry_path": "/opt/solana_golang/data/public-bootstrap/bootstrap-registry.json"
+  },
+  "genesis": {
+    "initial_supply_lamports": 100000000000000000,
+    "funded_accounts": [],
+    "initial_validators": []
+  }
+}

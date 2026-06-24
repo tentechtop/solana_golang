@@ -430,6 +430,7 @@ func normalizeBootstrapRegistration(request rpc.BootstrapValidatorRegistrationRe
 	request.ValidatorAddress = strings.TrimSpace(request.ValidatorAddress)
 	request.ConsensusPublicKey = strings.TrimSpace(request.ConsensusPublicKey)
 	request.BLSPublicKeyBase64 = strings.TrimSpace(request.BLSPublicKeyBase64)
+	request.StakerSignature = strings.TrimSpace(request.StakerSignature)
 	request.Signature = strings.TrimSpace(request.Signature)
 	// 功能目的：允许空链 ID 发现模式；实现原因：显式链 ID 仍强校验，空值由引导节点绑定权威链。
 	requestedChainID := request.ChainID
@@ -454,7 +455,8 @@ func normalizeBootstrapRegistration(request rpc.BootstrapValidatorRegistrationRe
 	if request.Network != string(utils.ProtocolTCP) {
 		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap network must be tcp")
 	}
-	if _, err := structure.PublicKeyFromBase58(request.StakerAddress); err != nil {
+	stakerPublicKey, err := structure.PublicKeyFromBase58(request.StakerAddress)
+	if err != nil {
 		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap staker address: %w", err)
 	}
 	if _, err := structure.PublicKeyFromBase58(request.ValidatorAddress); err != nil {
@@ -476,6 +478,13 @@ func normalizeBootstrapRegistration(request rpc.BootstrapValidatorRegistrationRe
 	}
 	if request.RegisteredAtUnixMilli <= 0 {
 		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap registered timestamp is invalid")
+	}
+	stakerSignature, err := structure.SignatureFromBase58(request.StakerSignature)
+	if err != nil {
+		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap staker signature: %w", err)
+	}
+	if !structure.VerifyMessageSignature(stakerPublicKey, bootstrapRegistrationSignBytes(request), stakerSignature) {
+		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap staker signature invalid")
 	}
 	signature, err := structure.SignatureFromBase58(request.Signature)
 	if err != nil {

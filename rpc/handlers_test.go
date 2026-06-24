@@ -49,6 +49,7 @@ func validBootstrapRegistrationRequest() BootstrapValidatorRegistrationRequest {
 		BLSPublicKeyBase64:    "bls",
 		StakeLamports:         1,
 		RegisteredAtUnixMilli: 1,
+		StakerSignature:       "staker-signature",
 		Signature:             "signature",
 	}
 }

@@ -85,6 +85,7 @@ func TestBootstrapCoordinatorAcceptsDiscoveryChainID(t *testing.T) {
 	}
 	registration := testBootstrapRegistration(t, config, 1)
 	registration.ChainID = ""
+	signBootstrapStakerAuthorization(t, &registration, "bootstrap-staker-1")
 	signBootstrapRegistration(t, &registration, "bootstrap-consensus-1")
 
 	result, err := coordinator.BootstrapRegisterValidator(context.Background(), registration)
@@ -111,6 +112,7 @@ func TestBootstrapCoordinatorReloadsDiscoveryRegistration(t *testing.T) {
 	}
 	registration := testBootstrapRegistration(t, config, 1)
 	registration.ChainID = ""
+	signBootstrapStakerAuthorization(t, &registration, "bootstrap-staker-1")
 	signBootstrapRegistration(t, &registration, "bootstrap-consensus-1")
 	if _, err := coordinator.BootstrapRegisterValidator(context.Background(), registration); err != nil {
 		t.Fatalf("BootstrapRegisterValidator() error = %v", err)
@@ -137,6 +139,7 @@ func TestBootstrapCoordinatorRejectsExplicitChainMismatch(t *testing.T) {
 	}
 	registration := testBootstrapRegistration(t, config, 1)
 	registration.ChainID = "wrong-chain"
+	signBootstrapStakerAuthorization(t, &registration, "bootstrap-staker-1")
 	signBootstrapRegistration(t, &registration, "bootstrap-consensus-1")
 
 	if _, err := coordinator.BootstrapRegisterValidator(context.Background(), registration); err == nil {
@@ -167,6 +170,56 @@ func TestBuildBootstrapRegistrationOmitsDiscoveredChainID(t *testing.T) {
 	}
 	if registration.PeerID == "" || registration.ConsensusPublicKey == "" || registration.Signature == "" {
 		t.Fatal("registration identity fields are empty")
+	}
+}
+
+func TestBuildBootstrapRegistrationUsesStoredStakerSignature(t *testing.T) {
+	staker := mustStructureKeyPair("bootstrap-wallet-staker")
+	config := minimalNodeConfigForValidation()
+	config.ChainID = "bootstrap-signed-chain"
+	config.NodeName = "bootstrap-signed-validator"
+	config.AdvertisedIP = "127.0.0.9"
+	config.AdvertisedPort = 19199
+	config.StakerAddress = staker.PublicKey.String()
+	config.StakerSeed = ""
+	config.BootstrapJoin = bootstrapJoinConfig{
+		Enabled:               true,
+		RPCURL:                "http://127.0.0.1:8899/",
+		RegisteredAtUnixMilli: 123456789,
+	}
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	expected := rpc.BootstrapValidatorRegistrationRequest{
+		ChainID:               normalized.ChainID,
+		NodeName:              normalized.NodeName,
+		PeerID:                mustRawKeyPair(normalized.PeerSeed).peerID,
+		AdvertisedIP:          normalized.AdvertisedIP,
+		AdvertisedPort:        normalized.AdvertisedPort,
+		Network:               string(utils.ProtocolTCP),
+		StakerAddress:         staker.PublicKey.String(),
+		ValidatorAddress:      mustStructureKeyPair(normalized.ValidatorSeed).PublicKey.String(),
+		ConsensusPublicKey:    mustStructureKeyPair(normalized.ConsensusSeed).PublicKey.String(),
+		BLSPublicKeyBase64:    utils.Base64Encode(mustBLSKeyPair(normalized.ConsensusSeed).PublicKey),
+		StakeLamports:         normalized.StakeLamports,
+		RegisteredAtUnixMilli: normalized.BootstrapJoin.RegisteredAtUnixMilli,
+	}
+	signature, err := staker.Sign(bootstrapRegistrationSignBytes(expected))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	normalized.BootstrapJoin.StakerSignature = signature.String()
+
+	registration, err := buildBootstrapRegistration(normalized)
+	if err != nil {
+		t.Fatalf("buildBootstrapRegistration() error = %v", err)
+	}
+	if registration.StakerSignature != signature.String() {
+		t.Fatalf("StakerSignature = %q, want wallet signature", registration.StakerSignature)
+	}
+	if _, err := normalizeBootstrapRegistration(registration, normalized.ChainID); err != nil {
+		t.Fatalf("normalizeBootstrapRegistration() error = %v", err)
 	}
 }
 
@@ -331,8 +384,19 @@ func testBootstrapRegistration(t *testing.T, config nodeConfig, index int) rpc.B
 		StakeLamports:         stake.MinimumStakeLamports,
 		RegisteredAtUnixMilli: time.Now().UnixMilli(),
 	}
+	signBootstrapStakerAuthorization(t, &request, "bootstrap-staker-"+indexText)
 	signBootstrapRegistration(t, &request, "bootstrap-consensus-"+indexText)
 	return request
+}
+
+func signBootstrapStakerAuthorization(t *testing.T, request *rpc.BootstrapValidatorRegistrationRequest, stakerSeed string) {
+	t.Helper()
+	stakerKey := mustStructureKeyPair(stakerSeed)
+	signature, err := stakerKey.Sign(bootstrapRegistrationSignBytes(*request))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	request.StakerSignature = signature.String()
 }
 
 func signBootstrapRegistration(t *testing.T, request *rpc.BootstrapValidatorRegistrationRequest, consensusSeed string) {

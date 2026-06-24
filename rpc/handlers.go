@@ -405,6 +405,12 @@ type HealthResult struct {
 	HeadHeight                        uint64 `json:"head_height"`
 	HeadSlot                          uint64 `json:"head_slot"`
 	FinalizedHeight                   uint64 `json:"finalized_height"`
+	HeadUpdatedUnixMilli              int64  `json:"head_updated_unix_milli"`
+	HeadAgeMillis                     int64  `json:"head_age_millis"`
+	HeadStaleThresholdMillis          int64  `json:"head_stale_threshold_millis"`
+	ChainProgressing                  bool   `json:"chain_progressing"`
+	TransactionSubmissionEnabled      bool   `json:"transaction_submission_enabled"`
+	TransactionSubmissionReason       string `json:"transaction_submission_reason,omitempty"`
 	MempoolSize                       int    `json:"mempool_size"`
 	LivenessState                     string `json:"liveness_state,omitempty"`
 	LivenessMode                      string `json:"liveness_mode,omitempty"`
@@ -518,25 +524,25 @@ type BootstrapStatusResult struct {
 }
 
 type ValidatorPairingResult struct {
-	Enabled           bool                           `json:"enabled"`
-	State             string                         `json:"state"`
-	Mode              string                         `json:"mode,omitempty"`
-	RPCURL            string                         `json:"rpc_url,omitempty"`
-	BootstrapRPCURL   string                         `json:"bootstrap_rpc_url,omitempty"`
-	ChainID           string                         `json:"chain_id,omitempty"`
-	ChainIdentityHash string                         `json:"chain_identity_hash,omitempty"`
-	GenesisHash       string                         `json:"genesis_hash,omitempty"`
-	NodeName          string                         `json:"node_name,omitempty"`
-	NodePeerID        string                         `json:"node_peer_id,omitempty"`
-	AdvertisedIP      string                         `json:"advertised_ip,omitempty"`
-	AdvertisedPort    int                            `json:"advertised_port,omitempty"`
-	Network           string                         `json:"network,omitempty"`
-	ValidatorAddress  string                         `json:"validator_address,omitempty"`
-	ConsensusAddress  string                         `json:"consensus_address,omitempty"`
-	BLSPublicKey      string                         `json:"bls_public_key,omitempty"`
-	RegisteredAtUnixMS int64                         `json:"registered_at_unix_millis,omitempty"`
-	ExpiresAtUnixMS   int64                          `json:"expires_at_unix_millis,omitempty"`
-	Completed         ValidatorPairingCompleteResult `json:"completed,omitempty"`
+	Enabled            bool                           `json:"enabled"`
+	State              string                         `json:"state"`
+	Mode               string                         `json:"mode,omitempty"`
+	RPCURL             string                         `json:"rpc_url,omitempty"`
+	BootstrapRPCURL    string                         `json:"bootstrap_rpc_url,omitempty"`
+	ChainID            string                         `json:"chain_id,omitempty"`
+	ChainIdentityHash  string                         `json:"chain_identity_hash,omitempty"`
+	GenesisHash        string                         `json:"genesis_hash,omitempty"`
+	NodeName           string                         `json:"node_name,omitempty"`
+	NodePeerID         string                         `json:"node_peer_id,omitempty"`
+	AdvertisedIP       string                         `json:"advertised_ip,omitempty"`
+	AdvertisedPort     int                            `json:"advertised_port,omitempty"`
+	Network            string                         `json:"network,omitempty"`
+	ValidatorAddress   string                         `json:"validator_address,omitempty"`
+	ConsensusAddress   string                         `json:"consensus_address,omitempty"`
+	BLSPublicKey       string                         `json:"bls_public_key,omitempty"`
+	RegisteredAtUnixMS int64                          `json:"registered_at_unix_millis,omitempty"`
+	ExpiresAtUnixMS    int64                          `json:"expires_at_unix_millis,omitempty"`
+	Completed          ValidatorPairingCompleteResult `json:"completed,omitempty"`
 }
 
 type ValidatorPairingCompleteRequest struct {
@@ -1575,7 +1581,7 @@ func parseCompleteValidatorPairingParams(params json.RawMessage) (ValidatorPairi
 		request.ConsensusAddress == "" ||
 		request.BLSPublicKey == "" ||
 		request.NodePeerID == "" ||
-		request.Signature == "" ||
+		(request.Signature == "" && request.BootstrapStakerSignature == "") ||
 		request.StakeLamports == 0 {
 		return ValidatorPairingCompleteRequest{}, invalidParamsError("completeValidatorPairing has empty required fields")
 	}
@@ -1605,6 +1611,7 @@ func parseBootstrapRegisterValidatorParams(params json.RawMessage) (BootstrapVal
 		request.BLSPublicKeyBase64 == "" ||
 		request.StakeLamports == 0 ||
 		request.RegisteredAtUnixMilli == 0 ||
+		request.StakerSignature == "" ||
 		request.Signature == "" {
 		return BootstrapValidatorRegistrationRequest{}, invalidParamsError("bootstrapRegisterValidator registration has empty required fields")
 	}

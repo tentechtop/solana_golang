@@ -121,6 +121,10 @@ func buildBootstrapRegistration(config nodeConfig) (rpc.BootstrapValidatorRegist
 	if advertisedPort == 0 {
 		advertisedPort = config.ListenPort
 	}
+	registeredAtUnixMilli := config.BootstrapJoin.RegisteredAtUnixMilli
+	if registeredAtUnixMilli == 0 {
+		registeredAtUnixMilli = time.Now().UnixMilli()
+	}
 	// 功能目的：省略发现模式链 ID；实现原因：由引导节点返回权威链身份，避免用户预配置错误链。
 	chainID := strings.TrimSpace(config.ChainID)
 	if config.BootstrapJoin.Enabled && !config.ChainIDExplicit {
@@ -133,13 +137,25 @@ func buildBootstrapRegistration(config nodeConfig) (rpc.BootstrapValidatorRegist
 		AdvertisedIP:          advertisedIP,
 		AdvertisedPort:        advertisedPort,
 		Network:               string(utils.ProtocolTCP),
-		StakerAddress:         localKeys.staker.PublicKey.String(),
+		StakerAddress:         localKeys.stakerAddress.String(),
 		ValidatorAddress:      localKeys.validator.PublicKey.String(),
 		ConsensusPublicKey:    localKeys.consensus.PublicKey.String(),
 		BLSPublicKeyBase64:    utils.Base64Encode(localKeys.bls.PublicKey),
 		StakeLamports:         config.StakeLamports,
-		RegisteredAtUnixMilli: time.Now().UnixMilli(),
+		RegisteredAtUnixMilli: registeredAtUnixMilli,
 	}
+	stakerSignature := strings.TrimSpace(config.BootstrapJoin.StakerSignature)
+	if stakerSignature == "" {
+		if len(localKeys.staker.PrivateKey) == 0 {
+			return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: bootstrap join requires staker_signature when staker private key is not local")
+		}
+		signature, err := localKeys.staker.Sign(bootstrapRegistrationSignBytes(request))
+		if err != nil {
+			return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: sign bootstrap staker authorization: %w", err)
+		}
+		stakerSignature = signature.String()
+	}
+	request.StakerSignature = stakerSignature
 	signature, err := localKeys.consensus.Sign(bootstrapRegistrationSignBytes(request))
 	if err != nil {
 		return rpc.BootstrapValidatorRegistrationRequest{}, fmt.Errorf("posnode: sign bootstrap registration: %w", err)

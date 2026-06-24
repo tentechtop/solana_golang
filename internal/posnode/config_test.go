@@ -530,6 +530,35 @@ func TestNormalizeNodeConfigInfersBootstrapJoinDefaultRPCPort(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigAllowsBootstrapPairingWithoutGenesis(t *testing.T) {
+	disabled := false
+	enabled := true
+	config := minimalNodeConfigForValidation()
+	config.ChainID = ""
+	config.Genesis = genesisConfig{}
+	config.NodeRole = "full"
+	config.RPCEnabled = true
+	config.RPCPort = 19003
+	config.ValidatorEnabled = &disabled
+	config.ConsensusEnabled = &disabled
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+	config.BootstrapJoin = bootstrapJoinConfig{RPCURL: "http://101.35.87.31:8899/"}
+	config.ValidatorPairing = validatorPairingConfig{Enabled: &enabled}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	if normalized.BootstrapJoin.Enabled {
+		t.Fatal("BootstrapJoin.Enabled = true before wallet pairing, want false")
+	}
+	if !normalized.bootstrapPairingPending() {
+		t.Fatal("bootstrapPairingPending() = false, want true")
+	}
+}
+
 func TestNormalizeNodeConfigRejectsInvalidNodeCapability(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 	config.NodeCapabilities = []string{"archive", "bad-capability"}

@@ -29,6 +29,8 @@ const (
 	maxRPCBodyBytes               = 1 << 20
 	minimumStakeLamports          = 10_000_000
 	validatorPairingPayloadPrefix = "posvalpair:"
+	validatorPairingModeRegister  = "validator_registration"
+	validatorPairingModeBootstrap = "bootstrap_join"
 )
 
 type keystoreFile struct {
@@ -83,44 +85,52 @@ func (result *transactionSubmitResult) UnmarshalJSON(data []byte) error {
 }
 
 type validatorPairingPayload struct {
-	Version           int    `json:"version"`
-	RPCURL            string `json:"rpc_url"`
-	ChainID           string `json:"chain_id"`
-	ChainIdentityHash string `json:"chain_identity_hash"`
-	GenesisHash       string `json:"genesis_hash"`
-	NodeName          string `json:"node_name"`
-	NodePeerID        string `json:"node_peer_id"`
-	ValidatorAddress  string `json:"validator_address"`
-	ConsensusAddress  string `json:"consensus_address"`
-	BLSPublicKey      string `json:"bls_public_key"`
-	Token             string `json:"token"`
-	ExpiresAtUnixMS   int64  `json:"expires_at_unix_millis"`
+	Version            int    `json:"version"`
+	Mode               string `json:"mode,omitempty"`
+	RPCURL             string `json:"rpc_url"`
+	BootstrapRPCURL    string `json:"bootstrap_rpc_url,omitempty"`
+	ChainID            string `json:"chain_id"`
+	ChainIdentityHash  string `json:"chain_identity_hash"`
+	GenesisHash        string `json:"genesis_hash"`
+	NodeName           string `json:"node_name"`
+	NodePeerID         string `json:"node_peer_id"`
+	AdvertisedIP       string `json:"advertised_ip,omitempty"`
+	AdvertisedPort     int    `json:"advertised_port,omitempty"`
+	Network            string `json:"network,omitempty"`
+	ValidatorAddress   string `json:"validator_address"`
+	ConsensusAddress   string `json:"consensus_address"`
+	BLSPublicKey       string `json:"bls_public_key"`
+	RegisteredAtUnixMS int64  `json:"registered_at_unix_millis,omitempty"`
+	Token              string `json:"token"`
+	ExpiresAtUnixMS    int64  `json:"expires_at_unix_millis"`
 }
 
 type validatorPairingCompleteRequest struct {
-	Token            string `json:"token"`
-	StakerAddress    string `json:"staker_address"`
-	ValidatorAddress string `json:"validator_address"`
-	ConsensusAddress string `json:"consensus_address"`
-	BLSPublicKey     string `json:"bls_public_key"`
-	NodePeerID       string `json:"node_peer_id"`
-	StakeLamports    uint64 `json:"stake_lamports"`
-	Signature        string `json:"signature"`
+	Token                    string `json:"token"`
+	StakerAddress            string `json:"staker_address"`
+	ValidatorAddress         string `json:"validator_address"`
+	ConsensusAddress         string `json:"consensus_address"`
+	BLSPublicKey             string `json:"bls_public_key"`
+	NodePeerID               string `json:"node_peer_id"`
+	StakeLamports            uint64 `json:"stake_lamports"`
+	Signature                string `json:"signature"`
+	BootstrapStakerSignature string `json:"bootstrap_staker_signature,omitempty"`
 }
 
 type validatorPairingCompleteResult struct {
-	State            string `json:"state,omitempty"`
-	StakerAddress    string `json:"staker_address,omitempty"`
-	ValidatorAddress string `json:"validator_address,omitempty"`
-	ConsensusAddress string `json:"consensus_address,omitempty"`
-	BLSPublicKey     string `json:"bls_public_key,omitempty"`
-	NodePeerID       string `json:"node_peer_id,omitempty"`
-	StakeLamports    uint64 `json:"stake_lamports,omitempty"`
-	Signature        string `json:"signature,omitempty"`
-	ConfigUpdated    bool   `json:"config_updated"`
-	RestartRequired  bool   `json:"restart_required"`
-	ConfigPath       string `json:"config_path,omitempty"`
-	ActivationNote   string `json:"activation_note,omitempty"`
+	State                    string `json:"state,omitempty"`
+	StakerAddress            string `json:"staker_address,omitempty"`
+	ValidatorAddress         string `json:"validator_address,omitempty"`
+	ConsensusAddress         string `json:"consensus_address,omitempty"`
+	BLSPublicKey             string `json:"bls_public_key,omitempty"`
+	NodePeerID               string `json:"node_peer_id,omitempty"`
+	StakeLamports            uint64 `json:"stake_lamports,omitempty"`
+	Signature                string `json:"signature,omitempty"`
+	BootstrapStakerSignature string `json:"bootstrap_staker_signature,omitempty"`
+	ConfigUpdated            bool   `json:"config_updated"`
+	RestartRequired          bool   `json:"restart_required"`
+	ConfigPath               string `json:"config_path,omitempty"`
+	ActivationNote           string `json:"activation_note,omitempty"`
 }
 
 func main() {
@@ -402,7 +412,18 @@ func runValidatorPair(args []string) error {
 		return err
 	}
 	signature := strings.TrimSpace(*registrationSignature)
-	if signature == "" {
+	bootstrapStakerSignature := ""
+	if validatorPairingPayloadMode(payload) == validatorPairingModeBootstrap {
+		bootstrapStakerSignature = signature
+		if bootstrapStakerSignature == "" {
+			signatureValue, err := signBootstrapPairingAuthorization(payload, staker, *lamports)
+			if err != nil {
+				return err
+			}
+			bootstrapStakerSignature = signatureValue
+		}
+		signature = ""
+	} else if signature == "" {
 		blockhash, err := latestBlockhash(rpcURL)
 		if err != nil {
 			return err
@@ -425,14 +446,15 @@ func runValidatorPair(args []string) error {
 		}
 	}
 	completeRequest := validatorPairingCompleteRequest{
-		Token:            payload.Token,
-		StakerAddress:    staker.PublicKey.String(),
-		ValidatorAddress: payload.ValidatorAddress,
-		ConsensusAddress: payload.ConsensusAddress,
-		BLSPublicKey:     payload.BLSPublicKey,
-		NodePeerID:       payload.NodePeerID,
-		StakeLamports:    *lamports,
-		Signature:        signature,
+		Token:                    payload.Token,
+		StakerAddress:            staker.PublicKey.String(),
+		ValidatorAddress:         payload.ValidatorAddress,
+		ConsensusAddress:         payload.ConsensusAddress,
+		BLSPublicKey:             payload.BLSPublicKey,
+		NodePeerID:               payload.NodePeerID,
+		StakeLamports:            *lamports,
+		Signature:                signature,
+		BootstrapStakerSignature: bootstrapStakerSignature,
 	}
 	var result validatorPairingCompleteResult
 	if err := rpcCall(rpcURL, "completeValidatorPairing", []any{completeRequest}, &result); err != nil {
@@ -707,15 +729,27 @@ func validateValidatorPairingPayload(payload validatorPairingPayload) error {
 		return fmt.Errorf("unsupported validator pairing payload version %d", payload.Version)
 	}
 	required := map[string]string{
-		"rpc_url":             payload.RPCURL,
-		"chain_id":            payload.ChainID,
-		"chain_identity_hash": payload.ChainIdentityHash,
-		"genesis_hash":        payload.GenesisHash,
-		"node_peer_id":        payload.NodePeerID,
-		"validator_address":   payload.ValidatorAddress,
-		"consensus_address":   payload.ConsensusAddress,
-		"bls_public_key":      payload.BLSPublicKey,
-		"token":               payload.Token,
+		"rpc_url":           payload.RPCURL,
+		"node_peer_id":      payload.NodePeerID,
+		"validator_address": payload.ValidatorAddress,
+		"consensus_address": payload.ConsensusAddress,
+		"bls_public_key":    payload.BLSPublicKey,
+		"token":             payload.Token,
+	}
+	if validatorPairingPayloadMode(payload) == validatorPairingModeBootstrap {
+		required["bootstrap_rpc_url"] = payload.BootstrapRPCURL
+		required["advertised_ip"] = payload.AdvertisedIP
+		required["network"] = payload.Network
+		if payload.AdvertisedPort <= 0 {
+			return fmt.Errorf("validator pairing payload has invalid advertised port")
+		}
+		if payload.RegisteredAtUnixMS <= 0 {
+			return fmt.Errorf("validator pairing payload has invalid bootstrap registration time")
+		}
+	} else {
+		required["chain_id"] = payload.ChainID
+		required["chain_identity_hash"] = payload.ChainIdentityHash
+		required["genesis_hash"] = payload.GenesisHash
 	}
 	for name, value := range required {
 		if strings.TrimSpace(value) == "" {
@@ -726,6 +760,76 @@ func validateValidatorPairingPayload(payload validatorPairingPayload) error {
 		return fmt.Errorf("validator pairing payload has invalid expiry")
 	}
 	return validateWalletRPCURL(payload.RPCURL)
+}
+
+func validatorPairingPayloadMode(payload validatorPairingPayload) string {
+	mode := strings.TrimSpace(payload.Mode)
+	if mode == "" {
+		return validatorPairingModeRegister
+	}
+	return mode
+}
+
+type bootstrapPairingRegistration struct {
+	ChainID               string
+	NodeName              string
+	PeerID                string
+	AdvertisedIP          string
+	AdvertisedPort        int
+	Network               string
+	StakerAddress         string
+	ValidatorAddress      string
+	ConsensusPublicKey    string
+	BLSPublicKeyBase64    string
+	StakeLamports         uint64
+	CommissionBps         uint16
+	RegisteredAtUnixMilli int64
+}
+
+func signBootstrapPairingAuthorization(payload validatorPairingPayload, staker structure.SolanaKeyPair, lamports uint64) (string, error) {
+	blsPublicKey, err := utils.Base58Decode(strings.TrimSpace(payload.BLSPublicKey))
+	if err != nil {
+		return "", fmt.Errorf("decode bootstrap bls public key: %w", err)
+	}
+	registration := bootstrapPairingRegistration{
+		ChainID:               strings.TrimSpace(payload.ChainID),
+		NodeName:              strings.TrimSpace(payload.NodeName),
+		PeerID:                strings.TrimSpace(payload.NodePeerID),
+		AdvertisedIP:          strings.TrimSpace(payload.AdvertisedIP),
+		AdvertisedPort:        payload.AdvertisedPort,
+		Network:               strings.TrimSpace(payload.Network),
+		StakerAddress:         staker.PublicKey.String(),
+		ValidatorAddress:      strings.TrimSpace(payload.ValidatorAddress),
+		ConsensusPublicKey:    strings.TrimSpace(payload.ConsensusAddress),
+		BLSPublicKeyBase64:    utils.Base64Encode(blsPublicKey),
+		StakeLamports:         lamports,
+		RegisteredAtUnixMilli: payload.RegisteredAtUnixMS,
+	}
+	signature, err := staker.Sign(bootstrapPairingSignBytes(registration))
+	if err != nil {
+		return "", fmt.Errorf("sign bootstrap authorization: %w", err)
+	}
+	return signature.String(), nil
+}
+
+func bootstrapPairingSignBytes(registration bootstrapPairingRegistration) []byte {
+	fields := []string{
+		"pos-bootstrap-register-v1",
+		strings.TrimSpace(registration.ChainID),
+		strings.TrimSpace(registration.NodeName),
+		strings.TrimSpace(registration.PeerID),
+		strings.TrimSpace(registration.AdvertisedIP),
+		strconv.Itoa(registration.AdvertisedPort),
+		strings.TrimSpace(registration.Network),
+		strings.TrimSpace(registration.StakerAddress),
+		strings.TrimSpace(registration.ValidatorAddress),
+		strings.TrimSpace(registration.ConsensusPublicKey),
+		strings.TrimSpace(registration.BLSPublicKeyBase64),
+		strconv.FormatUint(registration.StakeLamports, 10),
+		strconv.FormatUint(uint64(registration.CommissionBps), 10),
+		strconv.FormatInt(registration.RegisteredAtUnixMilli, 10),
+	}
+	return []byte(strings.Join(fields, "\n"))
 }
 
 func validateWalletRPCURL(rawURL string) error {

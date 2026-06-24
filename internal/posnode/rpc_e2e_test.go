@@ -65,6 +65,12 @@ func TestHTTPJSONRPCSubmitsSignedTransaction(t *testing.T) {
 	if health.MempoolSize != 1 {
 		t.Fatalf("health mempool size = %d, want 1", health.MempoolSize)
 	}
+	if health.HeadUpdatedUnixMilli <= 0 || health.HeadAgeMillis < 0 {
+		t.Fatalf("health head time invalid: updated=%d age=%d", health.HeadUpdatedUnixMilli, health.HeadAgeMillis)
+	}
+	if !health.ChainProgressing || health.TransactionSubmissionReason == "" {
+		t.Fatalf("health submission fields invalid: progressing=%v enabled=%v reason=%s", health.ChainProgressing, health.TransactionSubmissionEnabled, health.TransactionSubmissionReason)
+	}
 
 	metricsResponse := postPosNodeJSONRPC(t, server, 4, rpc.MethodGetMetrics, []any{})
 	metrics := decodePosNodeRPCResult[nodeOperationalMetrics](t, metricsResponse)
@@ -73,6 +79,38 @@ func TestHTTPJSONRPCSubmitsSignedTransaction(t *testing.T) {
 	}
 	if metrics.Counters.TransactionsIn != 1 {
 		t.Fatalf("metrics transactions in = %d, want 1", metrics.Counters.TransactionsIn)
+	}
+}
+
+func TestHealthHeadProgressDetectsStaleHead(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	head := blockchain.Head{UpdatedAtMs: now.Add(-time.Minute).UnixMilli()}
+
+	headAgeMillis, chainProgressing := healthHeadProgress(now, head, 5*time.Second)
+	if headAgeMillis != int64(time.Minute/time.Millisecond) {
+		t.Fatalf("head age = %d, want %d", headAgeMillis, int64(time.Minute/time.Millisecond))
+	}
+	if chainProgressing {
+		t.Fatal("chain progressing = true, want false for stale head")
+	}
+}
+
+func TestTransactionSubmissionHealthRequiresPackagingAndProgress(t *testing.T) {
+	enabled, reason := transactionSubmissionHealth(livenessGateJSON{UserTransactionPackagingEnabled: true}, true)
+	if !enabled || reason != "ready" {
+		t.Fatalf("submission health = %v %s, want ready", enabled, reason)
+	}
+
+	enabled, reason = transactionSubmissionHealth(livenessGateJSON{
+		Reason: "consensus_disabled",
+	}, true)
+	if enabled || reason != "consensus_disabled" {
+		t.Fatalf("disabled submission health = %v %s, want consensus_disabled", enabled, reason)
+	}
+
+	enabled, reason = transactionSubmissionHealth(livenessGateJSON{UserTransactionPackagingEnabled: true}, false)
+	if enabled || reason != "chain_head_not_progressing" {
+		t.Fatalf("stale submission health = %v %s, want chain_head_not_progressing", enabled, reason)
 	}
 }
 

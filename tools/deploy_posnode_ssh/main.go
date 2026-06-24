@@ -15,7 +15,7 @@ import (
 const (
 	remoteRoot    = "/opt/solana_golang"
 	remoteBinary  = remoteRoot + "/bin/posnode"
-	defaultConfig = "deploy/posnode-101.json"
+	defaultConfig = "cmd/posnode/configs/bootstrap-public.json"
 )
 
 func buildServiceText(remoteConfig string) string {

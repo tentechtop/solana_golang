@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	protocolAddressTransparent     byte = 0x00
-	protocolAddressPrivacy         byte = 0x01
-	protocolAddressSize                 = structure.PublicKeySize + 1
-	rpcTransactionBroadcastTimeout      = 2 * time.Second
+	protocolAddressTransparent        byte = 0x00
+	protocolAddressPrivacy            byte = 0x01
+	protocolAddressSize                    = structure.PublicKeySize + 1
+	rpcTransactionBroadcastTimeout         = 2 * time.Second
+	minHealthHeadFreshnessWindow           = 5 * time.Second
+	maxHealthHeadFreshnessWindow           = 30 * time.Second
+	healthHeadFreshnessSlotMultiplier      = 5
 )
 
 type privacyChangeArtifacts struct {
@@ -1054,16 +1057,30 @@ func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 		}
 		return rpc.HealthResult{OK: ready}, nil
 	}
+	now := time.Now()
 	head := node.ledger.Head()
+	headFreshnessWindow := node.healthHeadFreshnessWindow()
+	headAgeMillis, chainProgressing := healthHeadProgress(now, head, headFreshnessWindow)
 	node.mutex.Lock()
 	mempoolSize := len(node.mempool)
 	node.mutex.Unlock()
-	livenessGate := node.refreshLivenessGate(time.Now())
+	livenessGate := node.refreshLivenessGate(now)
+	transactionSubmissionEnabled, transactionSubmissionReason := transactionSubmissionHealth(livenessGate, chainProgressing)
+	healthOK := livenessGateHealthOK(livenessGate)
+	if livenessGate.ProductionEnabled && !chainProgressing {
+		healthOK = false
+	}
 	return rpc.HealthResult{
-		OK:                                livenessGateHealthOK(livenessGate),
+		OK:                                healthOK,
 		HeadHeight:                        head.Height,
 		HeadSlot:                          head.Slot,
 		FinalizedHeight:                   head.FinalizedHeight,
+		HeadUpdatedUnixMilli:              head.UpdatedAtMs,
+		HeadAgeMillis:                     headAgeMillis,
+		HeadStaleThresholdMillis:          headFreshnessWindow.Milliseconds(),
+		ChainProgressing:                  chainProgressing,
+		TransactionSubmissionEnabled:      transactionSubmissionEnabled,
+		TransactionSubmissionReason:       transactionSubmissionReason,
 		MempoolSize:                       mempoolSize,
 		LivenessState:                     livenessGate.State,
 		LivenessMode:                      livenessGate.Mode,
@@ -1076,6 +1093,44 @@ func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 		RecentReachabilityWindowMillis:    livenessGate.RecentReachabilityWindowMillis,
 		LastReachableStakeUpdateUnixMilli: livenessGate.LastReachableStakeUpdateUnixMilli,
 	}, nil
+}
+
+// healthHeadFreshnessWindow 计算链头新鲜度窗口 + 允许少量 slot 抖动但快速暴露停止出块。
+func (node *posNode) healthHeadFreshnessWindow() time.Duration {
+	window := node.config.slotDuration() * healthHeadFreshnessSlotMultiplier
+	if window < minHealthHeadFreshnessWindow {
+		return minHealthHeadFreshnessWindow
+	}
+	if window > maxHealthHeadFreshnessWindow {
+		return maxHealthHeadFreshnessWindow
+	}
+	return window
+}
+
+// healthHeadProgress 计算链头推进状态 + APP 需要拒绝已经停止出块的提交入口。
+func healthHeadProgress(now time.Time, head blockchain.Head, freshnessWindow time.Duration) (int64, bool) {
+	if head.UpdatedAtMs <= 0 {
+		return 0, false
+	}
+	headAgeMillis := now.UnixMilli() - head.UpdatedAtMs
+	if headAgeMillis < 0 {
+		headAgeMillis = 0
+	}
+	return headAgeMillis, time.Duration(headAgeMillis)*time.Millisecond <= freshnessWindow
+}
+
+// transactionSubmissionHealth 汇总提交门禁 + 把共识不可用和链头陈旧拆成可读原因。
+func transactionSubmissionHealth(livenessGate livenessGateJSON, chainProgressing bool) (bool, string) {
+	if !livenessGate.UserTransactionPackagingEnabled {
+		if livenessGate.Reason != "" {
+			return false, livenessGate.Reason
+		}
+		return false, "transaction_packaging_disabled"
+	}
+	if !chainProgressing {
+		return false, "chain_head_not_progressing"
+	}
+	return true, "ready"
 }
 
 func (node *posNode) lookupMempoolTransaction(signature string) (rpc.TransactionDetailResult, bool, error) {

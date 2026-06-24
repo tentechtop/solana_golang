@@ -47,6 +47,38 @@ func TestValidatorPairingCompletesAndWritesValidatorConfig(t *testing.T) {
 	}
 }
 
+func TestValidatorPairingCompletesBootstrapJoinConfig(t *testing.T) {
+	node, configPath := newBootstrapPairingTestNode(t, 19015, true)
+	pairing, err := node.GetValidatorPairing(context.Background())
+	if err != nil {
+		t.Fatalf("GetValidatorPairing() error = %v", err)
+	}
+	if pairing.Mode != validatorPairingModeBootstrap || pairing.BootstrapRPCURL == "" {
+		t.Fatalf("pairing = %+v, want bootstrap mode", pairing)
+	}
+	staker := mustStructureKeyPair("paired-bootstrap-staker")
+	request := newBootstrapPairingCompleteRequest(t, node, staker, stake.MinimumStakeLamports)
+	result, err := node.CompleteValidatorPairing(context.Background(), request)
+	if err != nil {
+		t.Fatalf("CompleteValidatorPairing() error = %v", err)
+	}
+	if !result.ConfigUpdated || result.BootstrapStakerSignature == "" {
+		t.Fatalf("complete result = %+v, want bootstrap signature and config update", result)
+	}
+	updated := readConfigMap(t, configPath)
+	if updated["node_role"] != "validator" || updated["staker_address"] != staker.PublicKey.String() {
+		t.Fatalf("updated config = %+v, want validator role and paired staker", updated)
+	}
+	joinConfig, ok := updated["bootstrap_join"].(map[string]any)
+	if !ok || joinConfig["enabled"] != true || joinConfig["staker_signature"] != request.BootstrapStakerSignature {
+		t.Fatalf("bootstrap_join = %+v, want enabled with staker signature", updated["bootstrap_join"])
+	}
+	pairingConfig, ok := updated["validator_pairing"].(map[string]any)
+	if !ok || pairingConfig["enabled"] != false {
+		t.Fatalf("validator_pairing = %+v, want disabled after completion", updated["validator_pairing"])
+	}
+}
+
 func TestValidatorPairingRejectsBadToken(t *testing.T) {
 	node, _ := newValidatorPairingTestNode(t, 19011, false)
 	request := rpc.ValidatorPairingCompleteRequest{
@@ -149,6 +181,75 @@ func newValidatorPairingTestNode(t *testing.T, rpcPort int, writeConfigFile bool
 	return node, configPath
 }
 
+func newBootstrapPairingTestNode(t *testing.T, rpcPort int, writeConfigFile bool) (*posNode, string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "node.json")
+	disabled := false
+	enabled := true
+	config := minimalNodeConfigForValidation()
+	config.ConfigPath = configPath
+	config.ChainID = ""
+	config.Genesis = genesisConfig{}
+	config.NodeRole = "full"
+	config.RPCEnabled = true
+	config.RPCPort = rpcPort
+	config.DataPath = filepath.Join(tempDir, "data")
+	config.ListenIP = "0.0.0.0"
+	config.AdvertisedIP = "192.168.1.15"
+	config.PeerSeed = "validator-bootstrap-pairing-peer"
+	config.ValidatorEnabled = &disabled
+	config.ConsensusEnabled = &disabled
+	config.StakerSeed = ""
+	config.ValidatorSeed = ""
+	config.ConsensusSeed = ""
+	config.BootstrapJoin = bootstrapJoinConfig{RPCURL: "http://101.35.87.31:8899/"}
+	config.ValidatorPairing = validatorPairingConfig{
+		Enabled:     &enabled,
+		KeystoreDir: filepath.Join(tempDir, "keys"),
+	}
+	if writeConfigFile {
+		writeTestConfig(t, configPath, map[string]any{
+			"node_name":         config.NodeName,
+			"node_role":         "full",
+			"listen_ip":         config.ListenIP,
+			"listen_port":       config.ListenPort,
+			"advertised_ip":     config.AdvertisedIP,
+			"rpc_enabled":       true,
+			"rpc_listen_ip":     "0.0.0.0",
+			"rpc_port":          rpcPort,
+			"peer_seed":         config.PeerSeed,
+			"data_path":         config.DataPath,
+			"validator_enabled": false,
+			"consensus_enabled": false,
+			"bootstrap_join": map[string]any{
+				"rpc_url": config.BootstrapJoin.RPCURL,
+			},
+			"validator_pairing": map[string]any{
+				"enabled":      true,
+				"keystore_dir": config.ValidatorPairing.KeystoreDir,
+			},
+		})
+	}
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	normalized.ConfigPath = configPath
+	node := &posNode{
+		config:           normalized,
+		peerKeyPair:      mustRawKeyPair(config.PeerSeed),
+		logger:           testLogger(),
+		seenTransactions: make(map[string]struct{}),
+	}
+	session, err := node.newValidatorPairingSession()
+	if err != nil {
+		t.Fatalf("newValidatorPairingSession() error = %v", err)
+	}
+	node.validatorPairing = session
+	return node, configPath
+}
+
 func newValidatorPairingCompleteRequest(node *posNode, staker structure.SolanaKeyPair, signature string, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
 	return rpc.ValidatorPairingCompleteRequest{
 		Token:            node.validatorPairing.payload.Token,
@@ -160,6 +261,31 @@ func newValidatorPairingCompleteRequest(node *posNode, staker structure.SolanaKe
 		StakeLamports:    stakeLamports,
 		Signature:        signature,
 	}
+}
+
+func newBootstrapPairingCompleteRequest(t *testing.T, node *posNode, staker structure.SolanaKeyPair, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
+	t.Helper()
+	request := rpc.ValidatorPairingCompleteRequest{
+		Token:            node.validatorPairing.payload.Token,
+		StakerAddress:    "T" + staker.PublicKey.String(),
+		ValidatorAddress: node.validatorPairing.payload.ValidatorAddress,
+		ConsensusAddress: node.validatorPairing.payload.ConsensusAddress,
+		BLSPublicKey:     node.validatorPairing.payload.BLSPublicKey,
+		NodePeerID:       node.validatorPairing.payload.NodePeerID,
+		StakeLamports:    stakeLamports,
+	}
+	signRequest := request
+	signRequest.StakerAddress = staker.PublicKey.String()
+	bootstrapRequest, err := bootstrapRegistrationFromPairing(node.validatorPairing.payload, signRequest)
+	if err != nil {
+		t.Fatalf("bootstrapRegistrationFromPairing() error = %v", err)
+	}
+	signature, err := staker.Sign(bootstrapRegistrationSignBytes(bootstrapRequest))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	request.BootstrapStakerSignature = signature.String()
+	return request
 }
 
 func addValidatorPairingRegistrationToMempool(t *testing.T, node *posNode, staker structure.SolanaKeyPair, stakeLamports uint64) string {

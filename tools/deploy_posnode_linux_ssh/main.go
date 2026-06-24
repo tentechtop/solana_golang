@@ -16,10 +16,10 @@ import (
 const (
 	remoteRoot          = "/opt/solana_golang"
 	remoteBinary        = remoteRoot + "/bin/posnode"
-	defaultConfig       = "deploy/three-validator-101-linux.json"
-	defaultRemoteConfig = remoteRoot + "/config/three-validator-101-linux.json"
-	defaultRemoteData   = remoteRoot + "/data/posnode-three-101-stage"
-	defaultServiceName  = "posnode-three-validator.service"
+	defaultConfig       = "cmd/posnode/configs/bootstrap-public.json"
+	defaultRemoteConfig = remoteRoot + "/config/bootstrap-public.json"
+	defaultRemoteData   = remoteRoot + "/data/public-bootstrap"
+	defaultServiceName  = "posnode-bootstrap.service"
 )
 
 func main() {

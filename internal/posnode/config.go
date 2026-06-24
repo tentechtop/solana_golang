@@ -146,12 +146,12 @@ type bootstrapCoordinatorConfig struct {
 }
 
 type bootstrapJoinConfig struct {
-	Enabled                bool   `json:"enabled,omitempty"`
-	RPCURL                 string `json:"rpc_url,omitempty"`
-	PollIntervalMillis     int64  `json:"poll_interval_millis,omitempty"`
-	TimeoutMillis          int64  `json:"timeout_millis,omitempty"`
-	RegisteredAtUnixMilli  int64  `json:"registered_at_unix_milli,omitempty"`
-	StakerSignature        string `json:"staker_signature,omitempty"`
+	Enabled               bool   `json:"enabled,omitempty"`
+	RPCURL                string `json:"rpc_url,omitempty"`
+	PollIntervalMillis    int64  `json:"poll_interval_millis,omitempty"`
+	TimeoutMillis         int64  `json:"timeout_millis,omitempty"`
+	RegisteredAtUnixMilli int64  `json:"registered_at_unix_milli,omitempty"`
+	StakerSignature       string `json:"staker_signature,omitempty"`
 }
 
 type validatorPairingConfig struct {
