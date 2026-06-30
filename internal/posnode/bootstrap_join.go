@@ -57,6 +57,16 @@ func prepareBootstrapJoinConfig(ctx context.Context, config nodeConfig, logger *
 		}
 		registerResult, registerErr := callBootstrapRPC[rpc.BootstrapRegisterValidatorResult](ctx, config.BootstrapJoin.RPCURL, rpc.MethodBootstrapRegisterValidator, []any{registration})
 		if registerErr != nil {
+			if isBootstrapManifestFrozenError(registerErr) {
+				logger.Info("bootstrap manifest already frozen; applying manifest for known validator",
+					slog.String("peer_id", registration.PeerID),
+				)
+				joinedConfig, applyErr := fetchAndApplyReadyBootstrapManifest(ctx, config, registration.PeerID, logger)
+				if applyErr == nil {
+					return joinedConfig, nil
+				}
+				return nodeConfig{}, fmt.Errorf("posnode: bootstrap manifest already frozen; local validator cannot join frozen manifest: %w", applyErr)
+			}
 			logger.Warn("bootstrap validator register failed", slog.Any("error", registerErr))
 			if err := sleepBootstrapJoin(ctx, pollInterval); err != nil {
 				return nodeConfig{}, err
@@ -86,22 +96,48 @@ func prepareBootstrapJoinConfig(ctx context.Context, config nodeConfig, logger *
 			}
 			continue
 		}
-		if err := validateBootstrapManifestForLocalNode(manifest, registration.PeerID); err != nil {
-			return nodeConfig{}, err
-		}
-		joinedConfig, err := applyBootstrapManifest(config, manifest)
-		if err != nil {
-			return nodeConfig{}, err
-		}
-		logger.Info("bootstrap manifest applied",
-			slog.String("chain_id", joinedConfig.ChainID),
-			slog.String("chain_identity_hash", joinedConfig.ChainIdentityHash),
-			slog.String("genesis_hash", joinedConfig.GenesisHash),
-			slog.Int64("genesis_start_unix_millis", joinedConfig.GenesisStartMs),
-			slog.Int("validator_count", len(joinedConfig.Genesis.InitialValidators)),
-		)
-		return joinedConfig, nil
+		return applyReadyBootstrapManifest(config, manifest, registration.PeerID, logger)
 	}
+}
+
+// fetchAndApplyReadyBootstrapManifest 拉取冻结引导清单 + 允许已入网验证者重启后恢复链配置。
+func fetchAndApplyReadyBootstrapManifest(ctx context.Context, config nodeConfig, localPeerID string, logger *slog.Logger) (nodeConfig, error) {
+	manifest, err := callBootstrapRPC[rpc.BootstrapManifestResult](ctx, config.BootstrapJoin.RPCURL, rpc.MethodGetBootstrapManifest, []any{})
+	if err != nil {
+		return nodeConfig{}, fmt.Errorf("fetch bootstrap manifest: %w", err)
+	}
+	if !manifest.Ready {
+		return nodeConfig{}, fmt.Errorf("posnode: bootstrap manifest is not ready")
+	}
+	return applyReadyBootstrapManifest(config, manifest, localPeerID, logger)
+}
+
+// applyReadyBootstrapManifest 校验并应用权威清单 + 避免正常加入与重启恢复出现两套链身份逻辑。
+func applyReadyBootstrapManifest(config nodeConfig, manifest rpc.BootstrapManifestResult, localPeerID string, logger *slog.Logger) (nodeConfig, error) {
+	if err := validateBootstrapManifestForLocalNode(manifest, localPeerID); err != nil {
+		return nodeConfig{}, err
+	}
+	joinedConfig, err := applyBootstrapManifest(config, manifest)
+	if err != nil {
+		return nodeConfig{}, err
+	}
+	logger.Info("bootstrap manifest applied",
+		slog.String("chain_id", joinedConfig.ChainID),
+		slog.String("chain_identity_hash", joinedConfig.ChainIdentityHash),
+		slog.String("genesis_hash", joinedConfig.GenesisHash),
+		slog.Int64("genesis_start_unix_millis", joinedConfig.GenesisStartMs),
+		slog.Int("validator_count", len(joinedConfig.Genesis.InitialValidators)),
+	)
+	return joinedConfig, nil
+}
+
+// isBootstrapManifestFrozenError 识别引导窗口关闭 + 避免节点在不可恢复场景下无限重试。
+func isBootstrapManifestFrozenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "manifest already frozen")
 }
 
 func buildBootstrapRegistration(config nodeConfig) (rpc.BootstrapValidatorRegistrationRequest, error) {

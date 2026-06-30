@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net"
 	"net/url"
@@ -28,6 +30,7 @@ const (
 	validatorPairingPayloadPrefix = "posvalpair:"
 	validatorPairingVersion       = 1
 	validatorPairingTokenBytes    = 32
+	validatorPairingQRImageSize   = 512
 	validatorPairingModeRegister  = "validator_registration"
 	validatorPairingModeBootstrap = "bootstrap_join"
 )
@@ -38,7 +41,8 @@ type validatorPairingSession struct {
 	tokenHash       string
 	state           string
 	qrText          string
-	qrTerminal      string
+	qrHTMLPath      string
+	qrImagePath     string
 	validatorPath   string
 	consensusPath   string
 	blsPath         string
@@ -127,13 +131,11 @@ func (node *posNode) newValidatorPairingSession() (*validatorPairingSession, err
 	genesisHash := node.config.GenesisHash
 	if node.config.bootstrapPairingPending() {
 		mode = validatorPairingModeBootstrap
-		if !node.config.ChainIDExplicit {
-			chainID = ""
-		}
 		bootstrapRPCURL = strings.TrimSpace(node.config.BootstrapJoin.RPCURL)
 		advertisedIP, advertisedPort = validatorPairingAdvertisedEndpoint(node.config)
 		network = string(utils.ProtocolTCP)
 		registeredAtUnixMS = time.Now().UnixMilli()
+		chainID = ""
 		chainIdentityHash = ""
 		genesisHash = ""
 	}
@@ -165,12 +167,22 @@ func (node *posNode) newValidatorPairingSession() (*validatorPairingSession, err
 	if err != nil {
 		return nil, fmt.Errorf("posnode: build validator pairing qr: %w", err)
 	}
+	qrImagePath := validatorPairingQRImagePath(node.config)
+	qrImageBytes, err := writeValidatorPairingQRImage(qrCode, qrImagePath)
+	if err != nil {
+		return nil, err
+	}
+	qrHTMLPath := validatorPairingQRHTMLPath(node.config)
+	if err := writeValidatorPairingQRHTML(qrHTMLPath, qrImageBytes, qrText, payload); err != nil {
+		return nil, err
+	}
 	return &validatorPairingSession{
 		payload:       payload,
 		tokenHash:     utils.Base64RawEncode(utils.SHA256([]byte(token))),
 		state:         "pending",
 		qrText:        qrText,
-		qrTerminal:    qrCode.ToString(false),
+		qrHTMLPath:    qrHTMLPath,
+		qrImagePath:   qrImagePath,
 		validatorPath: validatorPath,
 		consensusPath: consensusPath,
 		blsPath:       blsPath,
@@ -182,6 +194,14 @@ func validatorPairingKeystoreDir(config nodeConfig) string {
 		return filepath.Clean(config.ValidatorPairing.KeystoreDir)
 	}
 	return filepath.Join(config.DataRootPath, "validator-pairing")
+}
+
+func validatorPairingQRImagePath(config nodeConfig) string {
+	return filepath.Join(validatorPairingKeystoreDir(config), "pairing-qr.png")
+}
+
+func validatorPairingQRHTMLPath(config nodeConfig) string {
+	return filepath.Join(validatorPairingKeystoreDir(config), "pairing-qr.html")
 }
 
 func validatorPairingRPCURL(config nodeConfig) string {
@@ -246,16 +266,122 @@ func encodeValidatorPairingPayload(payload validatorPairingPayload) (string, err
 	return validatorPairingPayloadPrefix + utils.Base64RawEncode(data), nil
 }
 
+func writeValidatorPairingQRImage(qrCode *qrcode.QRCode, imagePath string) ([]byte, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(imagePath))
+	if cleanPath == "" || cleanPath == "." {
+		return nil, fmt.Errorf("posnode: validator pairing qr image path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return nil, fmt.Errorf("posnode: create validator pairing qr dir: %w", err)
+	}
+	pngBytes, err := qrCode.PNG(validatorPairingQRImageSize)
+	if err != nil {
+		return nil, fmt.Errorf("posnode: encode validator pairing qr image: %w", err)
+	}
+	if err := os.WriteFile(cleanPath, pngBytes, 0o600); err != nil {
+		return nil, fmt.Errorf("posnode: write validator pairing qr image: %w", err)
+	}
+	return pngBytes, nil
+}
+
+func writeValidatorPairingQRHTML(htmlPath string, qrImageBytes []byte, qrText string, payload validatorPairingPayload) error {
+	cleanPath := filepath.Clean(strings.TrimSpace(htmlPath))
+	if cleanPath == "" || cleanPath == "." {
+		return fmt.Errorf("posnode: validator pairing qr html path is empty")
+	}
+	if len(qrImageBytes) == 0 {
+		return fmt.Errorf("posnode: validator pairing qr image is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return fmt.Errorf("posnode: create validator pairing qr html dir: %w", err)
+	}
+	htmlText := buildValidatorPairingQRHTML(qrImageBytes, qrText, payload)
+	if err := os.WriteFile(cleanPath, []byte(htmlText), 0o600); err != nil {
+		return fmt.Errorf("posnode: write validator pairing qr html: %w", err)
+	}
+	return nil
+}
+
+func buildValidatorPairingQRHTML(qrImageBytes []byte, qrText string, payload validatorPairingPayload) string {
+	// 功能目的：生成本地扫码页面；实现原因：浏览器展示比终端字符二维码更稳定。
+	imageBase64 := base64.StdEncoding.EncodeToString(qrImageBytes)
+	expiresAt := time.UnixMilli(payload.ExpiresAtUnixMS).Format(time.RFC3339)
+	var builder strings.Builder
+	builder.WriteString("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">")
+	builder.WriteString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+	builder.WriteString("<title>POSNODE 验证者钱包绑定</title>")
+	builder.WriteString("<style>")
+	builder.WriteString("body{margin:0;font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f7fb;color:#111827;}")
+	builder.WriteString(".page{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px;box-sizing:border-box;}")
+	builder.WriteString(".panel{width:min(760px,100%);background:#fff;border:1px solid #d9e1ee;border-radius:8px;padding:28px;box-shadow:0 10px 30px rgba(15,23,42,.10);}")
+	builder.WriteString("h1{margin:0 0 8px;font-size:26px;line-height:1.25;}p{margin:0 0 18px;color:#4b5563;line-height:1.6;}")
+	builder.WriteString(".qr{display:flex;justify-content:center;margin:20px 0;}.qr img{width:min(520px,86vw);height:auto;image-rendering:pixelated;}")
+	builder.WriteString(".meta{display:grid;grid-template-columns:140px 1fr;gap:10px 14px;margin:18px 0;font-size:14px;}.label{color:#6b7280;}.value{word-break:break-all;}")
+	builder.WriteString("textarea{width:100%;min-height:96px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:6px;padding:10px;font-size:12px;line-height:1.5;color:#1f2937;}")
+	builder.WriteString(".warning{margin-top:14px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px;font-size:14px;}")
+	builder.WriteString("</style></head><body><main class=\"page\"><section class=\"panel\">")
+	builder.WriteString("<h1>POSNODE 验证者钱包绑定</h1>")
+	builder.WriteString("<p>请用 APP 扫描二维码，自动创建或选择验证者质押钱包并完成节点绑定。</p>")
+	builder.WriteString("<div class=\"qr\"><img alt=\"验证者钱包绑定二维码\" src=\"data:image/png;base64,")
+	builder.WriteString(imageBase64)
+	builder.WriteString("\"></div><div class=\"meta\">")
+	builder.WriteString("<div class=\"label\">节点名称</div><div class=\"value\">")
+	builder.WriteString(html.EscapeString(payload.NodeName))
+	builder.WriteString("</div><div class=\"label\">RPC 地址</div><div class=\"value\">")
+	builder.WriteString(html.EscapeString(payload.RPCURL))
+	builder.WriteString("</div><div class=\"label\">节点身份</div><div class=\"value\">")
+	builder.WriteString(html.EscapeString(payload.NodePeerID))
+	builder.WriteString("</div><div class=\"label\">有效期</div><div class=\"value\">")
+	builder.WriteString(html.EscapeString(expiresAt))
+	builder.WriteString("</div></div>")
+	builder.WriteString("<textarea readonly>")
+	builder.WriteString(html.EscapeString(qrText))
+	builder.WriteString("</textarea>")
+	builder.WriteString("<div class=\"warning\">二维码和 payload 只用于本次节点绑定，不要发送给陌生人。</div>")
+	builder.WriteString("</section></main></body></html>")
+	return builder.String()
+}
+
 func printValidatorPairingQR(session *validatorPairingSession) {
 	var output bytes.Buffer
+	qrHTMLURI := localFileURI(session.qrHTMLPath)
 	output.WriteString("\nPOSNODE 验证者钱包绑定\n")
-	output.WriteString("请用同一局域网内的钱包扫码，钱包签名质押后会自动绑定为本节点验证者钱包。\n")
-	output.WriteString(session.qrTerminal)
+	output.WriteString("浏览器扫码页面已生成，请用 APP 扫码绑定验证者钱包。\n")
+	if qrHTMLURI != "" {
+		output.WriteString("扫码地址: ")
+		output.WriteString(qrHTMLURI)
+		output.WriteString("\n")
+	}
+	output.WriteString("扫码页面文件: ")
+	output.WriteString(session.qrHTMLPath)
 	output.WriteString("\n")
-	output.WriteString("如果钱包暂不支持扫码，请复制下面的 payload 执行 wallet validator-pair。\n")
+	output.WriteString("PowerShell 打开页面: Invoke-Item -LiteralPath \"")
+	output.WriteString(session.qrHTMLPath)
+	output.WriteString("\"\n")
+	output.WriteString("二维码文件: ")
+	output.WriteString(session.qrImagePath)
+	output.WriteString("\n")
+	output.WriteString("如果 APP 暂时无法扫码，请复制下面的 payload 执行 wallet validator-pair。\n")
 	output.WriteString(session.qrText)
 	output.WriteString("\n\n")
 	fmt.Fprint(os.Stdout, output.String())
+}
+
+func localFileURI(path string) string {
+	// 功能目的：把本地扫码页面转成浏览器地址；实现原因：控制台需要直接给用户可打开的扫码入口。
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" || cleanPath == "." {
+		return ""
+	}
+	absolutePath, err := filepath.Abs(cleanPath)
+	if err == nil {
+		cleanPath = absolutePath
+	}
+	slashPath := filepath.ToSlash(cleanPath)
+	if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	return (&url.URL{Scheme: "file", Path: slashPath}).String()
 }
 
 func loadOrCreatePairingEd25519Key(path string) (structure.SolanaKeyPair, error) {
@@ -410,8 +536,17 @@ func (node *posNode) CompleteValidatorPairing(ctx context.Context, request rpc.V
 		}
 		configUpdated = true
 	}
+	activationStarted := node.shouldAutoActivatePairedValidator(configUpdated, session)
+	state := "completed"
+	restartRequired := true
+	activationNote := "validator activates at the next epoch after the registration transaction is finalized"
+	if activationStarted {
+		state = "activating"
+		restartRequired = false
+		activationNote = "validator wallet paired; node activation starts automatically"
+	}
 	result := rpc.ValidatorPairingCompleteResult{
-		State:                    "completed",
+		State:                    state,
 		StakerAddress:            strings.TrimSpace(request.StakerAddress),
 		ValidatorAddress:         session.payload.ValidatorAddress,
 		ConsensusAddress:         session.payload.ConsensusAddress,
@@ -421,22 +556,186 @@ func (node *posNode) CompleteValidatorPairing(ctx context.Context, request rpc.V
 		Signature:                strings.TrimSpace(request.Signature),
 		BootstrapStakerSignature: strings.TrimSpace(request.BootstrapStakerSignature),
 		ConfigUpdated:            configUpdated,
-		RestartRequired:          true,
+		RestartRequired:          restartRequired,
+		ActivationStarted:        activationStarted,
 		ConfigPath:               node.config.ConfigPath,
-		ActivationNote:           "validator activates at the next epoch after the registration transaction is finalized",
+		ActivationNote:           activationNote,
 	}
-	if isBootstrapPairingPayload(session.payload) {
+	if isBootstrapPairingPayload(session.payload) && !activationStarted {
 		result.ActivationNote = "validator joins bootstrap after restart; block production starts after the bootstrap threshold is reached"
 	}
-	session.state = "completed"
+	session.state = state
 	session.completedResult = result
 	node.logger.Info("validator wallet pairing completed",
 		slog.String("staker", result.StakerAddress),
 		slog.String("validator_address", result.ValidatorAddress),
 		slog.String("signature", result.Signature),
 		slog.Bool("config_updated", result.ConfigUpdated),
+		slog.Bool("activation_started", result.ActivationStarted),
 	)
+	if activationStarted {
+		node.startPairedValidatorActivation(session)
+	}
 	return result, nil
+}
+
+// shouldAutoActivatePairedValidator 判断是否可热启动 + 只有初次 bootstrap 扫码进程具备安全的运行中激活边界。
+func (node *posNode) shouldAutoActivatePairedValidator(configUpdated bool, session *validatorPairingSession) bool {
+	if !configUpdated || session == nil {
+		return false
+	}
+	if node.runtimeContext == nil || !node.config.bootstrapPairingPending() {
+		return false
+	}
+	return isBootstrapPairingPayload(session.payload)
+}
+
+// startPairedValidatorActivation 后台激活验证者 + 避免 APP 请求等待 bootstrap 和账本初始化。
+func (node *posNode) startPairedValidatorActivation(session *validatorPairingSession) {
+	node.mutex.Lock()
+	if node.pairingActivationRunning || node.ledger != nil {
+		node.mutex.Unlock()
+		return
+	}
+	node.pairingActivationRunning = true
+	ctx := node.runtimeContext
+	node.mutex.Unlock()
+
+	go func() {
+		err := node.activatePairedValidatorRuntime(ctx)
+		node.finishPairedValidatorActivation(session, err)
+	}()
+}
+
+// finishPairedValidatorActivation 写入激活结果 + APP 轮询时能看到明确状态和错误原因。
+func (node *posNode) finishPairedValidatorActivation(session *validatorPairingSession, activationError error) {
+	node.mutex.Lock()
+	node.pairingActivationRunning = false
+	node.mutex.Unlock()
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	result := session.completedResult
+	if activationError != nil {
+		session.state = "activation_failed"
+		result.State = session.state
+		result.RestartRequired = true
+		result.ActivationError = activationError.Error()
+		result.ActivationNote = "validator activation failed; fix the reported error and restart the node"
+		session.completedResult = result
+		node.logger.Error("validator wallet pairing activation failed", slog.Any("error", activationError))
+		return
+	}
+	session.state = "completed"
+	result.State = session.state
+	result.RestartRequired = false
+	result.ActivationError = ""
+	result.ActivationNote = "validator node started automatically after wallet pairing"
+	session.completedResult = result
+	node.logger.Info("validator wallet pairing activation completed",
+		slog.String("staker", result.StakerAddress),
+		slog.String("validator_address", result.ValidatorAddress),
+		slog.String("node_peer_id", result.NodePeerID),
+	)
+}
+
+// activatePairedValidatorRuntime 加载已绑定配置并启动节点 + 扫码进程转为真实验证者进程。
+func (node *posNode) activatePairedValidatorRuntime(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	config, err := loadNodeConfig(node.config.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("posnode: load paired validator config: %w", err)
+	}
+	config, err = prepareBootstrapJoinConfig(ctx, config, node.logger)
+	if err != nil {
+		return fmt.Errorf("posnode: prepare paired validator bootstrap: %w", err)
+	}
+	activatedNode, err := newPosNode(config, node.logger)
+	if err != nil {
+		return fmt.Errorf("posnode: initialize paired validator runtime: %w", err)
+	}
+	if err := node.adoptPairedValidatorRuntime(activatedNode); err != nil {
+		activatedNode.closeRuntimeResources()
+		return err
+	}
+	if err := node.startP2P(ctx); err != nil {
+		return fmt.Errorf("posnode: start paired validator p2p: %w", err)
+	}
+	if node.config.AutoRegister && node.config.validatorEnabled() {
+		go node.autoRegisterLoop(ctx)
+	}
+	node.startLedgerWorkers(ctx)
+	node.logger.Info("paired validator runtime started",
+		slog.String("chain_id", node.config.ChainID),
+		slog.String("chain_identity_hash", node.config.ChainIdentityHash),
+		slog.String("genesis_hash", node.config.GenesisHash),
+		slog.String("peer_id", node.peerKeyPair.peerID),
+		slog.String("staker", node.stakerAddress.String()),
+		slog.String("validator", node.validatorKeyPair.PublicKey.String()),
+	)
+	return nil
+}
+
+// adoptPairedValidatorRuntime 接管初始化资源 + 保留原 RPC 服务和配对会话不中断 APP 轮询。
+func (node *posNode) adoptPairedValidatorRuntime(activatedNode *posNode) error {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if node.ledger != nil || node.host != nil {
+		return fmt.Errorf("posnode: validator runtime is already started")
+	}
+	node.config = activatedNode.config
+	node.startedAt = time.Now()
+	node.bootstrapCoordinator = activatedNode.bootstrapCoordinator
+	node.db = activatedNode.db
+	node.ledger = activatedNode.ledger
+	node.executor = activatedNode.executor
+	node.peerKeyPair = activatedNode.peerKeyPair
+	node.stakerAddress = activatedNode.stakerAddress
+	node.stakerKeyPair = activatedNode.stakerKeyPair
+	node.validatorKeyPair = activatedNode.validatorKeyPair
+	node.consensusKeyPair = activatedNode.consensusKeyPair
+	node.blsKeyPair = activatedNode.blsKeyPair
+	node.blockhashQueue = activatedNode.blockhashQueue
+	node.mempool = activatedNode.mempool
+	node.seenTransactions = activatedNode.seenTransactions
+	node.rejectedTransactions = activatedNode.rejectedTransactions
+	node.seenProposals = activatedNode.seenProposals
+	node.seenQCs = activatedNode.seenQCs
+	node.pendingEvidence = activatedNode.pendingEvidence
+	node.seenEvidence = activatedNode.seenEvidence
+	node.proposalChoices = activatedNode.proposalChoices
+	node.signedVoteChoices = activatedNode.signedVoteChoices
+	node.voteEnvelopeChoices = activatedNode.voteEnvelopeChoices
+	node.orphanProposals = activatedNode.orphanProposals
+	node.epochSnapshot = activatedNode.epochSnapshot
+	node.leaderSchedule = activatedNode.leaderSchedule
+	node.voteCollector = activatedNode.voteCollector
+	node.voteCollectors = activatedNode.voteCollectors
+	node.epochSnapshots = activatedNode.epochSnapshots
+	node.leaderSchedules = activatedNode.leaderSchedules
+	node.metrics = activatedNode.metrics
+	node.lastProducedSlot = activatedNode.lastProducedSlot
+	node.lastVotedSlot = activatedNode.lastVotedSlot
+	node.livenessGate = activatedNode.livenessGate
+	node.registeredSelf = activatedNode.registeredSelf
+	node.knownPeerIDs = activatedNode.knownPeerIDs
+	node.bootstrapManifestApplied = activatedNode.bootstrapManifestApplied
+	node.rpcForwardFanoutLimiter = activatedNode.rpcForwardFanoutLimiter
+	node.doubleVoteInjected = activatedNode.doubleVoteInjected
+	node.doubleProposalInjected = activatedNode.doubleProposalInjected
+	return nil
+}
+
+// closeRuntimeResources 释放未接管资源 + 激活失败时防止临时账本和网络句柄泄漏。
+func (node *posNode) closeRuntimeResources() {
+	if node.host != nil {
+		_ = node.host.Close()
+	}
+	if node.db != nil {
+		_ = node.db.Close()
+	}
 }
 
 func validValidatorPairingToken(session *validatorPairingSession, token string) bool {
@@ -692,6 +991,7 @@ func (node *posNode) writeValidatorPairingConfig(request rpc.ValidatorPairingCom
 	configMap["auto_register"] = false
 	configMap["validator_pairing"] = map[string]any{"enabled": false}
 	if isBootstrapPairingPayload(session.payload) {
+		delete(configMap, "chain_id")
 		configMap["advertised_ip"] = strings.TrimSpace(session.payload.AdvertisedIP)
 		configMap["advertised_port"] = session.payload.AdvertisedPort
 		configMap["network"] = strings.TrimSpace(session.payload.Network)

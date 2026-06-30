@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"solana_golang/consensus"
 	"solana_golang/p2p"
 	"solana_golang/programs/stake"
+	vmprogram "solana_golang/programs/vm"
 	"solana_golang/rpc"
 	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
@@ -35,6 +37,15 @@ type privacyChangeArtifacts struct {
 	commitment    structure.Hash
 	encryptedNote []byte
 	auditRecords  []structure.PrivacyAuditRecord
+}
+
+type blockLeaderMetadata struct {
+	address        string
+	source         string
+	commissionBps  *uint16
+	rewardLamports *uint64
+	stakeLamports  *uint64
+	voteCredits    *uint64
 }
 
 func (node *posNode) GetBalance(ctx context.Context, address string) (rpc.BalanceResult, error) {
@@ -109,13 +120,56 @@ func (node *posNode) SendTransaction(ctx context.Context, encodedTransaction str
 
 func (node *posNode) GetBlock(ctx context.Context, slot uint64) (rpc.BlockResult, error) {
 	_ = ctx
-	proposal, blockHash, found, err := node.ledger.BlockByHeight(slot)
+	proposal, blockHash, found, err := node.blockBySlot(slot)
 	if err != nil {
 		return rpc.BlockResult{}, err
 	}
 	if !found {
+		proposal, blockHash, found, err = node.ledger.BlockByHeight(slot)
+		if err != nil {
+			return rpc.BlockResult{}, err
+		}
+	}
+	if !found {
 		return rpc.BlockResult{Slot: slot}, nil
 	}
+	return node.blockResultFromProposal(proposal, blockHash)
+}
+
+func (node *posNode) blockBySlot(slot uint64) (consensus.BlockProposal, structure.Hash, bool, error) {
+	// 功能目的：按真实 slot 查主链区块；实现原因：账本 height 索引可能存在空洞，二分会误判为未找到。
+	if slot == 0 {
+		return consensus.BlockProposal{}, structure.Hash{}, false, nil
+	}
+	head := node.ledger.Head()
+	if slot > head.Slot {
+		return consensus.BlockProposal{}, structure.Hash{}, false, nil
+	}
+	for height := head.Height; height >= 1; height-- {
+		proposal, blockHash, found, err := node.ledger.BlockByHeight(height)
+		if err != nil {
+			return consensus.BlockProposal{}, structure.Hash{}, false, err
+		}
+		if !found {
+			if height == 1 {
+				break
+			}
+			continue
+		}
+		if proposal.Header.Slot == slot {
+			return proposal, blockHash, true, nil
+		}
+		if proposal.Header.Slot < slot {
+			break
+		}
+		if height == 1 {
+			break
+		}
+	}
+	return consensus.BlockProposal{}, structure.Hash{}, false, nil
+}
+
+func (node *posNode) blockResultFromProposal(proposal consensus.BlockProposal, blockHash structure.Hash) (rpc.BlockResult, error) {
 	transactions := make([]any, 0, len(proposal.Transactions))
 	for _, transaction := range proposal.Transactions {
 		transactionID, err := transaction.TxIDString()
@@ -124,12 +178,207 @@ func (node *posNode) GetBlock(ctx context.Context, slot uint64) (rpc.BlockResult
 		}
 		transactions = append(transactions, transactionID)
 	}
-	return rpc.BlockResult{
-		Slot:         proposal.Header.Height,
-		Blockhash:    blockHash.String(),
-		ParentSlot:   proposal.Header.Height - 1,
-		Transactions: transactions,
-	}, nil
+	leader := node.blockLeaderMetadata(proposal, blockHash)
+	result := rpc.BlockResult{
+		Slot:                 proposal.Header.Slot,
+		Height:               proposal.Header.Height,
+		Blockhash:            blockHash.String(),
+		ParentSlot:           node.blockParentSlotForProposal(proposal),
+		BlockTimeUnixMilli:   proposal.Header.TimestampUnixMilli,
+		StateRoot:            proposal.Header.StateRoot.String(),
+		TxRoot:               proposal.Header.TxRoot.String(),
+		LeaderAddress:        leader.address,
+		LeaderAddressSource:  leader.source,
+		LeaderCommissionBps:  leader.commissionBps,
+		LeaderStakeLamports:  leader.stakeLamports,
+		LeaderVoteCredits:    leader.voteCredits,
+		LeaderRewardLamports: leader.rewardLamports,
+		Transactions:         transactions,
+	}
+	return result, nil
+}
+
+func (node *posNode) blockParentSlotForProposal(proposal consensus.BlockProposal) uint64 {
+	if proposal.Header.Height == 0 || proposal.Header.ParentHash.IsZero() {
+		return 0
+	}
+	parentSlot, err := node.parentSlotForProposal(proposal.Header.ParentHash)
+	if err == nil {
+		return parentSlot
+	}
+	if proposal.Header.Slot == 0 {
+		return 0
+	}
+	return proposal.Header.Slot - 1
+}
+
+func (node *posNode) blockLeaderMetadata(proposal consensus.BlockProposal, blockHash structure.Hash) blockLeaderMetadata {
+	metadata := proposalRewardLeaderMetadata(proposal)
+	leader, found := node.leaderStateForProposal(proposal, blockHash)
+	if !found {
+		return metadata
+	}
+	commissionBps := leader.CommissionBps
+	metadata.address = leader.AccountAddress.String()
+	metadata.source = "block"
+	metadata.commissionBps = &commissionBps
+	if leader.StakeLamports > 0 {
+		stakeLamports := leader.StakeLamports
+		metadata.stakeLamports = &stakeLamports
+	}
+	if voteCredits, exists := node.validatorVoteCredits(leader.AccountAddress); exists {
+		metadata.voteCredits = &voteCredits
+	}
+	return metadata
+}
+
+func (node *posNode) leaderStateForProposal(proposal consensus.BlockProposal, blockHash structure.Hash) (consensus.ValidatorState, bool) {
+	if proposal.Header.LeaderID == "" {
+		return consensus.ValidatorState{}, false
+	}
+	if leader, found := node.leaderStateFromEpochContext(proposal); found {
+		return leader, true
+	}
+	if leader, found := node.leaderStateFromBlockState(blockHash, proposal.Header.LeaderID, proposal.Header.EpochID); found {
+		return leader, true
+	}
+	if leader, found := node.leaderStateFromBlockState(proposal.Header.ParentHash, proposal.Header.LeaderID, proposal.Header.EpochID); found {
+		return leader, true
+	}
+	return node.leaderStateFromCurrentState(proposal.Header.LeaderID, proposal.Header.EpochID)
+}
+
+func (node *posNode) leaderStateFromEpochContext(proposal consensus.BlockProposal) (consensus.ValidatorState, bool) {
+	if node.config.EpochSlots == 0 {
+		return consensus.ValidatorState{}, false
+	}
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	epochContextValue, err := node.epochContextForSlotLocked(proposal.Header.Slot)
+	if err != nil {
+		if node.logger != nil {
+			node.logger.Info("posnode block leader context unavailable",
+				slog.Uint64("slot", proposal.Header.Slot),
+				slog.Uint64("height", proposal.Header.Height),
+				slog.String("error", err.Error()),
+			)
+		}
+		return consensus.ValidatorState{}, false
+	}
+	leader, exists := epochContextValue.Snapshot.ValidatorByID(proposal.Header.LeaderID)
+	if !exists {
+		return consensus.ValidatorState{}, false
+	}
+	return leader, true
+}
+
+func (node *posNode) leaderStateFromBlockState(blockHash structure.Hash, leaderID consensus.ValidatorID, epochID uint64) (consensus.ValidatorState, bool) {
+	if blockHash.IsZero() || node.ledger == nil {
+		return consensus.ValidatorState{}, false
+	}
+	state, err := node.ledger.StateAtBlockHash(blockHash)
+	if err != nil {
+		if node.logger != nil {
+			node.logger.Debug("posnode block leader state unavailable",
+				slog.String("block_hash", blockHash.String()),
+				slog.String("leader_id", string(leaderID)),
+				slog.String("error", err.Error()),
+			)
+		}
+		return consensus.ValidatorState{}, false
+	}
+	return validatorStateByIDFromChainState(state, leaderID, epochID)
+}
+
+func (node *posNode) leaderStateFromCurrentState(leaderID consensus.ValidatorID, epochID uint64) (consensus.ValidatorState, bool) {
+	if node.ledger == nil {
+		return consensus.ValidatorState{}, false
+	}
+	return validatorStateByIDFromChainState(node.ledger.State(), leaderID, epochID)
+}
+
+func validatorStateByIDFromChainState(state consensus.ChainState, leaderID consensus.ValidatorID, epochID uint64) (consensus.ValidatorState, bool) {
+	for _, account := range state.Accounts {
+		if account.Account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Account.Data) == 0 {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil {
+			continue
+		}
+		if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != leaderID {
+			continue
+		}
+		return validatorStateFromStakeAccount(account.Address, stakeState, leaderID, epochID), true
+	}
+	return consensus.ValidatorState{}, false
+}
+
+func validatorStateFromStakeAccount(
+	accountAddress structure.PublicKey,
+	stakeState stake.ValidatorState,
+	validatorID consensus.ValidatorID,
+	epochID uint64,
+) consensus.ValidatorState {
+	effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
+	if err != nil {
+		effectiveStake = 0
+	}
+	status := validatorStatusFromStakeState(stakeState, epochID)
+	if status != consensus.ValidatorStatusActive {
+		effectiveStake = 0
+	}
+	return consensus.ValidatorState{
+		ValidatorID:         validatorID,
+		AccountAddress:      accountAddress,
+		ConsensusPublicKey:  stakeState.ConsensusPublicKey,
+		BLSPublicKey:        append([]byte(nil), stakeState.BLSPublicKey...),
+		P2PPeerID:           stakeState.P2PPeerID,
+		StakeLamports:       effectiveStake,
+		Status:              status,
+		CommissionBps:       stakeState.CommissionBps,
+		LastVotedSlot:       stakeState.LastVoteSlot,
+		MissedProposalCount: stakeState.MissedProposalCount,
+		MissedVoteCount:     stakeState.MissedVoteCount,
+		JailUntilEpoch:      stakeState.JailUntilEpoch,
+	}
+}
+
+func validatorStatusFromStakeState(stakeState stake.ValidatorState, epochID uint64) consensus.ValidatorStatus {
+	if stakeState.Status == stake.ValidatorStatusJailed {
+		return consensus.ValidatorStatusJailed
+	}
+	if stakeState.Status == stake.ValidatorStatusExiting && stakeState.DeactivationEpoch <= epochID {
+		return consensus.ValidatorStatusExiting
+	}
+	return consensus.ValidatorStatusActive
+}
+
+func (node *posNode) validatorVoteCredits(address structure.PublicKey) (uint64, bool) {
+	account, found, err := node.ledger.Account(address)
+	if err != nil || !found {
+		return 0, false
+	}
+	stakeState, err := stake.UnmarshalValidatorStateBinary(account.Data)
+	if err != nil {
+		return 0, false
+	}
+	return stakeState.VoteCredits, true
+}
+
+func proposalRewardLeaderMetadata(proposal consensus.BlockProposal) blockLeaderMetadata {
+	metadata := blockLeaderMetadata{}
+	for _, reward := range proposal.Rewards {
+		if reward.Type != consensus.RewardTypeLeaderFee || reward.AccountAddress.IsZero() {
+			continue
+		}
+		rewardLamports := reward.Lamports
+		metadata.address = reward.AccountAddress.String()
+		metadata.source = "block"
+		metadata.rewardLamports = &rewardLamports
+		return metadata
+	}
+	return metadata
 }
 
 func (node *posNode) GetTransaction(ctx context.Context, signature string) (rpc.TransactionDetailResult, error) {
@@ -207,6 +456,39 @@ func (node *posNode) GetContractPrograms(ctx context.Context, limit int) (rpc.Co
 		return rpc.ContractProgramListResult{}, fmt.Errorf("posnode: list contract programs: %w", err)
 	}
 	return contractProgramListResult(records), nil
+}
+
+func (node *posNode) GetAssetState(ctx context.Context, program string, owner string) (rpc.AssetStateResult, error) {
+	_ = ctx
+	programKey, _, err := decodeProtocolPublicKey(program, "asset program")
+	if err != nil {
+		return rpc.AssetStateResult{}, fmt.Errorf("posnode: decode asset program: %w", err)
+	}
+	ownerKey, ownerType, err := decodeProtocolPublicKey(owner, "asset owner")
+	if err != nil {
+		return rpc.AssetStateResult{}, fmt.Errorf("posnode: decode asset owner: %w", err)
+	}
+	if ownerType == protocolAddressPrivacy {
+		return rpc.AssetStateResult{}, fmt.Errorf("posnode: asset owner must be a transparent public key")
+	}
+	assetAccounts, err := blockchain.DeriveFungibleAssetBootstrapAccounts(programKey, ownerKey)
+	if err != nil {
+		return rpc.AssetStateResult{}, err
+	}
+	mintAccount, mintFound, err := node.ledger.Account(assetAccounts.Mint.PublicKey)
+	if err != nil {
+		return rpc.AssetStateResult{}, fmt.Errorf("posnode: load asset mint account: %w", err)
+	}
+	balanceAccount, balanceFound, err := node.ledger.Account(assetAccounts.Balance.PublicKey)
+	if err != nil {
+		return rpc.AssetStateResult{}, fmt.Errorf("posnode: load asset balance account: %w", err)
+	}
+	return rpc.AssetStateResult{
+		Program: programKey.String(),
+		Owner:   ownerKey.String(),
+		Mint:    assetMintStateResult(assetAccounts.Mint.PublicKey, programKey, mintAccount, mintFound),
+		Balance: assetBalanceStateResult(assetAccounts.Balance.PublicKey, programKey, balanceAccount, balanceFound),
+	}, nil
 }
 
 func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error) {
@@ -941,82 +1223,141 @@ func (node *posNode) JailValidator(ctx context.Context, stakerSeed string, valid
 func (node *posNode) GetValidatorSet(ctx context.Context) (rpc.ValidatorSetResult, error) {
 	_ = ctx
 	head := node.ledger.Head()
-	validatorSet, err := node.ledger.ValidatorSetFromStateAtEpoch(head.EpochID)
-	if err != nil {
-		return rpc.ValidatorSetResult{}, err
+	state := node.ledger.State()
+	validators := make([]rpc.ValidatorInfo, 0)
+	for _, account := range state.Accounts {
+		if account.Account.Owner != structure.DefaultBuiltinProgramIDs.Stake || len(account.Account.Data) == 0 {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil {
+			continue
+		}
+		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, head.EpochID)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
+		validatorInfo, err := validatorInfoFromStakeState(account.Address, stakeState, effectiveStake)
+		if err != nil {
+			return rpc.ValidatorSetResult{}, err
+		}
+		validators = append(validators, validatorInfo)
 	}
-	validators := validatorSet.Validators()
-	result := rpc.ValidatorSetResult{Validators: make([]rpc.ValidatorInfo, len(validators))}
-	for index, validator := range validators {
-		stakeState, err := node.loadValidatorStakeState(validator.AccountAddress)
-		if err != nil {
-			return rpc.ValidatorSetResult{}, err
-		}
-		selfStakeLamports, err := stake.SelfActiveStake(stakeState)
-		if err != nil {
-			return rpc.ValidatorSetResult{}, err
-		}
-		selfPendingStakeLamports, err := stake.SelfPendingStake(stakeState)
-		if err != nil {
-			return rpc.ValidatorSetResult{}, err
-		}
-		selfUnlockingStakeLamports, err := stake.SelfUnlockingStake(stakeState)
-		if err != nil {
-			return rpc.ValidatorSetResult{}, err
-		}
-		delegatedLamports, err := stake.TotalDelegatedStake(stakeState)
-		if err != nil {
-			return rpc.ValidatorSetResult{}, err
-		}
-		result.Validators[index] = rpc.ValidatorInfo{
-			ValidatorID:                string(validator.ValidatorID),
-			AccountAddress:             validator.AccountAddress.String(),
-			StakerAddress:              stakeState.StakerAccount.String(),
-			ConsensusPublicKey:         validator.ConsensusPublicKey.String(),
-			P2PPeerID:                  validator.P2PPeerID,
-			StakeLamports:              validator.StakeLamports,
-			SelfStakeLamports:          selfStakeLamports,
-			SelfPendingStakeLamports:   selfPendingStakeLamports,
-			SelfUnlockingStakeLamports: selfUnlockingStakeLamports,
-			SelfRewardLamports:         stakeState.SelfRewardLamports,
-			CommissionRewardLamports:   stakeState.CommissionRewardLamports,
-			DelegatedLamports:          delegatedLamports,
-			DelegatorCount:             len(stakeState.Delegations),
-			Status:                     validatorStatusText(validator.Status),
-			CommissionBps:              validator.CommissionBps,
-			VoteCredits:                stakeState.VoteCredits,
-			RewardLamports:             stakeState.RewardLamports,
-			LastRewardedSlot:           stakeState.LastRewardedSlot,
-			LastRewardEpoch:            stakeState.LastRewardEpoch,
-			JailUntilEpoch:             stakeState.JailUntilEpoch,
-			ActivationEpoch:            stakeState.ActivationEpoch,
-			DeactivationEpoch:          stakeState.DeactivationEpoch,
-			LastEffectiveStakeLamports: stakeState.LastEffectiveStake,
-			LastSlashedSlot:            stakeState.LastSlashedSlot,
-			Delegations:                delegationInfos(stakeState.Delegations),
-		}
-	}
-	return result, nil
+	sort.Slice(validators, func(leftIndex int, rightIndex int) bool {
+		return validators[leftIndex].ValidatorID < validators[rightIndex].ValidatorID
+	})
+	return rpc.ValidatorSetResult{Validators: validators}, nil
 }
 
-func delegationInfos(delegations []stake.DelegationState) []rpc.DelegationInfo {
+func validatorInfoFromStakeState(
+	accountAddress structure.PublicKey,
+	stakeState stake.ValidatorState,
+	effectiveStake uint64,
+) (rpc.ValidatorInfo, error) {
+	bondedStakeLamports, err := bondedStakeLamportsFromStakeState(stakeState)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	selfStakeLamports, err := stake.SelfActiveStake(stakeState)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	selfPendingStakeLamports, err := stake.SelfPendingStake(stakeState)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	selfUnlockingStakeLamports, err := stake.SelfUnlockingStake(stakeState)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	delegatedLamports, err := stake.TotalDelegatedStake(stakeState)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	delegations, err := delegationInfos(stakeState.Delegations)
+	if err != nil {
+		return rpc.ValidatorInfo{}, err
+	}
+	return rpc.ValidatorInfo{
+		ValidatorID:                string(consensus.NewValidatorID(stakeState.ConsensusPublicKey)),
+		AccountAddress:             accountAddress.String(),
+		StakerAddress:              stakeState.StakerAccount.String(),
+		ConsensusPublicKey:         stakeState.ConsensusPublicKey.String(),
+		P2PPeerID:                  stakeState.P2PPeerID,
+		StakeLamports:              bondedStakeLamports,
+		BondedStakeLamports:        bondedStakeLamports,
+		EffectiveStakeLamports:     effectiveStake,
+		SelfStakeLamports:          selfStakeLamports,
+		SelfPendingStakeLamports:   selfPendingStakeLamports,
+		SelfUnlockingStakeLamports: selfUnlockingStakeLamports,
+		SelfRewardLamports:         stakeState.SelfRewardLamports,
+		CommissionRewardLamports:   stakeState.CommissionRewardLamports,
+		DelegatedLamports:          delegatedLamports,
+		DelegatorCount:             len(stakeState.Delegations),
+		Status:                     stakeValidatorStatusText(stakeState.Status),
+		CommissionBps:              stakeState.CommissionBps,
+		VoteCredits:                stakeState.VoteCredits,
+		RewardLamports:             stakeState.RewardLamports,
+		LastRewardedSlot:           stakeState.LastRewardedSlot,
+		LastRewardEpoch:            stakeState.LastRewardEpoch,
+		JailUntilEpoch:             stakeState.JailUntilEpoch,
+		ActivationEpoch:            stakeState.ActivationEpoch,
+		DeactivationEpoch:          stakeState.DeactivationEpoch,
+		LastEffectiveStakeLamports: stakeState.LastEffectiveStake,
+		LastSlashedSlot:            stakeState.LastSlashedSlot,
+		Delegations:                delegations,
+	}, nil
+}
+
+func bondedStakeLamportsFromStakeState(stakeState stake.ValidatorState) (uint64, error) {
+	// 功能目的：计算用户可见质押本金；实现原因：jailed 只清零共识权重不能隐藏本金。
+	totalStakeLamports := stakeState.ActiveStake
+	if ^uint64(0)-totalStakeLamports < stakeState.PendingStake {
+		return 0, fmt.Errorf("posnode: bonded stake overflow")
+	}
+	totalStakeLamports += stakeState.PendingStake
+	if ^uint64(0)-totalStakeLamports < stakeState.UnlockingStake {
+		return 0, fmt.Errorf("posnode: bonded stake overflow")
+	}
+	return totalStakeLamports + stakeState.UnlockingStake, nil
+}
+
+func delegationInfos(delegations []stake.DelegationState) ([]rpc.DelegationInfo, error) {
 	if len(delegations) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make([]rpc.DelegationInfo, 0, len(delegations))
 	for _, delegation := range delegations {
+		totalStakeLamports, err := totalDelegationStakeLamports(delegation)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, rpc.DelegationInfo{
 			DelegatorAddress:       delegation.DelegatorAccount.String(),
 			ActiveStakeLamports:    delegation.ActiveStake,
 			PendingStakeLamports:   delegation.PendingStake,
 			UnlockingStakeLamports: delegation.UnlockingStake,
+			TotalStakeLamports:     totalStakeLamports,
 			RewardLamports:         delegation.RewardLamports,
 			ActivationEpoch:        delegation.ActivationEpoch,
 			DeactivationEpoch:      delegation.DeactivationEpoch,
 			UnlockEpoch:            delegation.UnlockEpoch,
 		})
 	}
-	return result
+	return result, nil
+}
+
+func totalDelegationStakeLamports(delegation stake.DelegationState) (uint64, error) {
+	// 功能目的：计算委托可见本金；实现原因：前端需要同时展示 active、pending 和 unlocking。
+	totalStakeLamports := delegation.ActiveStake
+	if ^uint64(0)-totalStakeLamports < delegation.PendingStake {
+		return 0, fmt.Errorf("posnode: delegation stake overflow")
+	}
+	totalStakeLamports += delegation.PendingStake
+	if ^uint64(0)-totalStakeLamports < delegation.UnlockingStake {
+		return 0, fmt.Errorf("posnode: delegation stake overflow")
+	}
+	return totalStakeLamports + delegation.UnlockingStake, nil
 }
 
 func (node *posNode) GetNodeStatus(ctx context.Context) (any, error) {
@@ -1170,7 +1511,7 @@ func (node *posNode) committedTransactionResult(
 		proposal.Header.Height,
 		proposal.Header.Slot,
 		blockHash,
-		proposalLeaderAddress(proposal),
+		node.blockLeaderMetadata(proposal, blockHash).address,
 		finalized,
 	)
 }
@@ -1519,18 +1860,26 @@ func (node *posNode) currentAuditSlot() uint64 {
 
 func privacyStateResult(address structure.PublicKey, state structure.PrivacyState) rpc.PrivacyStateResult {
 	notes := make([]rpc.PrivacyNoteResult, len(state.Notes))
+	auditRecordCount := 0
 	for index, note := range state.Notes {
 		notes[index] = privacyNoteResult(note)
+		auditRecordCount += len(note.AuditRecords)
 	}
 	nullifiers := make([]string, len(state.SpentNullifiers))
 	for index, nullifier := range state.SpentNullifiers {
 		nullifiers[index] = nullifier.String()
 	}
 	return rpc.PrivacyStateResult{
-		Address:         address.String(),
-		Version:         state.Version,
-		Notes:           notes,
-		SpentNullifiers: nullifiers,
+		Address:              address.String(),
+		Version:              state.Version,
+		Notes:                notes,
+		SpentNullifiers:      nullifiers,
+		MerkleRoot:           state.MerkleRoot.String(),
+		PrivacyPoolLamports:  fmt.Sprintf("%d", state.PrivacyPoolLamports),
+		UnspentNoteLiability: fmt.Sprintf("%d", state.UnspentNoteLiability),
+		NoteCount:            len(state.Notes),
+		SpentNullifierCount:  len(state.SpentNullifiers),
+		AuditRecordCount:     auditRecordCount,
 	}
 }
 
@@ -1585,6 +1934,63 @@ func contractProgramListResult(records []blockchain.ContractProgramRecord) rpc.C
 	}
 }
 
+func assetMintStateResult(address structure.PublicKey, expectedOwner structure.PublicKey, account structure.Account, found bool) rpc.AssetMintStateResult {
+	result := rpc.AssetMintStateResult{Address: address.String(), Exists: found}
+	if !found {
+		return result
+	}
+	result.Owner = account.Owner.String()
+	if account.Owner != expectedOwner {
+		result.Error = "asset mint owner mismatch"
+		return result
+	}
+	state, err := vmprogram.UnmarshalAssetMintStateBinary(account.Data)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.Kind = assetKindName(state.Kind)
+	result.Decimals = state.Decimals
+	result.Authority = state.Authority.String()
+	result.Supply = strconv.FormatUint(state.Supply, 10)
+	result.MaxSupply = strconv.FormatUint(state.MaxSupply, 10)
+	result.Name = state.Name
+	result.Symbol = state.Symbol
+	result.URI = state.URI
+	return result
+}
+
+func assetBalanceStateResult(address structure.PublicKey, expectedOwner structure.PublicKey, account structure.Account, found bool) rpc.AssetBalanceStateResult {
+	result := rpc.AssetBalanceStateResult{Address: address.String(), Exists: found}
+	if !found {
+		return result
+	}
+	result.Owner = account.Owner.String()
+	if account.Owner != expectedOwner {
+		result.Error = "asset balance owner mismatch"
+		return result
+	}
+	state, err := vmprogram.UnmarshalAssetBalanceStateBinary(account.Data)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.Mint = state.Mint.String()
+	result.Amount = strconv.FormatUint(state.Amount, 10)
+	return result
+}
+
+func assetKindName(kind vmprogram.AssetKind) string {
+	switch kind {
+	case vmprogram.AssetKindFungible:
+		return "fungible"
+	case vmprogram.AssetKindNFT:
+		return "nft"
+	default:
+		return "unknown"
+	}
+}
+
 func privacyBalanceResult(stateAddress structure.PublicKey, spendAuthority structure.PublicKey, summary blockchain.PrivacyBalanceSummary) rpc.PrivacyBalanceResult {
 	return rpc.PrivacyBalanceResult{
 		StateAddress:       stateAddress.String(),
@@ -1609,13 +2015,17 @@ func privacyNoteResult(note structure.PrivacyNoteRecord) rpc.PrivacyNoteResult {
 		}
 	}
 	return rpc.PrivacyNoteResult{
-		Commitment:     note.Commitment.String(),
-		SpendAuthority: note.SpendAuthority.String(),
-		Amount:         note.Amount,
-		Spent:          note.Spent,
-		SpentSlot:      note.SpentSlot,
-		SpendNullifier: privacyNullifierString(note),
-		AuditRecords:   records,
+		Commitment:        note.Commitment.String(),
+		SpendAuthority:    note.SpendAuthority.String(),
+		Amount:            note.Amount,
+		Spent:             note.Spent,
+		SpentSlot:         note.SpentSlot,
+		SpendNullifier:    privacyNullifierString(note),
+		AuditRecords:      records,
+		AuditRecordCount:  len(note.AuditRecords),
+		EncryptedNoteSize: len(note.EncryptedNote),
+		VMVersion:         note.VMVersion,
+		Confidential:      note.Confidential != nil,
 	}
 }
 

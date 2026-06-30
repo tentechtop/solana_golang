@@ -50,6 +50,25 @@ function Copy-DirectoryContent {
   Get-ChildItem -LiteralPath $Source | Copy-Item -Destination $Target -Recurse -Force
 }
 
+function Invoke-PureGoBuild {
+  param(
+    [string]$OutputPath,
+    [string]$PackagePath
+  )
+  # 功能目的：禁用 cgo 构建 Windows 包；实现原因：用户部署包不应依赖本机 GCC 或 C 工具链。
+  $previousCgoEnabled = $env:CGO_ENABLED
+  try {
+    $env:CGO_ENABLED = "0"
+    & go build -o $OutputPath $PackagePath
+    if ($LASTEXITCODE -ne 0) {
+      throw "Build failed: $PackagePath"
+    }
+  }
+  finally {
+    $env:CGO_ENABLED = $previousCgoEnabled
+  }
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
   $Version = Get-Date -Format "yyyyMMdd-HHmmss"
 }
@@ -70,14 +89,8 @@ if (-not $SkipBuild) {
   # 功能目的：构建 Windows 可执行文件；实现原因：用户部署包不能依赖本机 Go 环境。
   $posnodeBinary = Join-Path $binDir "posnode.exe"
   $walletBinary = Join-Path $binDir "wallet.exe"
-  & go build -o $posnodeBinary .\cmd\posnode
-  if ($LASTEXITCODE -ne 0) {
-    throw "Build posnode.exe failed."
-  }
-  & go build -o $walletBinary .\cmd\wallet
-  if ($LASTEXITCODE -ne 0) {
-    throw "Build wallet.exe failed."
-  }
+  Invoke-PureGoBuild -OutputPath $posnodeBinary -PackagePath ".\cmd\posnode"
+  Invoke-PureGoBuild -OutputPath $walletBinary -PackagePath ".\cmd\wallet"
 }
 
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "cmd\posnode\configs\join-wallet-scan.json") -Destination (Join-Path $configDir "join-wallet-scan.json") -Force

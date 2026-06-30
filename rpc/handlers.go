@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 	MethodGetTransaction             = "getTransaction"
 	MethodGetAddressTransactions     = "getAddressTransactions"
 	MethodGetContractPrograms        = "getContractPrograms"
+	MethodGetAssetState              = "getAssetState"
 	MethodTreasuryTransfer           = "treasuryTransfer"
 	MethodTransfer                   = "transfer"
 	MethodGetPrivacyState            = "getPrivacyState"
@@ -76,6 +78,10 @@ type AccountHistoryBackend interface {
 
 type ContractProgramBackend interface {
 	GetContractPrograms(ctx context.Context, limit int) (ContractProgramListResult, error)
+}
+
+type AssetStateBackend interface {
+	GetAssetState(ctx context.Context, program string, owner string) (AssetStateResult, error)
 }
 
 type PrivacyBackend interface {
@@ -170,10 +176,30 @@ type AccountTypeResult struct {
 }
 
 type BlockResult struct {
-	Slot         uint64 `json:"slot"`
-	Blockhash    string `json:"blockhash,omitempty"`
-	ParentSlot   uint64 `json:"parentSlot,omitempty"`
-	Transactions []any  `json:"transactions,omitempty"`
+	Slot                 uint64  `json:"slot"`
+	Height               uint64  `json:"height,omitempty"`
+	Blockhash            string  `json:"blockhash,omitempty"`
+	ParentSlot           uint64  `json:"parentSlot,omitempty"`
+	BlockTimeUnixMilli   int64   `json:"block_time_unix_milli,omitempty"`
+	StateRoot            string  `json:"state_root,omitempty"`
+	TxRoot               string  `json:"tx_root,omitempty"`
+	LeaderAddress        string  `json:"leader_address,omitempty"`
+	LeaderAddressSource  string  `json:"leader_address_source,omitempty"`
+	LeaderCommissionBps  *uint16 `json:"leader_commission_bps,omitempty"`
+	LeaderStakeLamports  *uint64 `json:"leader_stake_lamports,omitempty"`
+	LeaderVoteCredits    *uint64 `json:"leader_vote_credits,omitempty"`
+	LeaderRewardLamports *uint64 `json:"leader_reward_lamports,omitempty"`
+	Transactions         []any   `json:"transactions"`
+}
+
+// MarshalJSON 固定区块交易数组输出 + 空区块也要返回 [] 方便客户端区分无交易和 RPC 字段缺失。
+func (result BlockResult) MarshalJSON() ([]byte, error) {
+	type blockResultAlias BlockResult
+	alias := blockResultAlias(result)
+	if alias.Transactions == nil {
+		alias.Transactions = []any{}
+	}
+	return json.Marshal(alias)
 }
 
 type TransactionDetailResult struct {
@@ -238,6 +264,37 @@ type ContractProgramListResult struct {
 	Programs []ContractProgramResult `json:"programs"`
 }
 
+type AssetMintStateResult struct {
+	Address   string `json:"address"`
+	Exists    bool   `json:"exists"`
+	Owner     string `json:"owner,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Decimals  uint8  `json:"decimals,omitempty"`
+	Authority string `json:"authority,omitempty"`
+	Supply    string `json:"supply,omitempty"`
+	MaxSupply string `json:"max_supply,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Symbol    string `json:"symbol,omitempty"`
+	URI       string `json:"uri,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type AssetBalanceStateResult struct {
+	Address string `json:"address"`
+	Exists  bool   `json:"exists"`
+	Owner   string `json:"owner,omitempty"`
+	Mint    string `json:"mint,omitempty"`
+	Amount  string `json:"amount,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type AssetStateResult struct {
+	Program string                  `json:"program"`
+	Owner   string                  `json:"owner"`
+	Mint    AssetMintStateResult    `json:"mint"`
+	Balance AssetBalanceStateResult `json:"balance"`
+}
+
 type TransactionSubmitResult struct {
 	Signature string `json:"signature"`
 }
@@ -260,20 +317,30 @@ type PrivacyAuditRecordResult struct {
 }
 
 type PrivacyNoteResult struct {
-	Commitment     string                     `json:"commitment"`
-	SpendAuthority string                     `json:"spend_authority"`
-	Amount         uint64                     `json:"amount"`
-	Spent          bool                       `json:"spent"`
-	SpentSlot      uint64                     `json:"spent_slot"`
-	SpendNullifier string                     `json:"spend_nullifier,omitempty"`
-	AuditRecords   []PrivacyAuditRecordResult `json:"audit_records"`
+	Commitment        string                     `json:"commitment"`
+	SpendAuthority    string                     `json:"spend_authority"`
+	Amount            uint64                     `json:"amount"`
+	Spent             bool                       `json:"spent"`
+	SpentSlot         uint64                     `json:"spent_slot"`
+	SpendNullifier    string                     `json:"spend_nullifier,omitempty"`
+	AuditRecords      []PrivacyAuditRecordResult `json:"audit_records"`
+	AuditRecordCount  int                        `json:"audit_record_count"`
+	EncryptedNoteSize int                        `json:"encrypted_note_size"`
+	VMVersion         uint16                     `json:"vm_version"`
+	Confidential      bool                       `json:"confidential"`
 }
 
 type PrivacyStateResult struct {
-	Address         string              `json:"address"`
-	Version         uint16              `json:"version"`
-	Notes           []PrivacyNoteResult `json:"notes"`
-	SpentNullifiers []string            `json:"spent_nullifiers"`
+	Address              string              `json:"address"`
+	Version              uint16              `json:"version"`
+	Notes                []PrivacyNoteResult `json:"notes"`
+	SpentNullifiers      []string            `json:"spent_nullifiers"`
+	MerkleRoot           string              `json:"merkle_root,omitempty"`
+	PrivacyPoolLamports  string              `json:"privacy_pool_lamports"`
+	UnspentNoteLiability string              `json:"unspent_note_liability"`
+	NoteCount            int                 `json:"note_count"`
+	SpentNullifierCount  int                 `json:"spent_nullifier_count"`
+	AuditRecordCount     int                 `json:"audit_record_count"`
 }
 
 type PrivacyBalanceResult struct {
@@ -294,6 +361,8 @@ type ValidatorInfo struct {
 	ConsensusPublicKey         string           `json:"consensus_public_key"`
 	P2PPeerID                  string           `json:"p2p_peer_id"`
 	StakeLamports              uint64           `json:"stake_lamports"`
+	BondedStakeLamports        uint64           `json:"bonded_stake_lamports"`
+	EffectiveStakeLamports     uint64           `json:"effective_stake_lamports"`
 	SelfStakeLamports          uint64           `json:"self_stake_lamports"`
 	SelfPendingStakeLamports   uint64           `json:"self_pending_stake_lamports"`
 	SelfUnlockingStakeLamports uint64           `json:"self_unlocking_stake_lamports"`
@@ -320,6 +389,7 @@ type DelegationInfo struct {
 	ActiveStakeLamports    uint64 `json:"active_stake_lamports"`
 	PendingStakeLamports   uint64 `json:"pending_stake_lamports"`
 	UnlockingStakeLamports uint64 `json:"unlocking_stake_lamports"`
+	TotalStakeLamports     uint64 `json:"total_stake_lamports"`
 	RewardLamports         uint64 `json:"reward_lamports"`
 	ActivationEpoch        uint64 `json:"activation_epoch"`
 	DeactivationEpoch      uint64 `json:"deactivation_epoch"`
@@ -569,6 +639,8 @@ type ValidatorPairingCompleteResult struct {
 	BootstrapStakerSignature string `json:"bootstrap_staker_signature,omitempty"`
 	ConfigUpdated            bool   `json:"config_updated"`
 	RestartRequired          bool   `json:"restart_required"`
+	ActivationStarted        bool   `json:"activation_started,omitempty"`
+	ActivationError          string `json:"activation_error,omitempty"`
 	ConfigPath               string `json:"config_path,omitempty"`
 	ActivationNote           string `json:"activation_note,omitempty"`
 }
@@ -582,6 +654,7 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
 	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
+	_ = router.Register(MethodGetAssetState, getAssetStateHandler(backend))
 	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
 	_ = router.Register(MethodTransfer, transferHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
@@ -620,6 +693,7 @@ func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
 	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
+	_ = router.Register(MethodGetAssetState, getAssetStateHandler(backend))
 	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
 	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
@@ -655,6 +729,7 @@ func publicForwardMethods() []string {
 		MethodGetTransaction,
 		MethodGetAddressTransactions,
 		MethodGetContractPrograms,
+		MethodGetAssetState,
 		MethodGetPrivacyState,
 		MethodGetPrivacyBalance,
 		MethodGetValidatorSet,
@@ -909,6 +984,24 @@ func getContractProgramsHandler(backend LedgerBackend) HandlerFunc {
 		result, err := contractProgramBackend.GetContractPrograms(ctx, limit)
 		if err != nil {
 			return nil, internalError(fmt.Sprintf("get contract programs: %v", err))
+		}
+		return result, nil
+	}
+}
+
+func getAssetStateHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		assetStateBackend, ok := backend.(AssetStateBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		program, owner, rpcError := parseAssetStateParams(params)
+		if rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := assetStateBackend.GetAssetState(ctx, program, owner)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get asset state: %v", err))
 		}
 		return result, nil
 	}
@@ -1501,10 +1594,36 @@ func completeValidatorPairingHandler(backend any) HandlerFunc {
 		}
 		result, err := pairingBackend.CompleteValidatorPairing(ctx, request)
 		if err != nil {
-			return nil, internalError(fmt.Sprintf("complete validator pairing: %v", err))
+			return nil, validatorPairingError(err)
 		}
 		return result, nil
 	}
+}
+
+func validatorPairingError(err error) *Error {
+	message := fmt.Sprintf("complete validator pairing: %v", err)
+	if isValidatorPairingInternalError(message) {
+		return internalError(message)
+	}
+	return invalidParamsError(message)
+}
+
+func isValidatorPairingInternalError(message string) bool {
+	normalizedMessage := strings.ToLower(strings.TrimSpace(message))
+	internalMarkers := []string{
+		"config path is empty",
+		"read config for validator pairing",
+		"decode config for validator pairing",
+		"encode paired validator config",
+		"write paired validator config",
+		"replace paired validator config",
+	}
+	for _, marker := range internalMarkers {
+		if strings.Contains(normalizedMessage, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type getBalanceParams struct {
@@ -1683,6 +1802,28 @@ func parseContractProgramsParams(params json.RawMessage) (int, *Error) {
 		return 0, invalidParamsError("getContractPrograms limit is too large")
 	}
 	return int(limit), nil
+}
+
+func parseAssetStateParams(params json.RawMessage) (string, string, *Error) {
+	values, rpcError := parseParamsArray(params)
+	if rpcError != nil {
+		return "", "", rpcError
+	}
+	if len(values) < 2 {
+		return "", "", invalidParamsError("getAssetState requires program and owner")
+	}
+	if len(values) > 2 {
+		return "", "", invalidParamsError("getAssetState accepts exactly program and owner")
+	}
+	program, rpcError := parseStringParam(values[0], "getAssetState program")
+	if rpcError != nil {
+		return "", "", rpcError
+	}
+	owner, rpcError := parseStringParam(values[1], "getAssetState owner")
+	if rpcError != nil {
+		return "", "", rpcError
+	}
+	return program, owner, nil
 }
 
 func parseNoParams(params json.RawMessage) *Error {

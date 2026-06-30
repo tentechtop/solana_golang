@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -32,6 +33,31 @@ func TestParseBootstrapRegisterValidatorParamsRejectsMissingIdentity(t *testing.
 
 	if _, rpcError := parseBootstrapRegisterValidatorParams(params); rpcError == nil {
 		t.Fatal("parseBootstrapRegisterValidatorParams() error = nil, want missing identity rejection")
+	}
+}
+
+func TestValidatorPairingErrorUsesInvalidParamsForPairingValidation(t *testing.T) {
+	rpcError := validatorPairingError(errors.New("posnode: bootstrap staker signature invalid"))
+
+	if rpcError.Code != CodeInvalidParams {
+		t.Fatalf("Code = %d, want %d", rpcError.Code, CodeInvalidParams)
+	}
+	if rpcError.Message != ErrInvalidParams.Message {
+		t.Fatalf("Message = %q, want %q", rpcError.Message, ErrInvalidParams.Message)
+	}
+	if rpcError.Data == nil {
+		t.Fatal("Data = nil, want diagnostic detail")
+	}
+}
+
+func TestValidatorPairingErrorKeepsConfigFailuresInternal(t *testing.T) {
+	rpcError := validatorPairingError(errors.New("posnode: write paired validator config: access denied"))
+
+	if rpcError.Code != CodeInternalError {
+		t.Fatalf("Code = %d, want %d", rpcError.Code, CodeInternalError)
+	}
+	if rpcError.Message != ErrInternalError.Message {
+		t.Fatalf("Message = %q, want %q", rpcError.Message, ErrInternalError.Message)
 	}
 }
 

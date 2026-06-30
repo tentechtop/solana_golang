@@ -165,8 +165,11 @@ func reachableStakeForSnapshot(
 	return reachableStake, reachableValidatorIDs
 }
 
-// connectionRecentlyReachable 判断连接是否近期活跃 + 防止陈旧连接误撑大可达 stake。
+// connectionRecentlyReachable 判断连接是否可达 + Host 只返回当前连接，空闲 TCP 不能让 quorum 自锁。
 func connectionRecentlyReachable(state p2p.ConnectionState, now time.Time, window time.Duration) bool {
+	if state.ConnectedAtUnixMilli > 0 {
+		return true
+	}
 	lastReachableUnixMilli := maxInt64(
 		state.ConnectedAtUnixMilli,
 		state.LastReadUnixMilli,

@@ -1200,6 +1200,52 @@ func TestValidatorSetFromFinalizedStateIgnoresSpeculativeHeadStake(t *testing.T)
 	}
 }
 
+func TestValidatorSetFromStateExcludesJailedStakeAccount(t *testing.T) {
+	stakerA := testKeyPair(t, "jailed-staker-a")
+	validatorA := testKeyPair(t, "jailed-validator-a")
+	consensusA := testKeyPair(t, "jailed-consensus-a")
+	stakerB := testKeyPair(t, "jailed-staker-b")
+	validatorB := testKeyPair(t, "jailed-validator-b")
+	consensusB := testKeyPair(t, "jailed-consensus-b")
+	genesis := GenesisConfig{
+		ChainID:               "test-jailed-validator-set",
+		InitialSupplyLamports: consensus.DefaultGenesisSupplyLamports,
+		InitialValidators: []GenesisValidator{
+			{
+				StakerAddress:      stakerA.PublicKey,
+				ValidatorAddress:   validatorA.PublicKey,
+				ConsensusPublicKey: consensusA.PublicKey,
+				P2PPeerID:          testPeerID(t, "jailed-peer-a"),
+				StakeLamports:      stake.MinimumStakeLamports,
+			},
+			{
+				StakerAddress:      stakerB.PublicKey,
+				ValidatorAddress:   validatorB.PublicKey,
+				ConsensusPublicKey: consensusB.PublicKey,
+				P2PPeerID:          testPeerID(t, "jailed-peer-b"),
+				StakeLamports:      stake.MinimumStakeLamports,
+			},
+		},
+	}
+	state, _, err := BuildGenesisState(genesis)
+	if err != nil {
+		t.Fatalf("BuildGenesisState() error = %v", err)
+	}
+	jailValidatorStakeAccount(t, &state, consensusA.PublicKey, 0)
+
+	validatorSet, err := ValidatorSetFromStateAtEpoch(state, 0)
+	if err != nil {
+		t.Fatalf("ValidatorSetFromStateAtEpoch() error = %v", err)
+	}
+	validators := validatorSet.Validators()
+	if len(validators) != 1 {
+		t.Fatalf("validator count = %d, want 1", len(validators))
+	}
+	if validators[0].ConsensusPublicKey != consensusB.PublicKey {
+		t.Fatalf("validator consensus key = %s, want %s", validators[0].ConsensusPublicKey.String(), consensusB.PublicKey.String())
+	}
+}
+
 func TestLoadOrCreateLedgerRecoversCorruptedAccountTable(t *testing.T) {
 	db, err := database.NewDatabase(database.DatabaseConfig{
 		Path:   t.TempDir(),
@@ -1268,6 +1314,29 @@ func increaseFirstValidatorStake(t *testing.T, state *consensus.ChainState, lamp
 		}
 		state.Accounts[index].Account.Data = data
 		state.Accounts[index].Account.Lamports += lamports
+		return
+	}
+	t.Fatal("validator stake account not found")
+}
+
+func jailValidatorStakeAccount(t *testing.T, state *consensus.ChainState, consensusPublicKey structure.PublicKey, jailUntilEpoch uint64) {
+	t.Helper()
+	for index := range state.Accounts {
+		if state.Accounts[index].Account.Owner != structure.DefaultBuiltinProgramIDs.Stake {
+			continue
+		}
+		stakeState, err := stake.UnmarshalValidatorStateBinary(state.Accounts[index].Account.Data)
+		if err != nil || stakeState.ConsensusPublicKey != consensusPublicKey {
+			continue
+		}
+		stakeState.Status = stake.ValidatorStatusJailed
+		stakeState.JailUntilEpoch = jailUntilEpoch
+		stakeState.UnlockEpoch = jailUntilEpoch
+		data, err := stakeState.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		state.Accounts[index].Account.Data = data
 		return
 	}
 	t.Fatal("validator stake account not found")

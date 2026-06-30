@@ -782,6 +782,7 @@ func forwardedMethods() []string {
 		rpc.MethodGetTransaction,
 		rpc.MethodGetAddressTransactions,
 		rpc.MethodGetContractPrograms,
+		rpc.MethodGetAssetState,
 		rpc.MethodGetPrivacyState,
 		rpc.MethodGetPrivacyBalance,
 		rpc.MethodGetValidatorSet,

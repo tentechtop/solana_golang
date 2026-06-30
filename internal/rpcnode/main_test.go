@@ -151,7 +151,7 @@ func TestForwardedMethodsExposeSignedTransactionAndReadOnlyContractQueries(t *te
 	for _, method := range forwardedMethods() {
 		methods[method] = struct{}{}
 	}
-	for _, method := range []string{rpc.MethodSendTransaction, rpc.MethodGetContractPrograms} {
+	for _, method := range []string{rpc.MethodSendTransaction, rpc.MethodGetContractPrograms, rpc.MethodGetAssetState} {
 		if _, exists := methods[method]; !exists {
 			t.Fatalf("forwarded methods missing %s", method)
 		}

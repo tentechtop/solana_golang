@@ -527,6 +527,11 @@ func peerNeedsBlockSync(localHead blockchain.Head, status statusResponseEnvelope
 	return status.HeadHeight == localHead.Height && status.HeadHash != "" && status.HeadHash != localHead.BlockHash.String()
 }
 
+// peerBlocksProductionForSync 判断出块是否必须等待同步 + 只用 finalized 高度阻塞，避免非最终确认分叉耗尽 leader slot。
+func peerBlocksProductionForSync(localHead blockchain.Head, status statusResponseEnvelope) bool {
+	return status.FinalizedHeight > localHead.FinalizedHeight
+}
+
 type finalizedBoundarySyncError struct {
 	PeerID          string
 	Scope           string
@@ -813,7 +818,7 @@ func (node *posNode) shouldPauseProductionForSync(ctx context.Context, localHead
 			)
 			continue
 		}
-		if peerNeedsBlockSync(localHead, status) {
+		if peerBlocksProductionForSync(localHead, status) {
 			return true
 		}
 		return false

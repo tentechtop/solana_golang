@@ -159,6 +159,8 @@ func run(args []string) error {
 		return runTransfer(args[1:])
 	case "deploy-contract":
 		return runDeployContract(args[1:])
+	case "asset-bootstrap-fungible":
+		return runAssetBootstrapFungible(args[1:])
 	case "validator-register":
 		return runValidatorRegister(args[1:])
 	case "validator-pair":
@@ -320,6 +322,72 @@ func runDeployContract(args []string) error {
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("encode deploy result: %w", err)
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func runAssetBootstrapFungible(args []string) error {
+	flags := flag.NewFlagSet("asset-bootstrap-fungible", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "payer and mint authority ed25519 keystore path")
+	programAddressText := flags.String("program", "", "deployed ERC20-like program address")
+	name := flags.String("name", "", "asset display name")
+	symbol := flags.String("symbol", "", "asset symbol")
+	decimals := flags.Uint("decimals", 0, "asset decimals")
+	initialSupply := flags.Uint64("initial-supply", 0, "initial supply in smallest units")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *decimals > 255 {
+		return fmt.Errorf("decimals must be <= 255")
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load payer key: %w", err)
+	}
+	programAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(*programAddressText))
+	if err != nil {
+		return fmt.Errorf("decode program address: %w", err)
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	transaction, err := blockchain.NewBootstrapFungibleAssetTransaction(blockchain.FungibleAssetBootstrapParams{
+		Payer:           payer,
+		Program:         programAddress,
+		Name:            strings.TrimSpace(*name),
+		Symbol:          strings.TrimSpace(*symbol),
+		Decimals:        uint8(*decimals),
+		InitialSupply:   *initialSupply,
+		RecentBlockhash: blockhash,
+	})
+	if err != nil {
+		return fmt.Errorf("build asset bootstrap transaction: %w", err)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	assetAccounts, err := blockchain.DeriveFungibleAssetBootstrapAccounts(programAddress, payer.PublicKey)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"signature":      signature,
+		"program":        programAddress.String(),
+		"mint":           assetAccounts.Mint.PublicKey.String(),
+		"owner":          payer.PublicKey.String(),
+		"balance":        assetAccounts.Balance.PublicKey.String(),
+		"name":           strings.TrimSpace(*name),
+		"symbol":         strings.TrimSpace(*symbol),
+		"decimals":       uint8(*decimals),
+		"initial_supply": *initialSupply,
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode asset bootstrap result: %w", err)
 	}
 	fmt.Println(string(encoded))
 	return nil
@@ -998,6 +1066,7 @@ func printUsage() {
 		"  wallet balance -rpc http://127.0.0.1:8899 -address ADDRESS",
 		"  wallet transfer -rpc http://127.0.0.1:8899 -key keys/staker.json -to ADDRESS -lamports 1000",
 		"  wallet deploy-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program-key keys/program.json -bytecode dist/pop.svmbin -deposit-lamports 0",
+		"  wallet asset-bootstrap-fungible -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program PROGRAM -name POP -symbol POP -decimals 6 -initial-supply 1000000000000000",
 		"  wallet validator-register -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -consensus-address ADDRESS -bls-public-key KEY -peer-id PEER -lamports 10000000",
 		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -lamports 10000000",
 		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -signature SIGNATURE",

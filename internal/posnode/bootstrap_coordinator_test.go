@@ -2,6 +2,7 @@ package posnode
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -60,6 +61,15 @@ func TestBootstrapCoordinatorFreezesManifestAtThreshold(t *testing.T) {
 	}
 	if manifest.GenesisStartUnixMilli <= time.Now().UnixMilli() {
 		t.Fatal("manifest genesis start must be in the future")
+	}
+}
+
+func TestBootstrapManifestFrozenErrorDetection(t *testing.T) {
+	if !isBootstrapManifestFrozenError(errors.New("posnode: bootstrap rpc error -32603 internal error: bootstrap register validator: posnode: bootstrap manifest already frozen")) {
+		t.Fatal("frozen manifest error was not detected")
+	}
+	if isBootstrapManifestFrozenError(errors.New("temporary network timeout")) {
+		t.Fatal("temporary error detected as frozen manifest")
 	}
 }
 

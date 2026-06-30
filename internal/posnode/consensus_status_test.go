@@ -9,6 +9,7 @@ import (
 
 	"solana_golang/blockchain"
 	"solana_golang/consensus"
+	"solana_golang/database"
 	"solana_golang/programs/stake"
 	"solana_golang/rpc"
 	"solana_golang/structure"
@@ -60,7 +61,9 @@ func TestGetConsensusStatusRPC(t *testing.T) {
 func TestGetValidatorSetUsesCurrentHeadEpoch(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
 	jailLocalValidatorForTest(t, node, 1)
-	commitConsensusStatusStateAtEpoch(t, node.ledger, node.ledger.State(), 2)
+	state := node.ledger.State()
+	matureLocalValidatorForTest(t, node, &state, 2)
+	commitConsensusStatusStateAtEpoch(t, node.ledger, state, 2)
 
 	result, err := node.GetValidatorSet(context.Background())
 	if err != nil {
@@ -77,6 +80,90 @@ func TestGetValidatorSetUsesCurrentHeadEpoch(t *testing.T) {
 		return
 	}
 	t.Fatalf("local validator %s missing from current epoch validator set", localValidatorID)
+}
+
+func TestGetBlockReturnsComputedLeaderAddress(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	node := newConsensusStatusTestNodeWithDatabase(t, db)
+	slot := node.ledger.Head().Slot + 3
+	height := node.ledger.Head().Height + 1
+	leader := commitScheduledLeaderBlock(t, node, slot, height)
+
+	resultBySlot, err := node.GetBlock(context.Background(), slot)
+	if err != nil {
+		t.Fatalf("GetBlock(slot) error = %v", err)
+	}
+	if resultBySlot.Slot != slot {
+		t.Fatalf("slot result slot = %d, want %d", resultBySlot.Slot, slot)
+	}
+	if resultBySlot.Height != height {
+		t.Fatalf("slot result height = %d, want %d", resultBySlot.Height, height)
+	}
+	if resultBySlot.Transactions == nil || len(resultBySlot.Transactions) != 0 {
+		t.Fatalf("transactions = %#v, want empty array", resultBySlot.Transactions)
+	}
+	if resultBySlot.LeaderAddress != leader.AccountAddress.String() {
+		t.Fatalf("leader address = %s, want %s", resultBySlot.LeaderAddress, leader.AccountAddress.String())
+	}
+	if resultBySlot.LeaderAddressSource != "block" {
+		t.Fatalf("leader source = %q, want block", resultBySlot.LeaderAddressSource)
+	}
+	if resultBySlot.LeaderStakeLamports == nil || *resultBySlot.LeaderStakeLamports != leader.StakeLamports {
+		t.Fatalf("leader stake = %v, want %d", resultBySlot.LeaderStakeLamports, leader.StakeLamports)
+	}
+	if resultBySlot.LeaderCommissionBps == nil || *resultBySlot.LeaderCommissionBps != leader.CommissionBps {
+		t.Fatalf("leader commission = %v, want %d", resultBySlot.LeaderCommissionBps, leader.CommissionBps)
+	}
+	if resultBySlot.LeaderVoteCredits == nil {
+		t.Fatal("leader vote credits missing")
+	}
+
+	resultByHeight, err := node.GetBlock(context.Background(), height)
+	if err != nil {
+		t.Fatalf("GetBlock(height) error = %v", err)
+	}
+	if resultByHeight.Slot != slot || resultByHeight.Height != height {
+		t.Fatalf("height fallback result = slot %d height %d, want slot %d height %d", resultByHeight.Slot, resultByHeight.Height, slot, height)
+	}
+}
+
+func TestGetBlockReturnsLeaderFromHistoricalState(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{
+		Path:   t.TempDir(),
+		Engine: database.EnginePebble,
+		WAL:    true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	node := newConsensusStatusTestNodeWithDatabase(t, db)
+	slot := node.ledger.Head().Slot + 3
+	height := node.ledger.Head().Height + 1
+	leader := commitScheduledLeaderBlock(t, node, slot, height)
+	removeEpochLeaderForTest(t, node, leader.ValidatorID)
+
+	result, err := node.GetBlock(context.Background(), slot)
+	if err != nil {
+		t.Fatalf("GetBlock(slot) error = %v", err)
+	}
+	if result.LeaderAddress != leader.AccountAddress.String() {
+		t.Fatalf("leader address = %s, want historical %s", result.LeaderAddress, leader.AccountAddress.String())
+	}
+	if result.LeaderCommissionBps == nil || *result.LeaderCommissionBps != leader.CommissionBps {
+		t.Fatalf("leader commission = %v, want %d", result.LeaderCommissionBps, leader.CommissionBps)
+	}
+	if result.LeaderStakeLamports == nil || *result.LeaderStakeLamports != leader.StakeLamports {
+		t.Fatalf("leader stake = %v, want %d", result.LeaderStakeLamports, leader.StakeLamports)
+	}
 }
 
 func TestConsensusStatusZerosEffectiveStakeForJailedLocalValidator(t *testing.T) {
@@ -96,7 +183,71 @@ func TestConsensusStatusZerosEffectiveStakeForJailedLocalValidator(t *testing.T)
 	}
 }
 
+func commitScheduledLeaderBlock(t *testing.T, node *posNode, slot uint64, height uint64) consensus.ValidatorState {
+	t.Helper()
+	node.mutex.Lock()
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
+	node.mutex.Unlock()
+	if err != nil {
+		t.Fatalf("epochContextForSlotLocked() error = %v", err)
+	}
+	leaderID, err := epochContextValue.Schedule.LeaderForSlot(slot)
+	if err != nil {
+		t.Fatalf("LeaderForSlot() error = %v", err)
+	}
+	leader, exists := epochContextValue.Snapshot.ValidatorByID(leaderID)
+	if !exists {
+		t.Fatalf("leader %s missing from snapshot", leaderID)
+	}
+	state := node.ledger.State()
+	stateRoot, err := state.RootHash()
+	if err != nil {
+		t.Fatalf("RootHash() error = %v", err)
+	}
+	head := node.ledger.Head()
+	proposal := consensus.BlockProposal{
+		Header: consensus.BlockHeader{
+			ChainID:            head.ChainID,
+			Slot:               slot,
+			Height:             height,
+			ParentHash:         head.BlockHash,
+			PreviousQCHash:     head.QCHash,
+			LeaderID:           leaderID,
+			EpochID:            epochContextValue.EpochID,
+			StateRoot:          stateRoot,
+			AccountRoot:        stateRoot,
+			TimestampUnixMilli: 1_700_000_000_000,
+		},
+	}
+	if _, err := node.ledger.CommitBlock(blockchain.CommitBlockRequest{Proposal: proposal, NextState: state}); err != nil {
+		t.Fatalf("CommitBlock() error = %v", err)
+	}
+	return leader
+}
+
+func removeEpochLeaderForTest(t *testing.T, node *posNode, leaderID consensus.ValidatorID) {
+	t.Helper()
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	filteredValidators := make([]consensus.ValidatorState, 0, len(node.epochSnapshot.Validators))
+	for _, validator := range node.epochSnapshot.Validators {
+		if validator.ValidatorID == leaderID {
+			continue
+		}
+		filteredValidators = append(filteredValidators, validator)
+	}
+	if len(filteredValidators) == len(node.epochSnapshot.Validators) {
+		t.Fatalf("leader %s not found in epoch snapshot", leaderID)
+	}
+	node.epochSnapshot.Validators = filteredValidators
+	node.epochSnapshots[node.epochSnapshot.EpochID] = node.epochSnapshot
+}
+
 func newConsensusStatusTestNode(t *testing.T) *posNode {
+	return newConsensusStatusTestNodeWithDatabase(t, nil)
+}
+
+func newConsensusStatusTestNodeWithDatabase(t *testing.T, db database.Database) *posNode {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	validatorKeys := []structure.SolanaKeyPair{
@@ -124,7 +275,7 @@ func newConsensusStatusTestNode(t *testing.T) *posNode {
 			StakeLamports:      stake.MinimumStakeLamports,
 		}
 	}
-	ledger, err := blockchain.NewLedgerFromGenesis(nil, blockchain.GenesisConfig{
+	ledger, err := blockchain.NewLedgerFromGenesis(db, blockchain.GenesisConfig{
 		ChainID:               "posnode-consensus-status",
 		InitialSupplyLamports: 1_000_000_000_000,
 		InitialValidators:     genesisValidators,
@@ -157,6 +308,7 @@ func newConsensusStatusTestNode(t *testing.T) *posNode {
 			TransactionLeaderForwardSlots: 2,
 		},
 		logger:           logger,
+		db:               db,
 		ledger:           ledger,
 		consensusKeyPair: consensusKeys[0],
 		peerKeyPair:      rawKeyPair{peerID: genesisValidators[0].P2PPeerID},
@@ -190,6 +342,30 @@ func addPendingStakeForValidator(t *testing.T, ledger *blockchain.Ledger, valida
 		return
 	}
 	t.Fatalf("validator account %s not found", validatorAddress.String())
+}
+
+func matureLocalValidatorForTest(t *testing.T, node *posNode, state *consensus.ChainState, epochID uint64) {
+	t.Helper()
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	for index := range state.Accounts {
+		stakeState, err := stake.UnmarshalValidatorStateBinary(state.Accounts[index].Account.Data)
+		if err != nil {
+			continue
+		}
+		if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != validatorID {
+			continue
+		}
+		if err := stake.MatureStakeForEpoch(&stakeState, epochID); err != nil {
+			t.Fatalf("MatureStakeForEpoch() error = %v", err)
+		}
+		data, err := stakeState.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary() error = %v", err)
+		}
+		state.Accounts[index].Account.Data = data
+		return
+	}
+	t.Fatalf("local validator %s not found", validatorID)
 }
 
 func commitConsensusStatusState(t *testing.T, ledger *blockchain.Ledger, state consensus.ChainState) {

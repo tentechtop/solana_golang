@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,7 +24,21 @@ const (
 	defaultServiceName  = "posnode-bootstrap.service"
 )
 
+type cliOptions struct {
+	inspectOnly       bool
+	stopPublicRPCOnly bool
+	uploadBinaryOnly  bool
+	resetData         bool
+	noStopAll         bool
+	noStopPublicRPC   bool
+}
+
 func main() {
+	options, err := parseCLIOptions(os.Args[1:])
+	if err != nil {
+		exitError("parse args: %v", err)
+	}
+
 	host := envOrDefault("POSNODE_LINUX_DEPLOY_HOST", envOrDefault("POSNODE_DEPLOY_HOST", "101.35.87.31"))
 	user := envOrDefault("POSNODE_LINUX_DEPLOY_USER", envOrDefault("POSNODE_DEPLOY_USER", "root"))
 	password := envOrDefault("POSNODE_LINUX_DEPLOY_PASSWORD", os.Getenv("POSNODE_DEPLOY_PASSWORD"))
@@ -34,8 +50,16 @@ func main() {
 	remoteConfigPath := envOrDefault("POSNODE_LINUX_REMOTE_CONFIG", defaultRemoteConfig)
 	remoteDataPath := envOrDefault("POSNODE_LINUX_REMOTE_DATA_PATH", defaultRemoteData)
 	serviceName := envOrDefault("POSNODE_LINUX_SERVICE_NAME", defaultServiceName)
-	resetData := strings.EqualFold(envOrDefault("POSNODE_LINUX_DEPLOY_RESET_DATA", "false"), "true")
-	stopAll := strings.EqualFold(envOrDefault("POSNODE_LINUX_STOP_ALL", "true"), "true")
+	resetData := envBoolOrDefault("POSNODE_LINUX_DEPLOY_RESET_DATA", false) || options.resetData
+	stopAll := envBoolOrDefault("POSNODE_LINUX_STOP_ALL", true) && !options.noStopAll
+	inspectOnly := envBoolOrDefault("POSNODE_LINUX_INSPECT_ONLY", false) || options.inspectOnly
+	stopPublicRPC := envBoolOrDefault("POSNODE_LINUX_STOP_PUBLIC_RPC", true) && !options.noStopPublicRPC
+	stopPublicRPCOnly := envBoolOrDefault("POSNODE_LINUX_STOP_PUBLIC_RPC_ONLY", false) || options.stopPublicRPCOnly
+	uploadBinaryOnly := envBoolOrDefault("POSNODE_LINUX_UPLOAD_BINARY_ONLY", false) || options.uploadBinaryOnly
+	restartServices, err := parseServiceNames(envOrDefault("POSNODE_LINUX_RESTART_SERVICES", "posnode-bootstrap.service,posnode-public-validator.service"))
+	if err != nil {
+		exitError("invalid restart services: %v", err)
+	}
 	firewallPorts, err := parseFirewallPorts(envOrDefault("POSNODE_LINUX_FIREWALL_PORTS", "8899/tcp,5101/tcp"))
 	if err != nil {
 		exitError("invalid firewall ports: %v", err)
@@ -57,6 +81,27 @@ func main() {
 	}
 	defer client.Close()
 
+	if inspectOnly {
+		if err := inspectRemote(client); err != nil {
+			exitError("inspect remote: %v", err)
+		}
+		return
+	}
+	if stopPublicRPC {
+		if err := stopPublicRPCServices(client); err != nil {
+			exitError("stop public rpc services: %v", err)
+		}
+	}
+	if stopPublicRPCOnly {
+		fmt.Println("public rpc services stopped")
+		return
+	}
+	if uploadBinaryOnly {
+		if err := uploadBinaryAndRestart(client, restartServices); err != nil {
+			exitError("upload binary and restart: %v", err)
+		}
+		return
+	}
 	if err := stopExisting(client, serviceName, stopAll); err != nil {
 		exitError("stop existing services: %v", err)
 	}
@@ -141,6 +186,129 @@ func stopExisting(client *ssh.Client, serviceName string, stopAll bool) error {
 		"pkill -x rpcnode >/dev/null 2>&1 || true",
 	)
 	return run(client, strings.Join(commands, "; "))
+}
+
+func inspectRemote(client *ssh.Client) error {
+	commands := []string{
+		"echo '== systemd services =='; systemctl list-units --type=service --all --no-pager | grep -E 'posnode|rpcnode|public-rpc' || true",
+		"echo '== processes =='; ps -eo pid,comm,args | grep -E 'posnode|rpcnode' | grep -v grep || true",
+		"echo '== listening ports =='; ss -ltnp | grep -E ':(8899|8901|8910|8911|8912|8913|5101|5102|5103|5104|5105|5106|5107)\\b' || true",
+		"echo '== config roles =='; for file in /opt/solana_golang/config/*.json; do [ -f \"$file\" ] || continue; echo \"--- $file\"; grep -E '\"chain_id\"|\"chain_identity_hash\"|\"genesis_hash\"|\"node_mode\"|\"node_name\"|\"data_path\"|\"listen_port\"|\"advertised_ip\"|\"advertised_port\"|\"rpc_enabled\"|\"rpc_listen_ip\"|\"rpc_port\"|\"node_role\"|\"validator_enabled\"|\"consensus_enabled\"|\"staker_address\"|\"bootstrap_join\"|\"rpc_url\"|\"registered_at_unix_milli\"|\"staker_signature\"|\"peer_key_path\"|\"validator_key_path\"|\"consensus_key_path\"|\"bls_key_path\"' \"$file\" || true; done",
+		"echo '== recent validator logs =='; journalctl -u posnode-public-validator.service -n 80 --no-pager || true",
+		"echo '== validator stdout tail =='; tail -n 80 /opt/solana_golang/logs/posnode-public-validator.out.log 2>/dev/null || true; echo '== validator stderr tail =='; tail -n 80 /opt/solana_golang/logs/posnode-public-validator.err.log 2>/dev/null || true",
+	}
+	for _, command := range commands {
+		if err := run(client, command); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stopPublicRPCServices(client *ssh.Client) error {
+	return run(client, buildStopPublicRPCCommand())
+}
+
+func uploadBinaryAndRestart(client *ssh.Client, serviceNames []string) error {
+	if len(serviceNames) == 0 {
+		return fmt.Errorf("restart services is empty")
+	}
+	if err := run(client, "install -d -m 0755 /opt/solana_golang/bin /opt/solana_golang/logs"); err != nil {
+		return fmt.Errorf("create remote directories: %w", err)
+	}
+	if err := uploadFile(client, localPath("dist", "posnode-linux-amd64"), remoteBinary, "0755"); err != nil {
+		return fmt.Errorf("upload binary: %w", err)
+	}
+	commands := []string{"systemctl daemon-reload"}
+	for _, serviceName := range serviceNames {
+		quotedName := shellQuote(serviceName)
+		commands = append(commands,
+			"systemctl restart "+quotedName,
+			"sleep 2; systemctl --no-pager --full status "+quotedName+" | head -n 30",
+			"systemctl is-active --quiet "+quotedName,
+		)
+	}
+	commands = append(commands,
+		"if command -v curl >/dev/null 2>&1; then curl -sS -X POST http://127.0.0.1:8899/ -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\",\"params\":[]}'; else echo 'curl not installed; skip bootstrap health check'; fi",
+		"if command -v curl >/dev/null 2>&1; then curl -sS -X POST http://127.0.0.1:8901/ -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\",\"params\":[]}'; else echo 'curl not installed; skip validator health check'; fi",
+	)
+	for _, command := range commands {
+		if err := run(client, command); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildStopPublicRPCCommand() string {
+	serviceNames := []string{
+		"rpcnode.service",
+		"public-rpc.service",
+		"posnode-public-rpc.service",
+		"public-rpc-8910.service",
+		"public-rpc-8911.service",
+		"public-rpc-8912.service",
+		"public-rpc-8913.service",
+		"posnode-public-rpc-8910.service",
+		"posnode-public-rpc-8911.service",
+		"posnode-public-rpc-8912.service",
+		"posnode-public-rpc-8913.service",
+		"public-rpc-gateway-8910.service",
+		"public-rpc-gateway-8911.service",
+		"public-rpc-gateway-8912.service",
+		"public-rpc-gateway-8913.service",
+		"rpcnode-8910.service",
+		"rpcnode-8911.service",
+		"rpcnode-8912.service",
+		"rpcnode-8913.service",
+	}
+	commands := make([]string, 0, len(serviceNames)*2+2)
+	for _, serviceName := range serviceNames {
+		quotedName := shellQuote(serviceName)
+		commands = append(commands,
+			"systemctl stop "+quotedName+" >/dev/null 2>&1 || true",
+			"systemctl disable "+quotedName+" >/dev/null 2>&1 || true",
+		)
+	}
+	commands = append(commands,
+		"pkill -x rpcnode >/dev/null 2>&1 || true",
+	)
+	return strings.Join(commands, "; ")
+}
+
+func parseCLIOptions(args []string) (cliOptions, error) {
+	var options cliOptions
+	flagSet := flag.NewFlagSet("deploy_posnode_linux_ssh", flag.ContinueOnError)
+	flagSet.SetOutput(io.Discard)
+	flagSet.BoolVar(&options.inspectOnly, "inspect", false, "inspect remote state and exit")
+	flagSet.BoolVar(&options.stopPublicRPCOnly, "stop-public-rpc-only", false, "stop legacy public RPC services and exit")
+	flagSet.BoolVar(&options.uploadBinaryOnly, "upload-binary-only", false, "upload binary and restart configured services")
+	flagSet.BoolVar(&options.resetData, "reset-data", false, "reset remote data path before restart")
+	flagSet.BoolVar(&options.noStopAll, "no-stop-all", false, "stop only the selected service")
+	flagSet.BoolVar(&options.noStopPublicRPC, "no-stop-public-rpc", false, "skip stopping legacy public RPC services")
+	if err := flagSet.Parse(args); err != nil {
+		return cliOptions{}, err
+	}
+	if flagSet.NArg() > 0 {
+		return cliOptions{}, fmt.Errorf("unsupported args: %s", strings.Join(flagSet.Args(), " "))
+	}
+	return options, nil
+}
+
+func parseServiceNames(value string) ([]string, error) {
+	rawNames := strings.Split(value, ",")
+	serviceNames := make([]string, 0, len(rawNames))
+	for _, rawName := range rawNames {
+		serviceName := strings.TrimSpace(rawName)
+		if serviceName == "" {
+			continue
+		}
+		if !validServiceName(serviceName) {
+			return nil, fmt.Errorf("unsupported service name %q", serviceName)
+		}
+		serviceNames = append(serviceNames, serviceName)
+	}
+	return serviceNames, nil
 }
 
 func buildFirewallCommand(ports []string) string {
@@ -287,6 +455,14 @@ func envOrDefault(name string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return strings.EqualFold(value, "true")
 }
 
 func exitError(format string, args ...any) {

@@ -63,7 +63,7 @@ cd C:\solana-golang-node
 .\scripts\start-node.ps1
 ```
 
-终端会显示钱包配对二维码。用钱包扫码完成授权。
+终端会打印 `扫码地址: file:///.../pairing-qr.html`，并在节点生成二维码后自动打开浏览器扫码页面。用 APP 扫码完成授权。
 
 如果钱包暂时不能扫码，可以复制终端里的 `posvalpair:` payload，在钱包 CLI 里执行：
 
@@ -130,4 +130,3 @@ cd C:\solana-golang-node
 3. 仍看到旧验证者
 
    这是旧链数据或旧引导 registry 残留。必须使用新的公网引导节点数据目录，或清理旧数据后重新启动引导节点。
-

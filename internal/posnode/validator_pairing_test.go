@@ -1,8 +1,10 @@
 package posnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,6 +58,9 @@ func TestValidatorPairingCompletesBootstrapJoinConfig(t *testing.T) {
 	if pairing.Mode != validatorPairingModeBootstrap || pairing.BootstrapRPCURL == "" {
 		t.Fatalf("pairing = %+v, want bootstrap mode", pairing)
 	}
+	if strings.TrimSpace(pairing.ChainID) != "" || strings.TrimSpace(pairing.ChainIdentityHash) != "" || strings.TrimSpace(pairing.GenesisHash) != "" {
+		t.Fatalf("pairing chain fields = %q %q %q, want bootstrap discovery values", pairing.ChainID, pairing.ChainIdentityHash, pairing.GenesisHash)
+	}
 	staker := mustStructureKeyPair("paired-bootstrap-staker")
 	request := newBootstrapPairingCompleteRequest(t, node, staker, stake.MinimumStakeLamports)
 	result, err := node.CompleteValidatorPairing(context.Background(), request)
@@ -73,9 +78,80 @@ func TestValidatorPairingCompletesBootstrapJoinConfig(t *testing.T) {
 	if !ok || joinConfig["enabled"] != true || joinConfig["staker_signature"] != request.BootstrapStakerSignature {
 		t.Fatalf("bootstrap_join = %+v, want enabled with staker signature", updated["bootstrap_join"])
 	}
+	if _, ok := updated["chain_id"]; ok {
+		t.Fatalf("chain_id = %v, want bootstrap discovery without explicit chain id", updated["chain_id"])
+	}
 	pairingConfig, ok := updated["validator_pairing"].(map[string]any)
 	if !ok || pairingConfig["enabled"] != false {
 		t.Fatalf("validator_pairing = %+v, want disabled after completion", updated["validator_pairing"])
+	}
+}
+
+func TestBootstrapPairingAutoActivationEligibility(t *testing.T) {
+	node, _ := newBootstrapPairingTestNode(t, 19017, true)
+	if node.shouldAutoActivatePairedValidator(true, node.validatorPairing) {
+		t.Fatal("auto activation without runtime context = true, want false")
+	}
+	node.runtimeContext = context.Background()
+	if !node.shouldAutoActivatePairedValidator(true, node.validatorPairing) {
+		t.Fatal("auto activation with runtime context = false, want true")
+	}
+	if node.shouldAutoActivatePairedValidator(false, node.validatorPairing) {
+		t.Fatal("auto activation without config update = true, want false")
+	}
+}
+
+func TestBootstrapPairingActivationFailureIsQueryable(t *testing.T) {
+	node, _ := newBootstrapPairingTestNode(t, 19018, true)
+	session := node.validatorPairing
+	session.state = "activating"
+	session.completedResult = rpc.ValidatorPairingCompleteResult{
+		State:             "activating",
+		ActivationStarted: true,
+	}
+	node.pairingActivationRunning = true
+
+	node.finishPairedValidatorActivation(session, errors.New("bootstrap manifest already frozen"))
+
+	status, err := node.GetValidatorPairing(context.Background())
+	if err != nil {
+		t.Fatalf("GetValidatorPairing() error = %v", err)
+	}
+	if status.State != "activation_failed" || !strings.Contains(status.Completed.ActivationError, "manifest already frozen") {
+		t.Fatalf("pairing status = %+v, want activation_failed with error", status)
+	}
+	if !status.Completed.RestartRequired {
+		t.Fatalf("completed result = %+v, want restart required after activation failure", status.Completed)
+	}
+}
+
+func TestValidatorPairingWritesQRCodeAssets(t *testing.T) {
+	node, _ := newBootstrapPairingTestNode(t, 19016, false)
+	imagePath := node.validatorPairing.qrImagePath
+	if strings.TrimSpace(imagePath) == "" {
+		t.Fatal("qrImagePath is empty")
+	}
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		t.Fatalf("ReadFile(qr image) error = %v", err)
+	}
+	if !bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		t.Fatalf("qr image is not a PNG file: %q", imagePath)
+	}
+	htmlPath := node.validatorPairing.qrHTMLPath
+	if strings.TrimSpace(htmlPath) == "" {
+		t.Fatal("qrHTMLPath is empty")
+	}
+	htmlData, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("ReadFile(qr html) error = %v", err)
+	}
+	htmlText := string(htmlData)
+	if !strings.Contains(htmlText, "data:image/png;base64,") || !strings.Contains(htmlText, node.validatorPairing.qrText) {
+		t.Fatalf("qr html does not contain embedded qr assets: %q", htmlPath)
+	}
+	if !strings.Contains(node.validatorPairing.qrText, "posvalpair:") || strings.TrimSpace(node.validatorPairing.payload.ChainID) != "" {
+		t.Fatal("qr payload should use bootstrap discovery chain id")
 	}
 }
 

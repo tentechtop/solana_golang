@@ -72,6 +72,54 @@ func TestPeerNeedsBlockSyncWhenPeerFinalizedAhead(t *testing.T) {
 	}
 }
 
+func TestPeerBlocksProductionForSyncSkipsSameHeightFork(t *testing.T) {
+	localHead := blockchain.Head{
+		Height:          10,
+		BlockHash:       testHashFromText(t, "local-head"),
+		FinalizedHeight: 8,
+	}
+	status := statusResponseEnvelope{
+		HeadHeight: 10,
+		HeadHash:   testHashFromText(t, "peer-head").String(),
+	}
+	if peerBlocksProductionForSync(localHead, status) {
+		t.Fatal("peerBlocksProductionForSync() = true, want false")
+	}
+}
+
+func TestPeerBlocksProductionForSyncWhenPeerFinalizedAhead(t *testing.T) {
+	localHead := blockchain.Head{
+		Height:          10,
+		BlockHash:       testHashFromText(t, "local-head"),
+		FinalizedHeight: 8,
+	}
+	status := statusResponseEnvelope{
+		HeadHeight:      10,
+		HeadHash:        testHashFromText(t, "peer-head").String(),
+		FinalizedHeight: 9,
+	}
+	if !peerBlocksProductionForSync(localHead, status) {
+		t.Fatal("peerBlocksProductionForSync() = false, want true")
+	}
+}
+
+func TestPeerBlocksProductionForSyncSkipsUnfinalizedPeerHeadAhead(t *testing.T) {
+	localHead := blockchain.Head{
+		Height:          10,
+		BlockHash:       testHashFromText(t, "local-head"),
+		FinalizedHeight: 8,
+	}
+	status := statusResponseEnvelope{
+		HeadHeight:      11,
+		HeadHash:        testHashFromText(t, "peer-head").String(),
+		FinalizedHeight: 8,
+	}
+	status.FinalizedHeight = 8
+	if peerBlocksProductionForSync(localHead, status) {
+		t.Fatal("peerBlocksProductionForSync() = true, want false")
+	}
+}
+
 func TestCalculateSyncStartHeightFromAncestorUsesNextHeight(t *testing.T) {
 	startHeight := calculateSyncStartHeightFromAncestor(21)
 	if startHeight != 22 {
@@ -815,8 +863,8 @@ func TestLocalValidatorEffectiveStakeRejectsCurrentEpochJail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("localValidatorEffectiveStake(expired jail) error = %v", err)
 	}
-	if !active || stakeValue == 0 {
-		t.Fatalf("expired jail active=%v stake=%d, want active stake", active, stakeValue)
+	if active || stakeValue != 0 {
+		t.Fatalf("expired but unmatured jail active=%v stake=%d, want inactive", active, stakeValue)
 	}
 }
 

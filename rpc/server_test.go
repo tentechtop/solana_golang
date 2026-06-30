@@ -51,6 +51,25 @@ func (b testPublicBackend) GetContractPrograms(context.Context, int) (ContractPr
 		},
 	}, nil
 }
+func (b testPublicBackend) GetAssetState(context.Context, string, string) (AssetStateResult, error) {
+	return AssetStateResult{
+		Program: "program-address",
+		Owner:   "owner-address",
+		Mint: AssetMintStateResult{
+			Address:  "mint-address",
+			Exists:   true,
+			Kind:     "fungible",
+			Decimals: 6,
+			Supply:   "1000",
+			Symbol:   "POP",
+		},
+		Balance: AssetBalanceStateResult{
+			Address: "balance-address",
+			Exists:  true,
+			Amount:  "1000",
+		},
+	}, nil
+}
 
 func TestServerGetBalance(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
@@ -84,6 +103,25 @@ func TestServerGetLatestBlockhash(t *testing.T) {
 		t.Fatalf("result = %#v, want latest blockhash", decoded.Result)
 	}
 }
+
+func TestServerGetBlockSerializesEmptyTransactions(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[10]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	transactions, ok := result["transactions"].([]any)
+	if !ok || len(transactions) != 0 {
+		t.Fatalf("transactions = %#v, want empty array", result["transactions"])
+	}
+}
+
 func TestServerMethodNotFound(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
 	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"unknown","params":[]}`)
@@ -148,6 +186,24 @@ func TestPublicRouterExposesContractPrograms(t *testing.T) {
 	programs := result["programs"].([]any)
 	if len(programs) != 1 {
 		t.Fatalf("programs length = %d, want 1", len(programs))
+	}
+}
+
+func TestPublicRouterExposesAssetState(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getAssetState","params":["program-address","owner-address"]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	mint := result["mint"].(map[string]any)
+	if mint["symbol"].(string) != "POP" {
+		t.Fatalf("mint = %#v, want POP symbol", mint)
 	}
 }
 

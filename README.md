@@ -8,6 +8,8 @@
 
 <p align="center">
   <a href="#-项目简介">简介</a> ·
+  <a href="#-开发者突破">突破</a> ·
+  <a href="#-产品化展示">展示</a> ·
   <a href="#-项目定位">定位</a> ·
   <a href="#-架构设计">架构</a> ·
   <a href="#-快速开始">快速开始</a> ·
@@ -19,11 +21,44 @@
 
 ---
 
+<p align="center">
+  <img src="./doc/海报.png" alt="Solana Golang 技术突破海报" width="720">
+</p>
+
+---
+
 ## 📖 项目简介
 
 **Solana Golang** 是一个从零开始、完全用 Go 语言实现的自研公链，目标是成为一条**真正可承载金融级业务的生产级链**。项目深受 Solana 架构思想的启发——包括 **Borsh 序列化**、**账户模型**、**交易结构**和 **Slot 时钟**——但在工程实现上做出了独立的架构决策，旨在构建一套**安全、高性能、可审计、可长期演进**的区块链基础设施。
 
 > ⚠️ 本项目灵感来源是 Solana，但并非复制 Solana（翻译 Rust 代码），而是从零开始用 Go 语言独立构建的自研公链。Solana 官方实现使用 Rust 语言，位于 [solana-labs/solana](https://github.com/solana-labs/solana)。
+
+## 🚀 开发者突破
+
+这不是一个概念型 Demo，而是一套按生产链路拆解、可测试、可审计、可持续演进的 Go 区块链工程。
+
+| 突破方向 | 开发者价值 |
+|----------|------------|
+| **自研 P2P 协议栈** | TCP/QUIC 双传输、P2P Frame、KAD DHT、安全会话和 Peer 保护都在代码内可读、可测、可替换 |
+| **Borsh + Schema Registry** | P2P 与链上数据坚持二进制协议，raw bytes 必须带类型、版本、编码和哈希，降低协议演进风险 |
+| **金融级状态存储** | Pebble/LevelDB 双引擎、事务写入、Migration、前缀查询和表级缓存，为账户状态和区块索引提供稳定底座 |
+| **Slot + QC 共识基线** | 从 SlotClock、Vote 到 Quorum Certificate 逐步闭环，方便开发者理解并参与共识模块演进 |
+| **Solana 兼容密码学工具链** | Ed25519、X25519、AES-GCM、BIP-39、SLIP-0010、PDA 与多编码工具集中在 `utils` 中，便于钱包和 DApp 集成 |
+| **ZK 与合规金融路线** | 隐私交易、ZK Compression、RWA、证券代币和衍生品交易被纳入长期架构，不止于基础链节点 |
+
+## 🖼️ 产品化展示
+
+| Nulla 公链总览 | 钱包与交易流 |
+|----------------|--------------|
+| <img src="./doc/nulla-solana-showcase.png" alt="Nulla Solana showcase" width="420"> | <img src="./doc/nulla-wallet-flow-showcase.png" alt="Nulla wallet flow showcase" width="420"> |
+
+| 链治理 | 资产治理 |
+|--------|----------|
+| <img src="./doc/solana-chain-governance-showcase.png" alt="Solana chain governance showcase" width="420"> | <img src="./doc/solana-asset-governance-showcase.png" alt="Solana asset governance showcase" width="420"> |
+
+| 节点运维与监控 |
+|----------------|
+| <img src="./doc/solana-operation-showcase.png" alt="Solana operation showcase" width="860"> |
 
 ## 🎯 项目定位
 

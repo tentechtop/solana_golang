@@ -88,23 +88,29 @@ func TestLivenessGateUsesCeilTwoThirdsThreshold(t *testing.T) {
 
 func TestConnectionRecentlyReachableUsesLatestActivity(t *testing.T) {
 	now := time.UnixMilli(1_710_000_010_000)
-	recentState := p2p.ConnectionState{
+	connectedState := p2p.ConnectionState{
 		ConnectedAtUnixMilli:   now.Add(-time.Minute).UnixMilli(),
 		LastReadUnixMilli:      now.Add(-time.Minute).UnixMilli(),
 		LastWriteUnixMilli:     now.Add(-time.Minute).UnixMilli(),
+		LastHeartbeatUnixMilli: now.Add(-time.Second).UnixMilli(),
+	}
+	if !connectionRecentlyReachable(connectedState, now, 3*time.Second) {
+		t.Fatal("connected peer marked unreachable")
+	}
+
+	recentState := p2p.ConnectionState{
 		LastHeartbeatUnixMilli: now.Add(-time.Second).UnixMilli(),
 	}
 	if !connectionRecentlyReachable(recentState, now, 3*time.Second) {
 		t.Fatal("recent heartbeat marked unreachable")
 	}
 
-	staleState := p2p.ConnectionState{
-		ConnectedAtUnixMilli: now.Add(-time.Minute).UnixMilli(),
-		LastReadUnixMilli:    now.Add(-10 * time.Second).UnixMilli(),
-		LastWriteUnixMilli:   now.Add(-10 * time.Second).UnixMilli(),
+	staleActivityState := p2p.ConnectionState{
+		LastReadUnixMilli:  now.Add(-10 * time.Second).UnixMilli(),
+		LastWriteUnixMilli: now.Add(-10 * time.Second).UnixMilli(),
 	}
-	if connectionRecentlyReachable(staleState, now, 3*time.Second) {
-		t.Fatal("stale connection marked reachable")
+	if connectionRecentlyReachable(staleActivityState, now, 3*time.Second) {
+		t.Fatal("stale activity without current connection marked reachable")
 	}
 }
 

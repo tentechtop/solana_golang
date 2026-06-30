@@ -546,6 +546,62 @@ func TestHTTPJSONRPCGetValidatorSetReturnsRewardCounters(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONRPCGetValidatorSetIncludesJailedDelegations(t *testing.T) {
+	node, _, _ := newRPCIntegrationTestNode(t)
+	server := rpc.NewServer(rpc.ServerConfig{Logger: node.logger}, rpc.NewPublicRouter(node))
+	validator := mustStructureKeyPair("rpc-validator-jailed-account")
+	staker := mustStructureKeyPair("rpc-validator-jailed-staker")
+	delegator := mustStructureKeyPair("rpc-validator-jailed-delegator")
+	consensusKey := mustStructureKeyPair("rpc-validator-jailed-consensus")
+	addValidatorStakeAccountToLedger(t, node.ledger, validator.PublicKey, stakeprogram.ValidatorState{
+		ConsensusPublicKey: consensusKey.PublicKey,
+		StakerAccount:      staker.PublicKey,
+		P2PPeerID:          "rpc-validator-jailed-peer",
+		Status:             stakeprogram.ValidatorStatusJailed,
+		ActiveStake:        3 * stakeprogram.MinimumStakeLamports,
+		JailUntilEpoch:     99,
+		RewardLamports:     777,
+		Delegations: []stakeprogram.DelegationState{
+			{
+				DelegatorAccount: delegator.PublicKey,
+				ActiveStake:      stakeprogram.MinimumStakeLamports,
+				RewardLamports:   777,
+			},
+		},
+	})
+
+	response := postPosNodeJSONRPC(t, server, 1, rpc.MethodGetValidatorSet, []any{})
+	result := decodePosNodeRPCResult[rpc.ValidatorSetResult](t, response)
+	if len(result.Validators) != 1 {
+		t.Fatalf("validators length = %d, want 1", len(result.Validators))
+	}
+	validatorInfo := result.Validators[0]
+	if validatorInfo.Status != "jailed" || validatorInfo.JailUntilEpoch != 99 {
+		t.Fatalf("validator status = %+v, want jailed until epoch 99", validatorInfo)
+	}
+	if validatorInfo.StakeLamports != 3*stakeprogram.MinimumStakeLamports {
+		t.Fatalf("visible stake = %d, want bonded stake while jailed", validatorInfo.StakeLamports)
+	}
+	if validatorInfo.BondedStakeLamports != 3*stakeprogram.MinimumStakeLamports {
+		t.Fatalf("bonded stake = %d, want bonded stake while jailed", validatorInfo.BondedStakeLamports)
+	}
+	if validatorInfo.EffectiveStakeLamports != 0 {
+		t.Fatalf("effective stake = %d, want 0 while jailed", validatorInfo.EffectiveStakeLamports)
+	}
+	if validatorInfo.SelfStakeLamports != 2*stakeprogram.MinimumStakeLamports {
+		t.Fatalf("self stake = %d, want %d", validatorInfo.SelfStakeLamports, 2*stakeprogram.MinimumStakeLamports)
+	}
+	if validatorInfo.DelegatedLamports != stakeprogram.MinimumStakeLamports || validatorInfo.DelegatorCount != 1 {
+		t.Fatalf("delegation summary = %+v, want visible jailed delegation", validatorInfo)
+	}
+	if len(validatorInfo.Delegations) != 1 || validatorInfo.Delegations[0].DelegatorAddress != delegator.PublicKey.String() {
+		t.Fatalf("delegations = %+v, want jailed delegator detail", validatorInfo.Delegations)
+	}
+	if validatorInfo.Delegations[0].TotalStakeLamports != stakeprogram.MinimumStakeLamports {
+		t.Fatalf("delegation total stake = %d, want %d", validatorInfo.Delegations[0].TotalStakeLamports, stakeprogram.MinimumStakeLamports)
+	}
+}
+
 func TestHTTPJSONRPCGetPrivacyBalanceReturnsAggregatedNotes(t *testing.T) {
 	owner := mustStructureKeyPair("rpc-privacy-owner")
 	other := mustStructureKeyPair("rpc-privacy-other")

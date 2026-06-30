@@ -1005,6 +1005,9 @@ func ValidatorSetFromStateAtEpoch(state consensus.ChainState, epochID uint64) (c
 		if err != nil {
 			continue
 		}
+		if stakeState.Status == stake.ValidatorStatusJailed {
+			continue
+		}
 		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
 		if err != nil || effectiveStake == 0 {
 			continue

@@ -43,6 +43,7 @@ type posNode struct {
 	config                   nodeConfig
 	logger                   *slog.Logger
 	startedAt                time.Time
+	runtimeContext           context.Context
 	host                     *p2p.Host
 	rpcServer                *rpc.Server
 	bootstrapCoordinator     *bootstrapCoordinator
@@ -81,6 +82,7 @@ type posNode struct {
 	knownPeerIDs             []string
 	bootstrapManifestApplied bool
 	validatorPairing         *validatorPairingSession
+	pairingActivationRunning bool
 	nextRPCForwardPeer       atomic.Uint64
 	rpcForwardFanoutLimiter  chan struct{}
 	workerGroup              sync.WaitGroup
@@ -225,6 +227,20 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 }
 
 func (node *posNode) start(ctx context.Context) error {
+	node.runtimeContext = ctx
+	if node.config.bootstrapPairingPending() {
+		node.logger.Info("posnode pairing mode started",
+			slog.String("node", node.config.NodeName),
+			slog.String("config_path", node.config.ConfigPath),
+			slog.String("peer_id", node.peerKeyPair.peerID),
+			slog.String("rpc_url", validatorPairingRPCURL(node.config)),
+			slog.String("bootstrap_rpc_url", node.config.BootstrapJoin.RPCURL),
+		)
+		if err := node.startRPC(); err != nil {
+			return err
+		}
+		return node.startValidatorPairing()
+	}
 	if err := node.startP2P(ctx); err != nil {
 		return err
 	}
@@ -275,23 +291,30 @@ func (node *posNode) start(ctx context.Context) error {
 	if err := node.startValidatorPairing(); err != nil {
 		return err
 	}
-	if node.ledger != nil {
-		node.startWorker(func() {
-			node.blockSyncLoop(ctx)
-		})
-		node.startWorker(func() {
-			node.mempoolMaintenanceLoop(ctx)
-		})
-	}
-	if node.ledger != nil && node.config.consensusEnabled() {
-		node.startWorker(func() {
-			node.livenessGateLoop(ctx)
-		})
-		node.startWorker(func() {
-			node.slotLoop(ctx)
-		})
-	}
+	node.startLedgerWorkers(ctx)
 	return nil
+}
+
+// startLedgerWorkers 启动链上后台任务 + 配对后热启动与普通启动共享同一套 worker 边界。
+func (node *posNode) startLedgerWorkers(ctx context.Context) {
+	if node.ledger == nil {
+		return
+	}
+	node.startWorker(func() {
+		node.blockSyncLoop(ctx)
+	})
+	node.startWorker(func() {
+		node.mempoolMaintenanceLoop(ctx)
+	})
+	if !node.config.consensusEnabled() {
+		return
+	}
+	node.startWorker(func() {
+		node.livenessGateLoop(ctx)
+	})
+	node.startWorker(func() {
+		node.slotLoop(ctx)
+	})
 }
 
 // keyMaterialSource 标识密钥来源 + 日志只暴露来源类型避免泄露 seed 或私钥。
@@ -2282,14 +2305,14 @@ func validatorEffectiveStakeForEpoch(stakeState stake.ValidatorState, validatorI
 	if consensus.NewValidatorID(stakeState.ConsensusPublicKey) != validatorID {
 		return 0, false, nil
 	}
+	if stakeState.Status == stake.ValidatorStatusJailed {
+		return 0, false, nil
+	}
 	effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
 	if err != nil {
 		return 0, false, fmt.Errorf("posnode: calculate local validator effective stake: %w", err)
 	}
 	if effectiveStake == 0 {
-		return 0, false, nil
-	}
-	if stakeState.Status == stake.ValidatorStatusJailed && stakeState.JailUntilEpoch > epochID {
 		return 0, false, nil
 	}
 	if stakeState.Status == stake.ValidatorStatusExiting && stakeState.DeactivationEpoch <= epochID {

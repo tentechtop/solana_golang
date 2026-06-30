@@ -51,6 +51,20 @@ function Write-Utf8JsonFile {
   [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, $encoding)
 }
 
+function Set-JsonProperty {
+  param(
+    [object]$Object,
+    [string]$Name,
+    [object]$Value
+  )
+  # 功能目的：稳定写入 JSON 对象字段；实现原因：已绑定配置可能缺少重新部署需要的字段。
+  if ($null -ne $Object.PSObject.Properties[$Name]) {
+    $Object.$Name = $Value
+    return
+  }
+  $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+}
+
 $packageRoot = Resolve-PackageRoot
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
   $ConfigPath = Join-Path $packageRoot "config\join-wallet-scan.json"
@@ -105,9 +119,34 @@ $config.node_capabilities = @("relay", "state_sync", "dht")
 $config.validator_enabled = $false
 $config.consensus_enabled = $false
 $config.auto_register = $false
-$config.bootstrap_join.rpc_url = $BootstrapRPCURL
-$config.validator_pairing.enabled = $true
-$config.validator_pairing.auto_write_config = $true
+Set-JsonProperty -Object $config.bootstrap_join -Name "rpc_url" -Value $BootstrapRPCURL
+Set-JsonProperty -Object $config.validator_pairing -Name "enabled" -Value $true
+Set-JsonProperty -Object $config.validator_pairing -Name "auto_write_config" -Value $true
+
+$pairedFieldNames = @(
+  "staker_address",
+  "validator_key_path",
+  "consensus_key_path",
+  "bls_key_path",
+  "stake_lamports",
+  "chain_id"
+)
+foreach ($pairedFieldName in $pairedFieldNames) {
+  if ($null -ne $config.PSObject.Properties[$pairedFieldName]) {
+    $config.PSObject.Properties.Remove($pairedFieldName)
+  }
+}
+
+$bootstrapJoinFieldNames = @(
+  "enabled",
+  "registered_at_unix_milli",
+  "staker_signature"
+)
+foreach ($bootstrapJoinFieldName in $bootstrapJoinFieldNames) {
+  if ($null -ne $config.bootstrap_join.PSObject.Properties[$bootstrapJoinFieldName]) {
+    $config.bootstrap_join.PSObject.Properties.Remove($bootstrapJoinFieldName)
+  }
+}
 
 if ($null -ne $config.validator_pairing.PSObject.Properties["keystore_dir"]) {
   $config.validator_pairing.PSObject.Properties.Remove("keystore_dir")
