@@ -10,7 +10,7 @@ func TestChainStateApplyWritesSkipsMissingBuiltinProgramPlaceholder(t *testing.T
 	state := ChainState{}
 	nextState := state.applyWrites([]structure.AddressedAccount{
 		{
-			Address: structure.DefaultBuiltinProgramIDs.Privacy,
+			Address: structure.DefaultBuiltinProgramIDs.Shielded,
 			Account: structure.Account{Owner: structure.DefaultBuiltinProgramIDs.NativeLoader},
 		},
 	})

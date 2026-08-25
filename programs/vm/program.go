@@ -49,9 +49,6 @@ func executeProgramAccount(
 	if runtimeValue.LoaderID == (svm.Address{}) {
 		runtimeValue = svm.NewRuntime(vmAddressFromPublicKey(loaderProgram))
 	}
-	if err := attachPrivacySyscall(&runtimeValue, context); err != nil {
-		return err
-	}
 	if err := attachStakePoolSyscall(&runtimeValue, context); err != nil {
 		return err
 	}

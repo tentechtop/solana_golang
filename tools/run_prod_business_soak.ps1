@@ -187,7 +187,7 @@ $businessCommands.Add((New-GoCommand -StepName "consensus business stake vote re
 $businessCommands.Add((New-GoCommand -StepName "posnode rpc turbine sync" -GoArguments @("test", ".\cmd\posnode", "-run", "TestHTTPJSONRPC|TestStageBusinessRPC|TestConsensusStatus|TestTurbine|TestTransactionFastPath|TestFaultInjection|TestAddTransaction|TestVerifyQuorumCertificate", "-count", "1")))
 $businessCommands.Add((New-GoCommand -StepName "blockchain reorg persistence" -GoArguments @("test", ".\blockchain", "-run", "TestBuildGenesisStateCreatesTreasuryAndValidators|TestLedgerCommitPersistsAndReloads|TestLedgerReorganizeToBetterFork|TestStageBusinessFinalizedBlocksRejectDeepReorg|TestFaultInjectionReorgPersistsAfterNodeRestart", "-count", "1")))
 $businessCommands.Add((New-GoCommand -StepName "p2p fault network routing" -GoArguments @("test", ".\p2p", "-run", "TestFaultInjection|TestHostHeartbeatClosesExpiredConnection|TestHostRequestRetries|TestHostDialPeerBacksOff|TestHostRateLimitsInboundMessages|TestPeerProtection|TestQueuedConnection|TestConnectionMessageSequencer", "-count", "1")))
-$businessCommands.Add((New-GoCommand -StepName "privacy audit confidential flow" -GoArguments @("test", ".\programs\privacy", ".\zk", ".\runtime", "-count", "1")))
+$businessCommands.Add((New-GoCommand -StepName "shielded transfer flow" -GoArguments @("test", ".\shielded", ".\programs\shielded", ".\zk", ".\runtime", "-count", "1")))
 
 $stabilityCommands = [System.Collections.Generic.List[object]]::new()
 $stabilityCommands.Add((New-GoCommand -StepName "full go test" -GoArguments @("test", ".\...", "-count", "1")))

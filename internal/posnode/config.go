@@ -15,7 +15,6 @@ import (
 	"solana_golang/consensus"
 	"solana_golang/p2p"
 	"solana_golang/programs/stake"
-	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
@@ -31,68 +30,67 @@ const (
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
 type nodeConfig struct {
-	ConfigPath                    string                          `json:"-"`
-	ChainID                       string                          `json:"chain_id"`
-	ChainIDExplicit               bool                            `json:"-"`
-	Environment                   string                          `json:"environment"`
-	Production                    bool                            `json:"production"`
-	NodeName                      string                          `json:"node_name"`
-	DataPath                      string                          `json:"data_path"`
-	DataRootPath                  string                          `json:"-"`
-	ListenIP                      string                          `json:"listen_ip"`
-	ListenPort                    int                             `json:"listen_port"`
-	Network                       string                          `json:"network,omitempty"`
-	AdvertisedIP                  string                          `json:"advertised_ip,omitempty"`
-	AdvertisedPort                int                             `json:"advertised_port,omitempty"`
-	RPCEnabled                    bool                            `json:"rpc_enabled"`
-	RPCListenIP                   string                          `json:"rpc_listen_ip"`
-	RPCPort                       int                             `json:"rpc_port"`
-	AllowInsecureP2P              *bool                           `json:"allow_insecure_p2p,omitempty"`
-	PeerSeed                      string                          `json:"peer_seed"`
-	StakerAddress                 string                          `json:"staker_address,omitempty"`
-	StakerSeed                    string                          `json:"staker_seed"`
-	ValidatorSeed                 string                          `json:"validator_seed"`
-	ConsensusSeed                 string                          `json:"consensus_seed"`
-	PeerKeyPath                   string                          `json:"peer_key_path,omitempty"`
-	StakerKeyPath                 string                          `json:"staker_key_path,omitempty"`
-	ValidatorKeyPath              string                          `json:"validator_key_path,omitempty"`
-	ConsensusKeyPath              string                          `json:"consensus_key_path,omitempty"`
-	BLSKeyPath                    string                          `json:"bls_key_path,omitempty"`
-	NodeRole                      string                          `json:"node_role,omitempty"`
-	NodeRoles                     []string                        `json:"node_roles,omitempty"`
-	NodeCapabilities              []string                        `json:"node_capabilities,omitempty"`
-	ValidatorEnabled              *bool                           `json:"validator_enabled,omitempty"`
-	ConsensusEnabled              *bool                           `json:"consensus_enabled,omitempty"`
-	ResolvedNodeRole              p2p.PeerRole                    `json:"-"`
-	ResolvedNodeRoles             []p2p.PeerRole                  `json:"-"`
-	ResolvedNodeCapabilities      p2p.PeerCapability              `json:"-"`
-	StakeLamports                 uint64                          `json:"stake_lamports"`
-	BootstrapPeers                []peerConfig                    `json:"bootstrap_peers"`
-	BootstrapCoordinator          bootstrapCoordinatorConfig      `json:"bootstrap_coordinator,omitempty"`
-	BootstrapJoin                 bootstrapJoinConfig             `json:"bootstrap_join,omitempty"`
-	Genesis                       genesisConfig                   `json:"genesis"`
-	SlotMillis                    int                             `json:"slot_millis"`
-	GenesisStartMs                int64                           `json:"genesis_start_unix_millis"`
-	EpochSlots                    uint64                          `json:"epoch_slots"`
-	FinalityDepth                 uint64                          `json:"finality_depth"`
-	DisableStateRecovery          bool                            `json:"disable_state_recovery,omitempty"`
-	TurbineFanout                 int                             `json:"turbine_fanout"`
-	AutoRegister                  bool                            `json:"auto_register"`
-	MempoolMaxTransactions        int                             `json:"mempool_max_transactions"`
-	MempoolTransactionTTLMillis   int64                           `json:"mempool_transaction_ttl_millis"`
-	TransactionLeaderForwardSlots int                             `json:"transaction_leader_forward_slots"`
-	TransactionForwardEnabled     *bool                           `json:"transaction_forward_enabled,omitempty"`
-	TransactionForwardValidators  *bool                           `json:"transaction_forward_validators,omitempty"`
-	TreasuryKeyPath               string                          `json:"treasury_key_path,omitempty"`
-	ValidatorPairing              validatorPairingConfig          `json:"validator_pairing,omitempty"`
-	AllowHardcodedTreasury        *bool                           `json:"allow_hardcoded_treasury,omitempty"`
-	AutoTransfer                  *autoTransferConfig             `json:"auto_transfer,omitempty"`
-	PrivacyExecutionMode          runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
-	ContractDeploymentPolicy      contractDeploymentPolicyConfig  `json:"contract_deployment_policy,omitempty"`
-	FaultInjection                faultInjectionConfig            `json:"fault_injection,omitempty"`
-	GenesisHash                   string                          `json:"-"`
-	ChainIdentityHash             string                          `json:"-"`
-	P2PNetworkID                  string                          `json:"-"`
+	ConfigPath                    string                         `json:"-"`
+	ChainID                       string                         `json:"chain_id"`
+	ChainIDExplicit               bool                           `json:"-"`
+	Environment                   string                         `json:"environment"`
+	Production                    bool                           `json:"production"`
+	NodeName                      string                         `json:"node_name"`
+	DataPath                      string                         `json:"data_path"`
+	DataRootPath                  string                         `json:"-"`
+	ListenIP                      string                         `json:"listen_ip"`
+	ListenPort                    int                            `json:"listen_port"`
+	Network                       string                         `json:"network,omitempty"`
+	AdvertisedIP                  string                         `json:"advertised_ip,omitempty"`
+	AdvertisedPort                int                            `json:"advertised_port,omitempty"`
+	RPCEnabled                    bool                           `json:"rpc_enabled"`
+	RPCListenIP                   string                         `json:"rpc_listen_ip"`
+	RPCPort                       int                            `json:"rpc_port"`
+	AllowInsecureP2P              *bool                          `json:"allow_insecure_p2p,omitempty"`
+	PeerSeed                      string                         `json:"peer_seed"`
+	StakerAddress                 string                         `json:"staker_address,omitempty"`
+	StakerSeed                    string                         `json:"staker_seed"`
+	ValidatorSeed                 string                         `json:"validator_seed"`
+	ConsensusSeed                 string                         `json:"consensus_seed"`
+	PeerKeyPath                   string                         `json:"peer_key_path,omitempty"`
+	StakerKeyPath                 string                         `json:"staker_key_path,omitempty"`
+	ValidatorKeyPath              string                         `json:"validator_key_path,omitempty"`
+	ConsensusKeyPath              string                         `json:"consensus_key_path,omitempty"`
+	BLSKeyPath                    string                         `json:"bls_key_path,omitempty"`
+	NodeRole                      string                         `json:"node_role,omitempty"`
+	NodeRoles                     []string                       `json:"node_roles,omitempty"`
+	NodeCapabilities              []string                       `json:"node_capabilities,omitempty"`
+	ValidatorEnabled              *bool                          `json:"validator_enabled,omitempty"`
+	ConsensusEnabled              *bool                          `json:"consensus_enabled,omitempty"`
+	ResolvedNodeRole              p2p.PeerRole                   `json:"-"`
+	ResolvedNodeRoles             []p2p.PeerRole                 `json:"-"`
+	ResolvedNodeCapabilities      p2p.PeerCapability             `json:"-"`
+	StakeLamports                 uint64                         `json:"stake_lamports"`
+	BootstrapPeers                []peerConfig                   `json:"bootstrap_peers"`
+	BootstrapCoordinator          bootstrapCoordinatorConfig     `json:"bootstrap_coordinator,omitempty"`
+	BootstrapJoin                 bootstrapJoinConfig            `json:"bootstrap_join,omitempty"`
+	Genesis                       genesisConfig                  `json:"genesis"`
+	SlotMillis                    int                            `json:"slot_millis"`
+	GenesisStartMs                int64                          `json:"genesis_start_unix_millis"`
+	EpochSlots                    uint64                         `json:"epoch_slots"`
+	FinalityDepth                 uint64                         `json:"finality_depth"`
+	DisableStateRecovery          bool                           `json:"disable_state_recovery,omitempty"`
+	TurbineFanout                 int                            `json:"turbine_fanout"`
+	AutoRegister                  bool                           `json:"auto_register"`
+	MempoolMaxTransactions        int                            `json:"mempool_max_transactions"`
+	MempoolTransactionTTLMillis   int64                          `json:"mempool_transaction_ttl_millis"`
+	TransactionLeaderForwardSlots int                            `json:"transaction_leader_forward_slots"`
+	TransactionForwardEnabled     *bool                          `json:"transaction_forward_enabled,omitempty"`
+	TransactionForwardValidators  *bool                          `json:"transaction_forward_validators,omitempty"`
+	TreasuryKeyPath               string                         `json:"treasury_key_path,omitempty"`
+	ValidatorPairing              validatorPairingConfig         `json:"validator_pairing,omitempty"`
+	AllowHardcodedTreasury        *bool                          `json:"allow_hardcoded_treasury,omitempty"`
+	AutoTransfer                  *autoTransferConfig            `json:"auto_transfer,omitempty"`
+	ContractDeploymentPolicy      contractDeploymentPolicyConfig `json:"contract_deployment_policy,omitempty"`
+	FaultInjection                faultInjectionConfig           `json:"fault_injection,omitempty"`
+	GenesisHash                   string                         `json:"-"`
+	ChainIdentityHash             string                         `json:"-"`
+	P2PNetworkID                  string                         `json:"-"`
 }
 
 type peerConfig struct {
@@ -111,11 +109,10 @@ type peerConfig struct {
 }
 
 type genesisConfig struct {
-	InitialSupplyLamports uint64                          `json:"initial_supply_lamports"`
-	TreasuryAddress       string                          `json:"treasury_address,omitempty"`
-	PrivacyExecutionMode  runtimepkg.PrivacyExecutionMode `json:"privacy_execution_mode,omitempty"`
-	FundedAccounts        []genesisAccountConfig          `json:"funded_accounts"`
-	InitialValidators     []genesisValidatorConfig        `json:"initial_validators"`
+	InitialSupplyLamports uint64                   `json:"initial_supply_lamports"`
+	TreasuryAddress       string                   `json:"treasury_address,omitempty"`
+	FundedAccounts        []genesisAccountConfig   `json:"funded_accounts"`
+	InitialValidators     []genesisValidatorConfig `json:"initial_validators"`
 }
 
 type genesisAccountConfig struct {
@@ -299,9 +296,6 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	}
 	if isProductionNodeConfig(config) && config.allowInsecureP2P() {
 		return nodeConfig{}, fmt.Errorf("posnode: insecure p2p disabled in production")
-	}
-	if err := normalizePrivacyExecutionModeConfig(&config); err != nil {
-		return nodeConfig{}, err
 	}
 	if err := normalizeContractDeploymentPolicyConfig(&config); err != nil {
 		return nodeConfig{}, err
@@ -577,28 +571,6 @@ func normalizeValidatorPairingConfig(config *nodeConfig) error {
 
 func (config faultInjectionConfig) enabled() bool {
 	return config.ProposalDelayMillis > 0 || config.DoubleVoteOnce || config.DoubleProposalOnce
-}
-
-func normalizePrivacyExecutionModeConfig(config *nodeConfig) error {
-	rootMode, rootErr := runtimepkg.NormalizePrivacyExecutionMode(config.PrivacyExecutionMode)
-	genesisMode, genesisErr := runtimepkg.NormalizePrivacyExecutionMode(config.Genesis.PrivacyExecutionMode)
-	if config.PrivacyExecutionMode != "" && rootErr != nil {
-		return fmt.Errorf("posnode: invalid privacy execution mode: %w", rootErr)
-	}
-	if config.Genesis.PrivacyExecutionMode != "" && genesisErr != nil {
-		return fmt.Errorf("posnode: invalid genesis privacy execution mode: %w", genesisErr)
-	}
-	if config.PrivacyExecutionMode != "" && config.Genesis.PrivacyExecutionMode != "" && rootMode != genesisMode {
-		return fmt.Errorf("posnode: privacy execution mode mismatch root=%s genesis=%s", rootMode, genesisMode)
-	}
-	if config.Genesis.PrivacyExecutionMode != "" {
-		config.PrivacyExecutionMode = genesisMode
-		config.Genesis.PrivacyExecutionMode = genesisMode
-		return nil
-	}
-	config.PrivacyExecutionMode = rootMode
-	config.Genesis.PrivacyExecutionMode = rootMode
-	return nil
 }
 
 func normalizeNodeAttributes(config *nodeConfig) error {

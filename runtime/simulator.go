@@ -12,7 +12,6 @@ const (
 	SimulationLogInstructionSuccess       = "instruction success"
 	SimulationLogTransactionSuccess       = "transaction success"
 	stakeInstructionRegisterValidatorType = uint32(0)
-	privacyInstructionDepositType         = uint32(0)
 )
 
 // TransactionSimulationInput 描述交易模拟输入 + runtime 使用内存账户快照替代数据库读写。
@@ -24,6 +23,8 @@ type TransactionSimulationInput struct {
 	CurrentEpoch    uint64
 	FeeCalculator   structure.FeeCalculator
 	ComputeBudget   structure.ComputeBudgetLimits
+	TransactionFee  uint64
+	FeeSource       structure.FeePaymentSource
 	RentConfig      structure.RentConfig
 	BuiltinPrograms structure.BuiltinProgramIDs
 	ProgramRegistry ProgramRegistry
@@ -66,8 +67,33 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 	accountStates := cloneLoadedAccountsToMap(loadedTransaction.Accounts)
 	computeUnitsConsumed := uint64(0)
 	for instructionIndex, instruction := range loadedTransaction.Message.Instructions {
-		instructionComputeUnits, err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, normalizedInput, programRegistry)
-		computeUnitsConsumed += instructionComputeUnits
+		normalizedInput.TransactionFee = loadedTransaction.FeeDetails.TotalFee
+		normalizedInput.FeeSource = loadedTransaction.FeeSource
+		instructionInput := normalizedInput
+		instructionInput.ComputeBudget.MaxComputeUnits = remainingComputeUnits(
+			normalizedInput.ComputeBudget.MaxComputeUnits,
+			computeUnitsConsumed,
+		)
+		instructionComputeUnits, err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, instructionInput, programRegistry)
+		var computeBudgetExceeded bool
+		computeUnitsConsumed, computeBudgetExceeded = accumulateComputeUnits(
+			computeUnitsConsumed,
+			instructionComputeUnits,
+			normalizedInput.ComputeBudget.MaxComputeUnits,
+		)
+		if computeBudgetExceeded {
+			result.Status = structure.TransactionStatusFailed
+			result.Error = instructionFailure(
+				uint16(instructionIndex),
+				structure.InstructionErrorCodeComputationalBudgetExceeded,
+				fmt.Sprintf("computational budget exceeded: consumed %d, limit %d", computeUnitsConsumed, normalizedInput.ComputeBudget.MaxComputeUnits),
+			)
+			result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
+			result.WrittenAccounts = writtenAccountsFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
+			result.ComputeUnitsConsumed = computeUnitsConsumed
+			result.CostUnits = computeUnitsConsumed
+			return result, result.Validate()
+		}
 		if err != nil {
 			result.Status = structure.TransactionStatusFailed
 			result.Error = instructionFailure(uint16(instructionIndex), structure.InstructionErrorCodeGeneric, err.Error())
@@ -78,6 +104,18 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 			return result, result.Validate()
 		}
 		result.LogMessages = append(result.LogMessages, SimulationLogInstructionSuccess)
+	}
+	if loadedTransaction.FeeSource == structure.FeePaymentSourceShieldedPool {
+		if err := debitSimulationFee(loadedTransaction.FeePayer, loadedTransaction.FeeDetails.TotalFee, accountStates, normalizedInput.RentConfig); err != nil {
+			accountStates = cloneLoadedAccountsToMap(loadedTransaction.Accounts)
+			result.Status = structure.TransactionStatusFailed
+			result.Error = transactionFailure(structure.TransactionErrorCodeInsufficientFundsForFee, err.Error())
+			result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
+			result.WrittenAccounts = writtenAccountsFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
+			result.ComputeUnitsConsumed = computeUnitsConsumed
+			result.CostUnits = computeUnitsConsumed
+			return result, result.Validate()
+		}
 	}
 
 	result.Status = structure.TransactionStatusConfirmed
@@ -99,14 +137,42 @@ func normalizeSimulationInput(input TransactionSimulationInput) (TransactionSimu
 	if input.BuiltinPrograms == (structure.BuiltinProgramIDs{}) {
 		input.BuiltinPrograms = structure.DefaultBuiltinProgramIDs
 	}
+	estimatedBudget, err := structure.EstimateTransactionComputeBudget(input.Transaction, input.BuiltinPrograms)
+	if err != nil {
+		return TransactionSimulationInput{}, fmt.Errorf("runtime: estimate transaction compute budget: %w", err)
+	}
 	if input.ComputeBudget == (structure.ComputeBudgetLimits{}) {
-		estimatedBudget, err := structure.EstimateTransactionComputeBudget(input.Transaction, input.BuiltinPrograms)
-		if err != nil {
-			return TransactionSimulationInput{}, fmt.Errorf("runtime: estimate transaction compute budget: %w", err)
-		}
 		input.ComputeBudget = estimatedBudget
+	} else {
+		if err := input.ComputeBudget.Validate(); err != nil {
+			return TransactionSimulationInput{}, fmt.Errorf("runtime: validate transaction compute budget: %w", err)
+		}
+		if input.ComputeBudget.MaxComputeUnits < estimatedBudget.MaxComputeUnits {
+			return TransactionSimulationInput{}, fmt.Errorf(
+				"runtime: declared compute budget %d is below estimated demand %d",
+				input.ComputeBudget.MaxComputeUnits,
+				estimatedBudget.MaxComputeUnits,
+			)
+		}
 	}
 	return input, nil
+}
+
+// accumulateComputeUnits 累计交易计算量 + 使用饱和结果避免恶意程序上报值触发 uint64 回绕。
+func accumulateComputeUnits(consumed uint64, instructionUnits uint64, limit uint64) (uint64, bool) {
+	if instructionUnits > ^uint64(0)-consumed {
+		return ^uint64(0), true
+	}
+	total := consumed + instructionUnits
+	return total, total > limit
+}
+
+// remainingComputeUnits 返回当前指令可用余额 + 沙箱据此在提交账户变更前拒绝超限执行。
+func remainingComputeUnits(limit uint64, consumed uint64) uint64 {
+	if consumed >= limit {
+		return 0
+	}
+	return limit - consumed
 }
 
 func newSimulationProgramRegistry(input TransactionSimulationInput) (ProgramRegistry, error) {
@@ -158,6 +224,17 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 		result.Error = transactionFailure(structure.TransactionErrorCodeSanitizeFailure, err.Error())
 		return structure.LoadedTransaction{}, result, result.Validate()
 	}
+	if message.UsesAddressTable || len(message.AddressTableLookups) != 0 {
+		// runtime 尚未接入地址表状态解析，共识执行必须安全拒绝而不能用空加载地址继续。
+		result.Status = structure.TransactionStatusFailed
+		result.Error = transactionFailure(structure.TransactionErrorCodeInvalidAddressLookupTable, "address table transactions are not supported by runtime")
+		return structure.LoadedTransaction{}, result, result.Validate()
+	}
+	if err := validateTransactionAuthorization(input.Transaction, message, input.BuiltinPrograms); err != nil {
+		result.Status = structure.TransactionStatusFailed
+		result.Error = transactionFailure(structure.TransactionErrorCodeSignatureFailure, err.Error())
+		return structure.LoadedTransaction{}, result, result.Validate()
+	}
 	if !input.BlockhashQueue.IsRecent(message.RecentBlockhash, input.CurrentSlot) {
 		result.Status = structure.TransactionStatusFailed
 		result.Error = transactionFailure(structure.TransactionErrorCodeBlockhashNotFound, "recent blockhash is not valid")
@@ -199,12 +276,14 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 	result.FeeDetails = feeDetails
 	result.PreBalances = balancesFromLoadedAccounts(loadedAccounts)
 	result.LoadedAddresses = resolvedMessage.LoadedAddresses.Clone()
-	if err := debitSimulationFee(loadedTransaction.FeePayer, feeDetails.TotalFee, accountStates, input.RentConfig); err != nil {
-		result.Status = structure.TransactionStatusFailed
-		result.Error = transactionFailure(structure.TransactionErrorCodeInsufficientFundsForFee, err.Error())
-		result.PostBalances = balancesFromMessage(resolvedMessage.AccountKeys, accountStates)
-		result.WrittenAccounts = writtenAccountsFromMessage(resolvedMessage.AccountKeys, accountStates)
-		return structure.LoadedTransaction{}, result, result.Validate()
+	if loadedTransaction.FeeSource == structure.FeePaymentSourceTransparentAccount {
+		if err := debitSimulationFee(loadedTransaction.FeePayer, feeDetails.TotalFee, accountStates, input.RentConfig); err != nil {
+			result.Status = structure.TransactionStatusFailed
+			result.Error = transactionFailure(structure.TransactionErrorCodeInsufficientFundsForFee, err.Error())
+			result.PostBalances = balancesFromMessage(resolvedMessage.AccountKeys, accountStates)
+			result.WrittenAccounts = writtenAccountsFromMessage(resolvedMessage.AccountKeys, accountStates)
+			return structure.LoadedTransaction{}, result, result.Validate()
+		}
 	}
 	loadedAccounts, err = loadSimulationAccounts(resolvedMessage, accountStates, input.BuiltinPrograms)
 	if err != nil {
@@ -214,6 +293,33 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 	}
 	loadedTransaction.Accounts = loadedAccounts
 	return loadedTransaction, result, nil
+}
+
+func validateTransactionAuthorization(transaction structure.Transaction, message structure.SolanaMessage, builtinPrograms structure.BuiltinProgramIDs) error {
+	if message.Header.NumRequiredSignatures > 0 {
+		if message.Header.NumReadonlySignedAccounts == message.Header.NumRequiredSignatures {
+			return fmt.Errorf("%w: transparent fee payer must be writable", structure.ErrMissingWritableSigner)
+		}
+		return nil
+	}
+	if len(transaction.Signatures) != 0 {
+		return fmt.Errorf("%w: unsigned message cannot carry signatures", structure.ErrInvalidTransactionEncoding)
+	}
+	if len(message.Instructions) != 1 {
+		return fmt.Errorf("%w: shielded authorization requires exactly one instruction", structure.ErrMissingRequiredSignature)
+	}
+	instruction := message.Instructions[0]
+	if int(instruction.ProgramIDIndex) >= len(message.AccountKeys) || message.AccountKeys[instruction.ProgramIDIndex] != builtinPrograms.Shielded {
+		return fmt.Errorf("%w: unsigned transaction must target the shielded program", structure.ErrMissingRequiredSignature)
+	}
+	if len(instruction.AccountIndexes) == 0 || instruction.AccountIndexes[0] != 0 {
+		return fmt.Errorf("%w: shielded pool must be the first instruction account", structure.ErrInvalidInstruction)
+	}
+	metas := message.StaticAccountMetas()
+	if len(metas) == 0 || !metas[0].IsWritable {
+		return fmt.Errorf("%w: shielded pool must be writable", structure.ErrInvalidInstruction)
+	}
+	return nil
 }
 
 // addMissingAccountPlaceholders 补齐可创建账户占位 + 指令执行前必须先完成账户加载。
@@ -232,8 +338,8 @@ func addMissingAccountPlaceholders(message structure.ResolvedMessage, accounts m
 			addMissingStakeAccountPlaceholder(instruction, message, accounts, builtinPrograms)
 			continue
 		}
-		if programID == builtinPrograms.Privacy {
-			addMissingPrivacyStatePlaceholder(instruction, message, accounts, builtinPrograms)
+		if programID == builtinPrograms.Shielded {
+			addMissingShieldedAccountPlaceholders(instruction, message, accounts, builtinPrograms)
 		}
 	}
 }
@@ -297,23 +403,43 @@ func isStakeRegisterValidatorInstruction(data []byte) bool {
 	return binary.LittleEndian.Uint32(data[:4]) == stakeInstructionRegisterValidatorType
 }
 
-func addMissingPrivacyStatePlaceholder(
+func addMissingShieldedAccountPlaceholders(
 	instruction structure.CompiledInstruction,
 	message structure.ResolvedMessage,
 	accounts map[structure.PublicKey]structure.Account,
 	builtinPrograms structure.BuiltinProgramIDs,
 ) {
-	if len(instruction.AccountIndexes) < 2 || !isPrivacyDepositInstruction(instruction.Data) {
+	shieldedInstruction, err := structure.UnmarshalShieldedTransferInstructionBinary(instruction.Data)
+	if err != nil || len(instruction.AccountIndexes) == 0 {
 		return
 	}
-	addMissingWritableSystemAccount(message.AccountKeys[instruction.AccountIndexes[1]], accounts, builtinPrograms)
-}
-
-func isPrivacyDepositInstruction(data []byte) bool {
-	if len(data) < 4 {
-		return false
+	cursor := 1
+	if shieldedInstruction.TransparentInputAmount > 0 {
+		cursor++
 	}
-	return binary.LittleEndian.Uint32(data[:4]) == privacyInstructionDepositType
+	if shieldedInstruction.TransparentOutputAmount > 0 {
+		if cursor >= len(instruction.AccountIndexes) {
+			return
+		}
+		destinationIndex := instruction.AccountIndexes[cursor]
+		if int(destinationIndex) < len(message.AccountKeys) {
+			addMissingWritableSystemAccount(message.AccountKeys[destinationIndex], accounts, builtinPrograms)
+		}
+		cursor++
+	}
+	for _, action := range shieldedInstruction.Bundle.Actions {
+		if !action.EnabledSpend {
+			continue
+		}
+		if cursor >= len(instruction.AccountIndexes) {
+			return
+		}
+		markerIndex := instruction.AccountIndexes[cursor]
+		if int(markerIndex) < len(message.AccountKeys) {
+			addMissingWritableSystemAccount(message.AccountKeys[markerIndex], accounts, builtinPrograms)
+		}
+		cursor++
+	}
 }
 
 func addMissingWritableSystemAccount(address structure.PublicKey, accounts map[structure.PublicKey]structure.Account, builtinPrograms structure.BuiltinProgramIDs) {

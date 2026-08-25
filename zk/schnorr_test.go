@@ -10,7 +10,7 @@ func TestSchnorrProofBytesVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSchnorrKeyPair() error = %v", err)
 	}
-	message := []byte("privacy spend message")
+	message := []byte("schnorr authorization message")
 	proofBytes, err := NewSchnorrProofBytes(keyPair.PrivateScalar, message)
 	if err != nil {
 		t.Fatalf("NewSchnorrProofBytes() error = %v", err)
@@ -54,7 +54,7 @@ func TestSchnorrProofRejectsPublicKeyDigestMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSchnorrKeyPair(other) error = %v", err)
 	}
-	message := []byte("privacy spend message")
+	message := []byte("schnorr authorization message")
 	proofBytes, err := NewSchnorrProofBytes(keyPair.PrivateScalar, message)
 	if err != nil {
 		t.Fatalf("NewSchnorrProofBytes() error = %v", err)

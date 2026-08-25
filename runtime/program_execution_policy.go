@@ -33,21 +33,15 @@ type ProgramExecutionPolicy struct {
 	VirtualMachineBridgePrograms []ProgramExecutionPolicyEntry
 }
 
-// NewDefaultProgramExecutionPolicy 创建默认执行策略 + 隐私模式决定 privacy 是固定程序还是 VM syscall 桥。
-func NewDefaultProgramExecutionPolicy(
-	programIDs structure.BuiltinProgramIDs,
-	privacyExecutionMode PrivacyExecutionMode,
-) (ProgramExecutionPolicy, error) {
+// NewDefaultProgramExecutionPolicy 创建默认执行策略 + 屏蔽池始终由共识固定程序验证。
+func NewDefaultProgramExecutionPolicy(programIDs structure.BuiltinProgramIDs) (ProgramExecutionPolicy, error) {
 	if programIDs == (structure.BuiltinProgramIDs{}) {
 		programIDs = structure.DefaultBuiltinProgramIDs
-	}
-	mode, err := NormalizePrivacyExecutionMode(privacyExecutionMode)
-	if err != nil {
-		return ProgramExecutionPolicy{}, err
 	}
 	policy := ProgramExecutionPolicy{
 		FixedBuiltinPrograms: []ProgramExecutionPolicyEntry{
 			{Name: "bpf_loader", ProgramID: programIDs.BPFLoader.String()},
+			{Name: "shielded", ProgramID: programIDs.Shielded.String()},
 			{Name: "system", ProgramID: programIDs.System.String()},
 			{Name: "token", ProgramID: programIDs.Token.String()},
 			{Name: "stake", ProgramID: programIDs.Stake.String()},
@@ -56,12 +50,6 @@ func NewDefaultProgramExecutionPolicy(
 			{Name: "bpf_loader", ProgramID: programIDs.BPFLoader.String()},
 		},
 	}
-	privacyEntry := ProgramExecutionPolicyEntry{Name: "privacy", ProgramID: programIDs.Privacy.String()}
-	if mode == PrivacyExecutionModeVMSyscall {
-		policy.VirtualMachineBridgePrograms = append(policy.VirtualMachineBridgePrograms, privacyEntry)
-		return NormalizeProgramExecutionPolicy(policy), nil
-	}
-	policy.FixedBuiltinPrograms = append(policy.FixedBuiltinPrograms, privacyEntry)
 	return NormalizeProgramExecutionPolicy(policy), nil
 }
 
@@ -112,7 +100,7 @@ func (policy ProgramExecutionPolicy) IsZero() bool {
 }
 
 func defaultFixedProgramExecutionPolicy() ProgramExecutionPolicy {
-	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, PrivacyExecutionModeFixed)
+	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs)
 	if err != nil {
 		panic(fmt.Sprintf("runtime: default program execution policy is invalid: %v", err))
 	}

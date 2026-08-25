@@ -22,6 +22,8 @@ type InstructionContext struct {
 	CurrentEpoch     uint64
 	RentConfig       structure.RentConfig
 	ComputeBudget    structure.ComputeBudgetLimits
+	TransactionFee   uint64
+	FeeSource        structure.FeePaymentSource
 	BuiltinPrograms  structure.BuiltinProgramIDs
 	SignerOverrides  map[structure.PublicKey]struct{}
 	ComputeUnitsUsed *uint64

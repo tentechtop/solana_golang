@@ -12,6 +12,7 @@ const (
 	DefaultBuiltinInstructionCU              = uint64(3000)
 	DefaultTransferComputeUnits              = uint64(3000)
 	DefaultContractCallComputeUnits          = uint64(200000)
+	ShieldedGroth16VerificationComputeUnits  = DefaultContractCallComputeUnits
 	DefaultContractDeployBaseCU              = uint64(200000)
 	DefaultContractDeployByteCU              = uint64(10)
 	DefaultBaseComputeUnitPriceMicroLamports = uint64(100)
@@ -102,6 +103,12 @@ func (fee PrioritizationFee) Fee() (uint64, error) {
 func (calculator FeeCalculator) Validate() error {
 	if calculator.LamportsPerSignature == 0 {
 		return fmt.Errorf("%w: lamports per signature cannot be zero", ErrInvalidFee)
+	}
+	if calculator.BaseComputeUnitPriceMicroLamports == 0 {
+		return fmt.Errorf("%w: base compute unit price cannot be zero", ErrInvalidFee)
+	}
+	if calculator.StorageWriteLamportsPerByte == 0 {
+		return fmt.Errorf("%w: storage write price cannot be zero", ErrInvalidFee)
 	}
 	if calculator.BaseFeeBurnPercent > 100 {
 		return fmt.Errorf("%w: burn percent %d exceeds 100", ErrInvalidFee, calculator.BaseFeeBurnPercent)

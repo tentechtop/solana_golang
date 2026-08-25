@@ -699,6 +699,11 @@ func (node *posNode) adoptPairedValidatorRuntime(activatedNode *posNode) error {
 	node.blsKeyPair = activatedNode.blsKeyPair
 	node.blockhashQueue = activatedNode.blockhashQueue
 	node.mempool = activatedNode.mempool
+	node.mempoolShieldedNullifiers = activatedNode.mempoolShieldedNullifiers
+	node.mempoolShieldedAuthorizations = activatedNode.mempoolShieldedAuthorizations
+	node.mempoolShieldedTransparentDebits = activatedNode.mempoolShieldedTransparentDebits
+	node.mempoolShieldedDebitReservations = activatedNode.mempoolShieldedDebitReservations
+	node.shieldedPreflightFailures = activatedNode.shieldedPreflightFailures
 	node.seenTransactions = activatedNode.seenTransactions
 	node.rejectedTransactions = activatedNode.rejectedTransactions
 	node.seenProposals = activatedNode.seenProposals
@@ -715,7 +720,7 @@ func (node *posNode) adoptPairedValidatorRuntime(activatedNode *posNode) error {
 	node.voteCollectors = activatedNode.voteCollectors
 	node.epochSnapshots = activatedNode.epochSnapshots
 	node.leaderSchedules = activatedNode.leaderSchedules
-	node.metrics = activatedNode.metrics
+	node.metrics.restoreSnapshot(activatedNode.metrics.snapshot())
 	node.lastProducedSlot = activatedNode.lastProducedSlot
 	node.lastVotedSlot = activatedNode.lastVotedSlot
 	node.livenessGate = activatedNode.livenessGate
@@ -853,7 +858,7 @@ func validatorPairingStakerAddress(address string) (structure.PublicKey, error) 
 	if strings.HasPrefix(trimmedAddress, "Z") {
 		return structure.PublicKey{}, fmt.Errorf("posnode: staker address must be transparent")
 	}
-	key, err := decodeTransparentPublicKey(trimmedAddress, "staker address")
+	key, err := structure.PublicKeyFromBase58(trimmedAddress)
 	if err != nil {
 		return structure.PublicKey{}, fmt.Errorf("posnode: staker address: %w", err)
 	}

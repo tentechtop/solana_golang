@@ -16,6 +16,7 @@ const (
 	DefaultTransactionTTLMillis   = 400
 
 	solanaMessageVersionPrefixMask = 0x80
+	unsignedTransactionIDDomain    = "solana_golang.transaction.unsigned_shielded_authorization.v3"
 )
 
 type TransactionStatus int16
@@ -81,9 +82,6 @@ type Transaction struct {
 
 // Validate 校验交易结构 + 在交易池和执行层前拦截非法输入。
 func (transaction Transaction) Validate() error {
-	if len(transaction.Signatures) == 0 {
-		return ErrEmptyTransactionSignatures
-	}
 	if len(transaction.Signatures) > MaxSignaturesPerTransaction {
 		return fmt.Errorf("%w: signatures count %d exceeds %d", ErrInvalidTransactionEncoding, len(transaction.Signatures), MaxSignaturesPerTransaction)
 	}
@@ -94,15 +92,55 @@ func (transaction Transaction) Validate() error {
 	if err := message.Validate(); err != nil {
 		return fmt.Errorf("structure: validate transaction message: %w", err)
 	}
-	return transaction.validateSignatureCount(message.Header.NumRequiredSignatures)
+	if err := transaction.validateSignatureCount(message.Header.NumRequiredSignatures); err != nil {
+		return err
+	}
+	return validateTransactionAuthorizationShape(message)
 }
 
-// TxID 返回交易 ID + 使用第一笔签名保持公开交易格式语义。
+// TxID 返回交易 ID + 公开交易沿用首签名，屏蔽交易使用消息域隔离摘要。
 func (transaction Transaction) TxID() (Signature, error) {
-	if len(transaction.Signatures) == 0 {
-		return Signature{}, ErrEmptyTransactionSignatures
+	if len(transaction.Signatures) > 0 {
+		return transaction.Signatures[0], nil
 	}
-	return transaction.Signatures[0], nil
+	if err := transaction.Validate(); err != nil {
+		return Signature{}, fmt.Errorf("structure: validate unsigned transaction id input: %w", err)
+	}
+	message, err := transaction.SolanaMessage()
+	if err != nil {
+		return Signature{}, fmt.Errorf("structure: resolve unsigned transaction id message: %w", err)
+	}
+	authorizationMessage, err := buildUnsignedShieldedAuthorizationMessage(message)
+	if err != nil {
+		return Signature{}, fmt.Errorf("structure: build unsigned transaction authorization message: %w", err)
+	}
+	transactionID, err := NewSignature(utils.SHA512(append([]byte(unsignedTransactionIDDomain), authorizationMessage...)))
+	if err != nil {
+		return Signature{}, fmt.Errorf("structure: create unsigned transaction id: %w", err)
+	}
+	return transactionID, nil
+}
+
+// buildUnsignedShieldedAuthorizationMessage 保留规范消息外壳并剔除可重随机化证明 + 同一公开授权只能得到一个交易 ID。
+func buildUnsignedShieldedAuthorizationMessage(message SolanaMessage) ([]byte, error) {
+	if len(message.Instructions) != 1 {
+		return nil, fmt.Errorf("%w: unsigned shielded authorization requires one instruction", ErrInvalidInstruction)
+	}
+	shieldedInstruction, err := UnmarshalShieldedTransferInstructionBinary(message.Instructions[0].Data)
+	if err != nil {
+		return nil, err
+	}
+	authorizationBytes, err := shieldedInstruction.AuthorizationBytes()
+	if err != nil {
+		return nil, err
+	}
+	authorizationMessage := message.Clone()
+	authorizationMessage.Instructions[0].Data = authorizationBytes
+	encoded, err := authorizationMessage.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
 }
 
 // TxIDHex 返回交易 ID 十六进制 + 保留调试和本地索引可读性。
@@ -139,7 +177,7 @@ func (transaction Transaction) Sender() (PublicKey, error) {
 			return account.PublicKey, nil
 		}
 	}
-	if !transaction.Message.IsZero() && len(transaction.Message.AccountKeys) > 0 {
+	if !transaction.Message.IsZero() && transaction.Message.Header.NumRequiredSignatures > 0 && len(transaction.Message.AccountKeys) > 0 {
 		return transaction.Message.AccountKeys[0], nil
 	}
 	return PublicKey{}, ErrMissingWritableSigner
@@ -152,6 +190,12 @@ func (transaction Transaction) RequiredSignatureCount() int {
 		return 0
 	}
 	return int(message.Header.NumRequiredSignatures)
+}
+
+// IsUnsigned 判断交易是否完全由程序级证明授权 + 屏蔽交易不伪造透明账户签名。
+func (transaction Transaction) IsUnsigned() bool {
+	message, err := transaction.SolanaMessage()
+	return err == nil && message.Header.NumRequiredSignatures == 0 && len(transaction.Signatures) == 0
 }
 
 // SignerAccounts 返回签名账户快照 + 避免调用方直接修改交易账户列表。
@@ -437,9 +481,6 @@ func (transaction Transaction) validateAccounts() error {
 	if err := validateAccountOrder(transaction.Accounts); err != nil {
 		return err
 	}
-	if _, err := transaction.Sender(); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -521,9 +562,6 @@ func validateInstruction(instruction CompiledInstruction, accountCount int) erro
 
 // validateMessageHeader 校验消息头计数 + 保证签名和只读账户数量不越界。
 func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
-	if header.NumRequiredSignatures == 0 {
-		return fmt.Errorf("%w: required signatures cannot be zero", ErrInvalidMessageHeader)
-	}
 	if int(header.NumRequiredSignatures) > accountKeyCount {
 		return fmt.Errorf("%w: required signatures exceed account keys", ErrInvalidMessageHeader)
 	}
@@ -534,6 +572,83 @@ func validateMessageHeader(header MessageHeader, accountKeyCount int) error {
 	unsignedAccounts := accountKeyCount - int(header.NumRequiredSignatures)
 	if int(header.NumReadonlyUnsignedAccounts) > unsignedAccounts {
 		return fmt.Errorf("%w: readonly unsigned accounts exceed unsigned accounts", ErrInvalidMessageHeader)
+	}
+	return nil
+}
+
+func validateTransactionAuthorizationShape(message SolanaMessage) error {
+	if message.Header.NumRequiredSignatures > 0 {
+		return nil
+	}
+	if message.UsesAddressTable || len(message.AddressTableLookups) != 0 {
+		return fmt.Errorf("%w: unsigned shielded transaction cannot use address tables", ErrInvalidAddressTableLookup)
+	}
+	if len(message.Instructions) != 1 {
+		return fmt.Errorf("%w: unsigned transaction requires one shielded instruction", ErrMissingRequiredSignature)
+	}
+	compiledInstruction := message.Instructions[0]
+	if int(compiledInstruction.ProgramIDIndex) >= len(message.AccountKeys) || message.AccountKeys[compiledInstruction.ProgramIDIndex] != DefaultBuiltinProgramIDs.Shielded {
+		return fmt.Errorf("%w: unsigned transaction must target the shielded program", ErrMissingRequiredSignature)
+	}
+	shieldedInstruction, err := UnmarshalShieldedTransferInstructionBinary(compiledInstruction.Data)
+	if err != nil {
+		return err
+	}
+	if shieldedInstruction.TransparentInputAmount != 0 {
+		return fmt.Errorf("%w: transparent shielded input requires a signature", ErrMissingRequiredSignature)
+	}
+
+	expectedInstructionAccountCount := 1
+	if shieldedInstruction.TransparentOutputAmount > 0 {
+		expectedInstructionAccountCount++
+	}
+	for _, action := range shieldedInstruction.Bundle.Actions {
+		if action.EnabledSpend {
+			expectedInstructionAccountCount++
+		}
+	}
+	expectedMessageAccountCount := expectedInstructionAccountCount + 1
+	if len(message.AccountKeys) != expectedMessageAccountCount {
+		return fmt.Errorf("%w: unsigned shielded message has %d accounts, want %d", ErrInvalidInstruction, len(message.AccountKeys), expectedMessageAccountCount)
+	}
+	if hasDuplicatePublicKeys(message.AccountKeys) {
+		return fmt.Errorf("%w: unsigned shielded message contains duplicate accounts", ErrInvalidInstruction)
+	}
+	expectedHeader := MessageHeader{NumReadonlyUnsignedAccounts: 1}
+	if message.Header != expectedHeader {
+		return fmt.Errorf("%w: unsigned shielded message header is not canonical", ErrInvalidMessageHeader)
+	}
+	if len(compiledInstruction.AccountIndexes) != expectedInstructionAccountCount {
+		return fmt.Errorf("%w: unsigned shielded instruction has %d accounts, want %d", ErrInvalidInstruction, len(compiledInstruction.AccountIndexes), expectedInstructionAccountCount)
+	}
+	for accountPosition, accountIndex := range compiledInstruction.AccountIndexes {
+		if int(accountIndex) != accountPosition {
+			return fmt.Errorf("%w: unsigned shielded instruction account %d must use canonical index %d", ErrInvalidInstruction, accountPosition, accountPosition)
+		}
+	}
+	if message.AccountKeys[0] != DefaultShieldedPoolAddress {
+		return fmt.Errorf("%w: unsigned transaction must use the global shielded pool", ErrInvalidInstruction)
+	}
+
+	accountPosition := 1
+	if shieldedInstruction.TransparentOutputAmount > 0 {
+		accountPosition++
+	}
+	for _, action := range shieldedInstruction.Bundle.Actions {
+		if !action.EnabledSpend {
+			continue
+		}
+		expectedMarkerAddress := DeriveShieldedNullifierAccount(DefaultBuiltinProgramIDs.Shielded, action.Nullifier)
+		if message.AccountKeys[accountPosition] != expectedMarkerAddress {
+			return fmt.Errorf("%w: unsigned shielded nullifier marker is not canonical", ErrInvalidInstruction)
+		}
+		accountPosition++
+	}
+	if accountPosition != expectedInstructionAccountCount {
+		return fmt.Errorf("%w: unsigned shielded instruction account layout mismatch", ErrInvalidInstruction)
+	}
+	if compiledInstruction.ProgramIDIndex != uint8(expectedInstructionAccountCount) || message.AccountKeys[expectedInstructionAccountCount] != DefaultBuiltinProgramIDs.Shielded {
+		return fmt.Errorf("%w: unsigned transaction must place the shielded program last", ErrMissingRequiredSignature)
 	}
 	return nil
 }
@@ -636,9 +751,6 @@ func readSignatures(data []byte, offset *int) ([]Signature, error) {
 	signatureCount, err := readShortVecLength(data, offset)
 	if err != nil {
 		return nil, err
-	}
-	if signatureCount == 0 {
-		return nil, ErrEmptyTransactionSignatures
 	}
 	if signatureCount > MaxSignaturesPerTransaction {
 		return nil, fmt.Errorf("%w: signatures count %d exceeds %d", ErrInvalidTransactionEncoding, signatureCount, MaxSignaturesPerTransaction)

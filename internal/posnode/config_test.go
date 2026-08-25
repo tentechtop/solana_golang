@@ -2,11 +2,9 @@ package posnode
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"solana_golang/p2p"
-	runtimepkg "solana_golang/runtime"
 )
 
 func TestNormalizeNodeConfigRejectsProductionInsecureP2P(t *testing.T) {
@@ -299,67 +297,6 @@ func TestNormalizeNodeConfigProductionPublicRPCNeedsOnlyPeerKeyPath(t *testing.T
 	}
 }
 
-func TestNormalizeNodeConfigDefaultsPrivacyExecutionMode(t *testing.T) {
-	config := minimalNodeConfigForValidation()
-
-	normalized, err := normalizeNodeConfig(config)
-	if err != nil {
-		t.Fatalf("normalizeNodeConfig() error = %v", err)
-	}
-	if normalized.PrivacyExecutionMode != runtimepkg.PrivacyExecutionModeFixed {
-		t.Fatalf("PrivacyExecutionMode = %q, want fixed", normalized.PrivacyExecutionMode)
-	}
-	if normalized.Genesis.PrivacyExecutionMode != runtimepkg.PrivacyExecutionModeFixed {
-		t.Fatalf("Genesis.PrivacyExecutionMode = %q, want fixed", normalized.Genesis.PrivacyExecutionMode)
-	}
-}
-
-func TestNormalizeNodeConfigRejectsInvalidPrivacyExecutionMode(t *testing.T) {
-	config := minimalNodeConfigForValidation()
-	config.PrivacyExecutionMode = "bad-mode"
-
-	if _, err := normalizeNodeConfig(config); err == nil {
-		t.Fatal("normalizeNodeConfig() error = nil, want invalid privacy execution mode rejection")
-	}
-}
-
-func TestNormalizeNodeConfigRejectsPrivacyExecutionModeMismatch(t *testing.T) {
-	config := minimalNodeConfigForValidation()
-	config.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeFixed
-	config.Genesis.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeVMSyscall
-
-	if _, err := normalizeNodeConfig(config); err == nil {
-		t.Fatal("normalizeNodeConfig() error = nil, want privacy execution mode mismatch")
-	}
-}
-
-func TestNormalizeNodeConfigChainIdentityChangesWithPrivacyExecutionMode(t *testing.T) {
-	firstConfig := minimalNodeConfigForValidation()
-	firstConfig.DataPath = "data/privacy-mode-identity"
-	firstConfig.GenesisStartMs = 1_700_000_000_000
-	firstConfig.Genesis.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeFixed
-
-	secondConfig := minimalNodeConfigForValidation()
-	secondConfig.DataPath = firstConfig.DataPath
-	secondConfig.GenesisStartMs = firstConfig.GenesisStartMs
-	secondConfig.Genesis.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeVMSyscall
-
-	firstNormalized, err := normalizeNodeConfig(firstConfig)
-	if err != nil {
-		t.Fatalf("normalizeNodeConfig(first) error = %v", err)
-	}
-	secondNormalized, err := normalizeNodeConfig(secondConfig)
-	if err != nil {
-		t.Fatalf("normalizeNodeConfig(second) error = %v", err)
-	}
-	if firstNormalized.ChainIdentityHash == secondNormalized.ChainIdentityHash {
-		t.Fatal("ChainIdentityHash mismatch check failed, want different hashes for privacy execution mode")
-	}
-	if firstNormalized.GenesisHash != secondNormalized.GenesisHash {
-		t.Fatalf("GenesisHash changed = %s/%s, want same account genesis", firstNormalized.GenesisHash, secondNormalized.GenesisHash)
-	}
-}
-
 func TestNormalizeNodeConfigChainIdentityChangesWithContractDeploymentPolicy(t *testing.T) {
 	firstConfig := minimalNodeConfigForValidation()
 	firstConfig.DataPath = "data/contract-policy-identity"
@@ -380,26 +317,6 @@ func TestNormalizeNodeConfigChainIdentityChangesWithContractDeploymentPolicy(t *
 	}
 	if firstNormalized.ChainIdentityHash == secondNormalized.ChainIdentityHash {
 		t.Fatal("ChainIdentityHash mismatch check failed, want different hashes for contract deployment policy")
-	}
-}
-
-func TestBuildBlockchainGenesisConfigCarriesPrivacyExecutionMode(t *testing.T) {
-	config := minimalNodeConfigForValidation()
-	config.Genesis.PrivacyExecutionMode = runtimepkg.PrivacyExecutionModeVMSyscall
-	normalized, err := normalizeNodeConfig(config)
-	if err != nil {
-		t.Fatalf("normalizeNodeConfig() error = %v", err)
-	}
-
-	genesis, err := buildBlockchainGenesisConfig(normalized)
-	if err != nil {
-		t.Fatalf("buildBlockchainGenesisConfig() error = %v", err)
-	}
-	if genesis.PrivacyExecutionMode != string(runtimepkg.PrivacyExecutionModeVMSyscall) {
-		t.Fatalf("PrivacyExecutionMode = %q, want vm_syscall", genesis.PrivacyExecutionMode)
-	}
-	if !strings.Contains(genesis.ProgramExecutionPolicy, "vm_bridge=privacy:") {
-		t.Fatalf("ProgramExecutionPolicy = %q, want privacy vm bridge", genesis.ProgramExecutionPolicy)
 	}
 }
 

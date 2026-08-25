@@ -69,150 +69,26 @@ func TestLedgerAddressHistoryPersistsAndRebuilds(t *testing.T) {
 	assertAddressHistoryRecord(t, rebuiltHistory.Records[0], AddressHistoryDirectionOutgoing, AddressHistoryKindTransfer, destination.PublicKey.String(), 7_500)
 }
 
-func TestLedgerAddressHistoryIndexesPrivacyDepositSourceOnly(t *testing.T) {
-	db, err := database.NewDatabase(database.DatabaseConfig{
-		Path:   t.TempDir(),
-		Engine: database.EnginePebble,
-		WAL:    true,
+func TestShieldedInstructionEffectsExposeOnlyTransparentSides(t *testing.T) {
+	source := testKeyPair(t, "shielded-history-source").PublicKey
+	destination := testKeyPair(t, "shielded-history-destination").PublicKey
+	instruction := structure.ShieldedTransferInstruction{
+		TransparentInputAmount:  9_000,
+		TransparentOutputAmount: 4_000,
+	}
+	effects := shieldedInstructionEffects(instruction, []structure.PublicKey{
+		structure.DefaultShieldedPoolAddress,
+		source,
+		destination,
 	})
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	if len(effects) != 2 {
+		t.Fatalf("effect count = %d, want 2", len(effects))
 	}
-	defer db.Close()
-
-	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
-	if err != nil {
-		t.Fatalf("load ledger: %v", err)
+	if effects[0].Address != source || effects[0].Direction != AddressHistoryDirectionOutgoing || effects[0].Kind != AddressHistoryKindShieldedDeposit || effects[0].AmountLamports != 9_000 {
+		t.Fatalf("deposit effect = %+v", effects[0])
 	}
-	source := testKeyPair(t, "privacy-history-source")
-	stateAccount := testKeyPair(t, "privacy-history-state")
-	transaction, err := NewPrivacyDepositTransaction(PrivacyDepositTransactionParams{
-		Source:        source,
-		StateAccount:  stateAccount,
-		Amount:        9_999,
-		Commitment:    testHash(t, "privacy-history-commitment"),
-		EncryptedNote: []byte("note"),
-		CreateState:   true,
-	}, ledger.Head().BlockHash)
-	if err != nil {
-		t.Fatalf("NewPrivacyDepositTransaction() error = %v", err)
-	}
-	proposal, nextState := testProposalFromHead(t, ledger.Head(), ledger.State(), 1, 1, "privacy-history-block")
-	proposal.Transactions = []structure.Transaction{transaction}
-	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
-		t.Fatalf("CommitBlock() error = %v", err)
-	}
-
-	sourceHistory, err := ledger.AddressHistory(source.PublicKey, "", 10)
-	if err != nil {
-		t.Fatalf("AddressHistory(source) error = %v", err)
-	}
-	if len(sourceHistory.Records) != 1 {
-		t.Fatalf("source records = %d, want 1", len(sourceHistory.Records))
-	}
-	assertAddressHistoryRecord(t, sourceHistory.Records[0], AddressHistoryDirectionOutgoing, AddressHistoryKindPrivacyDeposit, stateAccount.PublicKey.String(), 9_999)
-
-	stateHistory, err := ledger.AddressHistory(stateAccount.PublicKey, "", 10)
-	if err != nil {
-		t.Fatalf("AddressHistory(state) error = %v", err)
-	}
-	if len(stateHistory.Records) != 0 {
-		t.Fatalf("privacy state records = %d, want 0", len(stateHistory.Records))
-	}
-}
-
-func TestLedgerPrivacyBalanceAggregatesOwnedNotes(t *testing.T) {
-	db, err := database.NewDatabase(database.DatabaseConfig{
-		Path:   t.TempDir(),
-		Engine: database.EnginePebble,
-		WAL:    true,
-	})
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-
-	ledger, err := LoadOrCreateLedger(db, testGenesis(t))
-	if err != nil {
-		t.Fatalf("load ledger: %v", err)
-	}
-	owner := testKeyPair(t, "privacy-balance-owner")
-	other := testKeyPair(t, "privacy-balance-other")
-	stateAddress := testKeyPair(t, "privacy-balance-state").PublicKey
-	privacyState := structure.PrivacyState{
-		Version: structure.PrivacyStateVersion,
-		Notes: []structure.PrivacyNoteRecord{
-			{
-				Commitment:     testHash(t, "note-available"),
-				SpendAuthority: owner.PublicKey,
-				Amount:         7,
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("available"),
-			},
-			{
-				Commitment:     testHash(t, "note-spent"),
-				SpendAuthority: owner.PublicKey,
-				Amount:         4,
-				Spent:          true,
-				SpentSlot:      2,
-				SpendNullifier: testHash(t, "note-spent-nullifier"),
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("spent"),
-			},
-			{
-				Commitment:     testHash(t, "note-other"),
-				SpendAuthority: other.PublicKey,
-				Amount:         9,
-				VMVersion:      structure.PrivacyStateVersion,
-				EncryptedNote:  []byte("other"),
-			},
-		},
-		SpentNullifiers: []structure.Hash{testHash(t, "note-spent-nullifier")},
-	}
-	data, err := privacyState.MarshalBinary()
-	if err != nil {
-		t.Fatalf("MarshalBinary(privacy state) error = %v", err)
-	}
-	rentLamports, err := structure.MinimumBalanceForRentExemption(len(data))
-	if err != nil {
-		t.Fatalf("MinimumBalanceForRentExemption() error = %v", err)
-	}
-	account, err := structure.NewAccount(rentLamports+50, data, structure.DefaultBuiltinProgramIDs.Privacy, false, 0)
-	if err != nil {
-		t.Fatalf("NewAccount() error = %v", err)
-	}
-
-	nextState := ledger.State()
-	nextState.Accounts = append(nextState.Accounts, structure.AddressedAccount{
-		Address: stateAddress,
-		Account: account,
-	})
-	proposal, _ := testProposalFromHead(t, ledger.Head(), nextState, 1, 1, "privacy-balance-block")
-	if _, err := ledger.CommitBlock(CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
-		t.Fatalf("CommitBlock() error = %v", err)
-	}
-
-	summary, err := ledger.PrivacyBalance(stateAddress, owner.PublicKey)
-	if err != nil {
-		t.Fatalf("PrivacyBalance() error = %v", err)
-	}
-	if summary.AvailableLamports != 7 {
-		t.Fatalf("available = %d, want 7", summary.AvailableLamports)
-	}
-	if summary.EscrowLamports != rentLamports+50 {
-		t.Fatalf("escrow = %d, want %d", summary.EscrowLamports, rentLamports+50)
-	}
-	if summary.SpendableNoteCount != 1 {
-		t.Fatalf("spendable note count = %d, want 1", summary.SpendableNoteCount)
-	}
-	if summary.SpentNoteCount != 1 {
-		t.Fatalf("spent note count = %d, want 1", summary.SpentNoteCount)
-	}
-	if summary.OwnedNoteCount != 2 {
-		t.Fatalf("owned note count = %d, want 2", summary.OwnedNoteCount)
-	}
-	if summary.StateNoteCount != 3 {
-		t.Fatalf("state note count = %d, want 3", summary.StateNoteCount)
+	if effects[1].Address != destination || effects[1].Direction != AddressHistoryDirectionIncoming || effects[1].Kind != AddressHistoryKindShieldedWithdraw || effects[1].AmountLamports != 4_000 {
+		t.Fatalf("withdraw effect = %+v", effects[1])
 	}
 }
 

@@ -16,9 +16,6 @@ func TestStructureProductionImportsStayLowLevel(t *testing.T) {
 		"solana_golang/codec/borsh": {},
 		"solana_golang/utils":       {},
 	}
-	legacyImportsByFile := map[string]map[string]struct{}{
-		"privacy_instruction.go": {"solana_golang/zk": {}},
-	}
 	forbiddenPrefixes := []string{
 		"solana_golang/runtime",
 		"solana_golang/programs",
@@ -36,7 +33,7 @@ func TestStructureProductionImportsStayLowLevel(t *testing.T) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			return nil
 		}
-		return assertStructureFileImports(t, path, entry.Name(), allowedImports, legacyImportsByFile, forbiddenPrefixes)
+		return assertStructureFileImports(t, path, entry.Name(), allowedImports, forbiddenPrefixes)
 	})
 	if err != nil {
 		t.Fatalf("walk structure directory: %v", err)
@@ -69,7 +66,6 @@ func assertStructureFileImports(
 	path string,
 	fileName string,
 	allowedImports map[string]struct{},
-	legacyImportsByFile map[string]map[string]struct{},
 	forbiddenPrefixes []string,
 ) error {
 	t.Helper()
@@ -94,11 +90,6 @@ func assertStructureFileImports(
 		}
 		if _, allowed := allowedImports[importPath]; allowed {
 			continue
-		}
-		if legacyImports, exists := legacyImportsByFile[fileName]; exists {
-			if _, allowed := legacyImports[importPath]; allowed {
-				continue
-			}
 		}
 		t.Fatalf("%s imports %s; move business/runtime dependencies behind runtime or programs", fileName, importPath)
 	}

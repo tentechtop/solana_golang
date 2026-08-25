@@ -35,6 +35,7 @@ type parallelExecutionOutput struct {
 	Receipts             []structure.Hash
 	FeeDetails           []structure.FeeDetails
 	RejectedTransactions []RejectedTransaction
+	ResourceUsage        blockResourceUsage
 }
 
 // RejectedTransaction 描述未入块交易 + 让节点能清理确定失败的 mempool 项。
@@ -264,6 +265,11 @@ func applyParallelBatchResults(
 ) (ChainState, parallelExecutionOutput, error) {
 	nextState := state
 	for _, executionResult := range results {
+		resourceUsage, err := addActualBlockResourceUsage(output.ResourceUsage, executionResult.Result.Execution, executionResult.OriginalIndex)
+		if err != nil {
+			return ChainState{}, parallelExecutionOutput{}, err
+		}
+		output.ResourceUsage = resourceUsage
 		if executionResult.Result.Execution.Status != structure.TransactionStatusConfirmed {
 			if input.RejectFailed {
 				return ChainState{}, parallelExecutionOutput{}, fmt.Errorf(

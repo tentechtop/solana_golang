@@ -46,16 +46,6 @@ exit
 	}
 }
 
-func TestAssemblePrivacyExecuteSyscall(t *testing.T) {
-	source := `
-syscall privacy_execute
-exit
-`
-	if _, err := Assemble(source); err != nil {
-		t.Fatalf("Assemble() error = %v", err)
-	}
-}
-
 func TestAssembleWithManifestBuildsGovernedRegisterBytecode(t *testing.T) {
 	source := `
 syscall asset_execute

@@ -3,7 +3,6 @@ package structure
 import "errors"
 
 var (
-	ErrEmptyTransactionSignatures = errors.New("structure: transaction signatures cannot be empty")
 	ErrInvalidMessageHeader       = errors.New("structure: invalid message header")
 	ErrEmptyAccountKeys           = errors.New("structure: account keys cannot be empty")
 	ErrEmptyRecentBlockhash       = errors.New("structure: recent blockhash cannot be empty")
@@ -16,7 +15,6 @@ var (
 	ErrRentExemption              = errors.New("structure: account is not rent exempt")
 	ErrInvalidInstruction         = errors.New("structure: invalid instruction")
 	ErrInvalidSystemInstruction   = errors.New("structure: invalid system instruction")
-	ErrInvalidPrivacyInstruction  = errors.New("structure: invalid privacy instruction")
 	ErrInvalidFee                 = errors.New("structure: invalid fee")
 	ErrInvalidExecutionResult     = errors.New("structure: invalid execution result")
 	ErrInvalidLoadedTransaction   = errors.New("structure: invalid loaded transaction")

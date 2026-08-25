@@ -13,12 +13,12 @@ import (
 )
 
 const (
-	addressHistoryDefaultLimit  = 20
-	addressHistoryMaxLimit      = 100
-	addressHistoryTxIndexBytes  = 2
-	addressHistoryEffectBytes   = 1
-	addressHistoryCursorPrefix  = "addr-history:"
-	addressHistoryScopePublic   = "transparent_balance_changes_only"
+	addressHistoryDefaultLimit = 20
+	addressHistoryMaxLimit     = 100
+	addressHistoryTxIndexBytes = 2
+	addressHistoryEffectBytes  = 1
+	addressHistoryCursorPrefix = "addr-history:"
+	addressHistoryScopePublic  = "transparent_balance_changes_only"
 )
 
 type AddressHistoryDirection string
@@ -32,8 +32,8 @@ type AddressHistoryKind string
 
 const (
 	AddressHistoryKindTransfer          AddressHistoryKind = "transfer"
-	AddressHistoryKindPrivacyDeposit    AddressHistoryKind = "privacy_deposit"
-	AddressHistoryKindPrivacyWithdraw   AddressHistoryKind = "privacy_withdraw"
+	AddressHistoryKindShieldedDeposit   AddressHistoryKind = "shielded_deposit"
+	AddressHistoryKindShieldedWithdraw  AddressHistoryKind = "shielded_withdraw"
 	AddressHistoryKindValidatorRegister AddressHistoryKind = "validator_register"
 	AddressHistoryKindStakeDeposit      AddressHistoryKind = "stake_deposit"
 	AddressHistoryKindStakeWithdraw     AddressHistoryKind = "stake_withdraw"
@@ -61,16 +61,6 @@ type AddressHistoryPage struct {
 	HasMore    bool
 }
 
-// PrivacyBalanceSummary 聚合隐私 note 余额 + 把可花费余额和托管余额分开展示。
-type PrivacyBalanceSummary struct {
-	AvailableLamports uint64
-	EscrowLamports    uint64
-	SpendableNoteCount int
-	SpentNoteCount     int
-	OwnedNoteCount     int
-	StateNoteCount     int
-}
-
 type addressHistoryEffect struct {
 	Address        structure.PublicKey
 	Direction      AddressHistoryDirection
@@ -85,15 +75,15 @@ type addressHistoryIndexedEntry struct {
 }
 
 type addressHistoryStoredRecord struct {
-	TransactionID       string                 `json:"transaction_id"`
+	TransactionID       string                  `json:"transaction_id"`
 	Direction           AddressHistoryDirection `json:"direction"`
 	Kind                AddressHistoryKind      `json:"kind"`
-	Counterparty        string                 `json:"counterparty,omitempty"`
-	AmountLamports      uint64                 `json:"amount_lamports"`
-	BlockHeight         uint64                 `json:"block_height"`
-	Slot                uint64                 `json:"slot"`
-	BlockHash           string                 `json:"block_hash"`
-	SubmitTimeUnixMilli int64                  `json:"submit_time_unix_milli"`
+	Counterparty        string                  `json:"counterparty,omitempty"`
+	AmountLamports      uint64                  `json:"amount_lamports"`
+	BlockHeight         uint64                  `json:"block_height"`
+	Slot                uint64                  `json:"slot"`
+	BlockHash           string                  `json:"block_hash"`
+	SubmitTimeUnixMilli int64                   `json:"submit_time_unix_milli"`
 }
 
 func (ledger *Ledger) AddressHistory(address structure.PublicKey, cursor string, limit int) (AddressHistoryPage, error) {
@@ -156,43 +146,6 @@ func (ledger *Ledger) AddressHistory(address structure.PublicKey, cursor string,
 		NextCursor: nextCursor,
 		HasMore:    !page.IsLastPage,
 	}, nil
-}
-
-func (ledger *Ledger) PrivacyBalance(stateAddress structure.PublicKey, spendAuthority structure.PublicKey) (PrivacyBalanceSummary, error) {
-	account, found, err := ledger.Account(stateAddress)
-	if err != nil {
-		return PrivacyBalanceSummary{}, err
-	}
-	if !found {
-		return PrivacyBalanceSummary{}, nil
-	}
-	if account.Owner != structure.DefaultBuiltinProgramIDs.Privacy {
-		return PrivacyBalanceSummary{}, fmt.Errorf("blockchain: account is not a privacy state")
-	}
-	state, err := structure.UnmarshalPrivacyStateBinary(account.Data)
-	if err != nil {
-		return PrivacyBalanceSummary{}, fmt.Errorf("blockchain: decode privacy state: %w", err)
-	}
-	summary := PrivacyBalanceSummary{
-		EscrowLamports: account.Lamports,
-		StateNoteCount: len(state.Notes),
-	}
-	for _, note := range state.Notes {
-		if note.SpendAuthority != spendAuthority {
-			continue
-		}
-		summary.OwnedNoteCount++
-		if note.Spent {
-			summary.SpentNoteCount++
-			continue
-		}
-		if ^uint64(0)-summary.AvailableLamports < note.Amount {
-			return PrivacyBalanceSummary{}, fmt.Errorf("blockchain: privacy balance overflow")
-		}
-		summary.AvailableLamports += note.Amount
-		summary.SpendableNoteCount++
-	}
-	return summary, nil
 }
 
 func ensureAddressHistoryIndex(db database.Database, head Head) error {
@@ -311,7 +264,7 @@ func buildAddressHistoryEntries(proposal consensus.BlockProposal, blockHash stru
 				return nil, err
 			}
 			entries = append(entries, addressHistoryIndexedEntry{
-				Key: addressHistoryKey(effect.Address, proposal.Header.Height, uint16(transactionIndex), uint8(effectIndex), transactionID),
+				Key:   addressHistoryKey(effect.Address, proposal.Header.Height, uint16(transactionIndex), uint8(effectIndex), transactionID),
 				Value: recordBytes,
 			})
 		}
@@ -336,21 +289,55 @@ func extractAddressHistoryEffects(transaction structure.Transaction) ([]addressH
 				return nil, fmt.Errorf("blockchain: decode system instruction for address history: %w", err)
 			}
 			effects = append(effects, systemInstructionEffects(systemInstruction, accountKeys)...)
-		case structure.DefaultBuiltinProgramIDs.Privacy:
-			privacyInstruction, err := structure.UnmarshalPrivacyInstructionBinary(instruction.Data)
-			if err != nil {
-				return nil, fmt.Errorf("blockchain: decode privacy instruction for address history: %w", err)
-			}
-			effects = append(effects, privacyInstructionEffects(privacyInstruction, accountKeys)...)
 		case structure.DefaultBuiltinProgramIDs.Stake:
 			stakeInstruction, err := stake.UnmarshalInstructionBinary(instruction.Data)
 			if err != nil {
 				return nil, fmt.Errorf("blockchain: decode stake instruction for address history: %w", err)
 			}
 			effects = append(effects, stakeInstructionEffects(stakeInstruction, accountKeys)...)
+		case structure.DefaultBuiltinProgramIDs.Shielded:
+			shieldedInstruction, err := structure.UnmarshalShieldedTransferInstructionBinary(instruction.Data)
+			if err != nil {
+				return nil, fmt.Errorf("blockchain: decode shielded instruction for address history: %w", err)
+			}
+			effects = append(effects, shieldedInstructionEffects(shieldedInstruction, accountKeys)...)
 		}
 	}
 	return effects, nil
+}
+
+func shieldedInstructionEffects(instruction structure.ShieldedTransferInstruction, accountKeys []structure.PublicKey) []addressHistoryEffect {
+	if len(accountKeys) == 0 || accountKeys[0] != structure.DefaultShieldedPoolAddress {
+		return nil
+	}
+	cursor := 1
+	effects := make([]addressHistoryEffect, 0, 2)
+	if instruction.TransparentInputAmount > 0 {
+		if cursor >= len(accountKeys) {
+			return nil
+		}
+		effects = append(effects, addressHistoryEffect{
+			Address:        accountKeys[cursor],
+			Direction:      AddressHistoryDirectionOutgoing,
+			Kind:           AddressHistoryKindShieldedDeposit,
+			Counterparty:   "shielded_pool",
+			AmountLamports: instruction.TransparentInputAmount,
+		})
+		cursor++
+	}
+	if instruction.TransparentOutputAmount > 0 {
+		if cursor >= len(accountKeys) {
+			return nil
+		}
+		effects = append(effects, addressHistoryEffect{
+			Address:        accountKeys[cursor],
+			Direction:      AddressHistoryDirectionIncoming,
+			Kind:           AddressHistoryKindShieldedWithdraw,
+			Counterparty:   "shielded_pool",
+			AmountLamports: instruction.TransparentOutputAmount,
+		})
+	}
+	return effects
 }
 
 func resolveInstructionAccounts(transaction structure.Transaction, instruction structure.CompiledInstruction) (structure.PublicKey, []structure.PublicKey, error) {
@@ -388,35 +375,6 @@ func systemInstructionEffects(instruction structure.SystemInstruction, accountKe
 			Counterparty:   source.String(),
 			AmountLamports: instruction.Transfer.Lamports,
 		},
-	}
-}
-
-func privacyInstructionEffects(instruction structure.PrivacyInstruction, accountKeys []structure.PublicKey) []addressHistoryEffect {
-	switch instruction.Type {
-	case structure.PrivacyInstructionDeposit:
-		if instruction.Deposit == nil || len(accountKeys) < 2 {
-			return nil
-		}
-		return []addressHistoryEffect{{
-			Address:        accountKeys[0],
-			Direction:      AddressHistoryDirectionOutgoing,
-			Kind:           AddressHistoryKindPrivacyDeposit,
-			Counterparty:   accountKeys[1].String(),
-			AmountLamports: instruction.Deposit.Amount,
-		}}
-	case structure.PrivacyInstructionWithdraw:
-		if instruction.Withdraw == nil || len(accountKeys) < 2 {
-			return nil
-		}
-		return []addressHistoryEffect{{
-			Address:        accountKeys[1],
-			Direction:      AddressHistoryDirectionIncoming,
-			Kind:           AddressHistoryKindPrivacyWithdraw,
-			Counterparty:   accountKeys[0].String(),
-			AmountLamports: instruction.Withdraw.Amount,
-		}}
-	default:
-		return nil
 	}
 }
 

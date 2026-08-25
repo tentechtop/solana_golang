@@ -15,7 +15,6 @@ type FixedExecutor struct {
 	Simulator              TransactionSimulator
 	Programs               ProgramRegistry
 	Logger                 *slog.Logger
-	PrivacyExecutionMode   PrivacyExecutionMode
 	ProgramExecutionPolicy ProgramExecutionPolicy
 }
 
@@ -106,7 +105,6 @@ func (executor FixedExecutor) logTransactionExecution(
 		slog.Uint64("slot", request.Slot),
 		slog.String("tx_id", transactionID),
 		slog.String("execution_mode", string(normalizeExecutionMode(request.Mode))),
-		slog.String("privacy_execution_mode", string(executor.privacyExecutionMode())),
 		slog.String("program_execution_policy", executor.programExecutionPolicy().Fingerprint()),
 		slog.Int("status", int(result.Execution.Status)),
 		slog.Uint64("fee_total", result.Execution.FeeDetails.TotalFee),
@@ -134,19 +132,11 @@ func (executor FixedExecutor) logTransactionExecution(
 	logger.LogAttrs(normalizeExecutionContext(contextValue), slog.LevelInfo, "runtime transaction executed", attrs...)
 }
 
-func (executor FixedExecutor) privacyExecutionMode() PrivacyExecutionMode {
-	mode, err := NormalizePrivacyExecutionMode(executor.PrivacyExecutionMode)
-	if err != nil {
-		return PrivacyExecutionModeFixed
-	}
-	return mode
-}
-
 func (executor FixedExecutor) programExecutionPolicy() ProgramExecutionPolicy {
 	if !executor.ProgramExecutionPolicy.IsZero() {
 		return NormalizeProgramExecutionPolicy(executor.ProgramExecutionPolicy)
 	}
-	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, executor.privacyExecutionMode())
+	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs)
 	if err != nil {
 		return defaultFixedProgramExecutionPolicy()
 	}

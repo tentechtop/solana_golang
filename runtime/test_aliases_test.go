@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	bpfloader "solana_golang/programs/bpfloader"
-	privacyprogram "solana_golang/programs/privacy"
 	stakeprogram "solana_golang/programs/stake"
 	systemprogram "solana_golang/programs/system"
 	tokenprogram "solana_golang/programs/token"
@@ -25,16 +24,6 @@ type BlockhashQueue = structure.BlockhashQueue
 type CompiledInstruction = structure.CompiledInstruction
 type CreateAccountParams = structure.CreateAccountParams
 type Hash = structure.Hash
-type PrivacyAuditRecord = structure.PrivacyAuditRecord
-type PrivacyAuthorizeAuditParams = structure.PrivacyAuthorizeAuditParams
-type PrivacyDepositParams = structure.PrivacyDepositParams
-type PrivacyInstruction = structure.PrivacyInstruction
-type PrivacyAuditPayload = structure.PrivacyAuditPayload
-type PrivacyAuditScope = structure.PrivacyAuditScope
-type PrivacyNoteRecord = structure.PrivacyNoteRecord
-type PrivacyState = structure.PrivacyState
-type PrivacyTransferParams = structure.PrivacyTransferParams
-type PrivacyWithdrawParams = structure.PrivacyWithdrawParams
 type PublicKey = structure.PublicKey
 type RecentBlockhashEntry = structure.RecentBlockhashEntry
 type SystemInstruction = structure.SystemInstruction
@@ -46,16 +35,8 @@ type TokenMintState = tokenprogram.MintState
 
 const (
 	LamportsPerSignature           = structure.LamportsPerSignature
-	PrivacyAuditScopeRegulatory    = structure.PrivacyAuditScopeRegulatory
-	PrivacyAuditScopeBusiness      = structure.PrivacyAuditScopeBusiness
 	TransactionStatusConfirmed     = structure.TransactionStatusConfirmed
 	TransactionStatusFailed        = structure.TransactionStatusFailed
-	PrivacyAuditPayloadVersion     = structure.PrivacyAuditPayloadVersion
-	PrivacyInstructionDeposit      = structure.PrivacyInstructionDeposit
-	PrivacyInstructionTransfer     = structure.PrivacyInstructionTransfer
-	PrivacyInstructionWithdraw     = structure.PrivacyInstructionWithdraw
-	PrivacyAuditKeySize            = structure.PrivacyAuditKeySize
-	PrivacyStateVersion            = structure.PrivacyStateVersion
 	TransactionErrorCodeBlockhash  = structure.TransactionErrorCodeBlockhashNotFound
 	MaxRecentBlockhashAgeSlots     = structure.MaxRecentBlockhashAgeSlots
 	TransactionErrorCodeFeeFailure = structure.TransactionErrorCodeInsufficientFundsForFee
@@ -69,19 +50,10 @@ var (
 	NewBlockhashQueue                           = structure.NewBlockhashQueue
 	NewCreateAccountInstruction                 = structure.NewCreateAccountInstruction
 	NewHash                                     = structure.NewHash
-	NewPrivacyAuthorizeAuditInstruction         = structure.NewPrivacyAuthorizeAuditInstruction
-	NewPrivacyDepositInstruction                = structure.NewPrivacyDepositInstruction
-	NewPrivacyTransferInstruction               = structure.NewPrivacyTransferInstruction
-	NewPrivacyWithdrawInstruction               = structure.NewPrivacyWithdrawInstruction
 	NewPublicKey                                = structure.NewPublicKey
 	NewTransferInstruction                      = structure.NewTransferInstruction
-	UnmarshalPrivacyStateBinary                 = structure.UnmarshalPrivacyStateBinary
-	BuildPrivacyTransferProofMessage            = structure.BuildPrivacyTransferProofMessage
-	BuildPrivacyWithdrawProofMessage            = structure.BuildPrivacyWithdrawProofMessage
-	AuditPrivacyNote                            = structure.AuditPrivacyNote
 	CompileInstruction                          = structure.CompileInstruction
 	AccountIndexMap                             = structure.AccountIndexMap
-	NewEncryptedPrivacyAuditRecord              = structure.NewEncryptedPrivacyAuditRecord
 	TransactionErrorCodeInsufficientFundsForFee = structure.TransactionErrorCodeInsufficientFundsForFee
 )
 
@@ -91,7 +63,6 @@ func simulateWithDefaultPrograms(t *testing.T, input TransactionSimulationInput)
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
 		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
 		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
-		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
 		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 	)
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
@@ -101,22 +72,9 @@ func simulateWithVirtualMachine(t *testing.T, input TransactionSimulationInput) 
 	t.Helper()
 	input.Programs = append(input.Programs,
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
-		privacyprogram.NewProgram(DefaultBuiltinProgramIDs.Privacy),
 		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 	)
 	input.FallbackProgram = vmprogram.NewProgram(DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
-	return runtimepkg.TransactionSimulator{}.Simulate(input)
-}
-
-func simulateWithPrivacyVMSyscall(t *testing.T, input TransactionSimulationInput) (structure.TransactionExecutionResult, error) {
-	t.Helper()
-	input.Programs = append(input.Programs,
-		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
-		tokenprogram.NewProgram(DefaultBuiltinProgramIDs.Token),
-		stakeprogram.NewProgram(DefaultBuiltinProgramIDs.Stake),
-		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
-		vmprogram.NewPrivacyBridgeProgram(DefaultBuiltinProgramIDs.Privacy, DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}),
-	)
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
 }
 
@@ -156,4 +114,26 @@ func mustTransactionFeeDetails(t *testing.T, transaction Transaction) structure.
 		t.Fatalf("FeeCalculator.Calculate() error = %v", err)
 	}
 	return feeDetails
+}
+
+func signedSimulationProgramTransaction(t *testing.T, programID PublicKey, accounts []AccountMeta, instructionAccounts []PublicKey, instructionData []byte, blockhash Blockhash, privateKeys map[PublicKey][]byte) Transaction {
+	t.Helper()
+	accountIndexByKey, err := AccountIndexMap(accounts)
+	if err != nil {
+		t.Fatalf("AccountIndexMap() error = %v", err)
+	}
+	compiledInstruction, err := CompileInstruction(programID, instructionAccounts, instructionData, accountIndexByKey)
+	if err != nil {
+		t.Fatalf("CompileInstruction() error = %v", err)
+	}
+	transaction := Transaction{
+		Accounts:        accounts,
+		Instructions:    []CompiledInstruction{compiledInstruction},
+		RecentBlockhash: blockhash,
+	}
+	signedTransaction, err := transaction.Sign(privateKeys)
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	return signedTransaction
 }

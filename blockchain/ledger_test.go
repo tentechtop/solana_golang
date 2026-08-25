@@ -35,6 +35,126 @@ func TestBuildGenesisStateCreatesTreasuryAndValidators(t *testing.T) {
 	if _, err := ValidatorSetFromState(state); err != nil {
 		t.Fatalf("validator set from genesis: %v", err)
 	}
+	totalLamports := uint64(0)
+	for accountIndex, account := range state.Accounts {
+		if totalLamports > ^uint64(0)-account.Account.Lamports {
+			t.Fatalf("genesis lamports overflow at account %d", accountIndex)
+		}
+		totalLamports += account.Account.Lamports
+	}
+	if totalLamports != genesis.InitialSupplyLamports {
+		t.Fatalf("genesis total lamports = %d, want initial supply %d", totalLamports, genesis.InitialSupplyLamports)
+	}
+}
+
+func TestBuildGenesisStateRejectsReservedAccountAddresses(t *testing.T) {
+	reservedAddresses := []struct {
+		name    string
+		address structure.PublicKey
+	}{
+		{name: "shielded_pool", address: structure.DefaultShieldedPoolAddress},
+		{name: "system", address: structure.DefaultBuiltinProgramIDs.System},
+		{name: "compute_budget", address: structure.DefaultBuiltinProgramIDs.ComputeBudget},
+		{name: "address_lookup_table", address: structure.DefaultBuiltinProgramIDs.AddressLookupTable},
+		{name: "native_loader", address: structure.DefaultBuiltinProgramIDs.NativeLoader},
+		{name: "bpf_loader", address: structure.DefaultBuiltinProgramIDs.BPFLoader},
+		{name: "vote", address: structure.DefaultBuiltinProgramIDs.Vote},
+		{name: "token", address: structure.DefaultBuiltinProgramIDs.Token},
+		{name: "stake", address: structure.DefaultBuiltinProgramIDs.Stake},
+		{name: "config", address: structure.DefaultBuiltinProgramIDs.Config},
+		{name: "shielded", address: structure.DefaultBuiltinProgramIDs.Shielded},
+	}
+	for _, testCase := range reservedAddresses {
+		t.Run(testCase.name, func(t *testing.T) {
+			genesis := testGenesis(t)
+			genesis.FundedAccounts[0].Address = testCase.address
+
+			_, _, err := BuildGenesisState(genesis)
+			if !errors.Is(err, ErrInvalidGenesis) {
+				t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+			}
+		})
+	}
+
+	t.Run("treasury_builtin", func(t *testing.T) {
+		genesis := testGenesis(t)
+		genesis.TreasuryAddress = structure.DefaultBuiltinProgramIDs.BPFLoader
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
+
+	t.Run("staker_builtin", func(t *testing.T) {
+		genesis := testGenesis(t)
+		genesis.InitialValidators[0].StakerAddress = structure.DefaultBuiltinProgramIDs.Vote
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
+
+	t.Run("validator_builtin", func(t *testing.T) {
+		genesis := testGenesis(t)
+		genesis.InitialValidators[0].ValidatorAddress = structure.DefaultBuiltinProgramIDs.Config
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
+}
+
+func TestBuildGenesisStateRejectsValidatorAccountAddressConflicts(t *testing.T) {
+	t.Run("funded_account", func(t *testing.T) {
+		genesis := testGenesis(t)
+		genesis.InitialValidators[0].ValidatorAddress = genesis.FundedAccounts[0].Address
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
+
+	t.Run("other_validator_staker", func(t *testing.T) {
+		genesis := testGenesis(t)
+		secondStaker := testKeyPair(t, "genesis-conflicting-staker")
+		secondValidator := testKeyPair(t, "genesis-second-validator")
+		secondConsensus := testKeyPair(t, "genesis-second-consensus")
+		genesis.InitialValidators[0].ValidatorAddress = secondStaker.PublicKey
+		genesis.InitialValidators = append(genesis.InitialValidators, GenesisValidator{
+			StakerAddress:      secondStaker.PublicKey,
+			ValidatorAddress:   secondValidator.PublicKey,
+			ConsensusPublicKey: secondConsensus.PublicKey,
+			P2PPeerID:          testPeerID(t, "genesis-second-peer"),
+			StakeLamports:      stake.MinimumStakeLamports,
+		})
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
+
+	t.Run("duplicate_validator_account", func(t *testing.T) {
+		genesis := testGenesis(t)
+		secondStaker := testKeyPair(t, "genesis-duplicate-validator-staker")
+		secondConsensus := testKeyPair(t, "genesis-duplicate-validator-consensus")
+		genesis.InitialValidators = append(genesis.InitialValidators, GenesisValidator{
+			StakerAddress:      secondStaker.PublicKey,
+			ValidatorAddress:   genesis.InitialValidators[0].ValidatorAddress,
+			ConsensusPublicKey: secondConsensus.PublicKey,
+			P2PPeerID:          testPeerID(t, "genesis-duplicate-validator-peer"),
+			StakeLamports:      stake.MinimumStakeLamports,
+		})
+
+		_, _, err := BuildGenesisState(genesis)
+		if !errors.Is(err, ErrInvalidGenesis) {
+			t.Fatalf("BuildGenesisState() error = %v, want ErrInvalidGenesis", err)
+		}
+	})
 }
 
 func TestBuildGenesisStateCreatesInitialValidatorStakerRewardAccount(t *testing.T) {

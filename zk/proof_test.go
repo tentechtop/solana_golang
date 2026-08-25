@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const testCircuitID CircuitID = 1
+
 type testVerifier struct {
 	system ProofSystem
 	valid  bool
@@ -30,19 +32,6 @@ func (verifier testVerifier) Verify(request VerificationRequest) (VerificationRe
 	}, nil
 }
 
-func TestRecommendedPrivacyProofTargetUsesGroth16BN254(t *testing.T) {
-	target := RecommendedPrivacyProofTarget()
-	if target.System != ProofSystemGroth16BN254 {
-		t.Fatalf("System = %d, want Groth16 BN254", target.System)
-	}
-	if target.Curve != CurveBN254 {
-		t.Fatalf("Curve = %d, want BN254", target.Curve)
-	}
-	if !target.TrustedSetupRequired || !target.PerCircuitSetupRequired {
-		t.Fatal("Groth16 target must declare trusted setup requirements")
-	}
-}
-
 func TestProofEnvelopeBindsPublicInputsAndCopiesProof(t *testing.T) {
 	publicInputs, err := NewPublicInputSet([][]byte{[]byte("root"), []byte("nullifier")})
 	if err != nil {
@@ -52,7 +41,7 @@ func TestProofEnvelopeBindsPublicInputsAndCopiesProof(t *testing.T) {
 	envelope, err := NewProofEnvelope(ProofEnvelopeParams{
 		System:           ProofSystemGroth16BN254,
 		Curve:            CurveBN254,
-		Circuit:          CircuitPrivacyTransfer,
+		Circuit:          testCircuitID,
 		VerifyingKeyHash: HashBytes([]byte("vk")),
 		PublicInputs:     publicInputs,
 		Proof:            proof,
@@ -86,7 +75,7 @@ func TestVerificationRequestRejectsPublicInputHashMismatch(t *testing.T) {
 	envelope, err := NewProofEnvelope(ProofEnvelopeParams{
 		System:           ProofSystemGroth16BN254,
 		Curve:            CurveBN254,
-		Circuit:          CircuitPrivacyWithdraw,
+		Circuit:          testCircuitID,
 		VerifyingKeyHash: HashBytes([]byte("vk")),
 		PublicInputs:     publicInputs,
 		Proof:            []byte("proof"),
@@ -116,8 +105,8 @@ func TestVerifierRegistryDispatchesVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
-	if !result.Valid || result.System != ProofSystemGroth16BN254 || result.Circuit != CircuitPrivacyTransfer {
-		t.Fatalf("result = %+v, want valid Groth16 transfer", result)
+	if !result.Valid || result.System != ProofSystemGroth16BN254 || result.Circuit != testCircuitID {
+		t.Fatalf("result = %+v, want valid Groth16 proof", result)
 	}
 }
 
@@ -154,7 +143,7 @@ func newTestVerificationRequest(t *testing.T) VerificationRequest {
 	envelope, err := NewProofEnvelope(ProofEnvelopeParams{
 		System:           ProofSystemGroth16BN254,
 		Curve:            CurveBN254,
-		Circuit:          CircuitPrivacyTransfer,
+		Circuit:          testCircuitID,
 		VerifyingKeyHash: HashBytes([]byte("vk")),
 		PublicInputs:     publicInputs,
 		Proof:            []byte("proof"),

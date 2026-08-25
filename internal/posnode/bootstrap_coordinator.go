@@ -18,7 +18,6 @@ import (
 	"solana_golang/p2p"
 	"solana_golang/programs/stake"
 	"solana_golang/rpc"
-	runtimepkg "solana_golang/runtime"
 	"solana_golang/structure"
 	"solana_golang/utils"
 )
@@ -558,7 +557,6 @@ func bootstrapManifestFromConfig(config nodeConfig, ready bool, validatorCount i
 		TurbineFanout:                 config.TurbineFanout,
 		TransactionLeaderForwardSlots: config.TransactionLeaderForwardSlots,
 		TransactionForwardValidators:  config.forwardTransactionsToValidators(),
-		PrivacyExecutionMode:          string(config.PrivacyExecutionMode),
 		ContractDeploymentPolicy:      bootstrapContractPolicyFromConfig(config.ContractDeploymentPolicy),
 		Genesis:                       genesis,
 		BootstrapPeers:                bootstrapPeersFromConfig(config.BootstrapPeers),
@@ -569,7 +567,6 @@ func bootstrapGenesisFromConfig(config nodeConfig) (rpc.BootstrapGenesisResult, 
 	genesis := rpc.BootstrapGenesisResult{
 		InitialSupplyLamports: config.Genesis.InitialSupplyLamports,
 		TreasuryAddress:       config.Genesis.TreasuryAddress,
-		PrivacyExecutionMode:  string(config.Genesis.PrivacyExecutionMode),
 		FundedAccounts:        make([]rpc.BootstrapGenesisAccountResult, 0, len(config.Genesis.FundedAccounts)),
 		InitialValidators:     make([]rpc.BootstrapGenesisValidatorResult, 0, len(config.Genesis.InitialValidators)),
 	}
@@ -638,14 +635,12 @@ func applyBootstrapManifest(config nodeConfig, manifest rpc.BootstrapManifestRes
 	config.FinalityDepth = manifest.FinalityDepth
 	config.TurbineFanout = manifest.TurbineFanout
 	config.TransactionLeaderForwardSlots = manifest.TransactionLeaderForwardSlots
-	config.PrivacyExecutionMode = runtimepkg.PrivacyExecutionMode(manifest.PrivacyExecutionMode)
 	forwardValidators := manifest.TransactionForwardValidators
 	config.TransactionForwardValidators = &forwardValidators
 	config.ContractDeploymentPolicy = contractDeploymentPolicyFromBootstrap(manifest.ContractDeploymentPolicy)
 	config.Genesis = genesisConfig{
 		InitialSupplyLamports: manifest.Genesis.InitialSupplyLamports,
 		TreasuryAddress:       manifest.Genesis.TreasuryAddress,
-		PrivacyExecutionMode:  runtimepkg.PrivacyExecutionMode(manifest.Genesis.PrivacyExecutionMode),
 		FundedAccounts:        make([]genesisAccountConfig, 0, len(manifest.Genesis.FundedAccounts)),
 		InitialValidators:     make([]genesisValidatorConfig, 0, len(manifest.Genesis.InitialValidators)),
 	}

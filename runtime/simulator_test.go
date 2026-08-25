@@ -4,8 +4,30 @@ import (
 	"testing"
 
 	stakeprogram "solana_golang/programs/stake"
+	runtimepkg "solana_golang/runtime"
+	"solana_golang/structure"
 	"solana_golang/utils"
 )
+
+type overBudgetMutationProgram struct {
+	programID structure.PublicKey
+	target    structure.PublicKey
+	units     uint64
+}
+
+func (program overBudgetMutationProgram) ProgramID() runtimepkg.ProgramID {
+	return program.programID
+}
+
+func (program overBudgetMutationProgram) Execute(context runtimepkg.InstructionContext) error {
+	if context.ComputeUnitsUsed != nil {
+		*context.ComputeUnitsUsed += program.units
+	}
+	account := context.Accounts[program.target]
+	account.Lamports++
+	context.Accounts[program.target] = account
+	return nil
+}
 
 func TestTransactionSimulatorTransfersLamports(t *testing.T) {
 	sourceKey, sourcePrivateKey := newSimulationSigner(t)
@@ -243,6 +265,104 @@ func TestTransactionSimulatorRejectsInsufficientFeeReserve(t *testing.T) {
 	sourceWritten := findWrittenAccount(t, result.WrittenAccounts, sourceKey)
 	if sourceWritten.Lamports != sourceLamports {
 		t.Fatalf("source lamports = %d, want unchanged %d", sourceWritten.Lamports, sourceLamports)
+	}
+}
+
+func TestTransactionSimulatorRejectsAndRollsBackInstructionAboveComputeBudget(t *testing.T) {
+	payerKey, payerPrivateKey := newSimulationSigner(t)
+	targetKey := newTestPublicKey(211)
+	programID := newTestPublicKey(212)
+	blockhash := newTestHash(213)
+	computeBudget := structure.DefaultComputeBudgetLimits()
+	computeBudget.MaxComputeUnits = structure.DefaultContractCallComputeUnits
+	targetLamports := mustMinimumBalance(t, 0) + 10
+	payerLamports := mustMinimumBalance(t, 0) + LamportsPerSignature + 100
+
+	transaction := signedSimulationProgramTransaction(
+		t,
+		programID,
+		[]AccountMeta{
+			{PublicKey: payerKey, IsSigner: true, IsWritable: true},
+			{PublicKey: targetKey, IsWritable: true},
+			{PublicKey: programID},
+		},
+		[]PublicKey{targetKey},
+		nil,
+		blockhash,
+		map[PublicKey][]byte{payerKey: payerPrivateKey},
+	)
+	accounts := simulationAccountsWithPrograms(t, payerKey, payerLamports, programID)
+	accounts = append(accounts, newSimulationAccount(t, targetKey, targetLamports, DefaultBuiltinProgramIDs.System, false))
+	program := overBudgetMutationProgram{
+		programID: programID,
+		target:    targetKey,
+		units:     structure.DefaultContractCallComputeUnits + 1,
+	}
+
+	result, err := (runtimepkg.TransactionSimulator{}).Simulate(runtimepkg.TransactionSimulationInput{
+		Transaction:     transaction,
+		Accounts:        accounts,
+		BlockhashQueue:  newSimulationBlockhashQueue(t, blockhash, 30),
+		CurrentSlot:     30,
+		ComputeBudget:   computeBudget,
+		ProgramRegistry: runtimepkg.ProgramRegistry{},
+		Programs:        []runtimepkg.Program{program},
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusFailed || result.Error == nil || result.Error.InstructionError == nil {
+		t.Fatalf("result = %+v, want instruction failure", result)
+	}
+	if result.Error.InstructionError.Code != structure.InstructionErrorCodeComputationalBudgetExceeded {
+		t.Fatalf("instruction error code = %d, want computational budget exceeded", result.Error.InstructionError.Code)
+	}
+	if result.ComputeUnitsConsumed != structure.DefaultContractCallComputeUnits+1 {
+		t.Fatalf("compute units = %d, want %d", result.ComputeUnitsConsumed, structure.DefaultContractCallComputeUnits+1)
+	}
+	if targetAccount := findWrittenAccount(t, result.WrittenAccounts, targetKey); targetAccount.Lamports != targetLamports {
+		t.Fatalf("target lamports = %d, want rolled back %d", targetAccount.Lamports, targetLamports)
+	}
+}
+
+func TestTransactionSimulatorRejectsAddressTablesUntilResolverIsAvailable(t *testing.T) {
+	payerKey, payerPrivateKey := newSimulationSigner(t)
+	blockhash := newTestHash(214)
+	message := structure.SolanaMessage{
+		Header: structure.MessageHeader{
+			NumRequiredSignatures:       1,
+			NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys:     []structure.PublicKey{payerKey, structure.DefaultBuiltinProgramIDs.System},
+		RecentBlockhash: blockhash,
+		Instructions: []structure.CompiledInstruction{{
+			ProgramIDIndex: 1,
+			AccountIndexes: []uint8{0},
+		}},
+		AddressTableLookups: []structure.MessageAddressTableLookup{{
+			AccountKey:      newTestPublicKey(215),
+			ReadonlyIndexes: []uint8{0},
+		}},
+		Version:          0,
+		UsesAddressTable: true,
+	}
+	transaction, err := (structure.Transaction{Message: message}).Sign(map[structure.PublicKey][]byte{
+		payerKey: payerPrivateKey,
+	})
+	if err != nil {
+		t.Fatalf("Sign(address table transaction) error = %v", err)
+	}
+	result, err := (runtimepkg.TransactionSimulator{}).Simulate(runtimepkg.TransactionSimulationInput{
+		Transaction:    transaction,
+		Accounts:       simulationAccounts(t, payerKey, mustMinimumBalance(t, 0)+structure.LamportsPerSignature+100),
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 31),
+		CurrentSlot:    31,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != structure.TransactionStatusFailed || result.Error == nil || result.Error.Code != structure.TransactionErrorCodeInvalidAddressLookupTable {
+		t.Fatalf("result = %+v, want address table rejection", result)
 	}
 }
 

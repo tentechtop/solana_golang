@@ -23,7 +23,6 @@ type chainIdentityPayload struct {
 	TurbineFanout                 int    `json:"turbine_fanout"`
 	TransactionLeaderForwardSlots int    `json:"transaction_leader_forward_slots"`
 	TransactionForwardValidators  bool   `json:"transaction_forward_validators"`
-	PrivacyExecutionMode          string `json:"privacy_execution_mode"`
 	ProgramExecutionPolicy        string `json:"program_execution_policy"`
 	ContractDeploymentPolicy      string `json:"contract_deployment_policy"`
 }
@@ -37,7 +36,7 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 	if err != nil {
 		return nodeConfig{}, fmt.Errorf("posnode: build chain identity genesis: %w", err)
 	}
-	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint(config.Genesis.PrivacyExecutionMode)
+	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint()
 	if err != nil {
 		return nodeConfig{}, err
 	}
@@ -51,7 +50,6 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 		TurbineFanout:                 config.TurbineFanout,
 		TransactionLeaderForwardSlots: config.TransactionLeaderForwardSlots,
 		TransactionForwardValidators:  config.forwardTransactionsToValidators(),
-		PrivacyExecutionMode:          string(config.Genesis.PrivacyExecutionMode),
 		ProgramExecutionPolicy:        programExecutionPolicy,
 		ContractDeploymentPolicy:      contractDeploymentPolicyFingerprint(config.ContractDeploymentPolicy),
 	}
@@ -103,14 +101,13 @@ func resolveChainDataPath(dataRootPath string, chainIdentityHash string) string 
 }
 
 func buildBlockchainGenesisConfig(config nodeConfig) (blockchain.GenesisConfig, error) {
-	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint(config.Genesis.PrivacyExecutionMode)
+	programExecutionPolicy, err := defaultProgramExecutionPolicyFingerprint()
 	if err != nil {
 		return blockchain.GenesisConfig{}, err
 	}
 	genesis := blockchain.GenesisConfig{
 		ChainID:                config.ChainID,
 		InitialSupplyLamports:  config.Genesis.InitialSupplyLamports,
-		PrivacyExecutionMode:   string(config.Genesis.PrivacyExecutionMode),
 		ProgramExecutionPolicy: programExecutionPolicy,
 		FundedAccounts:         make([]blockchain.GenesisAccount, 0, len(config.Genesis.FundedAccounts)),
 		InitialValidators:      make([]blockchain.GenesisValidator, 0, len(config.Genesis.InitialValidators)),
@@ -162,8 +159,8 @@ func buildBlockchainGenesisConfig(config nodeConfig) (blockchain.GenesisConfig, 
 	return genesis, nil
 }
 
-func defaultProgramExecutionPolicyFingerprint(privacyExecutionMode runtimepkg.PrivacyExecutionMode) (string, error) {
-	policy, err := runtimepkg.NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, privacyExecutionMode)
+func defaultProgramExecutionPolicyFingerprint() (string, error) {
+	policy, err := runtimepkg.NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs)
 	if err != nil {
 		return "", fmt.Errorf("posnode: program execution policy: %w", err)
 	}

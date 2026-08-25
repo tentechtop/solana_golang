@@ -29,6 +29,14 @@ type LoadedAddressView struct {
 	Readonly []string `json:"readonly,omitempty"`
 }
 
+// FeePaymentSource 描述手续费来源 + 区分透明签名账户和经证明授权的全局屏蔽池。
+type FeePaymentSource uint8
+
+const (
+	FeePaymentSourceTransparentAccount FeePaymentSource = iota + 1
+	FeePaymentSourceShieldedPool
+)
+
 // ResolvedMessage 描述执行期消息 + 将静态账户和加载地址合并为完整账户表。
 type ResolvedMessage struct {
 	Header            MessageHeader
@@ -45,6 +53,7 @@ type LoadedTransaction struct {
 	Message     ResolvedMessage
 	Accounts    []LoadedAccount
 	FeePayer    PublicKey
+	FeeSource   FeePaymentSource
 	FeeDetails  FeeDetails
 }
 
@@ -206,6 +215,10 @@ func NewLoadedTransaction(transaction Transaction, resolvedMessage ResolvedMessa
 	if len(resolvedMessage.AccountKeys) > 0 {
 		loadedTransaction.FeePayer = resolvedMessage.AccountKeys[0]
 	}
+	loadedTransaction.FeeSource = FeePaymentSourceTransparentAccount
+	if resolvedMessage.Header.NumRequiredSignatures == 0 {
+		loadedTransaction.FeeSource = FeePaymentSourceShieldedPool
+	}
 	if err := loadedTransaction.Validate(); err != nil {
 		return LoadedTransaction{}, err
 	}
@@ -234,6 +247,17 @@ func (transaction LoadedTransaction) Validate() error {
 	if transaction.FeePayer != transaction.Message.AccountKeys[0] {
 		return fmt.Errorf("%w: fee payer does not match first account", ErrInvalidLoadedTransaction)
 	}
+	if transaction.FeeSource == FeePaymentSourceTransparentAccount {
+		if transaction.Message.Header.NumRequiredSignatures == 0 {
+			return fmt.Errorf("%w: transparent fee source requires a signer", ErrInvalidLoadedTransaction)
+		}
+	} else if transaction.FeeSource == FeePaymentSourceShieldedPool {
+		if transaction.Message.Header.NumRequiredSignatures != 0 {
+			return fmt.Errorf("%w: shielded fee source cannot contain transparent signers", ErrInvalidLoadedTransaction)
+		}
+	} else {
+		return fmt.Errorf("%w: unsupported fee payment source %d", ErrInvalidLoadedTransaction, transaction.FeeSource)
+	}
 	return nil
 }
 
@@ -244,6 +268,7 @@ func (transaction LoadedTransaction) Clone() LoadedTransaction {
 		Message:     transaction.Message.Clone(),
 		Accounts:    cloneLoadedAccounts(transaction.Accounts),
 		FeePayer:    transaction.FeePayer,
+		FeeSource:   transaction.FeeSource,
 		FeeDetails:  transaction.FeeDetails,
 	}
 }

@@ -1,8 +1,8 @@
 package posnode
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -23,21 +23,11 @@ import (
 )
 
 const (
-	protocolAddressTransparent        byte = 0x00
-	protocolAddressPrivacy            byte = 0x01
-	protocolAddressSize                    = structure.PublicKeySize + 1
-	rpcTransactionBroadcastTimeout         = 2 * time.Second
-	minHealthHeadFreshnessWindow           = 5 * time.Second
-	maxHealthHeadFreshnessWindow           = 30 * time.Second
-	healthHeadFreshnessSlotMultiplier      = 5
+	rpcTransactionBroadcastTimeout    = 2 * time.Second
+	minHealthHeadFreshnessWindow      = 5 * time.Second
+	maxHealthHeadFreshnessWindow      = 30 * time.Second
+	healthHeadFreshnessSlotMultiplier = 5
 )
-
-type privacyChangeArtifacts struct {
-	amount        uint64
-	commitment    structure.Hash
-	encryptedNote []byte
-	auditRecords  []structure.PrivacyAuditRecord
-}
 
 type blockLeaderMetadata struct {
 	address        string
@@ -50,7 +40,7 @@ type blockLeaderMetadata struct {
 
 func (node *posNode) GetBalance(ctx context.Context, address string) (rpc.BalanceResult, error) {
 	_ = ctx
-	publicKey, _, err := decodeProtocolPublicKey(address, "balance address")
+	publicKey, err := decodePublicKey(address, "balance address")
 	if err != nil {
 		return rpc.BalanceResult{}, fmt.Errorf("posnode: decode balance address: %w", err)
 	}
@@ -87,7 +77,7 @@ func (node *posNode) GetLatestBlockhash(ctx context.Context) (rpc.LatestBlockhas
 
 func (node *posNode) GetAccountType(ctx context.Context, address string) (rpc.AccountTypeResult, error) {
 	_ = ctx
-	publicKey, _, err := decodeProtocolPublicKey(address, "account type address")
+	publicKey, err := decodePublicKey(address, "account type address")
 	if err != nil {
 		return rpc.AccountTypeResult{}, fmt.Errorf("posnode: decode account type address: %w", err)
 	}
@@ -103,6 +93,52 @@ func (node *posNode) GetAccountType(ctx context.Context, address string) (rpc.Ac
 		Exists:  true,
 		Owner:   account.Owner.String(),
 		Type:    accountTypeName(account.Owner),
+	}, nil
+}
+
+// GetShieldedPool 返回全局屏蔽池公开状态 + 节点永不接收钱包 seed、私钥或查看密钥。
+func (node *posNode) GetShieldedPool(ctx context.Context) (rpc.ShieldedPoolResult, error) {
+	_ = ctx
+	poolAddress := structure.DefaultShieldedPoolAddress
+	account, found, err := node.ledger.Account(poolAddress)
+	if err != nil {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: load shielded pool: %w", err)
+	}
+	if !found {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: shielded pool account is missing")
+	}
+	if account.Owner != structure.DefaultBuiltinProgramIDs.Shielded || account.Executable {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: shielded pool account metadata is invalid")
+	}
+	poolState, err := structure.UnmarshalShieldedPoolStateBinary(account.Data)
+	if err != nil {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: decode shielded pool: %w", err)
+	}
+	canonicalStateData, err := poolState.MarshalBinary()
+	if err != nil {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: encode shielded pool: %w", err)
+	}
+	if !bytes.Equal(canonicalStateData, account.Data) {
+		return rpc.ShieldedPoolResult{}, fmt.Errorf("posnode: shielded pool state encoding is not canonical")
+	}
+
+	recentAnchors := make([]string, len(poolState.RecentAnchors))
+	for index, anchor := range poolState.RecentAnchors {
+		recentAnchors[index] = anchor.String()
+	}
+	return rpc.ShieldedPoolResult{
+		Address:              poolAddress.String(),
+		StateEncodingVersion: poolState.StateEncodingVersion,
+		ProtocolVersion:      poolState.ProtocolVersion,
+		CircuitID:            poolState.CircuitID,
+		VerifyingKeyHash:     poolState.VerifyingKeyHash.String(),
+		TreeDepth:            poolState.TreeDepth,
+		LeafCount:            poolState.LeafCount,
+		CurrentRoot:          poolState.CurrentRoot.String(),
+		RecentAnchors:        recentAnchors,
+		PoolLamports:         poolState.PoolLamports,
+		PhysicalLamports:     account.Lamports,
+		DataBase64:           base64.StdEncoding.EncodeToString(canonicalStateData),
 	}, nil
 }
 
@@ -428,19 +464,9 @@ func (node *posNode) GetTransaction(ctx context.Context, signature string) (rpc.
 
 func (node *posNode) GetAddressTransactions(ctx context.Context, address string, cursor string, limit int) (rpc.AccountTransactionHistoryResult, error) {
 	_ = ctx
-	publicKey, addressType, err := decodeProtocolPublicKey(address, "history address")
+	publicKey, err := decodePublicKey(address, "history address")
 	if err != nil {
 		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: decode history address: %w", err)
-	}
-	if addressType == protocolAddressPrivacy {
-		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: public address history does not support privacy addresses")
-	}
-	account, found, err := node.ledger.Account(publicKey)
-	if err != nil {
-		return rpc.AccountTransactionHistoryResult{}, err
-	}
-	if found && account.Owner == structure.DefaultBuiltinProgramIDs.Privacy {
-		return rpc.AccountTransactionHistoryResult{}, fmt.Errorf("posnode: public address history does not support privacy state accounts")
 	}
 	page, err := node.ledger.AddressHistory(publicKey, strings.TrimSpace(cursor), limit)
 	if err != nil {
@@ -460,16 +486,13 @@ func (node *posNode) GetContractPrograms(ctx context.Context, limit int) (rpc.Co
 
 func (node *posNode) GetAssetState(ctx context.Context, program string, owner string) (rpc.AssetStateResult, error) {
 	_ = ctx
-	programKey, _, err := decodeProtocolPublicKey(program, "asset program")
+	programKey, err := decodePublicKey(program, "asset program")
 	if err != nil {
 		return rpc.AssetStateResult{}, fmt.Errorf("posnode: decode asset program: %w", err)
 	}
-	ownerKey, ownerType, err := decodeProtocolPublicKey(owner, "asset owner")
+	ownerKey, err := decodePublicKey(owner, "asset owner")
 	if err != nil {
 		return rpc.AssetStateResult{}, fmt.Errorf("posnode: decode asset owner: %w", err)
-	}
-	if ownerType == protocolAddressPrivacy {
-		return rpc.AssetStateResult{}, fmt.Errorf("posnode: asset owner must be a transparent public key")
 	}
 	assetAccounts, err := blockchain.DeriveFungibleAssetBootstrapAccounts(programKey, ownerKey)
 	if err != nil {
@@ -492,7 +515,7 @@ func (node *posNode) GetAssetState(ctx context.Context, program string, owner st
 }
 
 func (node *posNode) TreasuryTransfer(ctx context.Context, destination string, lamports uint64) (string, error) {
-	destinationKey, _, err := decodeProtocolPublicKey(destination, "destination")
+	destinationKey, err := decodePublicKey(destination, "destination")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode destination: %w", err)
 	}
@@ -516,7 +539,7 @@ func (node *posNode) Transfer(ctx context.Context, sourceSeed string, destinatio
 	if err != nil {
 		return "", err
 	}
-	destinationKey, _, err := decodeProtocolPublicKey(destination, "destination")
+	destinationKey, err := decodePublicKey(destination, "destination")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode destination: %w", err)
 	}
@@ -529,473 +552,6 @@ func (node *posNode) Transfer(ctx context.Context, sourceSeed string, destinatio
 		slog.String("destination", destinationKey.String()),
 		slog.Uint64("lamports", lamports),
 	)
-}
-
-func (node *posNode) GetPrivacyState(ctx context.Context, stateAddress string) (rpc.PrivacyStateResult, error) {
-	_ = ctx
-	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy state")
-	if err != nil {
-		return rpc.PrivacyStateResult{}, fmt.Errorf("posnode: decode privacy state: %w", err)
-	}
-	state, err := node.loadPrivacyState(stateKey)
-	if err != nil {
-		return rpc.PrivacyStateResult{}, err
-	}
-	return privacyStateResult(stateKey, state), nil
-}
-
-func (node *posNode) GetPrivacyBalance(ctx context.Context, stateAddress string, spendAuthority string) (rpc.PrivacyBalanceResult, error) {
-	_ = ctx
-	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy state")
-	if err != nil {
-		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: decode privacy state for balance: %w", err)
-	}
-	authorityKey, authorityType, err := decodeProtocolPublicKey(spendAuthority, "privacy spend authority")
-	if err != nil {
-		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: decode privacy spend authority: %w", err)
-	}
-	if authorityType == protocolAddressPrivacy {
-		return rpc.PrivacyBalanceResult{}, fmt.Errorf("posnode: privacy spend authority must be a transparent public key")
-	}
-	summary, err := node.ledger.PrivacyBalance(stateKey, authorityKey)
-	if err != nil {
-		return rpc.PrivacyBalanceResult{}, err
-	}
-	return privacyBalanceResult(stateKey, authorityKey, summary), nil
-}
-
-func (node *posNode) PrivacyDeposit(ctx context.Context, sourceSeed string, stateSeed string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	source, err := keyPairFromSeed(sourceSeed)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	stateAccount, err := keyPairFromSeed(stateSeed)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: build privacy state keypair: %w", err)
-	}
-	_, found, err := node.ledger.Account(stateAccount.PublicKey)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	commitment, err := randomPrivacyHash()
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:         structure.PrivacyAuditPayloadVersion,
-		TransactionType: structure.PrivacyInstructionDeposit,
-		Commitment:      commitment,
-		Amount:          lamports,
-		Slot:            node.currentAuditSlot(),
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
-		Source:         source,
-		StateAccount:   stateAccount,
-		SpendAuthority: source.PublicKey,
-		Amount:         lamports,
-		Commitment:     commitment,
-		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
-		AuditRecords:   auditRecords,
-		CreateState:    !found,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_deposit",
-		slog.String("source", source.PublicKey.String()),
-		slog.String("privacy_state", stateAccount.PublicKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateAccount.PublicKey.String(), Commitment: commitment.String()}, nil
-}
-
-func (node *posNode) PrivacyDepositToState(ctx context.Context, sourceSeed string, stateAddress string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	source, err := keyPairFromSeed(sourceSeed)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy state")
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode privacy state: %w", err)
-	}
-	if err := node.requirePrivacyStateAccount(stateKey); err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	commitment, err := randomPrivacyHash()
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:         structure.PrivacyAuditPayloadVersion,
-		TransactionType: structure.PrivacyInstructionDeposit,
-		Commitment:      commitment,
-		Amount:          lamports,
-		Slot:            node.currentAuditSlot(),
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
-		Source:         source,
-		StateAccount:   structure.SolanaKeyPair{PublicKey: stateKey},
-		SpendAuthority: source.PublicKey,
-		Amount:         lamports,
-		Commitment:     commitment,
-		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
-		AuditRecords:   auditRecords,
-		CreateState:    false,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_deposit_to_state",
-		slog.String("source", source.PublicKey.String()),
-		slog.String("privacy_state", stateKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitment.String()}, nil
-}
-
-func (node *posNode) PrivacyDepositToReceiver(ctx context.Context, sourceSeed string, stateAddress string, spendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	source, err := keyPairFromSeed(sourceSeed)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	stateKey, spendAuthorityKey, err := node.decodePrivacyReceiver(stateAddress, spendAuthority)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	commitment, err := randomPrivacyHash()
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:         structure.PrivacyAuditPayloadVersion,
-		TransactionType: structure.PrivacyInstructionDeposit,
-		Commitment:      commitment,
-		Amount:          lamports,
-		Slot:            node.currentAuditSlot(),
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyDepositTransaction(blockchain.PrivacyDepositTransactionParams{
-		Source:         source,
-		StateAccount:   structure.SolanaKeyPair{PublicKey: stateKey},
-		SpendAuthority: spendAuthorityKey,
-		Amount:         lamports,
-		Commitment:     commitment,
-		EncryptedNote:  privacyNoteBytes("deposit", lamports, commitment, structure.Hash{}),
-		AuditRecords:   auditRecords,
-		CreateState:    false,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_deposit_to_receiver",
-		slog.String("source", source.PublicKey.String()),
-		slog.String("privacy_state", stateKey.String()),
-		slog.String("spend_authority", spendAuthorityKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitment.String()}, nil
-}
-
-func (node *posNode) PrivacyWithdraw(ctx context.Context, authoritySeed string, stateAddress string, destination string, commitment string, nullifier string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	authority, stateKey, commitmentHash, nullifierHash, err := parsePrivacySpendInputs(authoritySeed, stateAddress, commitment, nullifier)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	destinationKey, _, err := decodeProtocolPublicKey(destination, "privacy withdraw destination")
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode privacy withdraw destination: %w", err)
-	}
-	sourceState, err := node.loadPrivacyState(stateKey)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditSlot := node.currentAuditSlot()
-	changeOutput, err := node.buildPrivacyChangeArtifacts(
-		"withdraw_change",
-		structure.PrivacyInstructionWithdraw,
-		sourceNote.Amount,
-		lamports,
-		commitmentHash,
-		nullifierHash,
-		auditor,
-		auditSecret,
-		expiresAtSlot,
-		auditSlot,
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:          structure.PrivacyAuditPayloadVersion,
-		TransactionType:  structure.PrivacyInstructionWithdraw,
-		Commitment:       commitmentHash,
-		Nullifier:        nullifierHash,
-		OutputCommitment: changeOutput.commitment,
-		Amount:           lamports,
-		Slot:             auditSlot,
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyWithdrawTransaction(blockchain.PrivacyWithdrawTransactionParams{
-		Authority:            authority,
-		StateAddress:         stateKey,
-		Destination:          destinationKey,
-		Amount:               lamports,
-		SourceCommitment:     commitmentHash,
-		Nullifier:            nullifierHash,
-		AuditRecords:         auditRecords,
-		ChangeAmount:         changeOutput.amount,
-		ChangeCommitment:     changeOutput.commitment,
-		ChangeSpendAuthority: sourceNote.SpendAuthority,
-		ChangeEncryptedNote:  changeOutput.encryptedNote,
-		ChangeAuditRecords:   changeOutput.auditRecords,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_withdraw",
-		slog.String("authority", authority.PublicKey.String()),
-		slog.String("privacy_state", stateKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return privacySpendResult(signature, stateKey, commitmentHash, nullifierHash, structure.Hash{}, changeOutput), nil
-}
-
-func (node *posNode) PrivacyTransfer(ctx context.Context, authoritySeed string, stateAddress string, commitment string, nullifier string, recipient string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	authority, stateKey, commitmentHash, nullifierHash, err := parsePrivacySpendInputs(authoritySeed, stateAddress, commitment, nullifier)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	recipientKey, _, err := decodeProtocolPublicKey(recipient, "privacy recipient")
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode privacy recipient: %w", err)
-	}
-	sourceState, err := node.loadPrivacyState(stateKey)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	outputCommitment, err := randomPrivacyHash()
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditSlot := node.currentAuditSlot()
-	changeOutput, err := node.buildPrivacyChangeArtifacts(
-		"transfer_change",
-		structure.PrivacyInstructionTransfer,
-		sourceNote.Amount,
-		lamports,
-		commitmentHash,
-		nullifierHash,
-		auditor,
-		auditSecret,
-		expiresAtSlot,
-		auditSlot,
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:          structure.PrivacyAuditPayloadVersion,
-		TransactionType:  structure.PrivacyInstructionTransfer,
-		Commitment:       commitmentHash,
-		Nullifier:        nullifierHash,
-		OutputCommitment: outputCommitment,
-		Amount:           lamports,
-		Slot:             auditSlot,
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyTransferTransaction(blockchain.PrivacyTransferTransactionParams{
-		Authority:            authority,
-		StateAddress:         stateKey,
-		Amount:               lamports,
-		SourceCommitment:     commitmentHash,
-		Nullifier:            nullifierHash,
-		OutputCommitment:     outputCommitment,
-		OutputSpendAuthority: recipientKey,
-		OutputEncryptedNote:  privacyNoteBytes("transfer", lamports, outputCommitment, nullifierHash),
-		OutputAuditRecords:   auditRecords,
-		ChangeAmount:         changeOutput.amount,
-		ChangeCommitment:     changeOutput.commitment,
-		ChangeSpendAuthority: sourceNote.SpendAuthority,
-		ChangeEncryptedNote:  changeOutput.encryptedNote,
-		ChangeAuditRecords:   changeOutput.auditRecords,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_transfer",
-		slog.String("authority", authority.PublicKey.String()),
-		slog.String("privacy_state", stateKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return privacySpendResult(signature, stateKey, commitmentHash, nullifierHash, outputCommitment, changeOutput), nil
-}
-
-func (node *posNode) PrivacyTransferToReceiver(ctx context.Context, authoritySeed string, sourceStateAddress string, commitment string, nullifier string, destinationStateAddress string, destinationSpendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	authority, sourceStateKey, commitmentHash, nullifierHash, err := parsePrivacySpendInputs(authoritySeed, sourceStateAddress, commitment, nullifier)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	destinationStateKey, destinationSpendAuthorityKey, err := node.decodePrivacyReceiver(destinationStateAddress, destinationSpendAuthority)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	sourceState, err := node.loadPrivacyState(sourceStateKey)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	sourceNote, err := privacySpendNote(sourceState, commitmentHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	outputCommitment, err := randomPrivacyHash()
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditSlot := node.currentAuditSlot()
-	changeOutput, err := node.buildPrivacyChangeArtifacts(
-		"transfer_change",
-		structure.PrivacyInstructionTransfer,
-		sourceNote.Amount,
-		lamports,
-		commitmentHash,
-		nullifierHash,
-		auditor,
-		auditSecret,
-		expiresAtSlot,
-		auditSlot,
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:          structure.PrivacyAuditPayloadVersion,
-		TransactionType:  structure.PrivacyInstructionTransfer,
-		Commitment:       commitmentHash,
-		Nullifier:        nullifierHash,
-		OutputCommitment: outputCommitment,
-		Amount:           lamports,
-		Slot:             auditSlot,
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyTransferTransaction(blockchain.PrivacyTransferTransactionParams{
-		Authority:            authority,
-		StateAddress:         sourceStateKey,
-		OutputStateAddress:   destinationStateKey,
-		Amount:               lamports,
-		SourceCommitment:     commitmentHash,
-		Nullifier:            nullifierHash,
-		OutputCommitment:     outputCommitment,
-		OutputSpendAuthority: destinationSpendAuthorityKey,
-		OutputEncryptedNote:  privacyNoteBytes("transfer", lamports, outputCommitment, nullifierHash),
-		OutputAuditRecords:   auditRecords,
-		ChangeAmount:         changeOutput.amount,
-		ChangeCommitment:     changeOutput.commitment,
-		ChangeSpendAuthority: sourceNote.SpendAuthority,
-		ChangeEncryptedNote:  changeOutput.encryptedNote,
-		ChangeAuditRecords:   changeOutput.auditRecords,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_transfer_to_receiver",
-		slog.String("authority", authority.PublicKey.String()),
-		slog.String("source_privacy_state", sourceStateKey.String()),
-		slog.String("destination_privacy_state", destinationStateKey.String()),
-		slog.String("destination_spend_authority", destinationSpendAuthorityKey.String()),
-		slog.Uint64("lamports", lamports),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return privacySpendResult(signature, destinationStateKey, commitmentHash, nullifierHash, outputCommitment, changeOutput), nil
-}
-
-func (node *posNode) PrivacyAuthorizeAudit(ctx context.Context, authoritySeed string, stateAddress string, commitment string, auditor string, auditSecret string, scope uint8, expiresAtSlot uint64) (rpc.PrivacyTransactionResult, error) {
-	authority, stateKey, commitmentHash, _, err := parsePrivacySpendInputs(authoritySeed, stateAddress, commitment, randomPrivacyHashString())
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	state, err := node.loadPrivacyState(stateKey)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	amount, err := privacyNoteAmount(state, commitmentHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	auditorKey, _, err := decodeProtocolPublicKey(auditor, "auditor")
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, fmt.Errorf("posnode: decode auditor: %w", err)
-	}
-	auditKey := utils.SHA256([]byte(strings.TrimSpace(auditSecret)))
-	auditRecord, err := structure.NewEncryptedPrivacyAuditRecord(auditorKey, structure.PrivacyAuditScope(scope), expiresAtSlot, auditKey, structure.PrivacyAuditPayload{
-		Version:         structure.PrivacyAuditPayloadVersion,
-		TransactionType: structure.PrivacyInstructionDeposit,
-		Commitment:      commitmentHash,
-		Amount:          amount,
-		Slot:            node.currentAuditSlot(),
-	})
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	transaction, err := blockchain.NewPrivacyAuthorizeAuditTransaction(blockchain.PrivacyAuthorizeAuditTransactionParams{
-		Authority:       authority,
-		StateAddress:    stateKey,
-		Commitment:      commitmentHash,
-		Auditor:         auditorKey,
-		Scope:           structure.PrivacyAuditScope(scope),
-		ExpiresAtSlot:   expiresAtSlot,
-		AuditCiphertext: auditRecord.AuditCiphertext,
-	}, node.ledger.Head().BlockHash)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	signature, err := node.submitTransaction(ctx, transaction, "privacy_authorize_audit",
-		slog.String("authority", authority.PublicKey.String()),
-		slog.String("privacy_state", stateKey.String()),
-		slog.String("auditor", auditorKey.String()),
-	)
-	if err != nil {
-		return rpc.PrivacyTransactionResult{}, err
-	}
-	return rpc.PrivacyTransactionResult{Signature: signature, PrivacyState: stateKey.String(), Commitment: commitmentHash.String()}, nil
 }
 
 func (node *posNode) GetLocalValidatorIdentity(ctx context.Context) (rpc.LocalValidatorIdentityResult, error) {
@@ -1086,11 +642,11 @@ func (node *posNode) RegisterValidatorIdentity(ctx context.Context, stakerSeed s
 	if err != nil {
 		return "", err
 	}
-	validatorKey, err := decodeTransparentPublicKey(validatorAddress, "validator address")
+	validatorKey, err := decodePublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
 	}
-	consensusKey, err := decodeTransparentPublicKey(consensusPublicKey, "consensus public key")
+	consensusKey, err := decodePublicKey(consensusPublicKey, "consensus public key")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode consensus public key: %w", err)
 	}
@@ -1120,7 +676,7 @@ func (node *posNode) Stake(ctx context.Context, stakerSeed string, validatorAddr
 	if err != nil {
 		return "", err
 	}
-	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
+	validatorKey, err := decodePublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
 	}
@@ -1152,7 +708,7 @@ func (node *posNode) Unstake(ctx context.Context, stakerSeed string, validatorAd
 	if err != nil {
 		return "", err
 	}
-	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
+	validatorKey, err := decodePublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
 	}
@@ -1185,7 +741,7 @@ func (node *posNode) SlashValidator(ctx context.Context, stakerSeed string, vali
 	if err != nil {
 		return "", err
 	}
-	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
+	validatorKey, err := decodePublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
 	}
@@ -1205,7 +761,7 @@ func (node *posNode) JailValidator(ctx context.Context, stakerSeed string, valid
 	if err != nil {
 		return "", err
 	}
-	validatorKey, _, err := decodeProtocolPublicKey(validatorAddress, "validator address")
+	validatorKey, err := decodePublicKey(validatorAddress, "validator address")
 	if err != nil {
 		return "", fmt.Errorf("posnode: decode validator address: %w", err)
 	}
@@ -1538,6 +1094,21 @@ func (node *posNode) submitTransaction(ctx context.Context, transaction structur
 		node.clearTransactionTracking(transactionID)
 		return transactionID, nil
 	}
+	containsShieldedInstruction, err := transactionContainsShieldedInstruction(transaction)
+	if err != nil {
+		return "", err
+	}
+	if err := validateTransactionResourceDemand(transaction); err != nil {
+		node.metrics.transactionsDrop.Add(1)
+		return "", err
+	}
+	if containsShieldedInstruction {
+		if err := node.addTransactionWithContext(ctx, transaction); err != nil {
+			return "", err
+		}
+		node.scheduleRPCTransactionBroadcast(ctx, transaction, transactionID)
+		return transactionID, nil
+	}
 	if err := node.ensureHeadBlockhashAvailable(head); err != nil {
 		return "", err
 	}
@@ -1709,34 +1280,6 @@ func (node *posNode) logRPCTransactionSubmit(
 	node.logger.LogAttrs(ctx, slog.LevelInfo, "posnode rpc transaction submitted", logAttrs...)
 }
 
-func (node *posNode) loadPrivacyState(stateKey structure.PublicKey) (structure.PrivacyState, error) {
-	account, found, err := node.ledger.Account(stateKey)
-	if err != nil {
-		return structure.PrivacyState{}, err
-	}
-	if !found {
-		return structure.PrivacyState{Version: structure.PrivacyStateVersion}, nil
-	}
-	if account.Owner != structure.DefaultBuiltinProgramIDs.Privacy {
-		return structure.PrivacyState{}, fmt.Errorf("posnode: privacy state owner mismatch")
-	}
-	return structure.UnmarshalPrivacyStateBinary(account.Data)
-}
-
-func (node *posNode) requirePrivacyStateAccount(stateKey structure.PublicKey) error {
-	account, found, err := node.ledger.Account(stateKey)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("posnode: privacy state account not found")
-	}
-	if account.Owner != structure.DefaultBuiltinProgramIDs.Privacy {
-		return fmt.Errorf("posnode: account is not privacy state")
-	}
-	return nil
-}
-
 func (node *posNode) loadValidatorStakeState(validatorKey structure.PublicKey) (stake.ValidatorState, error) {
 	account, found, err := node.ledger.Account(validatorKey)
 	if err != nil {
@@ -1755,131 +1298,16 @@ func (node *posNode) loadValidatorStakeState(validatorKey structure.PublicKey) (
 	return state, nil
 }
 
-func (node *posNode) decodePrivacyReceiver(stateAddress string, spendAuthority string) (structure.PublicKey, structure.PublicKey, error) {
-	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy receiver state")
-	if err != nil {
-		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: decode receiver state: %w", err)
-	}
-	if err := node.requirePrivacyStateAccount(stateKey); err != nil {
-		return structure.PublicKey{}, structure.PublicKey{}, err
-	}
-	spendAuthorityKey, addressType, err := decodeProtocolPublicKey(spendAuthority, "privacy receiver spend authority")
-	if err != nil {
-		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: decode receiver spend authority: %w", err)
-	}
-	if addressType == protocolAddressPrivacy {
-		return structure.PublicKey{}, structure.PublicKey{}, fmt.Errorf("posnode: receiver spend authority must be a transparent public key")
-	}
-	return stateKey, spendAuthorityKey, nil
-}
-
 func accountTypeName(owner structure.PublicKey) string {
 	switch owner {
-	case structure.DefaultBuiltinProgramIDs.Privacy:
-		return "privacy_state"
 	case structure.DefaultBuiltinProgramIDs.System:
 		return "transparent"
 	case structure.DefaultBuiltinProgramIDs.Stake:
 		return "stake"
+	case structure.DefaultBuiltinProgramIDs.Shielded:
+		return "shielded_pool"
 	default:
 		return "program"
-	}
-}
-
-func (node *posNode) buildPrivacyAuditRecords(auditor string, auditSecret string, expiresAtSlot uint64, scope structure.PrivacyAuditScope, payload structure.PrivacyAuditPayload) ([]structure.PrivacyAuditRecord, error) {
-	auditor = strings.TrimSpace(auditor)
-	auditSecret = strings.TrimSpace(auditSecret)
-	if auditor == "" && auditSecret == "" {
-		return nil, nil
-	}
-	auditorKey, _, err := decodeProtocolPublicKey(auditor, "auditor")
-	if err != nil {
-		return nil, fmt.Errorf("posnode: decode auditor: %w", err)
-	}
-	auditKey := utils.SHA256([]byte(auditSecret))
-	record, err := structure.NewEncryptedPrivacyAuditRecord(auditorKey, scope, expiresAtSlot, auditKey, payload)
-	if err != nil {
-		return nil, err
-	}
-	return []structure.PrivacyAuditRecord{record}, nil
-}
-
-func (node *posNode) buildPrivacyChangeArtifacts(
-	kind string,
-	transactionType structure.PrivacyInstructionType,
-	inputAmount uint64,
-	outputAmount uint64,
-	sourceCommitment structure.Hash,
-	nullifier structure.Hash,
-	auditor string,
-	auditSecret string,
-	expiresAtSlot uint64,
-	auditSlot uint64,
-) (privacyChangeArtifacts, error) {
-	if outputAmount > inputAmount {
-		return privacyChangeArtifacts{}, fmt.Errorf("posnode: privacy amount exceeds source note amount: amount=%d source=%d", outputAmount, inputAmount)
-	}
-	changeAmount := inputAmount - outputAmount
-	if changeAmount == 0 {
-		return privacyChangeArtifacts{}, nil
-	}
-	changeCommitment, err := randomPrivacyHash()
-	if err != nil {
-		return privacyChangeArtifacts{}, err
-	}
-	auditRecords, err := node.buildPrivacyAuditRecords(auditor, auditSecret, expiresAtSlot, structure.PrivacyAuditScopeRegulatory, structure.PrivacyAuditPayload{
-		Version:          structure.PrivacyAuditPayloadVersion,
-		TransactionType:  transactionType,
-		Commitment:       sourceCommitment,
-		Nullifier:        nullifier,
-		OutputCommitment: changeCommitment,
-		Amount:           changeAmount,
-		Slot:             auditSlot,
-	})
-	if err != nil {
-		return privacyChangeArtifacts{}, err
-	}
-	return privacyChangeArtifacts{
-		amount:        changeAmount,
-		commitment:    changeCommitment,
-		encryptedNote: privacyNoteBytes(kind, changeAmount, changeCommitment, nullifier),
-		auditRecords:  auditRecords,
-	}, nil
-}
-
-func (node *posNode) currentAuditSlot() uint64 {
-	head := node.ledger.Head()
-	if head.Slot != 0 {
-		return head.Slot
-	}
-	if head.Height != 0 {
-		return head.Height
-	}
-	return 1
-}
-
-func privacyStateResult(address structure.PublicKey, state structure.PrivacyState) rpc.PrivacyStateResult {
-	notes := make([]rpc.PrivacyNoteResult, len(state.Notes))
-	auditRecordCount := 0
-	for index, note := range state.Notes {
-		notes[index] = privacyNoteResult(note)
-		auditRecordCount += len(note.AuditRecords)
-	}
-	nullifiers := make([]string, len(state.SpentNullifiers))
-	for index, nullifier := range state.SpentNullifiers {
-		nullifiers[index] = nullifier.String()
-	}
-	return rpc.PrivacyStateResult{
-		Address:              address.String(),
-		Version:              state.Version,
-		Notes:                notes,
-		SpentNullifiers:      nullifiers,
-		MerkleRoot:           state.MerkleRoot.String(),
-		PrivacyPoolLamports:  fmt.Sprintf("%d", state.PrivacyPoolLamports),
-		UnspentNoteLiability: fmt.Sprintf("%d", state.UnspentNoteLiability),
-		NoteCount:            len(state.Notes),
-		SpentNullifierCount:  len(state.SpentNullifiers),
-		AuditRecordCount:     auditRecordCount,
 	}
 }
 
@@ -1989,51 +1417,6 @@ func assetKindName(kind vmprogram.AssetKind) string {
 	default:
 		return "unknown"
 	}
-}
-
-func privacyBalanceResult(stateAddress structure.PublicKey, spendAuthority structure.PublicKey, summary blockchain.PrivacyBalanceSummary) rpc.PrivacyBalanceResult {
-	return rpc.PrivacyBalanceResult{
-		StateAddress:       stateAddress.String(),
-		SpendAuthority:     spendAuthority.String(),
-		AvailableLamports:  fmt.Sprintf("%d", summary.AvailableLamports),
-		EscrowLamports:     fmt.Sprintf("%d", summary.EscrowLamports),
-		SpendableNoteCount: summary.SpendableNoteCount,
-		SpentNoteCount:     summary.SpentNoteCount,
-		OwnedNoteCount:     summary.OwnedNoteCount,
-		StateNoteCount:     summary.StateNoteCount,
-	}
-}
-
-func privacyNoteResult(note structure.PrivacyNoteRecord) rpc.PrivacyNoteResult {
-	records := make([]rpc.PrivacyAuditRecordResult, len(note.AuditRecords))
-	for index, record := range note.AuditRecords {
-		records[index] = rpc.PrivacyAuditRecordResult{
-			Auditor:       record.Auditor.String(),
-			Scope:         uint8(record.Scope),
-			ExpiresAtSlot: record.ExpiresAtSlot,
-			Ciphertext:    utils.Base64Encode(record.AuditCiphertext),
-		}
-	}
-	return rpc.PrivacyNoteResult{
-		Commitment:        note.Commitment.String(),
-		SpendAuthority:    note.SpendAuthority.String(),
-		Amount:            note.Amount,
-		Spent:             note.Spent,
-		SpentSlot:         note.SpentSlot,
-		SpendNullifier:    privacyNullifierString(note),
-		AuditRecords:      records,
-		AuditRecordCount:  len(note.AuditRecords),
-		EncryptedNoteSize: len(note.EncryptedNote),
-		VMVersion:         note.VMVersion,
-		Confidential:      note.Confidential != nil,
-	}
-}
-
-func privacyNullifierString(note structure.PrivacyNoteRecord) string {
-	if note.SpendNullifier.IsZero() {
-		return ""
-	}
-	return note.SpendNullifier.String()
 }
 
 func buildPeerNetworkResult(
@@ -2146,135 +1529,16 @@ func stringifyProtocols(protocols []utils.MultiAddressProtocol) []string {
 	return values
 }
 
-func privacyNoteAmount(state structure.PrivacyState, commitment structure.Hash) (uint64, error) {
-	note, err := privacySpendNote(state, commitment)
-	if err != nil {
-		return 0, err
-	}
-	return note.Amount, nil
-}
-
-func privacySpendNote(state structure.PrivacyState, commitment structure.Hash) (structure.PrivacyNoteRecord, error) {
-	for _, note := range state.Notes {
-		if note.Commitment == commitment && !note.Spent {
-			return note, nil
-		}
-	}
-	return structure.PrivacyNoteRecord{}, fmt.Errorf("posnode: unspent privacy note not found")
-}
-
-func privacySpendResult(
-	signature string,
-	privacyState structure.PublicKey,
-	commitment structure.Hash,
-	nullifier structure.Hash,
-	outputCommitment structure.Hash,
-	changeOutput privacyChangeArtifacts,
-) rpc.PrivacyTransactionResult {
-	result := rpc.PrivacyTransactionResult{
-		Signature:    signature,
-		PrivacyState: privacyState.String(),
-		Commitment:   commitment.String(),
-		Nullifier:    nullifier.String(),
-	}
-	if !outputCommitment.IsZero() {
-		result.OutputCommitment = outputCommitment.String()
-	}
-	if changeOutput.amount > 0 {
-		result.ChangeCommitment = changeOutput.commitment.String()
-		result.ChangeLamports = fmt.Sprintf("%d", changeOutput.amount)
-	}
-	return result
-}
-
-func parsePrivacySpendInputs(authoritySeed string, stateAddress string, commitment string, nullifier string) (structure.SolanaKeyPair, structure.PublicKey, structure.Hash, structure.Hash, error) {
-	authority, err := keyPairFromSeed(authoritySeed)
-	if err != nil {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, structure.Hash{}, structure.Hash{}, err
-	}
-	stateKey, _, err := decodeProtocolPublicKey(stateAddress, "privacy state")
-	if err != nil {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, structure.Hash{}, structure.Hash{}, fmt.Errorf("posnode: decode privacy state: %w", err)
-	}
-	commitmentHash, err := structure.HashFromBase58(strings.TrimSpace(commitment))
-	if err != nil {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, structure.Hash{}, structure.Hash{}, fmt.Errorf("posnode: decode privacy commitment: %w", err)
-	}
-	nullifierHash, err := structure.HashFromBase58(strings.TrimSpace(nullifier))
-	if err != nil {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, structure.Hash{}, structure.Hash{}, fmt.Errorf("posnode: decode privacy nullifier: %w", err)
-	}
-	return authority, stateKey, commitmentHash, nullifierHash, nil
-}
-
-func decodeProtocolPublicKey(address string, field string) (structure.PublicKey, byte, error) {
+func decodePublicKey(address string, field string) (structure.PublicKey, error) {
 	trimmedAddress := strings.TrimSpace(address)
 	if trimmedAddress == "" {
-		return structure.PublicKey{}, 0, fmt.Errorf("%s is empty", field)
+		return structure.PublicKey{}, fmt.Errorf("%s is empty", field)
 	}
-	prefix, encodedBody, hasPrefix := protocolAddressPrefix(trimmedAddress)
-	decodedBody, err := utils.Base58Decode(encodedBody)
+	publicKey, err := structure.PublicKeyFromBase58(trimmedAddress)
 	if err != nil {
-		return structure.PublicKey{}, 0, err
+		return structure.PublicKey{}, fmt.Errorf("%s is invalid: %w", field, err)
 	}
-	if len(decodedBody) == structure.PublicKeySize && !hasPrefix {
-		key, err := structure.NewPublicKey(decodedBody)
-		return key, 0, err
-	}
-	if len(decodedBody) != protocolAddressSize {
-		return structure.PublicKey{}, 0, fmt.Errorf("%s payload length = %d, want %d or %d", field, len(decodedBody), structure.PublicKeySize, protocolAddressSize)
-	}
-	addressType := decodedBody[0]
-	if addressType != protocolAddressTransparent && addressType != protocolAddressPrivacy {
-		return structure.PublicKey{}, 0, fmt.Errorf("%s address type byte %d is unsupported", field, addressType)
-	}
-	if hasPrefix && prefix != addressType {
-		return structure.PublicKey{}, 0, fmt.Errorf("%s prefix does not match payload type", field)
-	}
-	key, err := structure.NewPublicKey(decodedBody[1:])
-	return key, addressType, err
-}
-
-func decodeTransparentPublicKey(address string, field string) (structure.PublicKey, error) {
-	key, addressType, err := decodeProtocolPublicKey(address, field)
-	if err != nil {
-		return structure.PublicKey{}, err
-	}
-	if addressType == protocolAddressPrivacy {
-		return structure.PublicKey{}, fmt.Errorf("%s must be a transparent public key", field)
-	}
-	return key, nil
-}
-
-func protocolAddressPrefix(address string) (byte, string, bool) {
-	if strings.HasPrefix(address, "t") {
-		return protocolAddressTransparent, address[1:], true
-	}
-	if strings.HasPrefix(address, "z") {
-		return protocolAddressPrivacy, address[1:], true
-	}
-	return 0, address, false
-}
-
-func randomPrivacyHashString() string {
-	hash, err := randomPrivacyHash()
-	if err != nil {
-		return structure.Hash{}.String()
-	}
-	return hash.String()
-}
-
-func randomPrivacyHash() (structure.Hash, error) {
-	value := make([]byte, structure.HashSize)
-	if _, err := rand.Read(value); err != nil {
-		return structure.Hash{}, fmt.Errorf("posnode: generate privacy hash: %w", err)
-	}
-	return structure.NewHash(value)
-}
-
-func privacyNoteBytes(kind string, amount uint64, commitment structure.Hash, nullifier structure.Hash) []byte {
-	note := fmt.Sprintf("kind=%s;amount=%d;commitment=%s;nullifier=%s", kind, amount, commitment.String(), nullifier.String())
-	return []byte(note)
+	return publicKey, nil
 }
 
 func keyPairFromSeed(seedText string) (structure.SolanaKeyPair, error) {
@@ -2362,6 +1626,9 @@ func buildTransactionDetailResult(
 	}
 	result.AccountAddresses = transactionAccountAddresses(transaction.Accounts)
 	result.WritableAddresses = transactionWritableAddresses(transaction.Accounts)
+	if transactionBytes, err := transaction.MarshalBinary(); err == nil {
+		result.TransactionBase64 = base64.StdEncoding.EncodeToString(transactionBytes)
+	}
 	return result
 }
 

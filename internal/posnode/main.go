@@ -19,7 +19,7 @@ import (
 	"solana_golang/database"
 	"solana_golang/p2p"
 	bpfloader "solana_golang/programs/bpfloader"
-	"solana_golang/programs/privacy"
+	shieldedprogram "solana_golang/programs/shielded"
 	"solana_golang/programs/stake"
 	"solana_golang/programs/system"
 	tokenprogram "solana_golang/programs/token"
@@ -39,55 +39,61 @@ const (
 )
 
 type posNode struct {
-	mutex                    sync.Mutex
-	config                   nodeConfig
-	logger                   *slog.Logger
-	startedAt                time.Time
-	runtimeContext           context.Context
-	host                     *p2p.Host
-	rpcServer                *rpc.Server
-	bootstrapCoordinator     *bootstrapCoordinator
-	db                       database.Database
-	ledger                   *blockchain.Ledger
-	executor                 runtime.FixedExecutor
-	peerKeyPair              rawKeyPair
-	stakerAddress            structure.PublicKey
-	stakerKeyPair            structure.SolanaKeyPair
-	validatorKeyPair         structure.SolanaKeyPair
-	consensusKeyPair         structure.SolanaKeyPair
-	blsKeyPair               consensus.BLSKeyPair
-	blockhashQueue           structure.BlockhashQueue
-	mempool                  []structure.Transaction
-	seenTransactions         map[string]struct{}
-	rejectedTransactions     map[string]rejectedTransactionStatus
-	seenProposals            map[string]struct{}
-	seenQCs                  map[string]uint64
-	pendingEvidence          []consensus.SlashingEvidence
-	seenEvidence             map[string]struct{}
-	proposalChoices          map[string]consensus.BlockProposal
-	signedVoteChoices        map[string]consensus.SignedVote
-	voteEnvelopeChoices      map[string]voteEnvelope
-	orphanProposals          map[structure.Hash][]consensus.BlockProposal
-	epochSnapshot            consensus.EpochSnapshot
-	leaderSchedule           consensus.LeaderSchedule
-	voteCollector            *consensus.VoteCollector
-	voteCollectors           map[uint64]*consensus.VoteCollector
-	epochSnapshots           map[uint64]consensus.EpochSnapshot
-	leaderSchedules          map[uint64]consensus.LeaderSchedule
-	metrics                  nodeMetrics
-	lastProducedSlot         uint64
-	lastVotedSlot            uint64
-	livenessGate             livenessGateJSON
-	registeredSelf           bool
-	knownPeerIDs             []string
-	bootstrapManifestApplied bool
-	validatorPairing         *validatorPairingSession
-	pairingActivationRunning bool
-	nextRPCForwardPeer       atomic.Uint64
-	rpcForwardFanoutLimiter  chan struct{}
-	workerGroup              sync.WaitGroup
-	doubleVoteInjected       bool
-	doubleProposalInjected   bool
+	mutex                            sync.Mutex
+	shieldedPreflightMutex           sync.Mutex
+	config                           nodeConfig
+	logger                           *slog.Logger
+	startedAt                        time.Time
+	runtimeContext                   context.Context
+	host                             *p2p.Host
+	rpcServer                        *rpc.Server
+	bootstrapCoordinator             *bootstrapCoordinator
+	db                               database.Database
+	ledger                           *blockchain.Ledger
+	executor                         runtime.FixedExecutor
+	peerKeyPair                      rawKeyPair
+	stakerAddress                    structure.PublicKey
+	stakerKeyPair                    structure.SolanaKeyPair
+	validatorKeyPair                 structure.SolanaKeyPair
+	consensusKeyPair                 structure.SolanaKeyPair
+	blsKeyPair                       consensus.BLSKeyPair
+	blockhashQueue                   structure.BlockhashQueue
+	mempool                          []structure.Transaction
+	mempoolShieldedNullifiers        map[structure.Hash]string
+	mempoolShieldedAuthorizations    map[structure.Hash]string
+	mempoolShieldedTransparentDebits map[structure.PublicKey]uint64
+	mempoolShieldedDebitReservations map[string]map[structure.PublicKey]uint64
+	shieldedPreflightFailures        map[structure.Hash]time.Time
+	seenTransactions                 map[string]struct{}
+	rejectedTransactions             map[string]rejectedTransactionStatus
+	seenProposals                    map[string]struct{}
+	seenQCs                          map[string]uint64
+	pendingEvidence                  []consensus.SlashingEvidence
+	seenEvidence                     map[string]struct{}
+	proposalChoices                  map[string]consensus.BlockProposal
+	signedVoteChoices                map[string]consensus.SignedVote
+	voteEnvelopeChoices              map[string]voteEnvelope
+	orphanProposals                  map[structure.Hash][]consensus.BlockProposal
+	epochSnapshot                    consensus.EpochSnapshot
+	leaderSchedule                   consensus.LeaderSchedule
+	voteCollector                    *consensus.VoteCollector
+	voteCollectors                   map[uint64]*consensus.VoteCollector
+	epochSnapshots                   map[uint64]consensus.EpochSnapshot
+	leaderSchedules                  map[uint64]consensus.LeaderSchedule
+	metrics                          nodeMetrics
+	lastProducedSlot                 uint64
+	lastVotedSlot                    uint64
+	livenessGate                     livenessGateJSON
+	registeredSelf                   bool
+	knownPeerIDs                     []string
+	bootstrapManifestApplied         bool
+	validatorPairing                 *validatorPairingSession
+	pairingActivationRunning         bool
+	nextRPCForwardPeer               atomic.Uint64
+	rpcForwardFanoutLimiter          chan struct{}
+	workerGroup                      sync.WaitGroup
+	doubleVoteInjected               bool
+	doubleProposalInjected           bool
 }
 
 type rawKeyPair struct {
@@ -173,29 +179,34 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		return nil, err
 	}
 	node := &posNode{
-		config:                  config,
-		logger:                  logger,
-		startedAt:               time.Now(),
-		executor:                executor,
-		peerKeyPair:             peerKeyPair,
-		stakerAddress:           localKeys.stakerAddress,
-		stakerKeyPair:           localKeys.staker,
-		validatorKeyPair:        localKeys.validator,
-		consensusKeyPair:        localKeys.consensus,
-		blsKeyPair:              localKeys.bls,
-		seenTransactions:        make(map[string]struct{}),
-		rejectedTransactions:    make(map[string]rejectedTransactionStatus),
-		seenProposals:           make(map[string]struct{}),
-		seenQCs:                 make(map[string]uint64),
-		seenEvidence:            make(map[string]struct{}),
-		proposalChoices:         make(map[string]consensus.BlockProposal),
-		signedVoteChoices:       make(map[string]consensus.SignedVote),
-		voteEnvelopeChoices:     make(map[string]voteEnvelope),
-		orphanProposals:         make(map[structure.Hash][]consensus.BlockProposal),
-		voteCollectors:          make(map[uint64]*consensus.VoteCollector),
-		epochSnapshots:          make(map[uint64]consensus.EpochSnapshot),
-		leaderSchedules:         make(map[uint64]consensus.LeaderSchedule),
-		rpcForwardFanoutLimiter: make(chan struct{}, transactionFanoutWorkers),
+		config:                           config,
+		logger:                           logger,
+		startedAt:                        time.Now(),
+		executor:                         executor,
+		peerKeyPair:                      peerKeyPair,
+		stakerAddress:                    localKeys.stakerAddress,
+		stakerKeyPair:                    localKeys.staker,
+		validatorKeyPair:                 localKeys.validator,
+		consensusKeyPair:                 localKeys.consensus,
+		blsKeyPair:                       localKeys.bls,
+		seenTransactions:                 make(map[string]struct{}),
+		mempoolShieldedNullifiers:        make(map[structure.Hash]string),
+		mempoolShieldedAuthorizations:    make(map[structure.Hash]string),
+		mempoolShieldedTransparentDebits: make(map[structure.PublicKey]uint64),
+		mempoolShieldedDebitReservations: make(map[string]map[structure.PublicKey]uint64),
+		shieldedPreflightFailures:        make(map[structure.Hash]time.Time),
+		rejectedTransactions:             make(map[string]rejectedTransactionStatus),
+		seenProposals:                    make(map[string]struct{}),
+		seenQCs:                          make(map[string]uint64),
+		seenEvidence:                     make(map[string]struct{}),
+		proposalChoices:                  make(map[string]consensus.BlockProposal),
+		signedVoteChoices:                make(map[string]consensus.SignedVote),
+		voteEnvelopeChoices:              make(map[string]voteEnvelope),
+		orphanProposals:                  make(map[structure.Hash][]consensus.BlockProposal),
+		voteCollectors:                   make(map[uint64]*consensus.VoteCollector),
+		epochSnapshots:                   make(map[uint64]consensus.EpochSnapshot),
+		leaderSchedules:                  make(map[uint64]consensus.LeaderSchedule),
+		rpcForwardFanoutLimiter:          make(chan struct{}, transactionFanoutWorkers),
 	}
 	if config.BootstrapCoordinator.Enabled {
 		coordinator, err := newBootstrapCoordinator(config, logger)
@@ -276,7 +287,6 @@ func (node *posNode) start(ctx context.Context) error {
 		slog.Int64("genesis_start_unix_millis", node.config.GenesisStartMs),
 		slog.Uint64("finality_depth", node.config.FinalityDepth),
 		slog.Bool("p2p_insecure_allowed", node.config.allowInsecureP2P()),
-		slog.String("privacy_execution_mode", string(node.config.PrivacyExecutionMode)),
 		slog.String("program_execution_policy", runtime.NormalizeProgramExecutionPolicy(node.executor.ProgramExecutionPolicy).Fingerprint()),
 		slog.Bool("state_recovery_enabled", !node.config.DisableStateRecovery),
 		slog.String("data_root_path", node.config.DataRootPath),
@@ -672,27 +682,22 @@ type programRegistration struct {
 }
 
 func newRuntimeExecutor(logger *slog.Logger) (runtime.FixedExecutor, error) {
-	return newRuntimeExecutorWithPrivacyMode(runtime.PrivacyExecutionModeFixed, logger)
-}
-
-func newRuntimeExecutorWithPrivacyMode(privacyExecutionMode runtime.PrivacyExecutionMode, logger *slog.Logger) (runtime.FixedExecutor, error) {
-	return newRuntimeExecutorWithPolicy(privacyExecutionMode, bpfloader.DeploymentPolicy{}, logger)
+	return newRuntimeExecutorWithPolicy(bpfloader.DeploymentPolicy{}, logger)
 }
 
 func newRuntimeExecutorWithConfig(config nodeConfig, logger *slog.Logger) (runtime.FixedExecutor, error) {
-	return newRuntimeExecutorWithPolicy(config.PrivacyExecutionMode, deploymentPolicyFromConfig(config.ContractDeploymentPolicy), logger)
+	return newRuntimeExecutorWithPolicy(deploymentPolicyFromConfig(config.ContractDeploymentPolicy), logger)
 }
 
-func newRuntimeExecutorWithPolicy(privacyExecutionMode runtime.PrivacyExecutionMode, deploymentPolicy bpfloader.DeploymentPolicy, logger *slog.Logger) (runtime.FixedExecutor, error) {
+func newRuntimeExecutorWithPolicy(deploymentPolicy bpfloader.DeploymentPolicy, logger *slog.Logger) (runtime.FixedExecutor, error) {
 	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
 	executor.Logger = logger
-	executor.PrivacyExecutionMode = privacyExecutionMode
-	programExecutionPolicy, err := runtime.NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, privacyExecutionMode)
+	programExecutionPolicy, err := runtime.NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs)
 	if err != nil {
 		return runtime.FixedExecutor{}, fmt.Errorf("posnode: program execution policy: %w", err)
 	}
 	executor.ProgramExecutionPolicy = programExecutionPolicy
-	if err := registerProgramsWithPrivacyModeAndLoaderPolicy(&executor, privacyExecutionMode, deploymentPolicy); err != nil {
+	if err := registerProgramsWithLoaderPolicy(&executor, deploymentPolicy); err != nil {
 		return runtime.FixedExecutor{}, err
 	}
 	virtualMachineProgram := vmprogram.NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
@@ -704,17 +709,13 @@ func newRuntimeExecutorWithPolicy(privacyExecutionMode runtime.PrivacyExecutionM
 
 // registerPrograms 注册链上程序处理器 + 对齐 p2p 协议注册模式降低新增程序改动面。
 func registerPrograms(executor *runtime.FixedExecutor) error {
-	return registerProgramsWithPrivacyMode(executor, runtime.PrivacyExecutionModeFixed)
+	return registerProgramsWithLoaderPolicy(executor, bpfloader.DeploymentPolicy{})
 }
 
-func registerProgramsWithPrivacyMode(executor *runtime.FixedExecutor, privacyExecutionMode runtime.PrivacyExecutionMode) error {
-	return registerProgramsWithPrivacyModeAndLoaderPolicy(executor, privacyExecutionMode, bpfloader.DeploymentPolicy{})
-}
-
-func registerProgramsWithPrivacyModeAndLoaderPolicy(executor *runtime.FixedExecutor, privacyExecutionMode runtime.PrivacyExecutionMode, deploymentPolicy bpfloader.DeploymentPolicy) error {
-	privacyHandler, err := privacyProgramHandler(privacyExecutionMode)
+func registerProgramsWithLoaderPolicy(executor *runtime.FixedExecutor, deploymentPolicy bpfloader.DeploymentPolicy) error {
+	shieldedProgram, err := shieldedprogram.NewDefaultProgram()
 	if err != nil {
-		return err
+		return fmt.Errorf("posnode: create shielded program: %w", err)
 	}
 	registrations := []programRegistration{
 		{
@@ -730,8 +731,8 @@ func registerProgramsWithPrivacyModeAndLoaderPolicy(executor *runtime.FixedExecu
 			handler: stake.NewProgram(structure.DefaultBuiltinProgramIDs.Stake).Execute,
 		},
 		{
-			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Privacy, Name: "privacy"},
-			handler: privacyHandler,
+			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.Shielded, Name: "shielded"},
+			handler: shieldedProgram.Execute,
 		},
 		{
 			spec:    runtime.ProgramSpec{ID: structure.DefaultBuiltinProgramIDs.BPFLoader, Name: "bpf_loader"},
@@ -758,21 +759,6 @@ func deploymentPolicyFromConfig(config contractDeploymentPolicyConfig) bpfloader
 		policy.AllowUpgradeableContracts = *config.AllowUpgradeableContracts
 	}
 	return policy.Normalize()
-}
-
-func privacyProgramHandler(privacyExecutionMode runtime.PrivacyExecutionMode) (runtime.ProgramHandler, error) {
-	normalizedMode, err := runtime.NormalizePrivacyExecutionMode(privacyExecutionMode)
-	if err != nil {
-		return nil, fmt.Errorf("posnode: privacy execution mode: %w", err)
-	}
-	switch normalizedMode {
-	case runtime.PrivacyExecutionModeFixed:
-		return privacy.NewProgram(structure.DefaultBuiltinProgramIDs.Privacy).Execute, nil
-	case runtime.PrivacyExecutionModeVMSyscall:
-		return vmprogram.NewPrivacyBridgeProgram(structure.DefaultBuiltinProgramIDs.Privacy, structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}).Execute, nil
-	default:
-		return nil, fmt.Errorf("posnode: unsupported privacy execution mode %s", normalizedMode)
-	}
 }
 
 func (node *posNode) registerProtocols() error {
@@ -1513,7 +1499,7 @@ func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.M
 		)
 		return nil
 	}
-	if err := node.addTransaction(transaction); err != nil {
+	if err := node.addTransactionWithContext(ctx, transaction); err != nil {
 		return err
 	}
 	node.logger.Info("posnode transaction received",
@@ -2322,7 +2308,20 @@ func validatorEffectiveStakeForEpoch(stakeState stake.ValidatorState, validatorI
 }
 
 func (node *posNode) addTransaction(transaction structure.Transaction) error {
+	return node.addTransactionWithContext(context.Background(), transaction)
+}
+
+func (node *posNode) addTransactionWithContext(ctx context.Context, transaction structure.Transaction) error {
 	if err := transaction.Validate(); err != nil {
+		return err
+	}
+	containsShieldedInstruction, err := transactionContainsShieldedInstruction(transaction)
+	if err != nil {
+		node.metrics.transactionsDrop.Add(1)
+		return err
+	}
+	if err := validateTransactionResourceDemand(transaction); err != nil {
+		node.metrics.transactionsDrop.Add(1)
 		return err
 	}
 	signatureValid, err := transaction.HasValidSignatures()
@@ -2339,6 +2338,14 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 		node.metrics.transactionsDrop.Add(1)
 		return err
 	}
+	shieldedWireHash := structure.Hash{}
+	if containsShieldedInstruction {
+		shieldedWireHash, err = transaction.Hash()
+		if err != nil {
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: hash shielded transaction wire bytes: %w", err)
+		}
+	}
 	transactionID, err := transaction.TxIDString()
 	if err != nil {
 		return err
@@ -2354,6 +2361,57 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 		)
 		return nil
 	}
+	if transaction.SubmitTime == 0 {
+		transaction.SubmitTime = time.Now().UnixMilli()
+	}
+	if containsShieldedInstruction {
+		node.mutex.Lock()
+		if node.shieldedPreflightFailureCachedLocked(shieldedWireHash, time.Now()) {
+			node.mutex.Unlock()
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: identical shielded transaction recently failed preflight")
+		}
+		if _, exists := node.seenTransactions[transactionID]; exists {
+			if _, inMempool := node.mempoolTransactionByIDLocked(transactionID); inMempool {
+				node.mutex.Unlock()
+				return nil
+			}
+			delete(node.seenTransactions, transactionID)
+		}
+		if len(node.mempool) >= node.config.MempoolMaxTransactions {
+			node.mutex.Unlock()
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: mempool is full")
+		}
+		if transaction.IsExpiredWithTTL(time.Now().UnixMilli(), node.config.MempoolTransactionTTLMillis) {
+			node.mutex.Unlock()
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: transaction expired")
+		}
+		currentSlot := node.transactionValidationSlot()
+		if !node.transactionRecentBlockhashValidLocked(transaction, currentSlot) {
+			node.mutex.Unlock()
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: recent blockhash is not valid")
+		}
+		if err := node.checkMempoolShieldedResourcesLocked(transactionID, transaction); err != nil {
+			node.mutex.Unlock()
+			node.metrics.transactionsDrop.Add(1)
+			return err
+		}
+		node.mutex.Unlock()
+
+		if err := node.preflightShieldedMempoolTransaction(ctx, transaction); err != nil {
+			var rejection shieldedPreflightRejection
+			if errors.As(err, &rejection) {
+				node.mutex.Lock()
+				node.recordShieldedPreflightFailureLocked(shieldedWireHash, time.Now())
+				node.mutex.Unlock()
+			}
+			node.metrics.transactionsDrop.Add(1)
+			return err
+		}
+	}
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 	if _, exists := node.seenTransactions[transactionID]; exists {
@@ -2366,9 +2424,6 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 		node.metrics.transactionsDrop.Add(1)
 		return fmt.Errorf("posnode: mempool is full")
 	}
-	if transaction.SubmitTime == 0 {
-		transaction.SubmitTime = time.Now().UnixMilli()
-	}
 	if transaction.IsExpiredWithTTL(time.Now().UnixMilli(), node.config.MempoolTransactionTTLMillis) {
 		node.metrics.transactionsDrop.Add(1)
 		return fmt.Errorf("posnode: transaction expired")
@@ -2378,8 +2433,22 @@ func (node *posNode) addTransaction(transaction structure.Transaction) error {
 		node.metrics.transactionsDrop.Add(1)
 		return fmt.Errorf("posnode: recent blockhash is not valid")
 	}
+	if containsShieldedInstruction {
+		if node.shieldedPreflightFailureCachedLocked(shieldedWireHash, time.Now()) {
+			node.metrics.transactionsDrop.Add(1)
+			return fmt.Errorf("posnode: identical shielded transaction recently failed preflight")
+		}
+		if err := node.reserveMempoolShieldedResourcesLocked(transactionID, transaction); err != nil {
+			node.metrics.transactionsDrop.Add(1)
+			return err
+		}
+	}
 	if err := node.persistMempoolTransaction(transactionID, transaction); err != nil {
+		node.releaseMempoolShieldedResourcesLocked(transactionID)
 		return err
+	}
+	if containsShieldedInstruction {
+		delete(node.shieldedPreflightFailures, shieldedWireHash)
 	}
 	delete(node.rejectedTransactions, transactionID)
 	node.seenTransactions[transactionID] = struct{}{}

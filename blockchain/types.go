@@ -12,7 +12,6 @@ type GenesisConfig struct {
 	ChainID                string
 	InitialSupplyLamports  uint64
 	TreasuryAddress        structure.PublicKey
-	PrivacyExecutionMode   string
 	ProgramExecutionPolicy string
 	FundedAccounts         []GenesisAccount
 	InitialValidators      []GenesisValidator

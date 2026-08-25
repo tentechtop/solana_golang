@@ -127,7 +127,7 @@
     指令：RegisterValidator、Stake、Unstake、WithdrawUnstaked、ExitValidator。
 
 17. cmd/posnode/wire.go
-    组合层，负责创建 runtime executor，并显式注册 stake、privacy、token 等具体 programs。
+    组合层，负责创建 runtime executor，并显式注册 stake、shielded、token 等具体 programs。
 
 18. cmd/posnode
     启动一个可配置验证者节点，跑本地多节点集成测试。
@@ -574,7 +574,7 @@ MVP 不做复杂投票选举，使用 active stake 排名：
 包边界：
  - structure：定义数据结构、编解码和无副作用方法，例如 Transaction、Instruction、Account、BlockHeader、Hash、ValidateBasic、MarshalBinary。
  - runtime：定义执行接口、执行上下文、执行结果、固定指令调度器、Program 接口、未来 VM 适配器。
- - programs：放具体业务程序，例如 stake、privacy、token；这些程序实现 runtime.Program 接口。
+ - programs：放具体业务程序，例如 stake、shielded、token；这些程序实现 runtime.Program 接口。
  - consensus：只调用 runtime.TransactionExecutor，不直接调用 programs，也不修改 structure 内部状态。
 
 Go 极简落地原则：
@@ -588,7 +588,7 @@ Go 极简落地原则：
 依赖方向铁律：
  - 只能上层 import 下层，禁止下层反向 import 上层。
  - structure 是基础结构层，只能依赖标准库和极少量无业务 utils，不允许 import runtime、programs、consensus、p2p、storage。
- - runtime 可以 import structure、state、storage 接口、utils，但不允许 import programs/stake、programs/privacy、programs/token 等具体业务包。
+ - runtime 可以 import structure、state、storage 接口、utils，但不允许 import programs/stake、programs/shielded、programs/token 等具体业务包。
  - programs 可以 import runtime、structure、state、zk、utils，但不允许 import consensus、p2p、cmd。
  - consensus 可以依赖 structure 和 runtime.TransactionExecutor 接口，但不直接 import 具体 programs。
  - p2p 只提供网络能力和消息传输，不 import consensus、runtime、programs；共识层需要网络时使用接口，由上层注入 p2p 适配器。

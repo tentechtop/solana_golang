@@ -50,13 +50,6 @@ const (
 
 type CircuitID uint16
 
-const (
-	CircuitPrivacyDeposit CircuitID = iota + 1
-	CircuitPrivacyWithdraw
-	CircuitPrivacyTransfer
-	CircuitPrivacyAudit
-)
-
 // Digest 表示固定长度摘要 + 用数组避免切片长度不确定。
 type Digest [HashSize]byte
 
@@ -144,19 +137,6 @@ type VerifierRegistry struct {
 // RejectVerifier 默认拒绝 verifier + 防止未接入真实 ZK 时误验通过。
 type RejectVerifier struct {
 	ProofSystem ProofSystem
-}
-
-// RecommendedPrivacyProofTarget 返回隐私交易推荐目标 + 当前优先链上验证速度和成熟度。
-func RecommendedPrivacyProofTarget() ProofTarget {
-	return ProofTarget{
-		System:                  ProofSystemGroth16BN254,
-		Curve:                   CurveBN254,
-		Version:                 ProtocolVersion,
-		MaxProofBytes:           DefaultMaxProofBytes,
-		MaxPublicInputBytes:     MaxPublicInputBytes,
-		TrustedSetupRequired:    true,
-		PerCircuitSetupRequired: true,
-	}
 }
 
 // NewDigest 创建摘要对象 + 校验输入必须为固定 32 字节。
@@ -398,12 +378,9 @@ func (curve CurveID) IsSupported() bool {
 	return curve == CurveBN254 || curve == CurveBLS12381 || curve == CurveP256
 }
 
-// IsSupported 判断电路是否支持 + 固定枚举避免未知电路进入执行层。
+// IsSupported 判断电路标识是否有效 + 具体电路白名单由 verifier 实现负责。
 func (circuit CircuitID) IsSupported() bool {
-	return circuit == CircuitPrivacyDeposit ||
-		circuit == CircuitPrivacyWithdraw ||
-		circuit == CircuitPrivacyTransfer ||
-		circuit == CircuitPrivacyAudit
+	return circuit != 0
 }
 
 func failedVerification(envelope ProofEnvelope, message string) VerificationResult {

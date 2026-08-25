@@ -18,7 +18,7 @@ func ExecuteInstructionSandbox(
 ) (uint64, error) {
 	sandboxAccounts := cloneAccountMap(accounts)
 	computeUnitsUsed := uint64(0)
-	if err := registry.Execute(InstructionContext{
+	executionErr := registry.Execute(InstructionContext{
 		InstructionIndex: instructionIndex,
 		Instruction:      instruction,
 		Message:          message,
@@ -27,17 +27,28 @@ func ExecuteInstructionSandbox(
 		CurrentEpoch:     input.CurrentEpoch,
 		RentConfig:       input.RentConfig,
 		ComputeBudget:    input.ComputeBudget,
+		TransactionFee:   input.TransactionFee,
+		FeeSource:        input.FeeSource,
 		BuiltinPrograms:  input.BuiltinPrograms,
 		Logger:           input.Logger,
 		ComputeUnitsUsed: &computeUnitsUsed,
-	}); err != nil {
-		return normalizeInstructionComputeUnits(computeUnitsUsed), err
+	})
+	instructionComputeUnits := normalizeInstructionComputeUnits(computeUnitsUsed)
+	if instructionComputeUnits > input.ComputeBudget.MaxComputeUnits {
+		return instructionComputeUnits, fmt.Errorf(
+			"runtime: instruction compute units %d exceed remaining budget %d",
+			instructionComputeUnits,
+			input.ComputeBudget.MaxComputeUnits,
+		)
+	}
+	if executionErr != nil {
+		return instructionComputeUnits, executionErr
 	}
 	if err := ValidateInstructionWrites(instruction, message, accounts, sandboxAccounts, input.BuiltinPrograms); err != nil {
-		return normalizeInstructionComputeUnits(computeUnitsUsed), err
+		return instructionComputeUnits, err
 	}
 	replaceAccountMap(accounts, sandboxAccounts)
-	return normalizeInstructionComputeUnits(computeUnitsUsed), nil
+	return instructionComputeUnits, nil
 }
 
 // ValidateInstructionWrites 校验指令写集 + runtime 统一拦截未声明 writable 的账户变更。

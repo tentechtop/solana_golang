@@ -7,36 +7,21 @@ import (
 	"solana_golang/structure"
 )
 
-func TestDefaultProgramExecutionPolicySeparatesPrivacyModes(t *testing.T) {
-	fixedPolicy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, PrivacyExecutionModeFixed)
+func TestDefaultProgramExecutionPolicyIncludesShieldedFixedProgram(t *testing.T) {
+	policy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs)
 	if err != nil {
-		t.Fatalf("NewDefaultProgramExecutionPolicy(fixed) error = %v", err)
+		t.Fatalf("NewDefaultProgramExecutionPolicy() error = %v", err)
 	}
-	if err := fixedPolicy.Validate(); err != nil {
-		t.Fatalf("fixed policy Validate() error = %v", err)
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("policy Validate() error = %v", err)
 	}
-	fixedFingerprint := fixedPolicy.Fingerprint()
-	privacyEntry := "privacy:" + structure.DefaultBuiltinProgramIDs.Privacy.String()
-	if !strings.Contains(fixedFingerprint, "fixed_builtin=") || !strings.Contains(fixedFingerprint, privacyEntry) {
-		t.Fatalf("fixed fingerprint = %q, want privacy fixed builtin", fixedFingerprint)
+	fingerprint := policy.Fingerprint()
+	shieldedEntry := "shielded:" + structure.DefaultBuiltinProgramIDs.Shielded.String()
+	if !strings.Contains(fingerprint, "fixed_builtin=") || !strings.Contains(fingerprint, shieldedEntry) {
+		t.Fatalf("fingerprint = %q, want shielded fixed builtin", fingerprint)
 	}
-	if strings.Contains(fixedFingerprint, "vm_bridge="+privacyEntry) {
-		t.Fatalf("fixed fingerprint = %q, privacy should not be vm bridge", fixedFingerprint)
-	}
-
-	virtualMachinePolicy, err := NewDefaultProgramExecutionPolicy(structure.DefaultBuiltinProgramIDs, PrivacyExecutionModeVMSyscall)
-	if err != nil {
-		t.Fatalf("NewDefaultProgramExecutionPolicy(vm_syscall) error = %v", err)
-	}
-	if err := virtualMachinePolicy.Validate(); err != nil {
-		t.Fatalf("vm policy Validate() error = %v", err)
-	}
-	virtualMachineFingerprint := virtualMachinePolicy.Fingerprint()
-	if !strings.Contains(virtualMachineFingerprint, "vm_bridge="+privacyEntry) {
-		t.Fatalf("vm fingerprint = %q, want privacy vm bridge", virtualMachineFingerprint)
-	}
-	if fixedFingerprint == virtualMachineFingerprint {
-		t.Fatalf("fingerprints both %q, want mode-specific policies", fixedFingerprint)
+	if strings.Contains(fingerprint, "vm_bridge="+shieldedEntry) {
+		t.Fatalf("fingerprint = %q, shielded program should not be a VM bridge", fingerprint)
 	}
 }
 
@@ -60,16 +45,16 @@ func TestProgramExecutionPolicyFingerprintIsStable(t *testing.T) {
 }
 
 func TestProgramExecutionPolicyRejectsFixedBridgeOverlap(t *testing.T) {
-	programID := structure.DefaultBuiltinProgramIDs.Privacy.String()
+	programID := structure.DefaultBuiltinProgramIDs.Shielded.String()
 	policy := ProgramExecutionPolicy{
 		FixedBuiltinPrograms: []ProgramExecutionPolicyEntry{
-			{Name: "privacy", ProgramID: programID},
+			{Name: "shielded", ProgramID: programID},
 		},
 		VirtualMachineProgramOwners: []ProgramExecutionPolicyEntry{
 			{Name: "bpf_loader", ProgramID: structure.DefaultBuiltinProgramIDs.BPFLoader.String()},
 		},
 		VirtualMachineBridgePrograms: []ProgramExecutionPolicyEntry{
-			{Name: "privacy", ProgramID: programID},
+			{Name: "shielded", ProgramID: programID},
 		},
 	}
 	if err := policy.Validate(); err == nil {

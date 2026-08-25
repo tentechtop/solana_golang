@@ -17,17 +17,9 @@ const (
 	MethodGetAddressTransactions     = "getAddressTransactions"
 	MethodGetContractPrograms        = "getContractPrograms"
 	MethodGetAssetState              = "getAssetState"
+	MethodGetShieldedPool            = "getShieldedPool"
 	MethodTreasuryTransfer           = "treasuryTransfer"
 	MethodTransfer                   = "transfer"
-	MethodGetPrivacyState            = "getPrivacyState"
-	MethodGetPrivacyBalance          = "getPrivacyBalance"
-	MethodPrivacyDeposit             = "privacyDeposit"
-	MethodPrivacyDepositToState      = "privacyDepositToState"
-	MethodPrivacyDepositToReceiver   = "privacyDepositToReceiver"
-	MethodPrivacyWithdraw            = "privacyWithdraw"
-	MethodPrivacyTransfer            = "privacyTransfer"
-	MethodPrivacyTransferToReceiver  = "privacyTransferToReceiver"
-	MethodPrivacyAuthorizeAudit      = "privacyAuthorizeAudit"
 	MethodRegisterValidator          = "registerValidator"
 	MethodRegisterValidatorIdentity  = "registerValidatorIdentity"
 	MethodStake                      = "stake"
@@ -84,16 +76,9 @@ type AssetStateBackend interface {
 	GetAssetState(ctx context.Context, program string, owner string) (AssetStateResult, error)
 }
 
-type PrivacyBackend interface {
-	GetPrivacyState(ctx context.Context, stateAddress string) (PrivacyStateResult, error)
-	GetPrivacyBalance(ctx context.Context, stateAddress string, spendAuthority string) (PrivacyBalanceResult, error)
-	PrivacyDeposit(ctx context.Context, sourceSeed string, stateSeed string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyDepositToState(ctx context.Context, sourceSeed string, stateAddress string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyDepositToReceiver(ctx context.Context, sourceSeed string, stateAddress string, spendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyWithdraw(ctx context.Context, authoritySeed string, stateAddress string, destination string, commitment string, nullifier string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyTransfer(ctx context.Context, authoritySeed string, stateAddress string, commitment string, nullifier string, recipient string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyTransferToReceiver(ctx context.Context, authoritySeed string, sourceStateAddress string, commitment string, nullifier string, destinationStateAddress string, destinationSpendAuthority string, lamports uint64, auditor string, auditSecret string, expiresAtSlot uint64) (PrivacyTransactionResult, error)
-	PrivacyAuthorizeAudit(ctx context.Context, authoritySeed string, stateAddress string, commitment string, auditor string, auditSecret string, scope uint8, expiresAtSlot uint64) (PrivacyTransactionResult, error)
+// ShieldedPoolBackend 定义屏蔽池只读查询 + 钱包无需向节点提交任何查看密钥或私钥。
+type ShieldedPoolBackend interface {
+	GetShieldedPool(ctx context.Context) (ShieldedPoolResult, error)
 }
 
 type ValidatorJoinBackend interface {
@@ -224,6 +209,7 @@ type TransactionDetailResult struct {
 	Slot                      uint64   `json:"slot,omitempty"`
 	Blockhash                 string   `json:"blockhash,omitempty"`
 	Finalized                 bool     `json:"finalized"`
+	TransactionBase64         string   `json:"transaction_base64,omitempty"`
 }
 
 type AccountTransactionRecordResult struct {
@@ -295,63 +281,24 @@ type AssetStateResult struct {
 	Balance AssetBalanceStateResult `json:"balance"`
 }
 
+// ShieldedPoolResult 返回全局屏蔽池的公开共识状态 + data_base64 可供外部钱包按规范编码校验状态。
+type ShieldedPoolResult struct {
+	Address              string   `json:"address"`
+	StateEncodingVersion uint16   `json:"state_encoding_version"`
+	ProtocolVersion      uint16   `json:"protocol_version"`
+	CircuitID            uint32   `json:"circuit_id"`
+	VerifyingKeyHash     string   `json:"verifying_key_hash"`
+	TreeDepth            uint8    `json:"tree_depth"`
+	LeafCount            uint64   `json:"leaf_count"`
+	CurrentRoot          string   `json:"current_root"`
+	RecentAnchors        []string `json:"recent_anchors"`
+	PoolLamports         uint64   `json:"pool_lamports"`
+	PhysicalLamports     uint64   `json:"physical_lamports"`
+	DataBase64           string   `json:"data_base64"`
+}
+
 type TransactionSubmitResult struct {
 	Signature string `json:"signature"`
-}
-
-type PrivacyTransactionResult struct {
-	Signature        string `json:"signature"`
-	PrivacyState     string `json:"privacy_state"`
-	Commitment       string `json:"commitment,omitempty"`
-	Nullifier        string `json:"nullifier,omitempty"`
-	OutputCommitment string `json:"output_commitment,omitempty"`
-	ChangeCommitment string `json:"change_commitment,omitempty"`
-	ChangeLamports   string `json:"change_lamports,omitempty"`
-}
-
-type PrivacyAuditRecordResult struct {
-	Auditor       string `json:"auditor"`
-	Scope         uint8  `json:"scope"`
-	ExpiresAtSlot uint64 `json:"expires_at_slot"`
-	Ciphertext    string `json:"ciphertext"`
-}
-
-type PrivacyNoteResult struct {
-	Commitment        string                     `json:"commitment"`
-	SpendAuthority    string                     `json:"spend_authority"`
-	Amount            uint64                     `json:"amount"`
-	Spent             bool                       `json:"spent"`
-	SpentSlot         uint64                     `json:"spent_slot"`
-	SpendNullifier    string                     `json:"spend_nullifier,omitempty"`
-	AuditRecords      []PrivacyAuditRecordResult `json:"audit_records"`
-	AuditRecordCount  int                        `json:"audit_record_count"`
-	EncryptedNoteSize int                        `json:"encrypted_note_size"`
-	VMVersion         uint16                     `json:"vm_version"`
-	Confidential      bool                       `json:"confidential"`
-}
-
-type PrivacyStateResult struct {
-	Address              string              `json:"address"`
-	Version              uint16              `json:"version"`
-	Notes                []PrivacyNoteResult `json:"notes"`
-	SpentNullifiers      []string            `json:"spent_nullifiers"`
-	MerkleRoot           string              `json:"merkle_root,omitempty"`
-	PrivacyPoolLamports  string              `json:"privacy_pool_lamports"`
-	UnspentNoteLiability string              `json:"unspent_note_liability"`
-	NoteCount            int                 `json:"note_count"`
-	SpentNullifierCount  int                 `json:"spent_nullifier_count"`
-	AuditRecordCount     int                 `json:"audit_record_count"`
-}
-
-type PrivacyBalanceResult struct {
-	StateAddress       string `json:"state_address"`
-	SpendAuthority     string `json:"spend_authority"`
-	AvailableLamports  string `json:"available_lamports"`
-	EscrowLamports     string `json:"escrow_lamports"`
-	SpendableNoteCount int    `json:"spendable_note_count"`
-	SpentNoteCount     int    `json:"spent_note_count"`
-	OwnedNoteCount     int    `json:"owned_note_count"`
-	StateNoteCount     int    `json:"state_note_count"`
 }
 
 type ValidatorInfo struct {
@@ -551,7 +498,6 @@ type BootstrapGenesisValidatorResult struct {
 type BootstrapGenesisResult struct {
 	InitialSupplyLamports uint64                            `json:"initial_supply_lamports"`
 	TreasuryAddress       string                            `json:"treasury_address,omitempty"`
-	PrivacyExecutionMode  string                            `json:"privacy_execution_mode,omitempty"`
 	FundedAccounts        []BootstrapGenesisAccountResult   `json:"funded_accounts"`
 	InitialValidators     []BootstrapGenesisValidatorResult `json:"initial_validators"`
 }
@@ -577,7 +523,6 @@ type BootstrapManifestResult struct {
 	TurbineFanout                 int                                     `json:"turbine_fanout,omitempty"`
 	TransactionLeaderForwardSlots int                                     `json:"transaction_leader_forward_slots,omitempty"`
 	TransactionForwardValidators  bool                                    `json:"transaction_forward_validators"`
-	PrivacyExecutionMode          string                                  `json:"privacy_execution_mode,omitempty"`
 	ContractDeploymentPolicy      BootstrapContractDeploymentPolicyResult `json:"contract_deployment_policy"`
 	Genesis                       BootstrapGenesisResult                  `json:"genesis"`
 	BootstrapPeers                []BootstrapPeerConfigResult             `json:"bootstrap_peers"`
@@ -655,17 +600,9 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
 	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
 	_ = router.Register(MethodGetAssetState, getAssetStateHandler(backend))
+	_ = router.Register(MethodGetShieldedPool, getShieldedPoolHandler(backend))
 	_ = router.Register(MethodTreasuryTransfer, treasuryTransferHandler(backend))
 	_ = router.Register(MethodTransfer, transferHandler(backend))
-	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
-	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
-	_ = router.Register(MethodPrivacyDeposit, privacyDepositHandler(backend))
-	_ = router.Register(MethodPrivacyDepositToState, privacyDepositToStateHandler(backend))
-	_ = router.Register(MethodPrivacyDepositToReceiver, privacyDepositToReceiverHandler(backend))
-	_ = router.Register(MethodPrivacyWithdraw, privacyWithdrawHandler(backend))
-	_ = router.Register(MethodPrivacyTransfer, privacyTransferHandler(backend))
-	_ = router.Register(MethodPrivacyTransferToReceiver, privacyTransferToReceiverHandler(backend))
-	_ = router.Register(MethodPrivacyAuthorizeAudit, privacyAuthorizeAuditHandler(backend))
 	_ = router.Register(MethodRegisterValidator, signedTransactionRequiredHandler(MethodRegisterValidator))
 	_ = router.Register(MethodRegisterValidatorIdentity, signedTransactionRequiredHandler(MethodRegisterValidatorIdentity))
 	_ = router.Register(MethodStake, signedTransactionRequiredHandler(MethodStake))
@@ -694,8 +631,7 @@ func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
 	_ = router.Register(MethodGetContractPrograms, getContractProgramsHandler(backend))
 	_ = router.Register(MethodGetAssetState, getAssetStateHandler(backend))
-	_ = router.Register(MethodGetPrivacyState, getPrivacyStateHandler(backend))
-	_ = router.Register(MethodGetPrivacyBalance, getPrivacyBalanceHandler(backend))
+	_ = router.Register(MethodGetShieldedPool, getShieldedPoolHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
 	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
 	_ = router.Register(MethodGetPeerNetwork, getPeerNetworkHandler(backend))
@@ -730,8 +666,7 @@ func publicForwardMethods() []string {
 		MethodGetAddressTransactions,
 		MethodGetContractPrograms,
 		MethodGetAssetState,
-		MethodGetPrivacyState,
-		MethodGetPrivacyBalance,
+		MethodGetShieldedPool,
 		MethodGetValidatorSet,
 	}
 }
@@ -1007,6 +942,23 @@ func getAssetStateHandler(backend LedgerBackend) HandlerFunc {
 	}
 }
 
+func getShieldedPoolHandler(backend LedgerBackend) HandlerFunc {
+	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
+		shieldedPoolBackend, ok := backend.(ShieldedPoolBackend)
+		if !ok {
+			return nil, ErrMethodUnavailable
+		}
+		if rpcError := parseNoParams(params); rpcError != nil {
+			return nil, rpcError
+		}
+		result, err := shieldedPoolBackend.GetShieldedPool(ctx)
+		if err != nil {
+			return nil, internalError(fmt.Sprintf("get shielded pool: %v", err))
+		}
+		return result, nil
+	}
+}
+
 func treasuryTransferHandler(backend LedgerBackend) HandlerFunc {
 	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
 		transferBackend, ok := backend.(TreasuryTransferBackend)
@@ -1059,214 +1011,6 @@ func transferHandler(backend LedgerBackend) HandlerFunc {
 			return nil, internalError(fmt.Sprintf("transfer: %v", err))
 		}
 		return TransactionSubmitResult{Signature: signature}, nil
-	}
-}
-
-func getPrivacyStateHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		if len(values) < 1 {
-			return nil, invalidParamsError("getPrivacyState requires state address")
-		}
-		stateAddress, rpcError := parseStringParam(values[0], "getPrivacyState state address")
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.GetPrivacyState(ctx, stateAddress)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("get privacy state: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func getPrivacyBalanceHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		if len(values) < 2 {
-			return nil, invalidParamsError("getPrivacyBalance requires state address and spend authority")
-		}
-		stateAddress, rpcError := parseStringParam(values[0], "getPrivacyBalance state address")
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		spendAuthority, rpcError := parseStringParam(values[1], "getPrivacyBalance spend authority")
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.GetPrivacyBalance(ctx, stateAddress, spendAuthority)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("get privacy balance: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyDepositHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		sourceSeed, stateSeed, lamports, auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyDepositParams(values)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyDeposit(ctx, sourceSeed, stateSeed, lamports, auditor, auditSecret, expiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy deposit: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyDepositToStateHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		sourceSeed, stateAddress, lamports, auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyDepositParams(values)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyDepositToState(ctx, sourceSeed, stateAddress, lamports, auditor, auditSecret, expiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy deposit to state: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyDepositToReceiverHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		parsed, rpcError := parsePrivacyDepositReceiverParams(values)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyDepositToReceiver(ctx, parsed.SourceSeed, parsed.StateAddress, parsed.SpendAuthority, parsed.Lamports, parsed.Auditor, parsed.AuditSecret, parsed.ExpiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy deposit to receiver: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyWithdrawHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		parsed, rpcError := parsePrivacySpendParams(values, "privacyWithdraw")
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyWithdraw(ctx, parsed.AuthoritySeed, parsed.StateAddress, parsed.DestinationOrRecipient, parsed.Commitment, parsed.Nullifier, parsed.Lamports, parsed.Auditor, parsed.AuditSecret, parsed.ExpiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy withdraw: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyTransferHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		parsed, rpcError := parsePrivacySpendParams(values, "privacyTransfer")
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyTransfer(ctx, parsed.AuthoritySeed, parsed.StateAddress, parsed.Commitment, parsed.Nullifier, parsed.DestinationOrRecipient, parsed.Lamports, parsed.Auditor, parsed.AuditSecret, parsed.ExpiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy transfer: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyTransferToReceiverHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		parsed, rpcError := parsePrivacyTransferReceiverParams(values)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyTransferToReceiver(ctx, parsed.AuthoritySeed, parsed.StateAddress, parsed.Commitment, parsed.Nullifier, parsed.DestinationStateAddress, parsed.DestinationSpendAuthority, parsed.Lamports, parsed.Auditor, parsed.AuditSecret, parsed.ExpiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy transfer to receiver: %v", err))
-		}
-		return result, nil
-	}
-}
-
-func privacyAuthorizeAuditHandler(backend LedgerBackend) HandlerFunc {
-	return func(ctx context.Context, params json.RawMessage) (any, *Error) {
-		privacyBackend, ok := backend.(PrivacyBackend)
-		if !ok {
-			return nil, ErrMethodUnavailable
-		}
-		values, rpcError := parseParamsArray(params)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		authoritySeed, stateAddress, commitment, auditor, auditSecret, scope, expiresAtSlot, rpcError := parsePrivacyAuthorizeAuditParams(values)
-		if rpcError != nil {
-			return nil, rpcError
-		}
-		result, err := privacyBackend.PrivacyAuthorizeAudit(ctx, authoritySeed, stateAddress, commitment, auditor, auditSecret, scope, expiresAtSlot)
-		if err != nil {
-			return nil, internalError(fmt.Sprintf("privacy authorize audit: %v", err))
-		}
-		return result, nil
 	}
 }
 
@@ -1638,41 +1382,6 @@ type getBlockParams struct {
 	Slot uint64 `json:"slot"`
 }
 
-type privacySpendParams struct {
-	AuthoritySeed          string
-	StateAddress           string
-	Commitment             string
-	Nullifier              string
-	DestinationOrRecipient string
-	Lamports               uint64
-	Auditor                string
-	AuditSecret            string
-	ExpiresAtSlot          uint64
-}
-
-type privacyDepositReceiverParams struct {
-	SourceSeed     string
-	StateAddress   string
-	SpendAuthority string
-	Lamports       uint64
-	Auditor        string
-	AuditSecret    string
-	ExpiresAtSlot  uint64
-}
-
-type privacyTransferReceiverParams struct {
-	AuthoritySeed             string
-	StateAddress              string
-	Commitment                string
-	Nullifier                 string
-	DestinationStateAddress   string
-	DestinationSpendAuthority string
-	Lamports                  uint64
-	Auditor                   string
-	AuditSecret               string
-	ExpiresAtSlot             uint64
-}
-
 type registerValidatorIdentityParams struct {
 	StakerSeed         string
 	ValidatorAddress   string
@@ -1934,218 +1643,6 @@ func parseOptionalStringParam(value json.RawMessage, field string) (string, *Err
 		return "", invalidParamsError(field + " must be a string")
 	}
 	return text, nil
-}
-
-func parseUint64ParamAllowZero(value json.RawMessage, field string) (uint64, *Error) {
-	var number uint64
-	if err := json.Unmarshal(value, &number); err != nil {
-		return 0, invalidParamsError(field + " must be an unsigned integer")
-	}
-	return number, nil
-}
-
-func parsePrivacyDepositParams(values []json.RawMessage) (string, string, uint64, string, string, uint64, *Error) {
-	if len(values) < 6 {
-		return "", "", 0, "", "", 0, invalidParamsError("privacyDeposit requires source seed, state seed, lamports, auditor, audit secret, expires slot")
-	}
-	sourceSeed, rpcError := parseStringParam(values[0], "privacyDeposit source seed")
-	if rpcError != nil {
-		return "", "", 0, "", "", 0, rpcError
-	}
-	stateSeed, rpcError := parseStringParam(values[1], "privacyDeposit state seed")
-	if rpcError != nil {
-		return "", "", 0, "", "", 0, rpcError
-	}
-	lamports, rpcError := parseUint64Param(values[2], "privacyDeposit lamports")
-	if rpcError != nil {
-		return "", "", 0, "", "", 0, rpcError
-	}
-	auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyAuditTail(values[3:6], "privacyDeposit")
-	return sourceSeed, stateSeed, lamports, auditor, auditSecret, expiresAtSlot, rpcError
-}
-
-func parsePrivacyDepositReceiverParams(values []json.RawMessage) (privacyDepositReceiverParams, *Error) {
-	if len(values) < 7 {
-		return privacyDepositReceiverParams{}, invalidParamsError("privacyDepositToReceiver requires source seed, state address, spend authority, lamports, auditor, audit secret, expires slot")
-	}
-	sourceSeed, rpcError := parseStringParam(values[0], "privacyDepositToReceiver source seed")
-	if rpcError != nil {
-		return privacyDepositReceiverParams{}, rpcError
-	}
-	stateAddress, rpcError := parseStringParam(values[1], "privacyDepositToReceiver state address")
-	if rpcError != nil {
-		return privacyDepositReceiverParams{}, rpcError
-	}
-	spendAuthority, rpcError := parseStringParam(values[2], "privacyDepositToReceiver spend authority")
-	if rpcError != nil {
-		return privacyDepositReceiverParams{}, rpcError
-	}
-	lamports, rpcError := parseUint64Param(values[3], "privacyDepositToReceiver lamports")
-	if rpcError != nil {
-		return privacyDepositReceiverParams{}, rpcError
-	}
-	auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyAuditTail(values[4:7], "privacyDepositToReceiver")
-	if rpcError != nil {
-		return privacyDepositReceiverParams{}, rpcError
-	}
-	return privacyDepositReceiverParams{
-		SourceSeed:     sourceSeed,
-		StateAddress:   stateAddress,
-		SpendAuthority: spendAuthority,
-		Lamports:       lamports,
-		Auditor:        auditor,
-		AuditSecret:    auditSecret,
-		ExpiresAtSlot:  expiresAtSlot,
-	}, nil
-}
-
-func parsePrivacySpendParams(values []json.RawMessage, method string) (privacySpendParams, *Error) {
-	if len(values) < 9 {
-		return privacySpendParams{}, invalidParamsError(method + " requires authority seed, state address, commitment, nullifier, destination/recipient, lamports, auditor, audit secret, expires slot")
-	}
-	authoritySeed, rpcError := parseStringParam(values[0], method+" authority seed")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	stateAddress, rpcError := parseStringParam(values[1], method+" state address")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	commitment, rpcError := parseStringParam(values[2], method+" commitment")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	nullifier, rpcError := parseStringParam(values[3], method+" nullifier")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	destinationOrRecipient, rpcError := parseStringParam(values[4], method+" destination or recipient")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	lamports, rpcError := parseUint64Param(values[5], method+" lamports")
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyAuditTail(values[6:9], method)
-	if rpcError != nil {
-		return privacySpendParams{}, rpcError
-	}
-	return privacySpendParams{
-		AuthoritySeed:          authoritySeed,
-		StateAddress:           stateAddress,
-		Commitment:             commitment,
-		Nullifier:              nullifier,
-		DestinationOrRecipient: destinationOrRecipient,
-		Lamports:               lamports,
-		Auditor:                auditor,
-		AuditSecret:            auditSecret,
-		ExpiresAtSlot:          expiresAtSlot,
-	}, nil
-}
-
-func parsePrivacyTransferReceiverParams(values []json.RawMessage) (privacyTransferReceiverParams, *Error) {
-	if len(values) < 10 {
-		return privacyTransferReceiverParams{}, invalidParamsError("privacyTransferToReceiver requires authority seed, source state, commitment, nullifier, destination state, destination spend authority, lamports, auditor, audit secret, expires slot")
-	}
-	authoritySeed, rpcError := parseStringParam(values[0], "privacyTransferToReceiver authority seed")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	stateAddress, rpcError := parseStringParam(values[1], "privacyTransferToReceiver source state address")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	commitment, rpcError := parseStringParam(values[2], "privacyTransferToReceiver commitment")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	nullifier, rpcError := parseStringParam(values[3], "privacyTransferToReceiver nullifier")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	destinationStateAddress, rpcError := parseStringParam(values[4], "privacyTransferToReceiver destination state")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	destinationSpendAuthority, rpcError := parseStringParam(values[5], "privacyTransferToReceiver destination spend authority")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	lamports, rpcError := parseUint64Param(values[6], "privacyTransferToReceiver lamports")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	auditor, auditSecret, expiresAtSlot, rpcError := parsePrivacyAuditTail(values[7:10], "privacyTransferToReceiver")
-	if rpcError != nil {
-		return privacyTransferReceiverParams{}, rpcError
-	}
-	return privacyTransferReceiverParams{
-		AuthoritySeed:             authoritySeed,
-		StateAddress:              stateAddress,
-		Commitment:                commitment,
-		Nullifier:                 nullifier,
-		DestinationStateAddress:   destinationStateAddress,
-		DestinationSpendAuthority: destinationSpendAuthority,
-		Lamports:                  lamports,
-		Auditor:                   auditor,
-		AuditSecret:               auditSecret,
-		ExpiresAtSlot:             expiresAtSlot,
-	}, nil
-}
-
-func parsePrivacyAuthorizeAuditParams(values []json.RawMessage) (string, string, string, string, string, uint8, uint64, *Error) {
-	if len(values) < 7 {
-		return "", "", "", "", "", 0, 0, invalidParamsError("privacyAuthorizeAudit requires authority seed, state address, commitment, auditor, audit secret, scope, expires slot")
-	}
-	authoritySeed, rpcError := parseStringParam(values[0], "privacyAuthorizeAudit authority seed")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	stateAddress, rpcError := parseStringParam(values[1], "privacyAuthorizeAudit state address")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	commitment, rpcError := parseStringParam(values[2], "privacyAuthorizeAudit commitment")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	auditor, rpcError := parseStringParam(values[3], "privacyAuthorizeAudit auditor")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	auditSecret, rpcError := parseStringParam(values[4], "privacyAuthorizeAudit audit secret")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	scopeValue, rpcError := parseUint64Param(values[5], "privacyAuthorizeAudit scope")
-	if rpcError != nil || scopeValue > 255 {
-		return "", "", "", "", "", 0, 0, invalidParamsError("privacyAuthorizeAudit scope must be 1, 2, or 3")
-	}
-	expiresAtSlot, rpcError := parseUint64ParamAllowZero(values[6], "privacyAuthorizeAudit expires slot")
-	if rpcError != nil {
-		return "", "", "", "", "", 0, 0, rpcError
-	}
-	return authoritySeed, stateAddress, commitment, auditor, auditSecret, uint8(scopeValue), expiresAtSlot, nil
-}
-
-func parsePrivacyAuditTail(values []json.RawMessage, method string) (string, string, uint64, *Error) {
-	auditor, rpcError := parseOptionalStringParam(values[0], method+" auditor")
-	if rpcError != nil {
-		return "", "", 0, rpcError
-	}
-	auditSecret, rpcError := parseOptionalStringParam(values[1], method+" audit secret")
-	if rpcError != nil {
-		return "", "", 0, rpcError
-	}
-	expiresAtSlot, rpcError := parseUint64ParamAllowZero(values[2], method+" expires slot")
-	if rpcError != nil {
-		return "", "", 0, rpcError
-	}
-	if (auditor == "") != (auditSecret == "") {
-		return "", "", 0, invalidParamsError(method + " auditor and audit secret must be provided together")
-	}
-	return auditor, auditSecret, expiresAtSlot, nil
 }
 
 func parseParamsArray(params json.RawMessage) ([]json.RawMessage, *Error) {

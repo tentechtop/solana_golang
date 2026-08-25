@@ -12,7 +12,7 @@ var DefaultBuiltinProgramIDs = BuiltinProgramIDs{
 	Token:              MustPublicKeyFromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
 	Stake:              MustPublicKeyFromBase58("Stake11111111111111111111111111111111111111"),
 	Config:             MustPublicKeyFromBase58("Config1111111111111111111111111111111111111"),
-	Privacy:            PublicKey{0x50, 0x72, 0x69, 0x76, 0x61, 0x63, 0x79, 0x50, 0x72, 0x6f, 0x67, 0x72, 0x61, 0x6d, 0x56, 0x31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+	Shielded:           PublicKey{0x53, 0x68, 0x69, 0x65, 0x6c, 0x64, 0x65, 0x64, 0x50, 0x6f, 0x6f, 0x6c, 0x50, 0x72, 0x6f, 0x67, 0x72, 0x61, 0x6d, 0x56, 0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
 }
 
 // BuiltinProgramIDs 描述内置程序地址集合 + 统一执行层和指令构造使用的程序 ID。
@@ -26,7 +26,7 @@ type BuiltinProgramIDs struct {
 	Token              PublicKey
 	Stake              PublicKey
 	Config             PublicKey
-	Privacy            PublicKey
+	Shielded           PublicKey
 }
 
 // Validate 校验内置程序集合 + 防止启动时使用缺失的程序 ID。
@@ -55,8 +55,8 @@ func (programIDs BuiltinProgramIDs) Validate() error {
 	if programIDs.Config.IsZero() {
 		return fmt.Errorf("%w: config program is empty", ErrInvalidAccount)
 	}
-	if programIDs.Privacy.IsZero() {
-		return fmt.Errorf("%w: privacy program is empty", ErrInvalidAccount)
+	if programIDs.Shielded.IsZero() {
+		return fmt.Errorf("%w: shielded program is empty", ErrInvalidAccount)
 	}
 	return nil
 }
@@ -72,5 +72,5 @@ func (programIDs BuiltinProgramIDs) IsBuiltinProgram(programID PublicKey) bool {
 		programID == programIDs.Token ||
 		programID == programIDs.Stake ||
 		programID == programIDs.Config ||
-		programID == programIDs.Privacy
+		programID == programIDs.Shielded
 }

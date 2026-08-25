@@ -59,7 +59,7 @@ func TestFixedExecutorWritesAuditLog(t *testing.T) {
 		`"msg":"runtime transaction executed"`,
 		`"chain_id":"audit-chain"`,
 		`"tx_id"`,
-		`"privacy_execution_mode":"fixed"`,
+		`"execution_mode":"fixed_instruction_v1"`,
 		`"program_execution_policy"`,
 		`"fee_total"`,
 		`"balance_changes"`,

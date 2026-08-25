@@ -18,7 +18,7 @@ func TestRegisterProgramsRegistersBuiltinHandlers(t *testing.T) {
 		"system":     structure.DefaultBuiltinProgramIDs.System,
 		"token":      structure.DefaultBuiltinProgramIDs.Token,
 		"stake":      structure.DefaultBuiltinProgramIDs.Stake,
-		"privacy":    structure.DefaultBuiltinProgramIDs.Privacy,
+		"shielded":   structure.DefaultBuiltinProgramIDs.Shielded,
 		"bpf_loader": structure.DefaultBuiltinProgramIDs.BPFLoader,
 	}
 	for expectedName, expectedID := range expectedPrograms {
@@ -39,37 +39,15 @@ func TestRegisterProgramsRegistersBuiltinHandlers(t *testing.T) {
 	}
 }
 
-func TestRegisterProgramsSupportsPrivacyVMSyscallMode(t *testing.T) {
-	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
-	if err := registerProgramsWithPrivacyMode(&executor, runtime.PrivacyExecutionModeVMSyscall); err != nil {
-		t.Fatalf("registerProgramsWithPrivacyMode() error = %v", err)
-	}
-
-	spec, exists := executor.Programs.Spec(structure.DefaultBuiltinProgramIDs.Privacy)
-	if !exists {
-		t.Fatal("privacy program should be registered")
-	}
-	if spec.Name != "privacy" {
-		t.Fatalf("privacy spec name = %q, want privacy", spec.Name)
-	}
-}
-
-func TestRegisterProgramsRejectsInvalidPrivacyMode(t *testing.T) {
-	executor := runtime.NewFixedExecutorWithRegistry(runtime.NewProgramHandlerRegistry())
-	if err := registerProgramsWithPrivacyMode(&executor, runtime.PrivacyExecutionMode("bad-mode")); err == nil {
-		t.Fatal("registerProgramsWithPrivacyMode() error = nil, want invalid mode rejection")
-	}
-}
-
 func TestNewRuntimeExecutorSetsProgramExecutionPolicy(t *testing.T) {
-	executor, err := newRuntimeExecutorWithPrivacyMode(runtime.PrivacyExecutionModeVMSyscall, nil)
+	executor, err := newRuntimeExecutor(nil)
 	if err != nil {
-		t.Fatalf("newRuntimeExecutorWithPrivacyMode() error = %v", err)
+		t.Fatalf("newRuntimeExecutor() error = %v", err)
 	}
 	fingerprint := executor.ProgramExecutionPolicy.Fingerprint()
 	for _, expected := range []string{
 		"vm_program_owner=bpf_loader:" + structure.DefaultBuiltinProgramIDs.BPFLoader.String(),
-		"vm_bridge=privacy:" + structure.DefaultBuiltinProgramIDs.Privacy.String(),
+		"shielded:" + structure.DefaultBuiltinProgramIDs.Shielded.String(),
 	} {
 		if !strings.Contains(fingerprint, expected) {
 			t.Fatalf("fingerprint = %q, want %s", fingerprint, expected)

@@ -95,6 +95,24 @@ func (metrics *nodeMetrics) snapshot() nodeMetricsSnapshot {
 	}
 }
 
+// restoreSnapshot 逐项恢复原子计数器 + 禁止复制包含 noCopy 标记的 atomic 值。
+func (metrics *nodeMetrics) restoreSnapshot(snapshot nodeMetricsSnapshot) {
+	metrics.blocksProduced.Store(snapshot.BlocksProduced)
+	metrics.proposalsAccepted.Store(snapshot.ProposalsAccepted)
+	metrics.proposalsRejected.Store(snapshot.ProposalsRejected)
+	metrics.votesSent.Store(snapshot.VotesSent)
+	metrics.qcFormed.Store(snapshot.QCFormed)
+	metrics.qcReceived.Store(snapshot.QCReceived)
+	metrics.forkDecisions.Store(snapshot.ForkDecisions)
+	metrics.reorgs.Store(snapshot.Reorgs)
+	metrics.orphanStored.Store(snapshot.OrphanStored)
+	metrics.syncRequests.Store(snapshot.SyncRequests)
+	metrics.syncFailures.Store(snapshot.SyncFailures)
+	metrics.transactionsIn.Store(snapshot.TransactionsIn)
+	metrics.transactionsDrop.Store(snapshot.TransactionsDrop)
+	metrics.evidenceReceived.Store(snapshot.EvidenceReceived)
+}
+
 func (node *posNode) GetMetrics(ctx context.Context) (any, error) {
 	_ = ctx
 	return node.metricsSnapshot(), nil

@@ -52,6 +52,7 @@ func (node *posNode) removeRejectedMempoolTransactions(rejectedTransactions []co
 		}
 		removeTransactionIDs = append(removeTransactionIDs, transactionID)
 		delete(node.seenTransactions, transactionID)
+		node.releaseMempoolShieldedResourcesLocked(transactionID)
 		node.rejectedTransactions[transactionID] = rejectedTransactionStatus{
 			Detail:              buildRejectedTransactionDetail(rejectedTransaction, slot),
 			RecordedAtUnixMilli: nowMillis,

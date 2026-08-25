@@ -14,6 +14,10 @@ import (
 
 const (
 	MaxProposalTransactions = 1000
+	// MaxBlockComputeUnits 允许五笔单交易最大预算 + 仍可容纳一千笔 3000 CU 普通转账，并把屏蔽证明限制在每块最多 35 次。
+	MaxBlockComputeUnits = structure.MaxComputeUnitsPerTransaction * 5
+	// MaxBlockCostUnits 与当前执行器的确定性成本计量一致 + 独立成本模型上线前不允许绕过计算上限。
+	MaxBlockCostUnits = MaxBlockComputeUnits
 )
 
 // BlockHeader 描述 PoS 区块头 + 补齐 QC、epoch、leader 签名所需字段。
@@ -91,12 +95,16 @@ func (producer BlockProducer) ProduceBlockWithReport(
 	if producer.Executor == nil {
 		return BlockProductionResult{}, fmt.Errorf("consensus: nil transaction executor")
 	}
+	transactions, _, _, err := selectBlockTransactionPrefix(request.Transactions, MaxProposalTransactions)
+	if err != nil {
+		return BlockProductionResult{}, err
+	}
 
 	executionOutput, err := executeTransactionsParallel(contextValue, parallelExecutionInput{
 		ChainID:          producer.ChainID,
 		Slot:             request.Slot,
 		Epoch:            request.EpochSnapshot.EpochID,
-		Transactions:     request.Transactions,
+		Transactions:     transactions,
 		State:            request.ParentState,
 		BlockhashQueue:   request.BlockhashQueue,
 		ProcessedTxIDs:   make(map[string]struct{}, len(request.Transactions)),
@@ -190,6 +198,9 @@ func (verifier ProposalVerifier) VerifyProposal(
 	}
 	if leaderID != request.Proposal.Header.LeaderID || leaderID != request.Leader.ValidatorID {
 		return ChainState{}, fmt.Errorf("consensus: proposal leader mismatch")
+	}
+	if err := validateBlockTransactionResources(request.Proposal.Transactions); err != nil {
+		return ChainState{}, err
 	}
 
 	executionOutput, err := executeTransactionsParallel(contextValue, parallelExecutionInput{

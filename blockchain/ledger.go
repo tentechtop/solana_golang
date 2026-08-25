@@ -11,6 +11,7 @@ import (
 
 	"solana_golang/consensus"
 	"solana_golang/database"
+	shieldedprogram "solana_golang/programs/shielded"
 	"solana_golang/programs/stake"
 	"solana_golang/structure"
 	"solana_golang/utils"
@@ -25,6 +26,8 @@ var (
 )
 
 const DefaultFinalityDepth = uint64(2)
+
+const genesisBuiltinProgramLamports = uint64(10_000_000)
 
 // Ledger 保存链账本状态 + 统一提交区块、账户和 QC，避免业务散落在 cmd。
 type Ledger struct {
@@ -199,7 +202,10 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		}
 		treasuryAddress = defaultTreasuryAddress
 	}
-	accounts := make([]structure.AddressedAccount, 0, len(genesis.FundedAccounts)+len(genesis.InitialValidators)*2+3)
+	if err := validateGenesisAccountAddresses(genesis, treasuryAddress); err != nil {
+		return consensus.ChainState{}, Head{}, err
+	}
+	accounts := make([]structure.AddressedAccount, 0, len(genesis.FundedAccounts)+len(genesis.InitialValidators)*2+5)
 	treasuryLamports := genesis.InitialSupplyLamports
 	rewardReceiverAccounts := map[structure.PublicKey]struct{}{
 		treasuryAddress: {},
@@ -245,9 +251,37 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		}
 		accounts = append(accounts, account)
 	}
+	shieldedPoolState, err := shieldedprogram.DefaultPoolState()
+	if err != nil {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("blockchain: create genesis shielded pool: %w", err)
+	}
+	shieldedPoolData, err := shieldedPoolState.MarshalBinary()
+	if err != nil {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("blockchain: encode genesis shielded pool: %w", err)
+	}
+	shieldedPoolRent, err := structure.MinimumBalanceForRentExemption(shieldedprogram.PoolAccountDataCapacity)
+	if err != nil {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("blockchain: calculate shielded pool rent: %w", err)
+	}
+	if treasuryLamports < shieldedPoolRent {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("%w: shielded pool rent exceeds supply", ErrInvalidGenesis)
+	}
+	treasuryLamports -= shieldedPoolRent
+	accounts = append(accounts, mustAccount(structure.DefaultShieldedPoolAddress, shieldedPoolRent, structure.DefaultBuiltinProgramIDs.Shielded, false, shieldedPoolData))
+	builtinProgramAddresses := []structure.PublicKey{
+		structure.DefaultBuiltinProgramIDs.System,
+		structure.DefaultBuiltinProgramIDs.Stake,
+		structure.DefaultBuiltinProgramIDs.Shielded,
+	}
+	builtinProgramFunding := uint64(len(builtinProgramAddresses)) * genesisBuiltinProgramLamports
+	if treasuryLamports < builtinProgramFunding {
+		return consensus.ChainState{}, Head{}, fmt.Errorf("%w: builtin program funding exceeds supply", ErrInvalidGenesis)
+	}
+	treasuryLamports -= builtinProgramFunding
 	accounts = append(accounts, mustAccount(treasuryAddress, treasuryLamports, structure.DefaultBuiltinProgramIDs.System, false, nil))
-	accounts = append(accounts, mustAccount(structure.DefaultBuiltinProgramIDs.System, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
-	accounts = append(accounts, mustAccount(structure.DefaultBuiltinProgramIDs.Stake, 10_000_000, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
+	for _, programAddress := range builtinProgramAddresses {
+		accounts = append(accounts, mustAccount(programAddress, genesisBuiltinProgramLamports, structure.DefaultBuiltinProgramIDs.NativeLoader, true, nil))
+	}
 	state := consensus.ChainState{Accounts: mergeGenesisAccounts(accounts)}
 	stateRoot, err := state.RootHash()
 	if err != nil {
@@ -269,6 +303,79 @@ func BuildGenesisState(genesis GenesisConfig) (consensus.ChainState, Head, error
 		UpdatedAtMs:   time.Now().UnixMilli(),
 	}
 	return state, head, nil
+}
+
+// validateGenesisAccountAddresses 在写入创世状态前校验账户角色 + 防止保留地址被占用或 Stake 数据覆盖普通余额。
+func validateGenesisAccountAddresses(genesis GenesisConfig, treasuryAddress structure.PublicKey) error {
+	if err := validateGenesisUserAddress("treasury", treasuryAddress); err != nil {
+		return err
+	}
+
+	fundedAddresses := make(map[structure.PublicKey]struct{}, len(genesis.FundedAccounts))
+	for accountIndex, fundedAccount := range genesis.FundedAccounts {
+		role := fmt.Sprintf("funded account %d", accountIndex)
+		if err := validateGenesisUserAddress(role, fundedAccount.Address); err != nil {
+			return err
+		}
+		fundedAddresses[fundedAccount.Address] = struct{}{}
+	}
+
+	validatorAddressIndexes := make(map[structure.PublicKey]int, len(genesis.InitialValidators))
+	stakerAddressIndexes := make(map[structure.PublicKey][]int, len(genesis.InitialValidators))
+	for validatorIndex, validator := range genesis.InitialValidators {
+		stakerRole := fmt.Sprintf("validator %d staker", validatorIndex)
+		if err := validateGenesisUserAddress(stakerRole, validator.StakerAddress); err != nil {
+			return err
+		}
+		validatorRole := fmt.Sprintf("validator %d account", validatorIndex)
+		if err := validateGenesisUserAddress(validatorRole, validator.ValidatorAddress); err != nil {
+			return err
+		}
+		if previousIndex, exists := validatorAddressIndexes[validator.ValidatorAddress]; exists {
+			return fmt.Errorf(
+				"%w: validator accounts %d and %d use the same address",
+				ErrInvalidGenesis,
+				previousIndex,
+				validatorIndex,
+			)
+		}
+		validatorAddressIndexes[validator.ValidatorAddress] = validatorIndex
+		stakerAddressIndexes[validator.StakerAddress] = append(stakerAddressIndexes[validator.StakerAddress], validatorIndex)
+	}
+
+	for validatorIndex, validator := range genesis.InitialValidators {
+		if validator.ValidatorAddress == treasuryAddress {
+			return fmt.Errorf("%w: validator %d account conflicts with treasury", ErrInvalidGenesis, validatorIndex)
+		}
+		if _, exists := fundedAddresses[validator.ValidatorAddress]; exists {
+			return fmt.Errorf("%w: validator %d account conflicts with funded account", ErrInvalidGenesis, validatorIndex)
+		}
+		for _, stakerIndex := range stakerAddressIndexes[validator.ValidatorAddress] {
+			if stakerIndex == validatorIndex {
+				continue
+			}
+			return fmt.Errorf(
+				"%w: validator %d account conflicts with validator %d staker",
+				ErrInvalidGenesis,
+				validatorIndex,
+				stakerIndex,
+			)
+		}
+	}
+	return nil
+}
+
+func validateGenesisUserAddress(role string, address structure.PublicKey) error {
+	if address.IsZero() {
+		return fmt.Errorf("%w: %s address is empty", ErrInvalidGenesis, role)
+	}
+	if address == structure.DefaultShieldedPoolAddress {
+		return fmt.Errorf("%w: %s uses the shielded pool address", ErrInvalidGenesis, role)
+	}
+	if structure.DefaultBuiltinProgramIDs.IsBuiltinProgram(address) {
+		return fmt.Errorf("%w: %s uses a builtin program address", ErrInvalidGenesis, role)
+	}
+	return nil
 }
 
 // CommitBlock 提交已验证区块 + 区块、账户、索引、QC 和链头必须一起更新。

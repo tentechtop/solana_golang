@@ -225,7 +225,7 @@ func TestRuntimeSyscallVerifiesSchnorrProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSchnorrKeyPair() error = %v", err)
 	}
-	message := []byte("gosvm privacy spend")
+	message := []byte("gosvm schnorr authorization")
 	proof, err := zk.NewSchnorrProofBytes(keyPair.PrivateScalar, message)
 	if err != nil {
 		t.Fatalf("NewSchnorrProofBytes() error = %v", err)

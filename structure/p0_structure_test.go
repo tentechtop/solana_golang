@@ -174,6 +174,34 @@ func TestFeeBudgetEstimatesSystemTransferAndLoaderDeploy(t *testing.T) {
 	}
 }
 
+func TestEstimateTransactionComputeBudgetRejectsDemandAboveLimit(t *testing.T) {
+	programID := newTestPublicKey(201)
+	instructions := make([]CompiledInstruction, 8)
+	for instructionIndex := range instructions {
+		instructions[instructionIndex] = CompiledInstruction{ProgramIDIndex: 1}
+	}
+	transaction := Transaction{
+		Signatures: []Signature{newTestSignature(202)},
+		Accounts: []AccountMeta{
+			{PublicKey: newTestPublicKey(203), IsSigner: true, IsWritable: true},
+			{PublicKey: programID},
+		},
+		Instructions:    instructions,
+		RecentBlockhash: newTestHash(204),
+	}
+
+	demand, _, err := EstimateTransactionResourceDemand(transaction, DefaultBuiltinProgramIDs)
+	if err != nil {
+		t.Fatalf("EstimateTransactionResourceDemand() error = %v", err)
+	}
+	if demand != 8*DefaultContractCallComputeUnits || demand <= MaxComputeUnitsPerTransaction {
+		t.Fatalf("compute demand = %d, want %d above maximum", demand, 8*DefaultContractCallComputeUnits)
+	}
+	if _, err := EstimateTransactionComputeBudget(transaction, DefaultBuiltinProgramIDs); !errors.Is(err, ErrInvalidFee) {
+		t.Fatalf("EstimateTransactionComputeBudget() error = %v, want ErrInvalidFee", err)
+	}
+}
+
 func TestDefaultMonetaryPolicyCalculatesGenesisInflation(t *testing.T) {
 	policy := DefaultMonetaryPolicy()
 	if err := policy.Validate(); err != nil {

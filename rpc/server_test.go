@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -70,6 +71,15 @@ func (b testPublicBackend) GetAssetState(context.Context, string, string) (Asset
 		},
 	}, nil
 }
+func (b testPublicBackend) GetShieldedPool(context.Context) (ShieldedPoolResult, error) {
+	return ShieldedPoolResult{
+		Address:         "shielded-pool-address",
+		ProtocolVersion: 2,
+		CircuitID:       0x53483201,
+		RecentAnchors:   []string{"anchor"},
+		DataBase64:      "c3RhdGU=",
+	}, nil
+}
 
 func TestServerGetBalance(t *testing.T) {
 	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
@@ -132,6 +142,36 @@ func TestServerMethodNotFound(t *testing.T) {
 	}
 	if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
 		t.Fatalf("error = %+v, want method not found", decoded.Error)
+	}
+}
+
+func TestDefaultRouterRejectsLegacyPrivacyMethods(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewDefaultRouter(testLedgerBackend{}))
+	legacyMethods := []string{
+		"getPrivacyState",
+		"getPrivacyBalance",
+		"privacyDeposit",
+		"privacyDepositToState",
+		"privacyDepositToReceiver",
+		"privacyWithdraw",
+		"privacyTransfer",
+		"privacyTransferToReceiver",
+		"privacyAuthorizeAudit",
+	}
+
+	for _, method := range legacyMethods {
+		t.Run(method, func(t *testing.T) {
+			requestBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":%q,"params":[]}`, method)
+			response := postJSONRPC(t, server, requestBody)
+
+			var decoded Response
+			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if decoded.Error == nil || decoded.Error.Code != CodeMethodNotFound {
+				t.Fatalf("error = %+v, want method not found", decoded.Error)
+			}
+		})
 	}
 }
 
@@ -204,6 +244,29 @@ func TestPublicRouterExposesAssetState(t *testing.T) {
 	mint := result["mint"].(map[string]any)
 	if mint["symbol"].(string) != "POP" {
 		t.Fatalf("mint = %#v, want POP symbol", mint)
+	}
+}
+
+func TestPublicRouterExposesShieldedPoolWithoutWalletSecrets(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getShieldedPool","params":[]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["address"] != "shielded-pool-address" || result["data_base64"] != "c3RhdGU=" {
+		t.Fatalf("result = %#v, want public shielded pool state", result)
+	}
+	if _, exists := result["seed"]; exists {
+		t.Fatal("shielded pool result must not contain seed")
+	}
+	if _, exists := result["private_key"]; exists {
+		t.Fatal("shielded pool result must not contain private key")
 	}
 }
 

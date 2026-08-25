@@ -25,7 +25,6 @@ const (
 	SyscallVerifySchnorr
 	SyscallGetAccountData
 	SyscallSetAccountData
-	SyscallPrivacyExecute   SyscallID = 10_001
 	SyscallStakePoolExecute SyscallID = 10_002
 	SyscallAssetExecute     SyscallID = 10_003
 )

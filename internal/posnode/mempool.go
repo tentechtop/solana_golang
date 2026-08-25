@@ -50,8 +50,22 @@ func (node *posNode) loadMempool() error {
 			continue
 		}
 		transaction.SubmitTime = stored.SubmitTime
+		containsShieldedInstruction, err := transactionContainsShieldedInstruction(transaction)
+		if err != nil {
+			_ = node.db.Delete(database.TableChain, value.Key)
+			continue
+		}
+		if err := validateTransactionResourceDemand(transaction); err != nil {
+			_ = node.db.Delete(database.TableChain, value.Key)
+			continue
+		}
 		transaction, _, err = applyEstimatedTransactionFee(transaction)
 		if err != nil {
+			_ = node.db.Delete(database.TableChain, value.Key)
+			continue
+		}
+		signatureValid, err := transaction.HasValidSignatures()
+		if err != nil || !signatureValid {
 			_ = node.db.Delete(database.TableChain, value.Key)
 			continue
 		}
@@ -65,6 +79,20 @@ func (node *posNode) loadMempool() error {
 		}
 		if _, exists := node.seenTransactions[transactionID]; exists {
 			continue
+		}
+		if containsShieldedInstruction {
+			if err := node.checkMempoolShieldedResourcesLocked(transactionID, transaction); err != nil {
+				_ = node.db.Delete(database.TableChain, value.Key)
+				continue
+			}
+			if err := node.preflightShieldedMempoolTransaction(context.Background(), transaction); err != nil {
+				_ = node.db.Delete(database.TableChain, value.Key)
+				continue
+			}
+			if err := node.reserveMempoolShieldedResourcesLocked(transactionID, transaction); err != nil {
+				_ = node.db.Delete(database.TableChain, value.Key)
+				continue
+			}
 		}
 		node.seenTransactions[transactionID] = struct{}{}
 		node.mempool = append(node.mempool, transaction)
@@ -158,6 +186,7 @@ func (node *posNode) pruneMempool(nowMillis int64, currentSlot uint64) int {
 		}
 		removeIDs = append(removeIDs, transactionID)
 		delete(node.seenTransactions, transactionID)
+		node.releaseMempoolShieldedResourcesLocked(transactionID)
 		if reason == "expired" || reason == "recent blockhash is not valid" {
 			node.metrics.transactionsDrop.Add(1)
 		}
@@ -215,11 +244,13 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64, currentSlo
 		if transaction.IsExpiredWithTTL(nowMillis, node.config.MempoolTransactionTTLMillis) {
 			removeIDs = append(removeIDs, transactionID)
 			delete(node.seenTransactions, transactionID)
+			node.releaseMempoolShieldedResourcesLocked(transactionID)
 			continue
 		}
 		if !node.transactionRecentBlockhashValidLocked(transaction, currentSlot) {
 			removeIDs = append(removeIDs, transactionID)
 			delete(node.seenTransactions, transactionID)
+			node.releaseMempoolShieldedResourcesLocked(transactionID)
 			node.metrics.transactionsDrop.Add(1)
 			node.logger.Warn("posnode mempool transaction dropped",
 				"tx_id", transactionID,
@@ -241,6 +272,7 @@ func (node *posNode) selectMempoolTransactionsLocked(nowMillis int64, currentSlo
 		if committed {
 			removeIDs = append(removeIDs, transactionID)
 			delete(node.seenTransactions, transactionID)
+			node.releaseMempoolShieldedResourcesLocked(transactionID)
 			continue
 		}
 		selected = append(selected, transaction)
@@ -309,6 +341,9 @@ func (node *posNode) clearTransactionTracking(transactionID string) {
 	defer node.mutex.Unlock()
 	delete(node.seenTransactions, transactionID)
 	delete(node.rejectedTransactions, transactionID)
+	if _, inMempool := node.mempoolTransactionByIDLocked(transactionID); !inMempool {
+		node.releaseMempoolShieldedResourcesLocked(transactionID)
+	}
 }
 
 func (node *posNode) removeCommittedMempoolTransactions(transactions []structure.Transaction) {
@@ -338,6 +373,7 @@ func (node *posNode) removeCommittedMempoolTransactions(transactions []structure
 		if _, committed := transactionIDs[transactionID]; committed {
 			removeIDs = append(removeIDs, transactionID)
 			delete(node.seenTransactions, transactionID)
+			node.releaseMempoolShieldedResourcesLocked(transactionID)
 			continue
 		}
 		remaining = append(remaining, transaction)
