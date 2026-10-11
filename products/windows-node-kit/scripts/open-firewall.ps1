@@ -1,4 +1,4 @@
-﻿param(
+param(
   [int]$ListenPort = 5102,
   [int]$RPCPort = 8899
 )
@@ -39,8 +39,8 @@ if (-not (Test-ValidPort $RPCPort)) {
   throw "RPCPort must be 1..65535."
 }
 
-Add-PortRule -Name "SolanaGolang PosNode P2P $ListenPort" -Port $ListenPort -Profile "Any"
-Add-PortRule -Name "SolanaGolang PosNode RPC $RPCPort" -Port $RPCPort -Profile "Private"
+Add-PortRule -Name "OrdexusGolang PosNode P2P $ListenPort" -Port $ListenPort -Profile "Any"
+Add-PortRule -Name "OrdexusGolang PosNode RPC $RPCPort" -Port $RPCPort -Profile "Private"
 
 Write-Host "Firewall P2P port opened: $ListenPort"
 Write-Host "Firewall RPC port opened for Private profile: $RPCPort"

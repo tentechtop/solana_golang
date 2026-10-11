@@ -3,10 +3,10 @@ package vmprogram
 import (
 	"fmt"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 const (
@@ -146,6 +146,21 @@ func (instruction AssetInstruction) Validate() error {
 	}
 	if len(instruction.URI) > maxAssetURIBytes {
 		return fmt.Errorf("asset: uri too long")
+	}
+	if instruction.Type >= MarketCreate {
+		return validateMarketInstruction(instruction)
+	}
+	if instruction.Type >= RewardInitialize {
+		return validateRewardInstruction(instruction)
+	}
+	if instruction.Type >= RWAInitialize {
+		return validateRWAInstruction(instruction)
+	}
+	if instruction.Type >= FundInitialize {
+		return validateFundraiserInstruction(instruction)
+	}
+	if instruction.Type >= StableInitialize {
+		return validateStablecoinInstruction(instruction)
 	}
 	switch instruction.Type {
 	case AssetInstructionInitializeFungible:
@@ -478,30 +493,30 @@ func NFTContractProgramData() ([]byte, error) {
 }
 
 func assetContractProgramData() ([]byte, error) {
-	dispatchInstruction, err := svm.BuildRegisterInstruction(svm.RegOpSyscall, 0, 0, 0, uint64(svm.SyscallAssetExecute))
+	dispatchInstruction, err := ovm.BuildRegisterInstruction(ovm.RegOpSyscall, 0, 0, 0, uint64(ovm.SyscallAssetExecute))
 	if err != nil {
 		return nil, err
 	}
-	code, err := svm.BuildRegisterProgramCode(dispatchInstruction)
+	code, err := ovm.BuildRegisterProgramCode(dispatchInstruction)
 	if err != nil {
 		return nil, err
 	}
-	return svm.EncodeGovernedRegisterBytecode(code, nil, svm.ProgramManifest{
-		ComputeUnitLimit: svm.DefaultComputeUnitLimit,
-		RequiredSyscalls: []svm.SyscallID{svm.SyscallAssetExecute},
+	return ovm.EncodeGovernedRegisterBytecode(code, nil, ovm.ProgramManifest{
+		ComputeUnitLimit: ovm.DefaultComputeUnitLimit,
+		RequiredSyscalls: []ovm.SyscallID{ovm.SyscallAssetExecute},
 	})
 }
 
-func attachAssetSyscall(runtimeValue *svm.Runtime, context runtime.InstructionContext) error {
+func attachAssetSyscall(runtimeValue *ovm.Runtime, context runtime.InstructionContext) error {
 	if runtimeValue == nil {
 		return fmt.Errorf("vm program: runtime is nil")
 	}
 	registry := runtimeValue.Syscalls
 	if registry.IsZero() {
-		registry = svm.DefaultSyscallRegistry()
+		registry = ovm.DefaultSyscallRegistry()
 	}
-	extendedRegistry, err := registry.With(svm.Syscall{
-		ID:      svm.SyscallAssetExecute,
+	extendedRegistry, err := registry.With(ovm.Syscall{
+		ID:      ovm.SyscallAssetExecute,
 		Name:    "asset_execute",
 		Cost:    assetExecuteSyscallCost,
 		Handler: assetExecuteSyscall(context),
@@ -513,8 +528,8 @@ func attachAssetSyscall(runtimeValue *svm.Runtime, context runtime.InstructionCo
 	return nil
 }
 
-func assetExecuteSyscall(outerContext runtime.InstructionContext) svm.SyscallFunc {
-	return func(vmContext *svm.Context, input []byte) ([]byte, error) {
+func assetExecuteSyscall(outerContext runtime.InstructionContext) ovm.SyscallFunc {
+	return func(vmContext *ovm.Context, input []byte) ([]byte, error) {
 		if vmContext == nil || vmContext.Accounts == nil {
 			return nil, fmt.Errorf("asset syscall: vm context is nil")
 		}
@@ -526,7 +541,32 @@ func assetExecuteSyscall(outerContext runtime.InstructionContext) svm.SyscallFun
 			return nil, err
 		}
 		workingAccounts := cloneStructureAccounts(outerContext.Accounts)
-		if err := executeAssetInstruction(instruction, outerContext, workingAccounts); err != nil {
+		programID, err := assetVMProgramID(outerContext)
+		if err != nil {
+			return nil, err
+		}
+		stableProgram := IsStablecoinProgram(workingAccounts[programID].Data)
+		fundProgram := IsFundraiserProgram(workingAccounts[programID].Data)
+		rwaProgram := IsRWAProgram(workingAccounts[programID].Data)
+		rewardProgram := IsRewardProgram(workingAccounts[programID].Data)
+		marketProgram := IsMarketProgram(workingAccounts[programID].Data)
+		if marketProgram != (instruction.Type >= MarketCreate) || (!rewardProgram && instruction.Type >= RewardInitialize && instruction.Type < MarketCreate) || rwaProgram != (instruction.Type >= RWAInitialize && instruction.Type < RewardInitialize) || fundProgram != (instruction.Type >= FundInitialize && instruction.Type < RWAInitialize) || stableProgram != (instruction.Type >= StableInitialize && instruction.Type < FundInitialize) {
+			return nil, fmt.Errorf("asset: instruction does not belong to this program template")
+		}
+		if marketProgram {
+			err = executeMarketInstruction(instruction, outerContext, workingAccounts)
+		} else if rewardProgram {
+			err = executeRewardInstruction(instruction, outerContext, workingAccounts)
+		} else if rwaProgram {
+			err = executeRWAInstruction(instruction, outerContext, workingAccounts)
+		} else if fundProgram {
+			err = executeFundraiserInstruction(instruction, outerContext, workingAccounts)
+		} else if stableProgram {
+			err = executeStablecoinInstruction(instruction, outerContext, workingAccounts)
+		} else {
+			err = executeAssetInstruction(instruction, outerContext, workingAccounts)
+		}
+		if err != nil {
 			return nil, err
 		}
 		if err := commitAssetSyscallAccounts(vmContext, outerContext, workingAccounts); err != nil {
@@ -693,6 +733,10 @@ func executeAssetTransfer(instruction AssetInstruction, context runtime.Instruct
 	if err != nil {
 		return err
 	}
+	if sourceAddress == destinationAddress {
+		// Repeated ABI indexes name one balance, not two independent copies.
+		return applyAssetTransfer(instruction.Amount, mintState, &sourceState, &sourceState)
+	}
 	if err := applyAssetTransfer(instruction.Amount, mintState, &sourceState, &destinationState); err != nil {
 		return err
 	}
@@ -837,6 +881,13 @@ func executeAssetTransferFrom(instruction AssetInstruction, context runtime.Inst
 	if allowanceState.Amount < instruction.Amount {
 		return fmt.Errorf("asset: insufficient allowance")
 	}
+	if sourceAddress == destinationAddress {
+		if err := applyAssetTransfer(instruction.Amount, mintState, &sourceState, &sourceState); err != nil {
+			return err
+		}
+		allowanceState.Amount -= instruction.Amount
+		return writeAssetAccount(allowanceAddress, allowanceAccount, allowanceState.MarshalBinary, context, accounts)
+	}
 	if err := applyAssetTransfer(instruction.Amount, mintState, &sourceState, &destinationState); err != nil {
 		return err
 	}
@@ -880,6 +931,11 @@ func applyAssetTransfer(amount uint64, mintState AssetMintState, sourceState *As
 		if amount != 1 {
 			return fmt.Errorf("asset: nft amount must be one")
 		}
+	}
+	if sourceState == destinationState {
+		return nil
+	}
+	if mintState.Kind == AssetKindNFT {
 		if destinationState.Amount != 0 {
 			return fmt.Errorf("asset: nft destination already owns token")
 		}
@@ -1013,8 +1069,8 @@ func writeAssetAccount(address structure.PublicKey, account structure.Account, m
 	return nil
 }
 
-func commitAssetSyscallAccounts(vmContext *svm.Context, outerContext runtime.InstructionContext, workingAccounts map[structure.PublicKey]structure.Account) error {
-	vmAccounts := make([]svm.Account, len(outerContext.Instruction.AccountIndexes))
+func commitAssetSyscallAccounts(vmContext *ovm.Context, outerContext runtime.InstructionContext, workingAccounts map[structure.PublicKey]structure.Account) error {
+	vmAccounts := make([]ovm.Account, len(outerContext.Instruction.AccountIndexes))
 	for accountIndex, messageAccountIndex := range outerContext.Instruction.AccountIndexes {
 		account, err := buildInstructionAccount(runtime.InstructionContext{Message: outerContext.Message, Accounts: workingAccounts}, int(messageAccountIndex))
 		if err != nil {

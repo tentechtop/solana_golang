@@ -3,7 +3,7 @@ package vmprogram
 import (
 	"testing"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func testAccount(t *testing.T, lamports uint64, data []byte, owner structure.PublicKey, executable bool) structure.Account {

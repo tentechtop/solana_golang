@@ -14,6 +14,9 @@ func (host *Host) Send(ctx context.Context, peerID string, message Message) erro
 		return err
 	}
 	if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
+		if errors.Is(err, ErrPeerBackoff) {
+			return host.sendRelayFallback(ctx, peerID, message, peerProtectionDialError(peerID, err))
+		}
 		return peerProtectionDialError(peerID, err)
 	}
 
@@ -169,6 +172,9 @@ func (host *Host) broadcastToPeer(ctx context.Context, peerID string, baseMessag
 		return fmt.Errorf("%s: %w", peerID, err)
 	}
 	if err := host.checkPeerDialAllowedOrConnected(peerID); err != nil {
+		if errors.Is(err, ErrPeerBackoff) {
+			return host.sendRelayFallback(ctx, peerID, baseMessage, peerProtectionDialError(peerID, err))
+		}
 		return fmt.Errorf("%s: %w", peerID, peerProtectionDialError(peerID, err))
 	}
 	connection, ok := host.Connection(peerID)

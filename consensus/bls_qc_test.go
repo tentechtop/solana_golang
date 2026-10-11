@@ -3,7 +3,7 @@ package consensus
 import (
 	"testing"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestBLSAggregateQuorumCertificateVerifiesWithBitmap(t *testing.T) {

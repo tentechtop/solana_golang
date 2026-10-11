@@ -1,5 +1,5 @@
-﻿param(
-  [string]$TaskName = "SolanaGolangPosNode"
+param(
+  [string]$TaskName = "OrdexusGolangPosNode"
 )
 
 $ErrorActionPreference = "Stop"

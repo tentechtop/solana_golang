@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestRelayMessageSignedRoundTrip(t *testing.T) {
@@ -201,6 +202,31 @@ func TestHostSendFallsBackToConnectedRelayPeer(t *testing.T) {
 	if written.Type != ProtocolRelayMessageV1 {
 		t.Fatalf("written type = %d, want relay", written.Type)
 	}
+	host.recordPeerDialFailure(targetPeerID)
+	nextMessage, _ := NewMessage(ProtocolPingV1, []byte("relay during backoff"))
+	if err := host.Send(context.Background(), targetPeerID, nextMessage); err != nil {
+		t.Fatalf("relay during direct dial backoff: %v", err)
+	}
+	if relayConnection.waitWrite(t).Type != ProtocolRelayMessageV1 {
+		t.Fatal("backoff fallback was not relayed")
+	}
+}
+
+func TestRelayDoesNotBypassStaticPeerBlock(t *testing.T) {
+	target := testPeerID(155)
+	host, err := NewHost(HostConfig{PeerID: testPeerID(156), AllowInsecure: true, BlockedPeerIDs: []string{target}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	message, _ := NewMessage(ProtocolPingV1, nil)
+	if err := host.SendRelayMessage(context.Background(), target, message); !errors.Is(err, ErrPeerBlocked) {
+		t.Fatalf("blocked relay send: %v", err)
+	}
+	request, _ := NewRequestMessage(host.peerID, ProtocolPingV1, nil)
+	if _, err := host.RequestRelay(context.Background(), testPeerID(157), target, request); !errors.Is(err, ErrPeerBlocked) {
+		t.Fatalf("blocked relay request: %v", err)
+	}
 }
 
 func TestHostConsumesRelayMessage(t *testing.T) {
@@ -295,4 +321,77 @@ func testMessageID(t *testing.T) string {
 		t.Fatalf("newMessageID() error = %v", err)
 	}
 	return messageID
+}
+
+func TestRelayResponseFulfillsPendingRequest(t *testing.T) {
+	source, target := testPeerID(141), testPeerID(142)
+	host, err := NewHost(HostConfig{PeerID: target, AllowInsecure: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	id := testMessageID(t)
+	waiter, unregister, err := host.requests.register(id, source, ProtocolPingV1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unregister()
+	response, err := NewResponseMessage(source, ProtocolPingV1, id, []byte("echo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.ToPeerID = target
+	payload, err := response.MarshalBinary(host.maxMessageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := testRelayEnvelope(t, source, target, ProtocolPingV1, []byte("echo"))
+	envelope.Payload = payload
+	envelope.ID = response.ID
+	if err := host.consumeRelayMessage(context.Background(), envelope); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-waiter:
+		if !bytes.Equal(got.Payload, response.Payload) {
+			t.Fatal("response corrupted")
+		}
+	default:
+		t.Fatal("relayed response did not fulfill the pending request")
+	}
+}
+
+func TestRelayRejectsInnerSourceMismatch(t *testing.T) {
+	host, err := NewHost(HostConfig{PeerID: testPeerID(143), AllowInsecure: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	envelope := testRelayEnvelope(t, testPeerID(144), host.peerID, ProtocolPingV1, []byte("echo"))
+	envelope.SourcePeerID = testPeerID(145)
+	if err := host.consumeRelayMessage(context.Background(), envelope); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatal("accepted an inner sender different from the signed envelope source")
+	}
+}
+
+func BenchmarkRelayAccept(b *testing.B) {
+	for _, size := range []int{0, 10000} {
+		b.Run(fmt.Sprintf("seen_%d", size), func(b *testing.B) {
+			service := newRelayService(RelayConfig{})
+			expires := time.Now().Add(time.Minute).UnixMilli()
+			for i := 0; i < size; i++ {
+				service.seen[fmt.Sprintf("cached-%d", i)] = expires
+			}
+			inner, _ := NewMessage(ProtocolPingV1, []byte("benchmark"))
+			msg := RelayMessage{Version: RelayMessageVersion, SourcePeerID: testPeerID(146), TargetPeerID: testPeerID(147), TTL: 3, CreatedAtUnixMilli: time.Now().UnixMilli(), ProtocolID: ProtocolPingV1, Payload: []byte("benchmark")}
+			msg.ID = inner.ID
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				delete(service.seen, msg.ID)
+				if err := service.accept(msg); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

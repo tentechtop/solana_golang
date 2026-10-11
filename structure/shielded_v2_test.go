@@ -277,9 +277,9 @@ func TestUnsignedShieldedTransactionIDExcludesRerandomizableProof(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Transaction.TxID() error = %v", err)
 	}
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
-		t.Fatalf("Transaction.SolanaMessage() error = %v", err)
+		t.Fatalf("Transaction.OrdexusMessage() error = %v", err)
 	}
 	instruction, err := UnmarshalShieldedTransferInstructionBinary(message.Instructions[0].Data)
 	if err != nil {
@@ -307,9 +307,9 @@ func TestUnsignedShieldedTransactionIDExcludesRerandomizableProof(t *testing.T) 
 
 func TestUnsignedShieldedTransactionIDBindsPublicAuthorization(t *testing.T) {
 	baseTransaction := newCanonicalUnsignedShieldedTransaction(t, 0, PublicKey{})
-	baseMessage, err := baseTransaction.SolanaMessage()
+	baseMessage, err := baseTransaction.OrdexusMessage()
 	if err != nil {
-		t.Fatalf("Transaction.SolanaMessage() error = %v", err)
+		t.Fatalf("Transaction.OrdexusMessage() error = %v", err)
 	}
 	baseTransactionID, err := baseTransaction.TxID()
 	if err != nil {
@@ -318,42 +318,42 @@ func TestUnsignedShieldedTransactionIDBindsPublicAuthorization(t *testing.T) {
 
 	testCases := []struct {
 		name   string
-		mutate func(*SolanaMessage, *ShieldedTransferInstruction)
+		mutate func(*OrdexusMessage, *ShieldedTransferInstruction)
 	}{
 		{
 			name: "recent blockhash",
-			mutate: func(message *SolanaMessage, _ *ShieldedTransferInstruction) {
+			mutate: func(message *OrdexusMessage, _ *ShieldedTransferInstruction) {
 				message.RecentBlockhash = newTestHash(139)
 			},
 		},
 		{
 			name: "anchor",
-			mutate: func(_ *SolanaMessage, instruction *ShieldedTransferInstruction) {
+			mutate: func(_ *OrdexusMessage, instruction *ShieldedTransferInstruction) {
 				instruction.Bundle.Anchor = newTestHash(140)
 			},
 		},
 		{
 			name: "nullifier",
-			mutate: func(message *SolanaMessage, instruction *ShieldedTransferInstruction) {
+			mutate: func(message *OrdexusMessage, instruction *ShieldedTransferInstruction) {
 				instruction.Bundle.Actions[0].Nullifier = newTestHash(142)
 				message.AccountKeys[1] = DeriveShieldedNullifierAccount(DefaultBuiltinProgramIDs.Shielded, instruction.Bundle.Actions[0].Nullifier)
 			},
 		},
 		{
 			name: "note commitment",
-			mutate: func(_ *SolanaMessage, instruction *ShieldedTransferInstruction) {
+			mutate: func(_ *OrdexusMessage, instruction *ShieldedTransferInstruction) {
 				instruction.Bundle.Actions[0].NoteCommitment = newTestHash(144)
 			},
 		},
 		{
 			name: "encrypted note",
-			mutate: func(_ *SolanaMessage, instruction *ShieldedTransferInstruction) {
+			mutate: func(_ *OrdexusMessage, instruction *ShieldedTransferInstruction) {
 				instruction.Bundle.Actions[0].EncryptedNote[0] ^= 0x01
 			},
 		},
 		{
 			name: "value balance",
-			mutate: func(_ *SolanaMessage, instruction *ShieldedTransferInstruction) {
+			mutate: func(_ *OrdexusMessage, instruction *ShieldedTransferInstruction) {
 				instruction.Bundle.ValueBalance++
 			},
 		},
@@ -392,9 +392,9 @@ func TestUnsignedShieldedTransactionAcceptsCanonicalWithdrawalShape(t *testing.T
 	if err := transaction.Validate(); err != nil {
 		t.Fatalf("Transaction.Validate(canonical withdrawal) error = %v", err)
 	}
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
-		t.Fatalf("Transaction.SolanaMessage() error = %v", err)
+		t.Fatalf("Transaction.OrdexusMessage() error = %v", err)
 	}
 	if len(message.AccountKeys) != 4 || message.AccountKeys[1] != transparentTarget {
 		t.Fatalf("canonical withdrawal accounts = %v, want target at index 1", message.AccountKeys)
@@ -403,25 +403,25 @@ func TestUnsignedShieldedTransactionAcceptsCanonicalWithdrawalShape(t *testing.T
 
 func TestUnsignedShieldedTransactionRejectsMessageMalleability(t *testing.T) {
 	baseTransaction := newCanonicalUnsignedShieldedTransaction(t, 0, PublicKey{})
-	baseMessage, err := baseTransaction.SolanaMessage()
+	baseMessage, err := baseTransaction.OrdexusMessage()
 	if err != nil {
-		t.Fatalf("Transaction.SolanaMessage() error = %v", err)
+		t.Fatalf("Transaction.OrdexusMessage() error = %v", err)
 	}
 
 	testCases := []struct {
 		name   string
-		mutate func(*SolanaMessage)
+		mutate func(*OrdexusMessage)
 	}{
 		{
 			name: "address table",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.UsesAddressTable = true
 				message.AddressTableLookups = []MessageAddressTableLookup{{AccountKey: newTestPublicKey(141)}}
 			},
 		},
 		{
 			name: "unused writable account",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				programIndex := int(message.Instructions[0].ProgramIDIndex)
 				message.AccountKeys = append(message.AccountKeys, PublicKey{})
 				copy(message.AccountKeys[programIndex+1:], message.AccountKeys[programIndex:])
@@ -431,39 +431,39 @@ func TestUnsignedShieldedTransactionRejectsMessageMalleability(t *testing.T) {
 		},
 		{
 			name: "unused readonly account",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.AccountKeys = append(message.AccountKeys, newTestPublicKey(145))
 				message.Header.NumReadonlyUnsignedAccounts++
 			},
 		},
 		{
 			name: "reordered message accounts",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.AccountKeys[0], message.AccountKeys[1] = message.AccountKeys[1], message.AccountKeys[0]
 				message.Instructions[0].AccountIndexes[0], message.Instructions[0].AccountIndexes[1] = 1, 0
 			},
 		},
 		{
 			name: "reordered instruction accounts",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.Instructions[0].AccountIndexes[0], message.Instructions[0].AccountIndexes[1] = 1, 0
 			},
 		},
 		{
 			name: "noncanonical permissions",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.Header.NumReadonlyUnsignedAccounts = 0
 			},
 		},
 		{
 			name: "wrong nullifier marker",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				message.AccountKeys[1] = newTestPublicKey(147)
 			},
 		},
 		{
 			name: "transparent input without signer",
-			mutate: func(message *SolanaMessage) {
+			mutate: func(message *OrdexusMessage) {
 				instruction, decodeErr := UnmarshalShieldedTransferInstructionBinary(message.Instructions[0].Data)
 				if decodeErr != nil {
 					t.Fatalf("UnmarshalShieldedTransferInstructionBinary() error = %v", decodeErr)
@@ -493,7 +493,7 @@ func TestUnsignedShieldedTransactionRejectsMessageMalleability(t *testing.T) {
 }
 
 func TestUnsignedOrdinaryTransactionIsRejected(t *testing.T) {
-	message := SolanaMessage{
+	message := OrdexusMessage{
 		Header: MessageHeader{
 			NumReadonlyUnsignedAccounts: 1,
 		},
@@ -517,7 +517,7 @@ func TestUnsignedOrdinaryTransactionIsRejected(t *testing.T) {
 
 	messageBytes, err := message.MarshalBinary()
 	if err != nil {
-		t.Fatalf("SolanaMessage.MarshalBinary() error = %v", err)
+		t.Fatalf("OrdexusMessage.MarshalBinary() error = %v", err)
 	}
 	forgedWireTransaction := append([]byte{0}, messageBytes...)
 	if _, err := UnmarshalTransactionBinary(forgedWireTransaction); !errors.Is(err, ErrMissingRequiredSignature) {

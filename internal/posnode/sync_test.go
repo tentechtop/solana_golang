@@ -5,9 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/programs/stake"
 )
 
 func TestPeerNeedsBlockSyncWhenPeerAhead(t *testing.T) {
@@ -134,50 +135,24 @@ func TestCalculateSyncStartHeightFromAncestorStartsFromFirstBlockAfterGenesis(t 
 	}
 }
 
-func TestRequiresConnectedValidatorPeerForProduction(t *testing.T) {
-	tests := []struct {
-		name           string
-		validatorCount int
-		want           bool
-	}{
-		{name: "empty", validatorCount: 0, want: false},
-		{name: "single", validatorCount: 1, want: false},
-		{name: "two", validatorCount: 2, want: true},
-		{name: "three", validatorCount: 3, want: true},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			node := &posNode{
-				epochSnapshot: consensus.EpochSnapshot{
-					Validators: make([]consensus.ValidatorState, testCase.validatorCount),
-				},
-			}
-			if got := node.requiresConnectedValidatorPeerForProduction(); got != testCase.want {
-				t.Fatalf("requiresConnectedValidatorPeerForProduction() = %v, want %v", got, testCase.want)
-			}
-		})
+func TestArchiveNodeDisablesFinalizedSnapshotImport(t *testing.T) {
+	node := &posNode{config: nodeConfig{ResolvedNodeCapabilities: p2p.PeerCapabilityArchive}}
+	if node.allowsFinalizedSnapshotImport() {
+		t.Fatal("allowsFinalizedSnapshotImport() = true for archive node")
 	}
 }
 
-func TestHasMinimumActiveValidatorCount(t *testing.T) {
-	tests := []struct {
-		name                 string
-		activeValidatorCount int
-		want                 bool
-	}{
-		{name: "zero", activeValidatorCount: 0, want: false},
-		{name: "one", activeValidatorCount: 1, want: false},
-		{name: "two", activeValidatorCount: 2, want: true},
-		{name: "three", activeValidatorCount: 3, want: true},
+func TestNonArchiveNodeAllowsFinalizedSnapshotImport(t *testing.T) {
+	node := &posNode{config: nodeConfig{ResolvedNodeCapabilities: p2p.PeerCapabilityStateSync}}
+	if !node.allowsFinalizedSnapshotImport() {
+		t.Fatal("allowsFinalizedSnapshotImport() = false for non-archive node")
 	}
+}
 
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := hasMinimumActiveValidatorCount(testCase.activeValidatorCount); got != testCase.want {
-				t.Fatalf("hasMinimumActiveValidatorCount() = %v, want %v", got, testCase.want)
-			}
-		})
+func TestShouldPauseProductionForSyncAllowsNoConnectedPeer(t *testing.T) {
+	node := &posNode{host: &p2p.Host{}}
+	if node.shouldPauseProductionForSync(context.Background(), blockchain.Head{}) {
+		t.Fatal("shouldPauseProductionForSync() = true without connected peers after stake gate passed")
 	}
 }
 
@@ -216,14 +191,14 @@ func TestHeadQCLagAcceptable(t *testing.T) {
 		want          bool
 	}{
 		{name: "genesis without qc", headHeight: 0, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: true},
-		{name: "first optimistic block can pipeline", headHeight: 1, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: true},
-		{name: "second optimistic block can pipeline", headHeight: 2, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: true},
+		{name: "first uncertified block waits", headHeight: 1, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: false},
+		{name: "second uncertified block waits", headHeight: 2, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: false},
 		{name: "third optimistic block waits for qc", headHeight: 3, qcHeight: 0, qcExists: false, maxAllowedLag: 2, want: false},
 		{name: "qc at head", headHeight: 12, qcHeight: 12, qcExists: true, maxAllowedLag: 2, want: true},
-		{name: "qc one block behind can pipeline", headHeight: 12, qcHeight: 11, qcExists: true, maxAllowedLag: 2, want: true},
-		{name: "qc two blocks behind can pipeline", headHeight: 12, qcHeight: 10, qcExists: true, maxAllowedLag: 2, want: true},
+		{name: "qc one block behind waits", headHeight: 12, qcHeight: 11, qcExists: true, maxAllowedLag: 2, want: false},
+		{name: "qc two blocks behind waits", headHeight: 12, qcHeight: 10, qcExists: true, maxAllowedLag: 2, want: false},
 		{name: "qc beyond finality depth pauses", headHeight: 12, qcHeight: 9, qcExists: true, maxAllowedLag: 2, want: false},
-		{name: "qc ahead is accepted", headHeight: 12, qcHeight: 13, qcExists: true, maxAllowedLag: 2, want: true},
+		{name: "qc ahead is inconsistent", headHeight: 12, qcHeight: 13, qcExists: true, maxAllowedLag: 2, want: false},
 	}
 
 	for _, testCase := range tests {
@@ -558,7 +533,7 @@ func TestLocalVoteEnvelopeCacheRequiresSameChoice(t *testing.T) {
 	}
 }
 
-func TestVoteForCommittedHeadAllowsOldSlotWithoutRollback(t *testing.T) {
+func TestVoteForCommittedHeadRejectsOldSlotAfterWatermark(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
 	if err := node.rebuildEpoch(0, 1, node.epochSeed(0)); err != nil {
 		t.Fatalf("rebuildEpoch() error = %v", err)
@@ -568,22 +543,22 @@ func TestVoteForCommittedHeadAllowsOldSlotWithoutRollback(t *testing.T) {
 	proposal := recoveryProposalForTest(t, node, slot)
 	node.lastVotedSlot = slot + 8
 
-	if err := node.voteForCommittedHead(context.Background(), proposal, blockHash, 0); err != nil {
-		t.Fatalf("voteForCommittedHead() error = %v", err)
+	if err := node.voteForCommittedHead(context.Background(), proposal, blockHash, 0); err == nil {
+		t.Fatal("voteForCommittedHead() error = nil, want durable watermark rejection")
 	}
 
 	if node.lastVotedSlot != slot+8 {
 		t.Fatalf("lastVotedSlot = %d, want %d", node.lastVotedSlot, slot+8)
 	}
-	if got := node.metrics.votesSent.Load(); got != 1 {
-		t.Fatalf("votesSent = %d, want 1", got)
+	if got := node.metrics.votesSent.Load(); got != 0 {
+		t.Fatalf("votesSent = %d, want 0", got)
 	}
 	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
 	node.mutex.Lock()
 	_, exists := node.cachedLocalVoteEnvelopeLocked(slot, blockHash, validatorID)
 	node.mutex.Unlock()
-	if !exists {
-		t.Fatal("old slot recovery vote was not cached")
+	if exists {
+		t.Fatal("old slot recovery vote was cached despite watermark rejection")
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -74,7 +74,17 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 			normalizedInput.ComputeBudget.MaxComputeUnits,
 			computeUnitsConsumed,
 		)
-		instructionComputeUnits, err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, instructionInput, programRegistry)
+		instructionComputeUnits, executionTrace, err := executeSimulatedInstruction(instructionIndex, instruction, loadedTransaction.Message, accountStates, instructionInput, programRegistry)
+		result.LogMessages = append(result.LogMessages, executionTrace.LogMessages...)
+		if executionTrace.ReturnData != nil {
+			result.ReturnData = executionTrace.ReturnData.Clone()
+		}
+		if len(executionTrace.InnerInstructions) > 0 {
+			result.InnerInstructions = append(result.InnerInstructions, structure.InnerInstruction{
+				Index:        uint16(instructionIndex),
+				Instructions: cloneCompiledInstructions(executionTrace.InnerInstructions),
+			})
+		}
 		var computeBudgetExceeded bool
 		computeUnitsConsumed, computeBudgetExceeded = accumulateComputeUnits(
 			computeUnitsConsumed,
@@ -82,6 +92,9 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 			normalizedInput.ComputeBudget.MaxComputeUnits,
 		)
 		if computeBudgetExceeded {
+			// Roll back the entire transaction, including earlier successful instructions.
+			// Loaded accounts already include the transparent fee debit.
+			accountStates = cloneLoadedAccountsToMap(loadedTransaction.Accounts)
 			result.Status = structure.TransactionStatusFailed
 			result.Error = instructionFailure(
 				uint16(instructionIndex),
@@ -97,6 +110,7 @@ func (simulator TransactionSimulator) Simulate(input TransactionSimulationInput)
 		if err != nil {
 			result.Status = structure.TransactionStatusFailed
 			result.Error = instructionFailure(uint16(instructionIndex), structure.InstructionErrorCodeGeneric, err.Error())
+			accountStates = cloneLoadedAccountsToMap(loadedTransaction.Accounts)
 			result.PostBalances = balancesFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
 			result.WrittenAccounts = writtenAccountsFromMessage(loadedTransaction.Message.AccountKeys, accountStates)
 			result.ComputeUnitsConsumed = computeUnitsConsumed
@@ -218,7 +232,7 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 		return structure.LoadedTransaction{}, result, result.Validate()
 	}
 
-	message, err := input.Transaction.SolanaMessage()
+	message, err := input.Transaction.OrdexusMessage()
 	if err != nil {
 		result.Status = structure.TransactionStatusFailed
 		result.Error = transactionFailure(structure.TransactionErrorCodeSanitizeFailure, err.Error())
@@ -295,7 +309,7 @@ func prepareSimulation(input TransactionSimulationInput) (structure.LoadedTransa
 	return loadedTransaction, result, nil
 }
 
-func validateTransactionAuthorization(transaction structure.Transaction, message structure.SolanaMessage, builtinPrograms structure.BuiltinProgramIDs) error {
+func validateTransactionAuthorization(transaction structure.Transaction, message structure.OrdexusMessage, builtinPrograms structure.BuiltinProgramIDs) error {
 	if message.Header.NumRequiredSignatures > 0 {
 		if message.Header.NumReadonlySignedAccounts == message.Header.NumRequiredSignatures {
 			return fmt.Errorf("%w: transparent fee payer must be writable", structure.ErrMissingWritableSigner)
@@ -456,8 +470,16 @@ func executeSimulatedInstruction(
 	accounts map[structure.PublicKey]structure.Account,
 	input TransactionSimulationInput,
 	registry ProgramRegistry,
-) (uint64, error) {
+) (uint64, ProgramExecutionTrace, error) {
 	return ExecuteInstructionSandbox(instructionIndex, instruction, message, accounts, input, registry)
+}
+
+func cloneCompiledInstructions(instructions []structure.CompiledInstruction) []structure.CompiledInstruction {
+	cloned := make([]structure.CompiledInstruction, len(instructions))
+	for index, instruction := range instructions {
+		cloned[index] = instruction.Clone()
+	}
+	return cloned
 }
 
 func debitSimulationFee(feePayer structure.PublicKey, totalFee uint64, accounts map[structure.PublicKey]structure.Account, rentConfig structure.RentConfig) error {

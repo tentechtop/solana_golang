@@ -3,8 +3,8 @@ package posnode
 import (
 	"testing"
 
-	"solana_golang/p2p"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestBuildPeerNetworkResultMarksConnectedValidator(t *testing.T) {

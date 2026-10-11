@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	bpfloader "solana_golang/programs/bpfloader"
-	vmprogram "solana_golang/programs/vm"
+	bpfloader "github.com/tentechtop/ordexus-core/programs/bpfloader"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
 )
 
 func TestVirtualMachineERC20LikeContractCanBeDeployedFromBinaryAndExecuted(t *testing.T) {

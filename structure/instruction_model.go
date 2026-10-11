@@ -3,7 +3,7 @@ package structure
 import (
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type InstructionErrorCode uint16

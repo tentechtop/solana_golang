@@ -3,12 +3,12 @@ package assembler
 import (
 	"testing"
 
-	"solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestAssembleBuildsExecutableLogProgram(t *testing.T) {
 	source := `
-data message "hello-svmasm"
+data message "hello-ovmasm"
 syscall log message
 exit
 `
@@ -30,8 +30,8 @@ exit
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if len(result.Logs) != 1 || result.Logs[0] != "hello-svmasm" {
-		t.Fatalf("Logs = %+v, want hello-svmasm", result.Logs)
+	if len(result.Logs) != 1 || result.Logs[0] != "hello-ovmasm" {
+		t.Fatalf("Logs = %+v, want hello-ovmasm", result.Logs)
 	}
 }
 
@@ -43,6 +43,24 @@ exit
 `
 	if _, err := Assemble(source); err == nil {
 		t.Fatal("Assemble() error = nil, want duplicate label error")
+	}
+}
+
+func TestAssembleSupportsRuntimeSyscallNames(t *testing.T) {
+	names := []string{
+		"get_return_data",
+		"get_rent",
+		"create_program_address",
+		"invoke",
+		"invoke_signed",
+		"verify_schnorr",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Assemble("syscall " + name + "\nexit\n"); err != nil {
+				t.Fatalf("Assemble(%s) error = %v", name, err)
+			}
+		})
 	}
 }
 

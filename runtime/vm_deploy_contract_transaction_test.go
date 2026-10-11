@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"solana_golang/blockchain"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestWalletDeployContractTransactionCreatesExecutableProgramAccount(t *testing.T) {
@@ -18,8 +18,8 @@ func TestWalletDeployContractTransactionCreatesExecutableProgramAccount(t *testi
 	programLamports := mustMinimumBalance(t, len(programData)) + depositLamports
 
 	transaction, err := blockchain.NewDeployContractTransaction(
-		structure.SolanaKeyPair{PublicKey: payerKey, PrivateKey: payerPrivateKey},
-		structure.SolanaKeyPair{PublicKey: programKey, PrivateKey: programPrivateKey},
+		structure.OrdexusKeyPair{PublicKey: payerKey, PrivateKey: payerPrivateKey},
+		structure.OrdexusKeyPair{PublicKey: programKey, PrivateKey: programPrivateKey},
 		programData,
 		depositLamports,
 		blockhash,

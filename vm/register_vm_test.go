@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -47,6 +48,39 @@ func TestRegisterRuntimeWritesAccountDataThroughSyscall(t *testing.T) {
 	}
 	if string(result.Accounts[0].Data) != "vm-data" {
 		t.Fatalf("account data = %q, want vm-data", string(result.Accounts[0].Data))
+	}
+}
+
+func TestRegisterRuntimeCopiesSyscallOutputIntoHeap(t *testing.T) {
+	programID := testAddress(48)
+	loaderID := testAddress(49)
+	code := mustRegisterCode(t,
+		mustRegisterInstruction(t, RegOpMovImm, 3, 0, 0, RegisterMemoryBaseHeap),
+		mustRegisterInstruction(t, RegOpMovImm, 4, 0, 0, 16),
+		mustRegisterInstruction(t, RegOpSyscall, 0, 0, 0, uint64(SyscallGetClock)),
+		mustRegisterInstruction(t, RegOpMovImm, 1, 0, 0, RegisterMemoryBaseHeap),
+		mustRegisterInstruction(t, RegOpMovImm, 2, 0, 0, 16),
+		mustRegisterInstruction(t, RegOpSyscall, 0, 0, 0, uint64(SyscallSetReturnData)),
+	)
+	programAccount := testRegisterProgramAccount(t, programID, loaderID, code, nil)
+
+	result, err := NewRuntime(loaderID).Execute(Invocation{
+		ProgramID:      programID,
+		ProgramAccount: programAccount,
+		CurrentSlot:    73,
+		Sysvars:        Sysvars{Clock: ClockSysvar{Slot: 73, UnixTimestamp: 91}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ReturnData == nil || len(result.ReturnData.Data) != 16 {
+		t.Fatalf("ReturnData = %+v, want 16-byte clock", result.ReturnData)
+	}
+	if slot := binary.LittleEndian.Uint64(result.ReturnData.Data[:8]); slot != 73 {
+		t.Fatalf("clock slot = %d, want 73", slot)
+	}
+	if timestamp := int64(binary.LittleEndian.Uint64(result.ReturnData.Data[8:])); timestamp != 91 {
+		t.Fatalf("clock timestamp = %d, want 91", timestamp)
 	}
 }
 

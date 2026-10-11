@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"solana_golang/blockchain"
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestValidatorPairingCompletesAndWritesValidatorConfig(t *testing.T) {
@@ -326,7 +326,7 @@ func newBootstrapPairingTestNode(t *testing.T, rpcPort int, writeConfigFile bool
 	return node, configPath
 }
 
-func newValidatorPairingCompleteRequest(node *posNode, staker structure.SolanaKeyPair, signature string, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
+func newValidatorPairingCompleteRequest(node *posNode, staker structure.OrdexusKeyPair, signature string, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
 	return rpc.ValidatorPairingCompleteRequest{
 		Token:            node.validatorPairing.payload.Token,
 		StakerAddress:    "T" + staker.PublicKey.String(),
@@ -339,7 +339,7 @@ func newValidatorPairingCompleteRequest(node *posNode, staker structure.SolanaKe
 	}
 }
 
-func newBootstrapPairingCompleteRequest(t *testing.T, node *posNode, staker structure.SolanaKeyPair, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
+func newBootstrapPairingCompleteRequest(t *testing.T, node *posNode, staker structure.OrdexusKeyPair, stakeLamports uint64) rpc.ValidatorPairingCompleteRequest {
 	t.Helper()
 	request := rpc.ValidatorPairingCompleteRequest{
 		Token:            node.validatorPairing.payload.Token,
@@ -364,7 +364,7 @@ func newBootstrapPairingCompleteRequest(t *testing.T, node *posNode, staker stru
 	return request
 }
 
-func addValidatorPairingRegistrationToMempool(t *testing.T, node *posNode, staker structure.SolanaKeyPair, stakeLamports uint64) string {
+func addValidatorPairingRegistrationToMempool(t *testing.T, node *posNode, staker structure.OrdexusKeyPair, stakeLamports uint64) string {
 	t.Helper()
 	transaction := newValidatorPairingRegistrationTransaction(t, staker, node.validatorPairing.payload, stakeLamports)
 	return addTransactionToMempool(t, node, transaction)
@@ -378,7 +378,7 @@ func addTransactionToMempool(t *testing.T, node *posNode, transaction structure.
 	return signature
 }
 
-func newValidatorPairingRegistrationTransaction(t *testing.T, staker structure.SolanaKeyPair, payload validatorPairingPayload, stakeLamports uint64) structure.Transaction {
+func newValidatorPairingRegistrationTransaction(t *testing.T, staker structure.OrdexusKeyPair, payload validatorPairingPayload, stakeLamports uint64) structure.Transaction {
 	t.Helper()
 	validatorAddress, err := structure.PublicKeyFromBase58(payload.ValidatorAddress)
 	if err != nil {

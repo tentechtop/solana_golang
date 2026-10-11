@@ -14,16 +14,18 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
-	quicApplicationProtocol                   = "solana-golang-p2p/1"
+	quicApplicationProtocol                   = "ordexus-p2p/1"
+	legacyQUICApplicationProtocol             = "solana-golang-p2p/1"
 	quicCloseCode                             = quic.ApplicationErrorCode(0)
 	quicStreamCancelCode                      = quic.StreamErrorCode(0)
 	defaultQUICStreamAccept                   = 5 * time.Second
@@ -57,6 +59,7 @@ type QUICTransportConfig struct {
 type QUICTransport struct {
 	mutex               sync.Mutex
 	listeners           map[string]*quic.Listener
+	endpoints           map[string]*quic.Transport
 	closed              bool
 	maxMessageSize      int
 	streamPoolSize      int
@@ -83,6 +86,7 @@ func NewQUICTransportWithConfig(config QUICTransportConfig) (*QUICTransport, err
 	maxMessageSize := normalizeMaxMessageSize(config.MaxMessageSize)
 	return &QUICTransport{
 		listeners:           make(map[string]*quic.Listener),
+		endpoints:           make(map[string]*quic.Transport),
 		maxMessageSize:      maxMessageSize,
 		streamPoolSize:      normalizeQUICStreamPoolSize(config.StreamPoolSize),
 		inboundLimiter:      newTransportInboundLimiter(config.MaxPendingInbound, config.MaxConnectionsPerIP),
@@ -105,11 +109,27 @@ func (transport *QUICTransport) Listen(ctx context.Context, address utils.MultiA
 		return err
 	}
 
-	listener, err := quic.ListenAddr(joinAddress(address), transport.tlsConfig.Clone(), transport.quicConfig.Clone())
+	udpAddress, err := net.ResolveUDPAddr("udp", joinAddress(address))
+	if err != nil {
+		return err
+	}
+	network := "udp6"
+	if udpAddress.IP.To4() != nil {
+		network = "udp4"
+	}
+	packet, err := net.ListenUDP(network, udpAddress)
 	if err != nil {
 		return fmt.Errorf("p2p: listen quic %s: %w", address.String(), err)
 	}
-	if err := transport.addListener(address.String(), listener); err != nil {
+	endpoint := &quic.Transport{Conn: packet}
+	defer packet.Close()
+	defer endpoint.Close()
+	listener, err := endpoint.Listen(transport.tlsConfig.Clone(), transport.quicConfig.Clone())
+	if err != nil {
+		return fmt.Errorf("p2p: listen quic %s: %w", address.String(), err)
+	}
+	defer listener.Close()
+	if err := transport.addListener(address.String(), listener, endpoint); err != nil {
 		_ = listener.Close()
 		return err
 	}
@@ -135,7 +155,22 @@ func (transport *QUICTransport) Dial(ctx context.Context, address utils.MultiAdd
 	if err != nil {
 		return nil, err
 	}
-	connection, err := quic.DialAddr(ctx, joinAddress(address), tlsConfig, transport.quicConfig.Clone())
+	remote, err := net.ResolveUDPAddr("udp", joinAddress(address))
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := transport.dialEndpoint(remote.IP)
+	if err != nil {
+		return nil, err
+	}
+	var connection *quic.Conn
+	if endpoint != nil {
+		// Reuse the listening socket so the relay observes the mapping that also
+		// accepts introduced peers. DialAddr would allocate a different UDP port.
+		connection, err = endpoint.Dial(ctx, remote, tlsConfig, transport.quicConfig.Clone())
+	} else {
+		connection, err = quic.DialAddr(ctx, joinAddress(address), tlsConfig, transport.quicConfig.Clone())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("p2p: dial quic %s: %w", address.String(), err)
 	}
@@ -176,6 +211,8 @@ func (transport *QUICTransport) Close() error {
 		listeners = append(listeners, listener)
 	}
 	transport.listeners = make(map[string]*quic.Listener)
+	endpoints := transport.endpoints
+	transport.endpoints = make(map[string]*quic.Transport)
 	transport.mutex.Unlock()
 
 	var closeErrors []error
@@ -186,7 +223,40 @@ func (transport *QUICTransport) Close() error {
 			closeErrors = append(closeErrors, err)
 		}
 	}
+	for _, endpoint := range endpoints {
+		if err := endpoint.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+		if err := endpoint.Conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErrors = append(closeErrors, err)
+		}
+	}
 	return errors.Join(closeErrors...)
+}
+
+func (transport *QUICTransport) dialEndpoint(remoteIP net.IP) (*quic.Transport, error) {
+	transport.mutex.Lock()
+	defer transport.mutex.Unlock()
+	if transport.closed {
+		return nil, ErrTransportUnavailable
+	}
+	keys := make([]string, 0, len(transport.endpoints))
+	for key := range transport.endpoints {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		endpoint := transport.endpoints[key]
+		local := endpoint.Conn.LocalAddr().(*net.UDPAddr)
+		if (local.IP.To4() != nil) != (remoteIP.To4() != nil) {
+			continue
+		}
+		if local.IP.IsLoopback() && !remoteIP.IsLoopback() {
+			continue
+		}
+		return endpoint, nil
+	}
+	return nil, nil
 }
 
 // acceptLoop 持续接收 QUIC 连接 + 每个连接独立协程等待业务双向流。
@@ -259,13 +329,14 @@ func (transport *QUICTransport) acceptError(ctx context.Context, err error) erro
 }
 
 // addListener 注册 QUIC 监听器 + 持锁防止关闭和新增监听并发冲突。
-func (transport *QUICTransport) addListener(key string, listener *quic.Listener) error {
+func (transport *QUICTransport) addListener(key string, listener *quic.Listener, endpoint *quic.Transport) error {
 	transport.mutex.Lock()
 	defer transport.mutex.Unlock()
 	if transport.closed {
 		return ErrTransportUnavailable
 	}
 	transport.listeners[key] = listener
+	transport.endpoints[key] = endpoint
 	return nil
 }
 
@@ -273,6 +344,7 @@ func (transport *QUICTransport) addListener(key string, listener *quic.Listener)
 func (transport *QUICTransport) removeListener(key string) {
 	transport.mutex.Lock()
 	delete(transport.listeners, key)
+	delete(transport.endpoints, key)
 	transport.mutex.Unlock()
 }
 
@@ -502,19 +574,13 @@ func (connection *QUICConnection) Close() error {
 	connection.closeOnce.Do(func() {
 		streams := connection.closeTrackedStreams()
 		close(connection.done)
-		closeErrors := make([]error, 0, len(streams)+1)
 		for _, stream := range streams {
 			stream.CancelRead(quicStreamCancelCode)
 			stream.CancelWrite(quicStreamCancelCode)
-			if err := stream.Close(); err != nil {
-				closeErrors = append(closeErrors, err)
-			}
 		}
-		connectionErr := connection.connection.CloseWithError(quicCloseCode, "closed")
-		if connectionErr != nil {
-			closeErrors = append(closeErrors, connectionErr)
-		}
-		connection.closeErr = errors.Join(closeErrors...)
+		// CancelWrite already terminates the stream. Close would try to send a
+		// FIN after RESET_STREAM and report an error for every normal shutdown.
+		connection.closeErr = connection.connection.CloseWithError(quicCloseCode, "closed")
 	})
 	return connection.closeErr
 }
@@ -839,7 +905,7 @@ func normalizeQUICTLSConfig(config QUICTransportConfig) (*tls.Config, error) {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
-		NextProtos:   []string{quicApplicationProtocol},
+		NextProtos:   []string{quicApplicationProtocol, legacyQUICApplicationProtocol},
 		MinVersion:   tls.VersionTLS13,
 	}, nil
 }
@@ -990,7 +1056,7 @@ func applyQUICReceiveWindows(config *quic.Config, transportConfig QUICTransportC
 // ensureQUICNextProtos 补齐 ALPN 协议 + 防止 TLS 握手因协议为空失败。
 func ensureQUICNextProtos(config *tls.Config) {
 	if len(config.NextProtos) == 0 {
-		config.NextProtos = []string{quicApplicationProtocol}
+		config.NextProtos = []string{quicApplicationProtocol, legacyQUICApplicationProtocol}
 	}
 	if config.MinVersion == 0 {
 		config.MinVersion = tls.VersionTLS13

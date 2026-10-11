@@ -16,10 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type manifest struct {
@@ -64,6 +64,7 @@ type operationStats struct {
 	mutex        sync.Mutex
 	Errors       map[string]uint64
 	ErrorSamples map[string]string
+	Signatures   []string
 }
 
 type stressState struct {
@@ -82,16 +83,17 @@ type stakePosition struct {
 }
 
 type stressReport struct {
-	StartedAt         string                    `json:"started_at"`
-	FinishedAt        string                    `json:"finished_at"`
-	DurationSeconds   float64                   `json:"duration_seconds"`
-	Workers           int                       `json:"workers"`
-	TransferSucceeded uint64                    `json:"transfer_succeeded"`
-	StakeSucceeded    uint64                    `json:"stake_succeeded"`
-	DelegateSucceeded uint64                    `json:"delegate_succeeded"`
-	WithdrawSucceeded uint64                    `json:"withdraw_succeeded"`
-	Failed            uint64                    `json:"failed"`
-	ByOperation       map[string]operationCount `json:"by_operation"`
+	StartedAt             string                    `json:"started_at"`
+	FinishedAt            string                    `json:"finished_at"`
+	DurationSeconds       float64                   `json:"duration_seconds"`
+	Workers               int                       `json:"workers"`
+	TransferSucceeded     uint64                    `json:"transfer_succeeded"`
+	StakeSucceeded        uint64                    `json:"stake_succeeded"`
+	DelegateSucceeded     uint64                    `json:"delegate_succeeded"`
+	WithdrawSucceeded     uint64                    `json:"withdraw_succeeded"`
+	Failed                uint64                    `json:"failed"`
+	TransactionSignatures []string                  `json:"transaction_signatures,omitempty"`
+	ByOperation           map[string]operationCount `json:"by_operation"`
 }
 
 type operationCount struct {
@@ -181,8 +183,11 @@ func runFixedTransfers(plan manifest, timeout time.Duration, workers int, transa
 				if transactionIndex >= transactionCount {
 					return
 				}
-				err := submitFixedTransfer(contextValue, plan, random, startIndex+uint64(transactionIndex))
+				signature, err := submitFixedTransfer(contextValue, plan, random, startIndex+uint64(transactionIndex))
 				recordResult(stats, err)
+				if err == nil {
+					stats.recordSignature(signature)
+				}
 			}
 		}(index)
 	}
@@ -196,12 +201,13 @@ func runFixedTransfers(plan manifest, timeout time.Duration, workers int, transa
 		ErrorSamples: stats.copyErrorSamples(),
 	}
 	return stressReport{
-		StartedAt:         started.Format(time.RFC3339Nano),
-		FinishedAt:        finished.Format(time.RFC3339Nano),
-		DurationSeconds:   finished.Sub(started).Seconds(),
-		Workers:           workers,
-		TransferSucceeded: transferCount.Succeeded,
-		Failed:            transferCount.Failed,
+		StartedAt:             started.Format(time.RFC3339Nano),
+		FinishedAt:            finished.Format(time.RFC3339Nano),
+		DurationSeconds:       finished.Sub(started).Seconds(),
+		Workers:               workers,
+		TransferSucceeded:     transferCount.Succeeded,
+		Failed:                transferCount.Failed,
+		TransactionSignatures: stats.copySignatures(),
 		ByOperation: map[string]operationCount{
 			"transfer": transferCount,
 		},
@@ -292,20 +298,20 @@ func submitTransfer(ctx context.Context, plan manifest, random *rand.Rand, stats
 	recordResult(stats, err)
 }
 
-func submitFixedTransfer(ctx context.Context, plan manifest, random *rand.Rand, transactionIndex uint64) error {
+func submitFixedTransfer(ctx context.Context, plan manifest, random *rand.Rand, transactionIndex uint64) (string, error) {
 	sourceSeed, destinationSeed, lamports, err := fixedTransferParams(plan.UserSeeds, transactionIndex)
 	if err != nil {
-		return err
+		return "", err
 	}
 	source, err := keyPairFromSeed(sourceSeed)
 	if err != nil {
-		return err
+		return "", err
 	}
 	destination, err := keyPairFromSeed(destinationSeed)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return submitBuiltTransaction(ctx, plan, random, func(blockhash structure.Hash) (structure.Transaction, error) {
+	return submitBuiltTransactionWithSignature(ctx, plan, random, func(blockhash structure.Hash) (structure.Transaction, error) {
 		return blockchain.NewTransferTransaction(source, destination.PublicKey, lamports, blockhash)
 	})
 }
@@ -475,25 +481,33 @@ func submitDelegationWithdraw(ctx context.Context, plan manifest, random *rand.R
 }
 
 func submitBuiltTransaction(ctx context.Context, plan manifest, random *rand.Rand, build func(structure.Hash) (structure.Transaction, error)) error {
+	_, err := submitBuiltTransactionWithSignature(ctx, plan, random, build)
+	return err
+}
+
+func submitBuiltTransactionWithSignature(ctx context.Context, plan manifest, random *rand.Rand, build func(structure.Hash) (structure.Transaction, error)) (string, error) {
 	rpcURL := randomRPC(plan, random)
 	latest, err := getLatestBlockhash(ctx, rpcURL)
 	if err != nil {
-		return err
+		return "", err
 	}
 	blockhash, err := structure.HashFromBase58(latest.Blockhash)
 	if err != nil {
-		return err
+		return "", err
 	}
 	transaction, err := build(blockhash)
 	if err != nil {
-		return err
+		return "", err
 	}
 	encoded, err := transaction.MarshalBinary()
 	if err != nil {
-		return err
+		return "", err
 	}
 	var signature string
-	return callRPC(ctx, rpcURL, "sendTransaction", []any{base64.StdEncoding.EncodeToString(encoded)}, &signature)
+	if err := callRPC(ctx, rpcURL, "sendTransaction", []any{base64.StdEncoding.EncodeToString(encoded)}, &signature); err != nil {
+		return "", err
+	}
+	return signature, nil
 }
 
 func (state *stressState) pushStakePosition(position stakePosition) {
@@ -667,6 +681,18 @@ func (stats *operationStats) copyErrorSamples() map[string]string {
 	return result
 }
 
+func (stats *operationStats) recordSignature(signature string) {
+	stats.mutex.Lock()
+	defer stats.mutex.Unlock()
+	stats.Signatures = append(stats.Signatures, signature)
+}
+
+func (stats *operationStats) copySignatures() []string {
+	stats.mutex.Lock()
+	defer stats.mutex.Unlock()
+	return append([]string(nil), stats.Signatures...)
+}
+
 func bucketStressError(err error) string {
 	if err == nil {
 		return ""
@@ -747,7 +773,7 @@ func applyRPCURLOverride(value manifest, rpcURL string) (manifest, error) {
 	return value, nil
 }
 
-func keyPairFromSeed(seed string) (structure.SolanaKeyPair, error) {
+func keyPairFromSeed(seed string) (structure.OrdexusKeyPair, error) {
 	return structure.KeyPairFromSeed(utils.SHA256([]byte(strings.TrimSpace(seed))))
 }
 

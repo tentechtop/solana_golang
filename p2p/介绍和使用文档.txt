@@ -106,8 +106,8 @@ p2p:
   advertised_port: 5002
   default_protocol: "tcp"
   max_peers: 64
-  network_id: "solana_golang:localnet:00000000000000000000000000000000"
-  software_version: "solana_golang/0.1.0"
+  network_id: "ordexus-core:localnet:00000000000000000000000000000000"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 8
   bootstrap_timeout_millis: 5000
   bootstrap:
@@ -658,7 +658,7 @@ p2p:
   default_protocol: "tcp"
   max_peers: 64
   network_id: "localnet"
-  software_version: "solana_golang/0.1.0"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 0
   bootstrap_timeout_millis: 5000
 
@@ -673,7 +673,7 @@ p2p:
   default_protocol: "tcp"
   max_peers: 64
   network_id: "localnet"
-  software_version: "solana_golang/0.1.0"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 1
   bootstrap_timeout_millis: 5000
   bootstrap:

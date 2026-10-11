@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 var (

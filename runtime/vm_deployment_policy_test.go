@@ -5,16 +5,16 @@ import (
 	"strings"
 	"testing"
 
-	bpfloader "solana_golang/programs/bpfloader"
-	systemprogram "solana_golang/programs/system"
-	svm "solana_golang/vm"
+	bpfloader "github.com/tentechtop/ordexus-core/programs/bpfloader"
+	systemprogram "github.com/tentechtop/ordexus-core/programs/system"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestBPFLoaderDeploymentPolicyRejectsMissingManifest(t *testing.T) {
 	payerKey, payerPrivateKey := newSimulationSigner(t)
 	programKey, programPrivateKey := newSimulationSigner(t)
 	blockhash := newTestHash(14)
-	programData := mustVMProgramData(t, svm.BuildProgramCode())
+	programData := mustVMProgramData(t, ovm.BuildProgramCode())
 	policy := bpfloader.DeploymentPolicy{RequireManifest: true}
 
 	result := simulateBPFLoaderDeployment(t, payerKey, payerPrivateKey, programKey, programPrivateKey, programData, mustMinimumBalance(t, len(programData)), policy, blockhash, 214)
@@ -80,7 +80,7 @@ func TestBPFLoaderUpgradeRequiresGovernanceAuthority(t *testing.T) {
 	programKey := newTestPublicKey(20)
 	blockhash := newTestHash(21)
 	currentProgramData := mustGovernedNoopProgramData(t, authorityKey)
-	nextProgramData := mustGovernedNoopProgramDataWithLimit(t, authorityKey, svm.DefaultComputeUnitLimit-1)
+	nextProgramData := mustGovernedNoopProgramDataWithLimit(t, authorityKey, ovm.DefaultComputeUnitLimit-1)
 	policy := bpfloader.DeploymentPolicy{RequireManifest: true, AllowUpgradeableContracts: true}
 	programLamports := mustMinimumBalance(t, len(currentProgramData))
 
@@ -201,14 +201,14 @@ func simulateWithBPFLoaderPolicy(t *testing.T, input TransactionSimulationInput,
 
 func mustGovernedNoopProgramData(t *testing.T, upgradeAuthority PublicKey) []byte {
 	t.Helper()
-	return mustGovernedNoopProgramDataWithLimit(t, upgradeAuthority, svm.DefaultComputeUnitLimit)
+	return mustGovernedNoopProgramDataWithLimit(t, upgradeAuthority, ovm.DefaultComputeUnitLimit)
 }
 
 func mustGovernedNoopProgramDataWithLimit(t *testing.T, upgradeAuthority PublicKey, computeLimit uint64) []byte {
 	t.Helper()
-	var authority svm.Address
+	var authority ovm.Address
 	copy(authority[:], upgradeAuthority[:])
-	programData, err := svm.EncodeGovernedBytecode(svm.BuildProgramCode(), svm.ProgramManifest{
+	programData, err := ovm.EncodeGovernedBytecode(ovm.BuildProgramCode(), ovm.ProgramManifest{
 		ComputeUnitLimit: computeLimit,
 		UpgradeAuthority: authority,
 	})

@@ -1,0 +1,3 @@
+ok  	solana_golang/programs/vm	1.042s
+ok  	solana_golang/runtime	0.336s
+ok  	solana_golang/programs/bpfloader	0.955s

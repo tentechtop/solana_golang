@@ -14,7 +14,7 @@
 把压缩包解压到固定目录，例如：
 
 ```powershell
-C:\solana-golang-node
+C:\ordexus-golang-node
 ```
 
 后续命令都在这个目录执行。
@@ -24,7 +24,7 @@ C:\solana-golang-node
 打开 PowerShell，进入解压目录：
 
 ```powershell
-cd C:\solana-golang-node
+cd C:\ordexus-golang-node
 ```
 
 配置节点：

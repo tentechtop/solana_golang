@@ -95,6 +95,19 @@ func TestOperationStatsErrorCopyIsIndependent(t *testing.T) {
 	}
 }
 
+func TestOperationStatsSignatureCopyIsIndependent(t *testing.T) {
+	var stats operationStats
+	stats.recordSignature("signature-a")
+	copied := stats.copySignatures()
+	if len(copied) != 1 || copied[0] != "signature-a" {
+		t.Fatalf("signatures = %v, want signature-a", copied)
+	}
+	copied[0] = "changed"
+	if latest := stats.copySignatures()[0]; latest != "signature-a" {
+		t.Fatalf("stored signature = %q, want original", latest)
+	}
+}
+
 func TestRPCErrorDetailIncludesData(t *testing.T) {
 	rpcError := &rpcError{
 		Message: "internal error",

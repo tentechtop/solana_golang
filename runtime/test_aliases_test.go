@@ -3,14 +3,14 @@ package runtime_test
 import (
 	"testing"
 
-	bpfloader "solana_golang/programs/bpfloader"
-	stakeprogram "solana_golang/programs/stake"
-	systemprogram "solana_golang/programs/system"
-	tokenprogram "solana_golang/programs/token"
-	vmprogram "solana_golang/programs/vm"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
-	svm "solana_golang/vm"
+	bpfloader "github.com/tentechtop/ordexus-core/programs/bpfloader"
+	stakeprogram "github.com/tentechtop/ordexus-core/programs/stake"
+	systemprogram "github.com/tentechtop/ordexus-core/programs/system"
+	tokenprogram "github.com/tentechtop/ordexus-core/programs/token"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 type TransactionSimulationInput = runtimepkg.TransactionSimulationInput
@@ -74,7 +74,7 @@ func simulateWithVirtualMachine(t *testing.T, input TransactionSimulationInput) 
 		systemprogram.NewProgram(DefaultBuiltinProgramIDs.System),
 		bpfloader.NewProgram(DefaultBuiltinProgramIDs.BPFLoader),
 	)
-	input.FallbackProgram = vmprogram.NewProgram(DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
+	input.FallbackProgram = vmprogram.NewProgram(DefaultBuiltinProgramIDs.BPFLoader, ovm.Runtime{})
 	return runtimepkg.TransactionSimulator{}.Simulate(input)
 }
 

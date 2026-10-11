@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 func main() {

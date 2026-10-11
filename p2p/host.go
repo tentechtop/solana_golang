@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -48,6 +48,7 @@ type HostConfig struct {
 	AsyncWrite                   AsyncWriteConfig
 	BroadcastConcurrency         int
 	Relay                        RelayConfig
+	BlockedPeerIDs               []string
 	IgnoredUnregisteredProtocols []ProtocolID
 	Logger                       *slog.Logger
 	Registry                     *ProtocolRegistry
@@ -99,6 +100,7 @@ type Host struct {
 	registry                     *ProtocolRegistry
 	requests                     *requestManager
 	relay                        *relayService
+	blockedPeerIDs               map[string]struct{}
 	routingTable                 *KADRoutingTable
 	peerStore                    PeerStore
 	persistedPeerLimit           int
@@ -139,6 +141,10 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		return nil, err
 	}
 	if err := validateAdvertisedAddresses(config.AdvertisedAddresses, config.PeerID); err != nil {
+		return nil, err
+	}
+	blockedPeerIDs, err := normalizeBlockedPeerIDs(config.BlockedPeerIDs, config.PeerID)
+	if err != nil {
 		return nil, err
 	}
 	maxPeers := normalizeMaxPeers(config.MaxPeers)
@@ -187,6 +193,7 @@ func NewHost(config HostConfig, transports ...Transport) (*Host, error) {
 		registry:                     normalizeRegistry(config.Registry),
 		requests:                     newRequestManager(),
 		relay:                        newRelayService(config.Relay),
+		blockedPeerIDs:               blockedPeerIDs,
 		routingTable:                 routingTable,
 		peerStore:                    normalizePeerStore(config.PeerStore),
 		persistedPeerLimit:           normalizePeerStoreLimit(config.PersistedPeerLimit),

@@ -1,0 +1,9 @@
+Cluster manifest: F:\workSpace2029\sol\solana_golang\tmp\wallet-local-20260908-181541-883ec3bf\manifest.json
+
+index   pid rpc
+-----   --- ---
+    1 42948 http://127.0.0.1:28996/
+    2 35988 http://127.0.0.1:28997/
+    3 44932 http://127.0.0.1:28998/
+    4 41832 http://127.0.0.1:28999/
+

@@ -37,3 +37,6 @@
 /report/*.txt
 /report/
 /deploy/
+
+# Python P2P 测试编排工具的解释器缓存。
+/tools/__pycache__/

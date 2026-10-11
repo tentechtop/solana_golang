@@ -3,7 +3,7 @@ package blockchain
 import (
 	"testing"
 
-	"solana_golang/database"
+	"github.com/tentechtop/ordexus-core/database"
 )
 
 func TestFaultInjectionReorgPersistsAfterNodeRestart(t *testing.T) {

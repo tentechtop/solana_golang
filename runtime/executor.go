@@ -15,8 +15,8 @@ type ExecutionMode string
 
 const (
 	ExecutionModeFixedInstruction ExecutionMode = "fixed_instruction_v1"
-	ExecutionModeGoSVM            ExecutionMode = "gosvm_v1"
-	ExecutionModeSVMCompat        ExecutionMode = "svm_compat_v1"
+	ExecutionModeGoOVM            ExecutionMode = "goovm_v1"
+	ExecutionModeOVMCompat        ExecutionMode = "ovm_compat_v1"
 )
 
 // TransactionRequest 描述交易执行请求 + 共识层只传结构化输入不依赖具体程序包。
@@ -56,8 +56,8 @@ func normalizeExecutionMode(mode ExecutionMode) ExecutionMode {
 func validateTransactionRequest(request TransactionRequest) error {
 	if request.Mode != "" &&
 		request.Mode != ExecutionModeFixedInstruction &&
-		request.Mode != ExecutionModeGoSVM &&
-		request.Mode != ExecutionModeSVMCompat {
+		request.Mode != ExecutionModeGoOVM &&
+		request.Mode != ExecutionModeOVMCompat {
 		return fmt.Errorf("%w: unsupported execution mode %s", ErrInvalidExecutionRequest, request.Mode)
 	}
 	return nil

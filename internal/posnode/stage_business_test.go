@@ -3,11 +3,11 @@ package posnode
 import (
 	"testing"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestStageBusinessRPCValidatorRegisterAndStakeEntrypoints(t *testing.T) {

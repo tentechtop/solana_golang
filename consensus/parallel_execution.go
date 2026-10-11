@@ -6,8 +6,8 @@ import (
 	goruntime "runtime"
 	"sync"
 
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const defaultParallelExecutionWorkers = 0

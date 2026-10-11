@@ -103,6 +103,9 @@ func (host *Host) storeConnection(peerID string, connection Connection) error {
 	if connection == nil {
 		return fmt.Errorf("%w: nil connection", ErrConnectionClosed)
 	}
+	if err := host.checkStaticPeerBlock(peerID); err != nil {
+		return err
+	}
 	var storedPeer Peer
 	var replacedConnection Connection
 	shouldPersist := false
@@ -517,14 +520,13 @@ func (host *Host) recordConnectionError(connection Connection, err error) {
 		host.savePeerBestEffort(storedPeer)
 	}
 	if unexpectedClose {
-		host.penalizePeer(peerID, host.peerProtection.config.InvalidMessagePenalty, "connection-error")
 		host.logger.Warn("p2p connection error recorded",
 			slog.String("peer_id", peerID),
 			slog.String("connection_id", connectionID),
 			slog.Uint64("failure_count", uint64(state.FailureCount)),
 			slog.Any("error", err),
 		)
-		host.closePeerConnection(peerID)
+		host.closePeerConnectionIfID(peerID, connectionID)
 	}
 }
 
@@ -535,6 +537,13 @@ func (host *Host) removeConnectionByID(connectionID string) {
 	host.mutex.Lock()
 	peerID := host.connectionPeerIDs[connectionID]
 	if peerID == "" {
+		host.mutex.Unlock()
+		return
+	}
+	// A replaced connection may finish a queued read/write before its reader
+	// exits. Its cleanup must never remove the winning connection for this peer.
+	if current := host.connections[peerID]; current != nil && current.ID() != connectionID {
+		delete(host.connectionPeerIDs, connectionID)
 		host.mutex.Unlock()
 		return
 	}
@@ -562,10 +571,18 @@ func (host *Host) removeConnectionByID(connectionID string) {
 
 // closePeerConnection 关闭并移除节点连接 + 心跳失败和过期清理共用。
 func (host *Host) closePeerConnection(peerID string) {
+	host.closePeerConnectionIfID(peerID, "")
+}
+
+func (host *Host) closePeerConnectionIfID(peerID, connectionID string) {
 	var storedPeer Peer
 	shouldPersist := false
 	host.mutex.Lock()
 	connection := host.connections[peerID]
+	if connectionID != "" && (connection == nil || connection.ID() != connectionID) {
+		host.mutex.Unlock()
+		return
+	}
 	delete(host.connections, peerID)
 	delete(host.connectionStates, peerID)
 	if connection != nil {

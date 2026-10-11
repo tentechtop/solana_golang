@@ -3,9 +3,9 @@ package token
 import (
 	"fmt"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/runtime"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -153,7 +153,7 @@ func (program Program) executeInitializeMint(instruction Instruction, context ru
 	if err := requireWritable(context, mintAddress); err != nil {
 		return err
 	}
-	if !runtime.IsSignerAddress(authorityAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(authorityAddress, context) {
 		return fmt.Errorf("%w: mint authority must sign", structure.ErrMissingRequiredSignature)
 	}
 	mintAccount, err := tokenOwnedAccount(context, mintAddress, program.programID)
@@ -212,7 +212,7 @@ func (program Program) executeMintTo(instruction Instruction, context runtime.In
 	if err := requireWritable(context, destinationAddress); err != nil {
 		return err
 	}
-	if !runtime.IsSignerAddress(authorityAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(authorityAddress, context) {
 		return fmt.Errorf("%w: mint authority must sign", structure.ErrMissingRequiredSignature)
 	}
 	mintState, err := readMintState(context, mintAddress, program.programID)
@@ -253,7 +253,7 @@ func (program Program) executeTransfer(instruction Instruction, context runtime.
 	if err := requireWritable(context, destinationAddress); err != nil {
 		return err
 	}
-	if !runtime.IsSignerAddress(ownerAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(ownerAddress, context) {
 		return fmt.Errorf("%w: token owner must sign", structure.ErrMissingRequiredSignature)
 	}
 	sourceState, err := readAccountState(context, sourceAddress, program.programID)

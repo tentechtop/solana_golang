@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	vmprogram "solana_golang/programs/vm"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 
 // FungibleAssetBootstrapParams 描述资产启动参数 + 一笔交易完成 mint、余额账户初始化和初始发行。
 type FungibleAssetBootstrapParams struct {
-	Payer           structure.SolanaKeyPair
+	Payer           structure.OrdexusKeyPair
 	Program         structure.PublicKey
 	Name            string
 	Symbol          string
@@ -28,17 +28,17 @@ type FungibleAssetBootstrapParams struct {
 
 // FungibleAssetBootstrapAccounts 描述规范资产状态账户 + CLI、RPC 和 APP 必须使用同一地址约定。
 type FungibleAssetBootstrapAccounts struct {
-	Mint    structure.SolanaKeyPair
-	Balance structure.SolanaKeyPair
+	Mint    structure.OrdexusKeyPair
+	Balance structure.OrdexusKeyPair
 }
 
 // DeriveFungibleAssetMintKeyPair 派生规范 mint 账户 + 当前链没有 PDA 因此用稳定 seed 让客户端可复算。
-func DeriveFungibleAssetMintKeyPair(program structure.PublicKey) (structure.SolanaKeyPair, error) {
+func DeriveFungibleAssetMintKeyPair(program structure.PublicKey) (structure.OrdexusKeyPair, error) {
 	return deriveAssetStateKeyPair(assetMintDerivationDomain, program.String())
 }
 
 // DeriveFungibleAssetBalanceKeyPair 派生规范余额账户 + 每个合约和 owner 对应唯一资产余额状态。
-func DeriveFungibleAssetBalanceKeyPair(program structure.PublicKey, owner structure.PublicKey) (structure.SolanaKeyPair, error) {
+func DeriveFungibleAssetBalanceKeyPair(program structure.PublicKey, owner structure.PublicKey) (structure.OrdexusKeyPair, error) {
 	return deriveAssetStateKeyPair(assetBalanceDerivationDomain, program.String(), owner.String())
 }
 
@@ -149,11 +149,11 @@ func newAssetStateCreateInstructionData(program structure.PublicKey) ([]byte, er
 	return instruction.MarshalBinary()
 }
 
-func deriveAssetStateKeyPair(domain string, parts ...string) (structure.SolanaKeyPair, error) {
+func deriveAssetStateKeyPair(domain string, parts ...string) (structure.OrdexusKeyPair, error) {
 	seedText := domain + "|" + strings.Join(parts, "|")
 	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(seedText)))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("blockchain: derive asset state key: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("blockchain: derive asset state key: %w", err)
 	}
 	return keyPair, nil
 }

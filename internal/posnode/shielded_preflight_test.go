@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	walletshielded "solana_golang/shielded"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	walletshielded "github.com/tentechtop/ordexus-core/shielded"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestAddTransactionAcceptsValidSignedShieldedDeposit(t *testing.T) {
@@ -184,7 +184,7 @@ func TestMempoolShieldedTransparentDebitRejectsAggregateOverspendAndReleases(t *
 
 func TestAddTransactionRejectsUnresolvedAddressTableProgram(t *testing.T) {
 	feePayer := mustStructureKeyPair("address-table-program-fee-payer")
-	message := structure.SolanaMessage{
+	message := structure.OrdexusMessage{
 		Header: structure.MessageHeader{
 			NumRequiredSignatures: 1,
 		},
@@ -585,7 +585,7 @@ func newShieldedDepositAdmissionFixture(
 	t *testing.T,
 	sourceSeed string,
 	sourceLamports uint64,
-) (*posNode, structure.SolanaKeyPair, structure.ShieldedPoolState, structure.Blockhash, walletshielded.ShieldedAddress) {
+) (*posNode, structure.OrdexusKeyPair, structure.ShieldedPoolState, structure.Blockhash, walletshielded.ShieldedAddress) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	executor, err := newRuntimeExecutor(logger)
@@ -636,7 +636,7 @@ func newShieldedDepositAdmissionFixture(
 
 func buildShieldedDepositTransaction(
 	t *testing.T,
-	source structure.SolanaKeyPair,
+	source structure.OrdexusKeyPair,
 	poolState structure.ShieldedPoolState,
 	recentBlockhash structure.Blockhash,
 	shieldedAddress walletshielded.ShieldedAddress,

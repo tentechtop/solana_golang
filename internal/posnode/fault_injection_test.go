@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestFaultInjectionMissingParentStoresOrphanProposal(t *testing.T) {

@@ -2,14 +2,15 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -52,6 +53,7 @@ type relayService struct {
 	config           RelayConfig
 	routes           map[string]string
 	seen             map[string]int64
+	nextSeenPrune    int64
 	allowedProtocols map[ProtocolID]struct{}
 }
 
@@ -93,6 +95,9 @@ func (host *Host) SendRelayMessage(ctx context.Context, targetPeerID string, mes
 	if err := validateOutboundPeerID(targetPeerID); err != nil {
 		return err
 	}
+	if err := host.checkRelayTargetAllowed(targetPeerID); err != nil {
+		return peerProtectionDialError(targetPeerID, err)
+	}
 	if host.relay.disabled() {
 		return fmt.Errorf("%w: relay disabled", ErrUnsupportedProtocol)
 	}
@@ -107,6 +112,75 @@ func (host *Host) SendRelayMessage(ctx context.Context, targetPeerID string, mes
 	return host.sendRelayEnvelope(ctx, nextHopPeerID, relayPayload)
 }
 
+// RequestRelay 通过指定中继请求目标节点 + 保留请求关联、超时和来源校验，不触发目标直连。
+func (host *Host) RequestRelay(ctx context.Context, relayPeerID, targetPeerID string, request Message) (Message, error) {
+	if err := validateOutboundPeerID(relayPeerID); err != nil {
+		return Message{}, err
+	}
+	if err := validateOutboundPeerID(targetPeerID); err != nil {
+		return Message{}, err
+	}
+	if relayPeerID == host.peerID || relayPeerID == targetPeerID || targetPeerID == host.peerID {
+		return Message{}, fmt.Errorf("%w: invalid relay request route", ErrInvalidMessage)
+	}
+	if host.relay.disabled() {
+		return Message{}, fmt.Errorf("%w: relay disabled", ErrUnsupportedProtocol)
+	}
+	if err := host.checkRelayTargetAllowed(targetPeerID); err != nil {
+		return Message{}, peerProtectionDialError(targetPeerID, err)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestContext, cancel := host.withRequestTimeout(ctx)
+	defer cancel()
+	if err := requestContext.Err(); err != nil {
+		return Message{}, err
+	}
+	outbound, err := host.prepareOutboundRequestMessage(targetPeerID, request)
+	if err != nil {
+		return Message{}, err
+	}
+	responseType, requireType := expectedResponseType(outbound.Type)
+	waiter, unregister, err := host.requests.register(outbound.ID, targetPeerID, responseType, requireType)
+	if err != nil {
+		return Message{}, err
+	}
+	defer unregister()
+	started := time.Now()
+	host.metrics.requestsStarted.Add(1)
+	defer func() { host.metrics.recordRequestLatency(time.Since(started)) }()
+	envelope, err := host.newRelayMessage(targetPeerID, outbound, "")
+	if err == nil {
+		err = host.sendRelayEnvelope(requestContext, relayPeerID, envelope)
+	}
+	if err != nil {
+		host.metrics.requestsFailed.Add(1)
+		return Message{}, err
+	}
+	select {
+	case response := <-waiter:
+		host.metrics.requestsSucceeded.Add(1)
+		return response, nil
+	case <-requestContext.Done():
+		host.metrics.requestsFailed.Add(1)
+		return Message{}, fmt.Errorf("p2p: wait relay response: %w", requestContext.Err())
+	case <-host.lifecycleContext.Done():
+		host.metrics.requestsFailed.Add(1)
+		return Message{}, ErrHostClosed
+	}
+}
+
+// Direct-dial backoff must not disable the independently reachable relay route.
+// Static and dynamic peer blocks continue to apply to relayed traffic.
+func (host *Host) checkRelayTargetAllowed(peerID string) error {
+	err := host.checkPeerDialAllowedOrConnected(peerID)
+	if errors.Is(err, ErrPeerBackoff) {
+		return nil
+	}
+	return err
+}
+
 func (host *Host) handleRelayMessage(ctx context.Context, message Message) error {
 	if host.relay.disabled() {
 		return fmt.Errorf("%w: relay disabled", ErrUnsupportedProtocol)
@@ -115,12 +189,15 @@ func (host *Host) handleRelayMessage(ctx context.Context, message Message) error
 	if err != nil {
 		return err
 	}
-	if message.FromPeerID != "" {
-		relayPayload.PreviousHopPeerID = message.FromPeerID
-		host.relay.registerRoute(relayPayload.SourcePeerID, message.FromPeerID)
+	if host.secureSession && len(relayPayload.Signature) == 0 {
+		return fmt.Errorf("%w: secure host requires relay source signature", ErrSecureSession)
 	}
 	if err := host.relay.accept(relayPayload); err != nil {
 		return err
+	}
+	if message.FromPeerID != "" {
+		relayPayload.PreviousHopPeerID = message.FromPeerID
+		host.relay.registerRoute(relayPayload.SourcePeerID, message.FromPeerID)
 	}
 	if relayPayload.TargetPeerID == host.peerID {
 		return host.consumeRelayMessage(ctx, relayPayload)
@@ -136,8 +213,15 @@ func (host *Host) consumeRelayMessage(ctx context.Context, relayPayload RelayMes
 	if innerMessage.Type != relayPayload.ProtocolID {
 		return fmt.Errorf("%w: relay protocol mismatch", ErrInvalidMessage)
 	}
+	if innerMessage.FromPeerID != relayPayload.SourcePeerID || innerMessage.ID != relayPayload.ID {
+		return fmt.Errorf("%w: relay inner source or id mismatch", ErrInvalidMessage)
+	}
 	if innerMessage.ToPeerID != "" && innerMessage.ToPeerID != host.peerID {
 		return fmt.Errorf("%w: relay inner target mismatch", ErrInvalidMessage)
+	}
+	if innerMessage.IsResponse() {
+		host.requests.fulfill(innerMessage)
+		return nil
 	}
 	result, err := host.HandleMessage(ctx, innerMessage)
 	if err != nil {
@@ -501,8 +585,6 @@ func (service *relayService) nextHop(targetPeerID string) (string, bool) {
 }
 
 func (service *relayService) accept(message RelayMessage) error {
-	service.mutex.Lock()
-	defer service.mutex.Unlock()
 	if service.config.Disabled {
 		return fmt.Errorf("%w: relay disabled", ErrUnsupportedProtocol)
 	}
@@ -512,9 +594,16 @@ func (service *relayService) accept(message RelayMessage) error {
 	if _, ok := service.allowedProtocols[message.ProtocolID]; len(service.allowedProtocols) > 0 && !ok {
 		return fmt.Errorf("%w: relay protocol not allowed", ErrUnsupportedProtocol)
 	}
+	// Configuration is immutable. Signature verification must not serialize
+	// independent relay messages behind the route/cache mutex.
+	service.mutex.Lock()
+	defer service.mutex.Unlock()
 	nowUnixMilli := time.Now().UnixMilli()
-	service.pruneSeenLocked(nowUnixMilli)
-	if _, ok := service.seen[message.ID]; ok {
+	if nowUnixMilli >= service.nextSeenPrune {
+		service.pruneSeenLocked(nowUnixMilli)
+		service.nextSeenPrune = nowUnixMilli + 1000
+	}
+	if expires, ok := service.seen[message.ID]; ok && expires > nowUnixMilli {
 		return fmt.Errorf("%w: relay message %s", ErrDuplicateMessage, message.ID)
 	}
 	service.seen[message.ID] = nowUnixMilli + service.config.SeenTTL.Milliseconds()

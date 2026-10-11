@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"solana_golang/database"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 var mempoolKeyPrefix = []byte("pos/mempool/")
@@ -162,7 +162,7 @@ func (node *posNode) mempoolCurrentSlot() uint64 {
 	return node.transactionValidationSlot()
 }
 
-// transactionValidationSlot 统一交易时效校验槽位 + Solana 模式按已确认链头推进 recent blockhash 窗口。
+// transactionValidationSlot 统一交易时效校验槽位 + Ordexus 模式按已确认链头推进 recent blockhash 窗口。
 func (node *posNode) transactionValidationSlot() uint64 {
 	if node.ledger == nil {
 		return 0

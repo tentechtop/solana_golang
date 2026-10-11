@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"math"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
 	ShieldedInstructionEncodingVersion uint16 = 1
 	ShieldedConsensusBranchID          uint32 = 0x53483200
-	MaxShieldedInstructionBytes               = MaxSolanaTransactionSize
+	MaxShieldedInstructionBytes               = MaxOrdexusTransactionSize
 	MaxShieldedTransparentAmount              = uint64(math.MaxInt64)
 )
 
@@ -204,7 +204,7 @@ func buildShieldedProofAuthorizationMessage(
 		return nil, fmt.Errorf("%w: proof context instruction does not target shielded program", ErrInvalidShieldedBundle)
 	}
 
-	authorizationMessage := SolanaMessage{
+	authorizationMessage := OrdexusMessage{
 		Header:          message.Header,
 		AccountKeys:     clonePublicKeys(message.StaticAccountKeys),
 		RecentBlockhash: message.RecentBlockhash,

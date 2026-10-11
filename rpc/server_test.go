@@ -419,3 +419,79 @@ func postJSONRPC(t *testing.T, handler http.Handler, body string) *httptest.Resp
 	}
 	return response
 }
+
+func (b testPublicBackend) GetAccountInfo(context.Context, string) (AccountInfoResult, error) {
+	return AccountInfoResult{
+		Address:    "account-address",
+		Exists:     true,
+		Lamports:   "42",
+		Owner:      "program-address",
+		DataLength: 3,
+		DataBase64: "AQID",
+	}, nil
+}
+
+func (b testPublicBackend) SimulateTransaction(context.Context, string) (TransactionSimulationResult, error) {
+	return TransactionSimulationResult{
+		Status:               "confirmed",
+		FeeLamports:          "5000",
+		PreBalances:          []string{"10000"},
+		PostBalances:         []string{"5000"},
+		LogMessages:          []string{"contract-log"},
+		ComputeUnitsConsumed: 321,
+		InnerInstructions: []TransactionSimulationInnerInstructionResult{{
+			Index: 0,
+			Instructions: []TransactionSimulationCompiledInstructionResult{{
+				ProgramIDIndex: 2,
+				AccountIndexes: []uint8{1},
+				DataBase64:     "aW5uZXI=",
+			}},
+		}},
+		ReturnData: &TransactionSimulationReturnDataResult{
+			Program:    "program-address",
+			DataBase64: "cmV0dXJu",
+		},
+	}, nil
+}
+
+func TestPublicRouterExposesAccountInfo(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["account-address"]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["owner"] != "program-address" || result["data_base64"] != "AQID" {
+		t.Fatalf("result = %#v, want account data", decoded.Result)
+	}
+}
+
+func TestPublicRouterSimulatesSignedTransaction(t *testing.T) {
+	server := NewServer(ServerConfig{}, NewPublicRouter(testPublicBackend{}))
+	response := postJSONRPC(t, server, `{"jsonrpc":"2.0","id":1,"method":"simulateTransaction","params":["signed-transaction"]}`)
+
+	var decoded Response
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error != nil {
+		t.Fatalf("response error = %+v", decoded.Error)
+	}
+	result := decoded.Result.(map[string]any)
+	if result["status"] != "confirmed" || result["compute_units_consumed"].(float64) != 321 {
+		t.Fatalf("result = %#v, want simulation details", decoded.Result)
+	}
+	returnData := result["return_data"].(map[string]any)
+	if returnData["data_base64"] != "cmV0dXJu" {
+		t.Fatalf("return data = %#v", returnData)
+	}
+	innerInstructions := result["inner_instructions"].([]any)
+	if len(innerInstructions) != 1 {
+		t.Fatalf("inner instructions = %#v", innerInstructions)
+	}
+}

@@ -2,9 +2,10 @@ package posnode
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/p2p"
 )
 
 func TestNormalizeNodeConfigRejectsProductionInsecureP2P(t *testing.T) {
@@ -63,12 +64,54 @@ func TestNormalizeNodeConfigRejectsProductionFaultInjection(t *testing.T) {
 	}
 }
 
+func TestNormalizeNodeConfigRejectsProductionPeerBlockFaultInjection(t *testing.T) {
+	allowInsecure := false
+	config := minimalNodeConfigForValidation()
+	config.Production = true
+	config.TreasuryKeyPath = "treasury.json"
+	config.AllowInsecureP2P = &allowInsecure
+	config.PeerKeyPath = "peer.json"
+	config.StakerKeyPath = "staker.json"
+	config.ValidatorKeyPath = "validator.json"
+	config.ConsensusKeyPath = "consensus.json"
+	config.BLSKeyPath = "bls.json"
+	config.FaultInjection.BlockedPeerIDs = []string{"test-peer"}
+	config = withProductionGenesisPublicKeys(config)
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want production peer block fault injection rejection")
+	}
+}
+
 func TestNormalizeNodeConfigRejectsInvalidFaultInjectionDelay(t *testing.T) {
 	config := minimalNodeConfigForValidation()
 	config.FaultInjection.ProposalDelayMillis = -1
 
 	if _, err := normalizeNodeConfig(config); err == nil {
 		t.Fatal("normalizeNodeConfig() error = nil, want invalid fault delay rejection")
+	}
+}
+
+func TestNormalizeNodeConfigNormalizesFaultInjectionBlockedPeers(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.FaultInjection.BlockedPeerIDs = []string{" peer-a ", "peer-a", "peer-b"}
+
+	normalized, err := normalizeNodeConfig(config)
+	if err != nil {
+		t.Fatalf("normalizeNodeConfig() error = %v", err)
+	}
+	want := []string{"peer-a", "peer-b"}
+	if strings.Join(normalized.FaultInjection.BlockedPeerIDs, ",") != strings.Join(want, ",") {
+		t.Fatalf("blocked peers = %v, want %v", normalized.FaultInjection.BlockedPeerIDs, want)
+	}
+}
+
+func TestNormalizeNodeConfigRejectsEmptyFaultInjectionBlockedPeer(t *testing.T) {
+	config := minimalNodeConfigForValidation()
+	config.FaultInjection.BlockedPeerIDs = []string{" "}
+
+	if _, err := normalizeNodeConfig(config); err == nil {
+		t.Fatal("normalizeNodeConfig() error = nil, want empty blocked peer rejection")
 	}
 }
 
@@ -541,6 +584,49 @@ func TestValidatorPairingDefaultOnlyForFullNonValidator(t *testing.T) {
 	}
 	if normalizedPublic.validatorPairingEnabled() {
 		t.Fatal("validatorPairingEnabled(public_rpc) = true, want false")
+	}
+}
+
+func TestNormalizeBootstrapCoordinatorDoesNotRequireThreeFPlusOne(t *testing.T) {
+	tests := []struct {
+		name           string
+		config         bootstrapCoordinatorConfig
+		wantValidators int
+	}{
+		{
+			name:           "default allows first validator",
+			config:         bootstrapCoordinatorConfig{FaultTolerance: 3},
+			wantValidators: 1,
+		},
+		{
+			name:           "explicit count independent of fault tolerance",
+			config:         bootstrapCoordinatorConfig{MinValidators: 1, FaultTolerance: 3},
+			wantValidators: 1,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := testCase.config
+			if err := normalizeBootstrapCoordinatorConfig(&config); err != nil {
+				t.Fatalf("normalizeBootstrapCoordinatorConfig() error = %v", err)
+			}
+			if config.MinValidators != testCase.wantValidators {
+				t.Fatalf("min validators = %d, want %d", config.MinValidators, testCase.wantValidators)
+			}
+		})
+	}
+}
+
+func TestNormalizeBootstrapCoordinatorRejectsInvalidValues(t *testing.T) {
+	negativeFaultTolerance := bootstrapCoordinatorConfig{MinValidators: 1, FaultTolerance: -1}
+	if err := normalizeBootstrapCoordinatorConfig(&negativeFaultTolerance); err == nil {
+		t.Fatal("negative fault tolerance error = nil")
+	}
+
+	negativeMinValidators := bootstrapCoordinatorConfig{MinValidators: -1}
+	if err := normalizeBootstrapCoordinatorConfig(&negativeMinValidators); err == nil {
+		t.Fatal("negative min validators error = nil")
 	}
 }
 

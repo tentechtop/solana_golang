@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/database"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestBuildGenesisStateCreatesTreasuryAndValidators(t *testing.T) {
@@ -472,6 +472,26 @@ func TestLedgerWritesStructuredCommitAndQCLogs(t *testing.T) {
 		if !strings.Contains(logLine, expected) {
 			t.Fatalf("log output = %q, want %s", logLine, expected)
 		}
+	}
+}
+
+func TestSaveQCRejectsPrepareCertificate(t *testing.T) {
+	ledger, err := NewLedgerFromGenesis(nil, testGenesis(t))
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	qc := consensus.QuorumCertificate{
+		Type:               consensus.VoteTypePrepare,
+		Slot:               1,
+		BlockHeight:        1,
+		BlockHash:          ledger.Head().BlockHash,
+		ThresholdStake:     1,
+		ConfirmedStake:     1,
+		Voters:             []string{"validator-a"},
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	if _, err := ledger.SaveQC(qc); !errors.Is(err, ErrInvalidCommit) {
+		t.Fatalf("SaveQC(prepare) error = %v, want ErrInvalidCommit", err)
 	}
 }
 
@@ -1002,7 +1022,7 @@ func TestLedgerReorganizeStopsAtImportedFinalizedSnapshot(t *testing.T) {
 		QCHash:    genesisHead.QCHash,
 		EpochID:   3,
 	}, genesisState, 100, 10, "import-finalized-reorg")
-	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState})
+	importedHead, err := ledger.ImportFinalizedSnapshot(testImportSnapshotRequest(t, importProposal, importState))
 	if err != nil {
 		t.Fatalf("ImportFinalizedSnapshot() error = %v", err)
 	}
@@ -1093,13 +1113,35 @@ func TestLedgerImportFinalizedSnapshotAndContinueCommit(t *testing.T) {
 		QCHash:    genesisHead.QCHash,
 		EpochID:   3,
 	}, genesisState, 100, 10, "import-finalized")
+	importBlockHash, err := importProposal.Hash()
+	if err != nil {
+		t.Fatalf("import proposal hash: %v", err)
+	}
+	importQC := testRewardLedgerQC(100, 10, importBlockHash, 6, []string{"validator-a", "validator-b", "validator-c"}, 10)
+	importQCHash, err := HashCanonicalQC(importQC)
+	if err != nil {
+		t.Fatalf("import qc hash: %v", err)
+	}
+	if _, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState}); !errors.Is(err, ErrInvalidCommit) {
+		t.Fatalf("ImportFinalizedSnapshot(without qc) error = %v, want ErrInvalidCommit", err)
+	}
 
-	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState})
+	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: importProposal, State: importState, QC: &importQC})
 	if err != nil {
 		t.Fatalf("ImportFinalizedSnapshot() error = %v", err)
 	}
 	if importedHead.Height != 10 || importedHead.FinalizedHeight != 10 {
 		t.Fatalf("imported head = %+v, want height/finalized 10", importedHead)
+	}
+	if importedHead.QCHash != importQCHash {
+		t.Fatalf("imported qc hash = %s, want %s", importedHead.QCHash.String(), importQCHash.String())
+	}
+	storedQC, found, err := ledger.BlockQC(importBlockHash)
+	if err != nil {
+		t.Fatalf("BlockQC(imported) error = %v", err)
+	}
+	if !found || storedQC.BlockHash != importBlockHash {
+		t.Fatalf("BlockQC(imported) found=%v block=%s, want %s", found, storedQC.BlockHash.String(), importBlockHash.String())
 	}
 	nextProposal, nextState := testProposalFromHead(t, importedHead, importState, 101, 11, "after-import")
 	nextHead, err := ledger.CommitBlock(CommitBlockRequest{Proposal: nextProposal, NextState: nextState})
@@ -1150,7 +1192,7 @@ func TestLedgerImportFinalizedSnapshotAdvancesCheckpointOnMainChain(t *testing.T
 		t.Fatalf("initial finalized height = %d, want 1", headThree.FinalizedHeight)
 	}
 
-	advancedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: blockTwo, State: stateTwo})
+	advancedHead, err := ledger.ImportFinalizedSnapshot(testImportSnapshotRequest(t, blockTwo, stateTwo))
 	if err != nil {
 		t.Fatalf("ImportFinalizedSnapshot(main chain) error = %v", err)
 	}
@@ -1210,7 +1252,7 @@ func TestLedgerImportFinalizedSnapshotRewindsConflictingOptimisticHead(t *testin
 	if err != nil {
 		t.Fatalf("fork hash: %v", err)
 	}
-	importedHead, err := ledger.ImportFinalizedSnapshot(ImportSnapshotRequest{Proposal: forkTwo, State: forkState})
+	importedHead, err := ledger.ImportFinalizedSnapshot(testImportSnapshotRequest(t, forkTwo, forkState))
 	if err != nil {
 		t.Fatalf("ImportFinalizedSnapshot(conflicting) error = %v", err)
 	}
@@ -1363,6 +1405,24 @@ func TestValidatorSetFromStateExcludesJailedStakeAccount(t *testing.T) {
 	}
 	if validators[0].ConsensusPublicKey != consensusB.PublicKey {
 		t.Fatalf("validator consensus key = %s, want %s", validators[0].ConsensusPublicKey.String(), consensusB.PublicKey.String())
+	}
+	jailValidatorStakeAccount(t, &state, consensusA.PublicKey, 2)
+	before, err := ValidatorSetFromStateAtEpoch(state, 1)
+	if err != nil || len(before.Validators()) != 1 {
+		t.Fatalf("unexpired jail became eligible: %v", err)
+	}
+	expires, err := ValidatorSetFromStateAtEpoch(state, 2)
+	if err != nil || len(expires.Validators()) != 2 {
+		t.Fatalf("expired jail was not projected into target epoch: %v", err)
+	}
+	for _, account := range state.Accounts {
+		if account.Address != validatorA.PublicKey {
+			continue
+		}
+		stored, err := stake.UnmarshalValidatorStateBinary(account.Account.Data)
+		if err != nil || stored.Status != stake.ValidatorStatusJailed || stored.JailUntilEpoch != 2 {
+			t.Fatalf("committee projection mutated ledger account: %v", err)
+		}
 	}
 }
 
@@ -1520,7 +1580,7 @@ func testProposalFromParent(t *testing.T, parent Head, state consensus.ChainStat
 	}, state
 }
 
-func testKeyPair(t *testing.T, seed string) structure.SolanaKeyPair {
+func testKeyPair(t *testing.T, seed string) structure.OrdexusKeyPair {
 	t.Helper()
 	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(seed)))
 	if err != nil {
@@ -1571,6 +1631,23 @@ func testRewardLedgerQC(slot uint64, height uint64, blockHash structure.Hash, st
 		Voters:             voters,
 		CreatedAtUnixMilli: time.Now().UnixMilli() + offset,
 	}
+}
+
+func testImportSnapshotRequest(t *testing.T, proposal consensus.BlockProposal, state consensus.ChainState) ImportSnapshotRequest {
+	t.Helper()
+	blockHash, err := proposal.Hash()
+	if err != nil {
+		t.Fatalf("snapshot proposal hash: %v", err)
+	}
+	qc := testRewardLedgerQC(
+		proposal.Header.Slot,
+		proposal.Header.Height,
+		blockHash,
+		6,
+		[]string{"validator-a", "validator-b", "validator-c"},
+		10,
+	)
+	return ImportSnapshotRequest{Proposal: proposal, State: state, QC: &qc}
 }
 
 func findAccount(t *testing.T, state consensus.ChainState, address structure.PublicKey) structure.AddressedAccount {

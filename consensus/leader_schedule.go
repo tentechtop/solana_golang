@@ -3,8 +3,8 @@ package consensus
 import (
 	"fmt"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // LeaderSchedule 保存 slot 到 leader 的确定性映射 + 交易转发和出块共用同一结果。

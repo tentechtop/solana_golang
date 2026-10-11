@@ -6,9 +6,9 @@ import (
 	"math/big"
 	"sort"
 
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -42,8 +42,12 @@ const (
 
 // RewardConfig 描述奖励参数 + 所有节点必须使用同一配置才能得到一致 state root。
 type RewardConfig struct {
-	FinalityDepth                           uint64
-	VoteRewardLamportsPerCredit             uint64
+	FinalityDepth               uint64
+	RewardQCQuorum              Quorum
+	VoteRewardLamportsPerCredit uint64
+	// Zero enables exact payout ratios from genesis. Existing networks can
+	// preserve historical reward roots by activating at an agreed future epoch.
+	ExactStakePayoutActivationEpoch         uint64
 	MonetaryPolicy                          structure.MonetaryPolicy
 	MaxVoteRewardDelaySlots                 uint64
 	MissedVoteJailThreshold                 uint64
@@ -69,18 +73,19 @@ type BlockReward struct {
 
 // BlockRewardInput 描述奖励状态转换输入 + 出块和验块必须传入完全相同的确定性数据。
 type BlockRewardInput struct {
-	Slot          uint64
-	ParentSlot    uint64
-	Height        uint64
-	EpochID       uint64
-	EpochSnapshot EpochSnapshot
-	Schedule      LeaderSchedule
-	Leader        ValidatorState
-	FeeDetails    []structure.FeeDetails
-	RewardQCs     []QuorumCertificate
-	Evidence      []SlashingEvidence
-	Config        RewardConfig
-	RentConfig    structure.RentConfig
+	Slot           uint64
+	ParentSlot     uint64
+	Height         uint64
+	EpochID        uint64
+	EpochSnapshot  EpochSnapshot
+	Schedule       LeaderSchedule
+	Leader         ValidatorState
+	FeeDetails     []structure.FeeDetails
+	RewardQCs      []QuorumCertificate
+	Evidence       []SlashingEvidence
+	ProofSnapshots []EpochSnapshot
+	Config         RewardConfig
+	RentConfig     structure.RentConfig
 }
 
 type stakeAccountEntry struct {
@@ -90,13 +95,14 @@ type stakeAccountEntry struct {
 
 type epochRewardContext struct {
 	PoolLamports uint64
-	TotalWeight  uint64
+	TotalWeight  *big.Int
 }
 
 // DefaultRewardConfig 返回默认奖励策略 + 兼顾本地测试网可见收益和确定性惩罚。
 func DefaultRewardConfig() RewardConfig {
 	return RewardConfig{
 		FinalityDepth:                           DefaultRewardFinalityDepth,
+		RewardQCQuorum:                          Quorum{Numerator: 2, Denominator: 3, Strict: true},
 		MonetaryPolicy:                          structure.DefaultMonetaryPolicy(),
 		MaxVoteRewardDelaySlots:                 DefaultMaxVoteRewardDelaySlots,
 		MissedVoteJailThreshold:                 DefaultMissedVoteJailThreshold,
@@ -183,6 +189,9 @@ func (input BlockRewardInput) normalize() BlockRewardInput {
 	if input.Config.FinalityDepth == 0 {
 		input.Config.FinalityDepth = DefaultRewardFinalityDepth
 	}
+	if input.Config.RewardQCQuorum == (Quorum{}) {
+		input.Config.RewardQCQuorum = Quorum{Numerator: 2, Denominator: 3, Strict: true}
+	}
 	if input.Config.MaxVoteRewardDelaySlots == 0 {
 		input.Config.MaxVoteRewardDelaySlots = DefaultMaxVoteRewardDelaySlots
 	}
@@ -229,6 +238,9 @@ func (input BlockRewardInput) validate() error {
 	}
 	if input.Config.MaliciousSlashBasisPoints > 10000 {
 		return fmt.Errorf("consensus: malicious slash bps exceeds 10000")
+	}
+	if _, err := input.Config.RewardQCQuorum.RequiredStake(input.EpochSnapshot.TotalActiveStake); err != nil {
+		return fmt.Errorf("consensus: reward qc quorum: %w", err)
 	}
 	if err := input.Config.MonetaryPolicy.Validate(); err != nil {
 		return fmt.Errorf("consensus: reward monetary policy: %w", err)
@@ -333,7 +345,7 @@ func applyFinalizedVoteCredits(
 	input BlockRewardInput,
 	rewards *[]BlockReward,
 ) error {
-	rewardQCs, err := normalizedRewardQCs(input.RewardQCs)
+	rewardQCs, err := normalizedRewardQCs(input)
 	if err != nil {
 		return err
 	}
@@ -404,7 +416,7 @@ func applySlashingEvidence(
 	input BlockRewardInput,
 	rewards *[]BlockReward,
 ) error {
-	items, err := normalizeSlashingEvidence(input.Evidence, input.EpochSnapshot)
+	items, err := normalizeSlashingEvidence(input.Evidence, input.EpochSnapshot, input.ProofSnapshots)
 	if err != nil {
 		return err
 	}
@@ -439,11 +451,20 @@ func normalizeStakeDelegationBuckets(state *ChainState, rentConfig structure.Ren
 
 func normalizeSlashingEvidence(
 	evidences []SlashingEvidence,
-	snapshot EpochSnapshot,
+	currentSnapshot EpochSnapshot,
+	proofSnapshots []EpochSnapshot,
 ) ([]slashingEvidenceItem, error) {
 	items := make([]slashingEvidenceItem, 0, len(evidences))
 	seen := make(map[string]struct{}, len(evidences))
 	for index, evidence := range evidences {
+		evidenceSlot, err := evidence.Slot()
+		if err != nil {
+			return nil, fmt.Errorf("consensus: slashing evidence %d slot: %w", index, err)
+		}
+		snapshot, err := proofSnapshotForSlot(evidenceSlot, currentSnapshot, proofSnapshots)
+		if err != nil {
+			return nil, fmt.Errorf("consensus: slashing evidence %d snapshot: %w", index, err)
+		}
 		validator, slot, err := evidence.Validate(snapshot)
 		if err != nil {
 			return nil, fmt.Errorf("consensus: slashing evidence %d: %w", index, err)
@@ -640,7 +661,7 @@ func buildEpochRewardContext(
 	if err != nil {
 		return epochRewardContext{}, err
 	}
-	if totalWeight == 0 || input.Config.VoteRewardLamportsPerCredit != 0 {
+	if totalWeight.Sign() == 0 || input.Config.VoteRewardLamportsPerCredit != 0 {
 		return epochRewardContext{TotalWeight: totalWeight}, nil
 	}
 	currentSupply, err := totalStateLamports(state)
@@ -665,12 +686,12 @@ func totalEpochRewardWeight(
 	state ChainState,
 	accountIndexByAddress map[structure.PublicKey]int,
 	input BlockRewardInput,
-) (uint64, error) {
-	totalWeight := uint64(0)
+) (*big.Int, error) {
+	totalWeight := new(big.Int)
 	for _, entry := range sortedStakeAccountEntries(state) {
 		stakeState, _, _, err := loadStakeStateByAddress(state, accountIndexByAddress, entry.Address)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if stakeState.LastRewardEpoch >= input.EpochID || shouldJailForMissedPerformance(stakeState, input.Config) {
 			continue
@@ -681,16 +702,10 @@ func totalEpochRewardWeight(
 		}
 		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, input.EpochID)
 		if err != nil {
-			return 0, fmt.Errorf("consensus: reward weight effective stake: %w", err)
+			return nil, fmt.Errorf("consensus: reward weight effective stake: %w", err)
 		}
-		weight, err := safeMulUint64Consensus(effectiveStake, credits)
-		if err != nil {
-			return 0, err
-		}
-		totalWeight, err = safeAddUint64Consensus(totalWeight, weight)
-		if err != nil {
-			return 0, err
-		}
+		weight := new(big.Int).Mul(new(big.Int).SetUint64(effectiveStake), new(big.Int).SetUint64(credits))
+		totalWeight.Add(totalWeight, weight)
 	}
 	return totalWeight, nil
 }
@@ -725,7 +740,7 @@ func settleRewardedValidator(
 	if err != nil {
 		return err
 	}
-	commissionLamports := rewardLamports * uint64(stakeState.CommissionBps) / rewardBasisPointsDenominator
+	commissionLamports := prorateLamports(rewardLamports, uint64(stakeState.CommissionBps), rewardBasisPointsDenominator)
 	stakerLamports := rewardLamports - commissionLamports
 	validatorID := string(NewValidatorID(stakeState.ConsensusPublicKey))
 	if commissionLamports > 0 {
@@ -787,7 +802,7 @@ func distributeStakePayout(
 	}
 	distributed := uint64(0)
 	lastDelegatorIndex := -1
-	selfPayout := payoutLamports * selfActiveStake / activeStake
+	selfPayout := stakePayoutShare(payoutLamports, selfActiveStake, activeStake, input)
 	if selfPayout > 0 {
 		if err := creditStakeReward(state, accountIndexByAddress, validatorAddress, validatorAccount, stakeState.StakerAccount, selfPayout, input); err != nil {
 			return err
@@ -804,7 +819,7 @@ func distributeStakePayout(
 		if delegation.ActiveStake == 0 {
 			continue
 		}
-		delegatorPayout := payoutLamports * delegation.ActiveStake / activeStake
+		delegatorPayout := stakePayoutShare(payoutLamports, delegation.ActiveStake, activeStake, input)
 		if delegatorPayout == 0 {
 			lastDelegatorIndex = index
 			continue
@@ -926,12 +941,16 @@ func settleJailedValidator(
 	return writeStakeState(state, entry.Index, nextAccount, nextStakeState, input.RentConfig)
 }
 
-func normalizedRewardQCs(qcs []QuorumCertificate) ([]QuorumCertificate, error) {
-	normalized := make([]QuorumCertificate, 0, len(qcs))
-	seenSlots := make(map[uint64]struct{}, len(qcs))
-	for _, qc := range qcs {
-		if err := qc.Validate(); err != nil {
-			return nil, err
+func normalizedRewardQCs(input BlockRewardInput) ([]QuorumCertificate, error) {
+	normalized := make([]QuorumCertificate, 0, len(input.RewardQCs))
+	seenSlots := make(map[uint64]struct{}, len(input.RewardQCs))
+	for index, qc := range input.RewardQCs {
+		proofQuorum := input.Config.RewardQCQuorum
+		if qc.Type == VoteTypeSkip {
+			proofQuorum = Quorum{Numerator: 2, Denominator: 3, Strict: true}
+		}
+		if _, err := proofSnapshotForCertificate(qc, input.EpochSnapshot, input.ProofSnapshots, proofQuorum); err != nil {
+			return nil, fmt.Errorf("consensus: reward qc %d proof: %w", index, err)
 		}
 		if qc.Type != VoteTypeConfirm {
 			continue
@@ -954,6 +973,52 @@ func normalizedRewardQCs(qcs []QuorumCertificate) ([]QuorumCertificate, error) {
 		return left.BlockHash.String() < right.BlockHash.String()
 	})
 	return normalized, nil
+}
+
+// A certified recovery may change the committee within one epoch. Select the
+// historical committee by both slot range and the QC's signatures and weight.
+func proofSnapshotForCertificate(qc QuorumCertificate, current EpochSnapshot, snapshots []EpochSnapshot, quorum Quorum) (EpochSnapshot, error) {
+	candidates := append([]EpochSnapshot{current}, snapshots...)
+	var matched *EpochSnapshot
+	for _, snapshot := range candidates {
+		if qc.Slot < snapshot.StartSlot || qc.Slot > snapshot.EndSlot {
+			continue
+		}
+		if err := VerifyQuorumCertificateForSnapshot(qc, snapshot, quorum); err != nil {
+			continue
+		}
+		if matched != nil && matched.SnapshotStateRoot != snapshot.SnapshotStateRoot {
+			return EpochSnapshot{}, fmt.Errorf("ambiguous certified snapshots for slot %d", qc.Slot)
+		}
+		copyValue := snapshot
+		matched = &copyValue
+	}
+	if matched == nil {
+		return EpochSnapshot{}, fmt.Errorf("no authenticated committee verifies qc for slot %d", qc.Slot)
+	}
+	return *matched, nil
+}
+
+func proofSnapshotForSlot(slot uint64, current EpochSnapshot, snapshots []EpochSnapshot) (EpochSnapshot, error) {
+	if slot >= current.StartSlot && slot <= current.EndSlot {
+		return current, nil
+	}
+	var matched *EpochSnapshot
+	for index := range snapshots {
+		snapshot := snapshots[index]
+		if slot < snapshot.StartSlot || slot > snapshot.EndSlot {
+			continue
+		}
+		if matched != nil && matched.SnapshotStateRoot != snapshot.SnapshotStateRoot {
+			return EpochSnapshot{}, fmt.Errorf("ambiguous epoch snapshots for slot %d", slot)
+		}
+		copyValue := snapshot
+		matched = &copyValue
+	}
+	if matched == nil {
+		return EpochSnapshot{}, fmt.Errorf("epoch snapshot not found for slot %d", slot)
+	}
+	return *matched, nil
 }
 
 func isRewardEligibleQC(qc QuorumCertificate, input BlockRewardInput) bool {
@@ -1023,18 +1088,25 @@ func calculateVoteReward(
 		}
 		return reward, nil
 	}
-	if rewardContext.PoolLamports == 0 || rewardContext.TotalWeight == 0 {
+	if rewardContext.PoolLamports == 0 || rewardContext.TotalWeight == nil || rewardContext.TotalWeight.Sign() == 0 {
 		return 0, nil
 	}
 	effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, input.EpochID)
 	if err != nil {
 		return 0, fmt.Errorf("consensus: reward effective stake: %w", err)
 	}
-	weight, err := safeMulUint64Consensus(effectiveStake, credits)
-	if err != nil {
-		return 0, err
+	// Stake and credits each fit uint64, but their product may not. Keep the
+	// exact integer ratio, including the final floor, without narrowing weights.
+	weight := new(big.Int).Mul(new(big.Int).SetUint64(effectiveStake), new(big.Int).SetUint64(credits))
+	if weight.Cmp(rewardContext.TotalWeight) > 0 {
+		return 0, fmt.Errorf("consensus: reward weight exceeds total")
 	}
-	return prorateLamports(rewardContext.PoolLamports, weight, rewardContext.TotalWeight), nil
+	reward := new(big.Int).Mul(new(big.Int).SetUint64(rewardContext.PoolLamports), weight)
+	reward.Div(reward, rewardContext.TotalWeight)
+	if !reward.IsUint64() {
+		return 0, fmt.Errorf("consensus: vote reward overflow")
+	}
+	return reward.Uint64(), nil
 }
 
 func prorateLamports(poolLamports uint64, weight uint64, totalWeight uint64) uint64 {
@@ -1045,6 +1117,14 @@ func prorateLamports(poolLamports uint64, weight uint64, totalWeight uint64) uin
 	pool.Mul(pool, new(big.Int).SetUint64(weight))
 	pool.Div(pool, new(big.Int).SetUint64(totalWeight))
 	return pool.Uint64()
+}
+
+func stakePayoutShare(poolLamports, weight, totalWeight uint64, input BlockRewardInput) uint64 {
+	if input.EpochID < input.Config.ExactStakePayoutActivationEpoch {
+		// Replay the old arithmetic only before the network's activation epoch.
+		return poolLamports * weight / totalWeight
+	}
+	return prorateLamports(poolLamports, weight, totalWeight)
 }
 
 func safeAddUint64Consensus(left uint64, right uint64) (uint64, error) {
@@ -1069,10 +1149,7 @@ func calculateSlashLamports(state stake.ValidatorState, basisPoints uint16) (uin
 	if basisPoints == 0 || totalStake == 0 {
 		return 0, nil
 	}
-	if basisPoints != 0 && totalStake > ^uint64(0)/uint64(basisPoints) {
-		return 0, fmt.Errorf("consensus: slash amount overflow")
-	}
-	slashLamports := totalStake * uint64(basisPoints) / rewardBasisPointsDenominator
+	slashLamports := prorateLamports(totalStake, uint64(basisPoints), rewardBasisPointsDenominator)
 	if slashLamports >= totalStake {
 		return totalStake, nil
 	}

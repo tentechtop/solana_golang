@@ -3,8 +3,8 @@ package database
 import (
 	"fmt"
 
-	leveldbengine "solana_golang/database/leveldb"
-	pebbleengine "solana_golang/database/pebble"
+	leveldbengine "github.com/tentechtop/ordexus-core/database/leveldb"
+	pebbleengine "github.com/tentechtop/ordexus-core/database/pebble"
 )
 
 func NewDatabase(config DatabaseConfig) (Database, error) {

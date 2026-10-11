@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const maxPendingEvidence = consensus.MaxSlashingEvidencePerBlock * 2
@@ -85,7 +85,7 @@ func (node *posNode) observeProposalForEvidence(
 		)
 		return
 	}
-	choiceKey := fmt.Sprintf("proposal/%d/%s", proposal.Header.Slot, proposal.Header.LeaderID)
+	choiceKey := proposalChoiceKey(proposal.Header.Slot, proposal.Header.LeaderID)
 	node.mutex.Lock()
 	if node.proposalChoices == nil {
 		node.proposalChoices = make(map[string]consensus.BlockProposal)
@@ -129,6 +129,10 @@ func (node *posNode) observeProposalForEvidence(
 	}
 }
 
+func proposalChoiceKey(slot uint64, leaderID consensus.ValidatorID) string {
+	return fmt.Sprintf("proposal/%d/%s", slot, leaderID)
+}
+
 func (node *posNode) verifyProposalSignatureForEvidence(proposal consensus.BlockProposal) error {
 	node.mutex.Lock()
 	epochContextValue, err := node.epochContextForSlotLocked(proposal.Header.Slot)
@@ -154,7 +158,7 @@ func (node *posNode) observeSignedVoteForEvidence(ctx context.Context, envelope 
 		node.logger.Debug("posnode signed vote skipped for evidence", slog.Any("error", err))
 		return
 	}
-	choiceKey := fmt.Sprintf("vote/%d/%s", envelope.Vote.Slot, envelope.Vote.VoterID)
+	choiceKey := signedVoteEvidenceChoiceKey(envelope.Vote)
 	node.mutex.Lock()
 	if node.signedVoteChoices == nil {
 		node.signedVoteChoices = make(map[string]consensus.SignedVote)
@@ -194,6 +198,14 @@ func (node *posNode) observeSignedVoteForEvidence(ctx context.Context, envelope 
 		)
 		node.broadcastEvidence(ctx, evidence, "")
 	}
+}
+
+func signedVoteEvidenceChoiceKey(vote consensus.Vote) string {
+	phase := "decision"
+	if vote.Type == consensus.VoteTypePrepare {
+		phase = "prepare"
+	}
+	return fmt.Sprintf("vote/%d/%s/%s", vote.Slot, phase, vote.VoterID)
 }
 
 func (node *posNode) addPendingSlashingEvidence(evidence consensus.SlashingEvidence) (bool, error) {

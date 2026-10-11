@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -30,6 +30,7 @@ const (
 
 // nodeConfig 描述 posnode 配置 + 用同一 genesis 文件保证多节点状态一致。
 type nodeConfig struct {
+	quietPairingQR                bool
 	ConfigPath                    string                         `json:"-"`
 	ChainID                       string                         `json:"chain_id"`
 	ChainIDExplicit               bool                           `json:"-"`
@@ -60,6 +61,7 @@ type nodeConfig struct {
 	NodeRole                      string                         `json:"node_role,omitempty"`
 	NodeRoles                     []string                       `json:"node_roles,omitempty"`
 	NodeCapabilities              []string                       `json:"node_capabilities,omitempty"`
+	NodeFeatures                  nodeFeaturesConfig             `json:"node_features,omitempty"`
 	ValidatorEnabled              *bool                          `json:"validator_enabled,omitempty"`
 	ConsensusEnabled              *bool                          `json:"consensus_enabled,omitempty"`
 	ResolvedNodeRole              p2p.PeerRole                   `json:"-"`
@@ -73,6 +75,7 @@ type nodeConfig struct {
 	SlotMillis                    int                            `json:"slot_millis"`
 	GenesisStartMs                int64                          `json:"genesis_start_unix_millis"`
 	EpochSlots                    uint64                         `json:"epoch_slots"`
+	StakeRewardExactRatioEpoch    uint64                         `json:"stake_reward_exact_ratio_epoch,omitempty"`
 	FinalityDepth                 uint64                         `json:"finality_depth"`
 	DisableStateRecovery          bool                           `json:"disable_state_recovery,omitempty"`
 	TurbineFanout                 int                            `json:"turbine_fanout"`
@@ -88,6 +91,8 @@ type nodeConfig struct {
 	AutoTransfer                  *autoTransferConfig            `json:"auto_transfer,omitempty"`
 	ContractDeploymentPolicy      contractDeploymentPolicyConfig `json:"contract_deployment_policy,omitempty"`
 	FaultInjection                faultInjectionConfig           `json:"fault_injection,omitempty"`
+	ConsensusPolicy               consensusPolicyConfig          `json:"consensus_policy,omitempty"`
+	EmergencyRecovery             emergencyRecoveryConfig        `json:"emergency_recovery,omitempty"`
 	GenesisHash                   string                         `json:"-"`
 	ChainIdentityHash             string                         `json:"-"`
 	P2PNetworkID                  string                         `json:"-"`
@@ -106,6 +111,13 @@ type peerConfig struct {
 	ResolvedRole         p2p.PeerRole       `json:"-"`
 	ResolvedRoles        []p2p.PeerRole     `json:"-"`
 	ResolvedCapabilities p2p.PeerCapability `json:"-"`
+}
+
+// nodeFeaturesConfig 暴露给部署者的全节点能力开关；不承载钱包私钥，只控制发现、连续历史和钱包配对能力。
+type nodeFeaturesConfig struct {
+	BootnodeEnabled      *bool `json:"bootnode_enabled,omitempty"`
+	ArchiveEnabled       *bool `json:"archive_enabled,omitempty"`
+	WalletPairingEnabled *bool `json:"wallet_pairing_enabled,omitempty"`
 }
 
 type genesisConfig struct {
@@ -172,9 +184,28 @@ type contractDeploymentPolicyConfig struct {
 }
 
 type faultInjectionConfig struct {
-	ProposalDelayMillis int64 `json:"proposal_delay_millis,omitempty"`
-	DoubleVoteOnce      bool  `json:"double_vote_once,omitempty"`
-	DoubleProposalOnce  bool  `json:"double_proposal_once,omitempty"`
+	ProposalDelayMillis int64    `json:"proposal_delay_millis,omitempty"`
+	DoubleVoteOnce      bool     `json:"double_vote_once,omitempty"`
+	DoubleProposalOnce  bool     `json:"double_proposal_once,omitempty"`
+	BlockedPeerIDs      []string `json:"blocked_peer_ids,omitempty"`
+}
+
+type emergencyRecoveryConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// GovernancePublicKeys 和 Threshold 仅保留旧配置解码兼容，恢复授权只接受链上验证者权益签名。
+	GovernancePublicKeys         []string              `json:"governance_public_keys,omitempty"`
+	Threshold                    int                   `json:"threshold,omitempty"`
+	ResolvedGovernancePublicKeys []structure.PublicKey `json:"-"`
+}
+
+type consensusPolicyConfig struct {
+	MultiValidatorThreshold int `json:"multi_validator_threshold,omitempty"`
+}
+
+func normalizeEmergencyRecoveryConfig(config *nodeConfig) error {
+	recovery := &config.EmergencyRecovery
+	recovery.ResolvedGovernancePublicKeys = nil
+	return nil
 }
 
 func loadNodeConfig(path string) (nodeConfig, error) {
@@ -196,7 +227,16 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if config.ChainID != "" {
 		config.ChainIDExplicit = true
 	}
+	if err := normalizeNodeFeatures(&config); err != nil {
+		return nodeConfig{}, err
+	}
 	if err := normalizeBootstrapConfig(&config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := validateNodeFeatures(config); err != nil {
+		return nodeConfig{}, err
+	}
+	if err := normalizeEmergencyRecoveryConfig(&config); err != nil {
 		return nodeConfig{}, err
 	}
 	if config.ChainID == "" {
@@ -252,6 +292,11 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	if config.FinalityDepth < 1 || config.FinalityDepth > 1_000_000 {
 		return nodeConfig{}, fmt.Errorf("posnode: finality depth must be 1..1000000")
 	}
+	policy, err := (consensus.NetworkPolicy{MultiValidatorThreshold: config.ConsensusPolicy.MultiValidatorThreshold}).Normalize()
+	if err != nil {
+		return nodeConfig{}, err
+	}
+	config.ConsensusPolicy.MultiValidatorThreshold = policy.MultiValidatorThreshold
 	if config.TurbineFanout == 0 {
 		config.TurbineFanout = consensus.DefaultTurbineFanout
 	}
@@ -324,6 +369,73 @@ func normalizeNodeConfig(config nodeConfig) (nodeConfig, error) {
 	return enrichNodeChainIdentity(config)
 }
 
+// normalizeNodeFeatures 将简化的全节点能力开关转换为既有角色和运行控制，保留旧配置字段兼容。
+func normalizeNodeFeatures(config *nodeConfig) error {
+	features := config.NodeFeatures
+	if features.BootnodeEnabled == nil && features.ArchiveEnabled == nil && features.WalletPairingEnabled == nil {
+		return nil
+	}
+
+	if strings.TrimSpace(config.NodeRole) == "" {
+		config.NodeRole = "full"
+	}
+	if config.ValidatorEnabled == nil {
+		disabled := false
+		config.ValidatorEnabled = &disabled
+	}
+	if config.ConsensusEnabled == nil {
+		disabled := false
+		config.ConsensusEnabled = &disabled
+	}
+
+	if features.BootnodeEnabled != nil && *features.BootnodeEnabled {
+		config.NodeRoles = appendUniqueConfigValues(config.NodeRoles, "bootnode")
+		config.NodeCapabilities = appendUniqueConfigValues(config.NodeCapabilities, "relay", "dht")
+	}
+	if features.ArchiveEnabled != nil && *features.ArchiveEnabled {
+		config.NodeRoles = appendUniqueConfigValues(config.NodeRoles, "archive")
+		config.NodeCapabilities = appendUniqueConfigValues(config.NodeCapabilities, "archive")
+	}
+	if features.WalletPairingEnabled == nil {
+		return nil
+	}
+
+	walletPairingEnabled := *features.WalletPairingEnabled
+	if config.ValidatorPairing.Enabled != nil && *config.ValidatorPairing.Enabled != walletPairingEnabled {
+		return fmt.Errorf("posnode: node_features.wallet_pairing_enabled conflicts with validator_pairing.enabled")
+	}
+	if walletPairingEnabled && (*config.ValidatorEnabled || *config.ConsensusEnabled) {
+		return fmt.Errorf("posnode: wallet pairing requires validator_enabled and consensus_enabled to be false")
+	}
+	config.ValidatorPairing.Enabled = &walletPairingEnabled
+	return nil
+}
+
+// validateNodeFeatures 处理能力组合边界，避免把创世协调进程误配置为钱包配对节点。
+func validateNodeFeatures(config nodeConfig) error {
+	if config.NodeFeatures.WalletPairingEnabled != nil && *config.NodeFeatures.WalletPairingEnabled && config.BootstrapCoordinator.Enabled {
+		return fmt.Errorf("posnode: wallet pairing cannot be enabled on bootstrap coordinator")
+	}
+	return nil
+}
+
+func appendUniqueConfigValues(values []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(values)+len(additions))
+	result := make([]string, 0, len(values)+len(additions))
+	for _, value := range append(values, additions...) {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
 func normalizeBootstrapConfig(config *nodeConfig) error {
 	if config.BootstrapCoordinator.Enabled && config.BootstrapJoin.Enabled {
 		return fmt.Errorf("posnode: bootstrap coordinator and bootstrap join cannot both be enabled")
@@ -388,17 +500,10 @@ func normalizeBootstrapCoordinatorConfig(config *bootstrapCoordinatorConfig) err
 		return fmt.Errorf("posnode: bootstrap fault_tolerance must be non-negative")
 	}
 	if config.MinValidators == 0 {
-		if config.FaultTolerance > 0 {
-			config.MinValidators = config.FaultTolerance*3 + 1
-		} else {
-			config.MinValidators = 4
-		}
+		config.MinValidators = 1
 	}
 	if config.MinValidators < 1 {
 		return fmt.Errorf("posnode: bootstrap min_validators must be positive")
-	}
-	if config.FaultTolerance > 0 && config.MinValidators < config.FaultTolerance*3+1 {
-		return fmt.Errorf("posnode: bootstrap min_validators must satisfy 3f + 1")
 	}
 	if config.GenesisStartDelayMillis == 0 {
 		config.GenesisStartDelayMillis = 30_000
@@ -540,6 +645,20 @@ func normalizeContractDeploymentPolicyConfig(config *nodeConfig) error {
 }
 
 func normalizeFaultInjectionConfig(config *nodeConfig) error {
+	blockedPeerIDs := make([]string, 0, len(config.FaultInjection.BlockedPeerIDs))
+	seenBlockedPeerIDs := make(map[string]struct{}, len(config.FaultInjection.BlockedPeerIDs))
+	for _, rawPeerID := range config.FaultInjection.BlockedPeerIDs {
+		peerID := strings.TrimSpace(rawPeerID)
+		if peerID == "" {
+			return fmt.Errorf("posnode: fault injection blocked peer id is empty")
+		}
+		if _, exists := seenBlockedPeerIDs[peerID]; exists {
+			continue
+		}
+		seenBlockedPeerIDs[peerID] = struct{}{}
+		blockedPeerIDs = append(blockedPeerIDs, peerID)
+	}
+	config.FaultInjection.BlockedPeerIDs = blockedPeerIDs
 	if config.FaultInjection.ProposalDelayMillis < 0 {
 		return fmt.Errorf("posnode: fault injection proposal delay must be non-negative")
 	}
@@ -570,7 +689,7 @@ func normalizeValidatorPairingConfig(config *nodeConfig) error {
 }
 
 func (config faultInjectionConfig) enabled() bool {
-	return config.ProposalDelayMillis > 0 || config.DoubleVoteOnce || config.DoubleProposalOnce
+	return config.ProposalDelayMillis > 0 || config.DoubleVoteOnce || config.DoubleProposalOnce || len(config.BlockedPeerIDs) > 0
 }
 
 func normalizeNodeAttributes(config *nodeConfig) error {
@@ -801,10 +920,6 @@ func (config nodeConfig) slotDuration() time.Duration {
 	return time.Duration(config.SlotMillis) * time.Millisecond
 }
 
-func (config nodeConfig) genesisStartTime() time.Time {
-	return time.UnixMilli(config.GenesisStartMs)
-}
-
 func (config nodeConfig) allowInsecureP2P() bool {
 	if config.AllowInsecureP2P == nil {
 		if isProductionNodeConfig(config) {
@@ -817,6 +932,15 @@ func (config nodeConfig) allowInsecureP2P() bool {
 
 func (config nodeConfig) publicRPCMode() bool {
 	return containsPeerRole(config.ResolvedNodeRoles, p2p.PeerRolePublicRPC)
+}
+
+// advertisedP2PRole 选择写入已签名 P2P 节点记录的主角色；全节点兼任 bootnode 时优先声明 bootnode，
+// 使新节点可将其识别为发现入口，同时不改变本地账本、RPC 或共识的运行角色。
+func (config nodeConfig) advertisedP2PRole() p2p.PeerRole {
+	if containsPeerRole(config.ResolvedNodeRoles, p2p.PeerRoleBootnode) {
+		return p2p.PeerRoleBootnode
+	}
+	return config.ResolvedNodeRole
 }
 
 func (config nodeConfig) validatorEnabled() bool {

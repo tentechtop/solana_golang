@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -21,11 +21,12 @@ const (
 	quicHolePunchKindIntroduce uint8 = 2
 	quicHolePunchKindAck       uint8 = 3
 
-	defaultHolePunchDelay        = 300 * time.Millisecond
-	defaultHolePunchTimeout      = 3 * time.Second
-	defaultHolePunchRetryGap     = 150 * time.Millisecond
-	maxHolePunchPayloadSize      = 4096
-	maxHolePunchObservedAddrSize = 128
+	defaultHolePunchDelay          = 300 * time.Millisecond
+	defaultHolePunchTimeout        = 3 * time.Second
+	defaultHolePunchRetryGap       = 150 * time.Millisecond
+	defaultHolePunchAttemptTimeout = time.Second
+	maxHolePunchPayloadSize        = 4096
+	maxHolePunchObservedAddrSize   = 128
 )
 
 // QUICHolePunchMessage 保存 QUIC 打洞协调消息 + 由公网中继分发双方 NAT 映射地址。
@@ -84,7 +85,7 @@ func (host *Host) PunchQUICPeer(ctx context.Context, relayPeerID string, targetP
 	if err := host.Send(ctx, relayPeerID, message); err != nil {
 		return nil, fmt.Errorf("p2p: request quic hole punch via relay %s: %w", relayPeerID, err)
 	}
-	return host.waitHolePunchConnection(ctx, targetPeerID, defaultHolePunchTimeout)
+	return host.waitHolePunchConnection(ctx, targetPeerID, defaultHolePunchDelay+defaultHolePunchTimeout+time.Second)
 }
 
 func (host *Host) handleQUICHolePunchMessage(ctx context.Context, message Message) error {
@@ -96,6 +97,16 @@ func (host *Host) handleQUICHolePunchMessage(ctx context.Context, message Messag
 	case quicHolePunchKindRequest:
 		return host.handleQUICHolePunchRequest(ctx, message.FromPeerID, payload)
 	case quicHolePunchKindIntroduce:
+		if message.FromPeerID != payload.RelayPeerID {
+			return fmt.Errorf("%w: hole punch introducer mismatch", ErrInvalidMessage)
+		}
+		relay, ok := host.Peer(message.FromPeerID)
+		if !ok || relay.Capabilities&PeerCapabilityRelay == 0 {
+			return fmt.Errorf("%w: hole punch introducer is not a relay", ErrInvalidMessage)
+		}
+		if _, ok := host.Connection(message.FromPeerID); !ok {
+			return fmt.Errorf("%w: hole punch introducer is not connected", ErrInvalidMessage)
+		}
 		go host.handleQUICHolePunchIntroduce(host.lifecycleContext, payload)
 		return nil
 	case quicHolePunchKindAck:
@@ -194,7 +205,7 @@ func (host *Host) handleQUICHolePunchIntroduce(ctx context.Context, payload QUIC
 			return
 		}
 	}
-	connection, err := host.dialHolePunchAddress(ctx, address, time.UnixMilli(payload.ExpiresAtUnixMilli))
+	_, err = host.dialHolePunchAddress(ctx, address, time.UnixMilli(payload.ExpiresAtUnixMilli))
 	if err != nil {
 		host.logger.Warn("p2p quic hole punch failed",
 			slog.String("session_id", payload.SessionID),
@@ -204,8 +215,6 @@ func (host *Host) handleQUICHolePunchIntroduce(ctx context.Context, payload QUIC
 		)
 		return
 	}
-	go host.HandleConnection(host.lifecycleContext, connection)
-	host.identifyPeerAsync(connection, address.PeerID)
 	host.sendHolePunchAck(ctx, payload, address.PeerID)
 }
 
@@ -223,15 +232,21 @@ func (host *Host) dialHolePunchAddress(ctx context.Context, address utils.MultiA
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithDeadline(ctx, expiresAt)
+	defer cancel()
 	var dialErrors []error
 	for time.Now().Before(expiresAt) {
 		if connection, ok := host.Connection(address.PeerID); ok && connection.Protocol() == utils.ProtocolQUIC {
 			return connection, nil
 		}
-		attemptContext, cancel := context.WithTimeout(ctx, defaultHolePunchRetryGap)
+		attemptContext, cancel := context.WithTimeout(ctx, defaultHolePunchAttemptTimeout)
 		connection, err := host.DialAddress(attemptContext, address)
 		cancel()
 		if err == nil {
+			// Only the owner of a new outbound connection starts its read loop.
+			// An inbound/previously established connection already has a reader.
+			go host.HandleConnection(host.lifecycleContext, connection)
+			host.identifyPeerAsync(connection, address.PeerID)
 			return connection, nil
 		}
 		dialErrors = append(dialErrors, err)
@@ -535,7 +550,13 @@ func (message QUICHolePunchMessage) Validate() error {
 	if message.CreatedAtUnixMilli <= 0 || message.ExpiresAtUnixMilli <= 0 {
 		return fmt.Errorf("%w: invalid hole punch time", ErrInvalidMessage)
 	}
-	if time.Now().UnixMilli() > message.ExpiresAtUnixMilli {
+	nowUnixMilli := time.Now().UnixMilli()
+	if message.ExpiresAtUnixMilli <= message.CreatedAtUnixMilli ||
+		message.ExpiresAtUnixMilli-message.CreatedAtUnixMilli > (10*time.Second).Milliseconds() ||
+		message.ExpiresAtUnixMilli > nowUnixMilli+(10*time.Second).Milliseconds() {
+		return fmt.Errorf("%w: hole punch time range too long", ErrInvalidMessage)
+	}
+	if nowUnixMilli > message.ExpiresAtUnixMilli {
 		return fmt.Errorf("%w: expired hole punch message", ErrInvalidMessage)
 	}
 	return nil

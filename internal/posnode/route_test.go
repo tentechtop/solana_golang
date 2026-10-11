@@ -1,6 +1,9 @@
 package posnode
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestTransactionRouteStopsAtMaxHops(t *testing.T) {
 	route := transactionRouteEnvelope{OriginPeerID: "peer-origin", HopCount: 1, MaxHops: 2}
@@ -46,5 +49,22 @@ func TestPrioritizePeerIDsMovesLeadersToFront(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("peer %d = %s, want %s; all peers = %+v", index, got[index], want[index], got)
 		}
+	}
+}
+
+func TestRecoveryVoteTargetsAllConnectedValidatorsBeforeScheduledCollectors(t *testing.T) {
+	targets := recoveryVoteTargetPeerIDs(
+		[]string{"peer-c", "peer-a", "peer-b", "peer-a"},
+		[]string{"offline-leader", "peer-c"},
+		"peer-b",
+	)
+	want := []string{"peer-c", "peer-a"}
+	if !reflect.DeepEqual(targets, want) {
+		t.Fatalf("recoveryVoteTargetPeerIDs() = %v, want %v", targets, want)
+	}
+
+	fallback := recoveryVoteTargetPeerIDs(nil, []string{"leader-a", "leader-b"}, "leader-a")
+	if !reflect.DeepEqual(fallback, []string{"leader-b"}) {
+		t.Fatalf("recoveryVoteTargetPeerIDs(fallback) = %v, want [leader-b]", fallback)
 	}
 }

@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/database"
-	stakeprogram "solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	stakeprogram "github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type posNodeRPCResponse struct {
@@ -675,7 +675,7 @@ func TestHTTPJSONRPCStakeRequiresSignedTransaction(t *testing.T) {
 	}
 }
 
-func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.SolanaKeyPair, structure.SolanaKeyPair) {
+func newRPCIntegrationTestNode(t *testing.T) (*posNode, structure.OrdexusKeyPair, structure.OrdexusKeyPair) {
 	t.Helper()
 	source := mustStructureKeyPair("rpc-source")
 	destination := mustStructureKeyPair("rpc-destination")
@@ -751,7 +751,7 @@ func addValidatorStakeAccountToLedger(t *testing.T, ledger *blockchain.Ledger, v
 	}
 }
 
-func newRPCTransferTransaction(t *testing.T, node *posNode, source structure.SolanaKeyPair, destination structure.PublicKey, amount uint64) structure.Transaction {
+func newRPCTransferTransaction(t *testing.T, node *posNode, source structure.OrdexusKeyPair, destination structure.PublicKey, amount uint64) structure.Transaction {
 	t.Helper()
 	transaction, err := blockchain.NewTransferTransaction(source, destination, amount, node.ledger.Head().BlockHash)
 	if err != nil {

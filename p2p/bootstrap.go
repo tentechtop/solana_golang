@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -87,23 +87,31 @@ func (host *Host) bootstrapFromAddress(ctx context.Context, address utils.MultiA
 		return summary, err
 	}
 
-	dialContext, cancel := context.WithTimeout(ctx, config.DialTimeout)
-	connection, err := host.DialAddress(dialContext, address)
-	cancel()
-	if err != nil {
-		return summary, fmt.Errorf("p2p: bootstrap dial %s: %w", address.String(), err)
+	connection, connected := host.Connection(address.PeerID)
+	newConnection := false
+	if !connected {
+		dialContext, cancel := context.WithTimeout(ctx, config.DialTimeout)
+		var err error
+		connection, err = host.DialAddress(dialContext, address)
+		cancel()
+		if err != nil {
+			return summary, fmt.Errorf("p2p: bootstrap dial %s: %w", address.String(), err)
+		}
+		newConnection = true
 	}
 	summary.ConnectedBootnodes++
 
-	loopContext := ctx
-	var stopLoop context.CancelFunc
-	if !config.StartConnectionLoops {
-		loopContext, stopLoop = context.WithCancel(ctx)
-		defer stopLoop()
-		defer connection.Close()
+	if newConnection {
+		loopContext := ctx
+		var stopLoop context.CancelFunc
+		if !config.StartConnectionLoops {
+			loopContext, stopLoop = context.WithCancel(ctx)
+			defer stopLoop()
+			defer connection.Close()
+		}
+		go host.HandleConnection(loopContext, connection)
+		host.identifyPeerAsync(connection, address.PeerID)
 	}
-	go host.HandleConnection(loopContext, connection)
-	host.identifyPeerAsync(connection, address.PeerID)
 
 	targets := host.bootstrapTargetPeerIDs(config.RefreshTargetCount)
 	for _, targetPeerID := range targets {

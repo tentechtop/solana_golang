@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // ProgramID 标识可执行程序 + 复用账户模型公钥避免重复定义地址类型。
@@ -15,6 +15,7 @@ type ProgramID = structure.PublicKey
 // InstructionContext 描述单指令执行上下文 + runtime 调度程序时只传执行所需状态。
 type InstructionContext struct {
 	InstructionIndex int
+	InvocationDepth  uint8
 	Instruction      structure.CompiledInstruction
 	Message          structure.ResolvedMessage
 	Accounts         map[structure.PublicKey]structure.Account
@@ -27,7 +28,15 @@ type InstructionContext struct {
 	BuiltinPrograms  structure.BuiltinProgramIDs
 	SignerOverrides  map[structure.PublicKey]struct{}
 	ComputeUnitsUsed *uint64
+	ExecutionTrace   *ProgramExecutionTrace
 	Logger           *slog.Logger
+}
+
+// ProgramExecutionTrace 汇总单条顶层指令及其 CPI 的可观测结果。
+type ProgramExecutionTrace struct {
+	LogMessages       []string
+	ReturnData        *structure.TransactionReturnData
+	InnerInstructions []structure.CompiledInstruction
 }
 
 // Program 定义固定程序接口 + runtime 只依赖接口防止 import 具体 programs 形成循环引用。

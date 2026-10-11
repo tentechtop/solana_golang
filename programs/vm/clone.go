@@ -1,6 +1,6 @@
 package vmprogram
 
-import "solana_golang/structure"
+import "github.com/tentechtop/ordexus-core/structure"
 
 func cloneStructureAccounts(accounts map[structure.PublicKey]structure.Account) map[structure.PublicKey]structure.Account {
 	clonedAccounts := make(map[structure.PublicKey]structure.Account, len(accounts))

@@ -3,10 +3,10 @@ package vmprogram
 import (
 	"testing"
 
-	stakeprogram "solana_golang/programs/stake"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	svm "solana_golang/vm"
+	stakeprogram "github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestStakePoolDistributesRewardsWithoutHistoricalDilution(t *testing.T) {
@@ -216,7 +216,7 @@ func testExecuteStakePoolInstructionResultAtEpoch(
 		RentConfig:      structure.DefaultRentConfig,
 		BuiltinPrograms: structure.DefaultBuiltinProgramIDs,
 	}
-	return NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{}).Execute(context)
+	return NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader, ovm.Runtime{}).Execute(context)
 }
 
 func testStakePoolAccounts(

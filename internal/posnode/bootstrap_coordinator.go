@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const maxBootstrapRegistryBytes = 4 << 20
@@ -544,6 +544,14 @@ func bootstrapManifestFromConfig(config nodeConfig, ready bool, validatorCount i
 		return rpc.BootstrapManifestResult{}, err
 	}
 	return rpc.BootstrapManifestResult{
+		NetworkParameters: &rpc.BootstrapNetworkParametersResult{
+			Version:                    1,
+			MultiValidatorThreshold:    config.ConsensusPolicy.MultiValidatorThreshold,
+			StakeRewardExactRatioEpoch: config.StakeRewardExactRatioEpoch,
+			RecoveryEnabled:            config.EmergencyRecovery.Enabled,
+			GovernancePublicKeys:       append([]string(nil), config.EmergencyRecovery.GovernancePublicKeys...),
+			GovernanceThreshold:        config.EmergencyRecovery.Threshold,
+		},
 		Ready:                         ready,
 		ValidatorCount:                validatorCount,
 		MinValidators:                 minValidators,
@@ -627,6 +635,16 @@ func bootstrapContractPolicyFromConfig(config contractDeploymentPolicyConfig) rp
 func applyBootstrapManifest(config nodeConfig, manifest rpc.BootstrapManifestResult) (nodeConfig, error) {
 	if !manifest.Ready {
 		return nodeConfig{}, fmt.Errorf("posnode: bootstrap manifest is not ready")
+	}
+	if parameters := manifest.NetworkParameters; parameters != nil {
+		if parameters.Version != 1 {
+			return nodeConfig{}, fmt.Errorf("posnode: unsupported bootstrap network parameters version")
+		}
+		config.ConsensusPolicy.MultiValidatorThreshold = parameters.MultiValidatorThreshold
+		config.StakeRewardExactRatioEpoch = parameters.StakeRewardExactRatioEpoch
+		config.EmergencyRecovery.Enabled = parameters.RecoveryEnabled
+		config.EmergencyRecovery.GovernancePublicKeys = append([]string(nil), parameters.GovernancePublicKeys...)
+		config.EmergencyRecovery.Threshold = parameters.GovernanceThreshold
 	}
 	config.ChainID = strings.TrimSpace(manifest.ChainID)
 	config.GenesisStartMs = manifest.GenesisStartUnixMilli

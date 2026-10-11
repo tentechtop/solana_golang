@@ -29,7 +29,7 @@ func EstimateTransactionResourceDemand(transaction Transaction, programIDs Built
 	if programIDs == (BuiltinProgramIDs{}) {
 		programIDs = DefaultBuiltinProgramIDs
 	}
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return 0, 0, err
 	}

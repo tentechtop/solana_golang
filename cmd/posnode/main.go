@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"solana_golang/internal/posnode"
+	"github.com/tentechtop/ordexus-core/internal/posnode"
 )
 
 func main() {

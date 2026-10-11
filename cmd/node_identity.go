@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/database"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 var (

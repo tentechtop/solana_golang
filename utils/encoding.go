@@ -23,7 +23,7 @@ var base58Indexes = func() [256]int {
 	return indexes
 }()
 
-// Base58Encode 编码 Base58 字符串 + 兼容 Bitcoin/Solana 字母表。
+// Base58Encode 编码 Base58 字符串 + 兼容 Bitcoin/Ordexus 字母表。
 func Base58Encode(value []byte) string {
 	if len(value) == 0 {
 		return ""
@@ -49,7 +49,7 @@ func Base58Encode(value []byte) string {
 	return string(encoded)
 }
 
-// Base58Decode 解码 Base58 字符串 + 校验 Bitcoin/Solana 字母表合法性。
+// Base58Decode 解码 Base58 字符串 + 校验 Bitcoin/Ordexus 字母表合法性。
 func Base58Decode(value string) ([]byte, error) {
 	if value == "" {
 		return []byte{}, nil
@@ -140,7 +140,7 @@ func IsHexString(value string) bool {
 	return err == nil
 }
 
-// EncodeShortVecLength 编码 Solana short_vec 长度 + 使用 compact-u16 格式。
+// EncodeShortVecLength 编码 Ordexus short_vec 长度 + 使用 compact-u16 格式。
 func EncodeShortVecLength(length int) ([]byte, error) {
 	if length < 0 {
 		return nil, fmt.Errorf("utils: shortvec length cannot be negative")
@@ -162,7 +162,7 @@ func EncodeShortVecLength(length int) ([]byte, error) {
 	}
 }
 
-// DecodeShortVecLength 解码 Solana short_vec 长度 + 校验 compact-u16 边界。
+// DecodeShortVecLength 解码 Ordexus short_vec 长度 + 校验 compact-u16 边界。
 func DecodeShortVecLength(value []byte) (length int, bytesRead int, err error) {
 	var result uint32
 	for i, b := range value {

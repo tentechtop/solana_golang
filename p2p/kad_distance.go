@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const kadIdentifierBits = peerIDByteSize * 8

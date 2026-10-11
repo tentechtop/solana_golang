@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/schema"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/schema"
 )
 
 func TestMessageFrameRoundTrip(t *testing.T) {

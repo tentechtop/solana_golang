@@ -3,10 +3,10 @@ package runtime_test
 import (
 	"testing"
 
-	stakeprogram "solana_golang/programs/stake"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	stakeprogram "github.com/tentechtop/ordexus-core/programs/stake"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type overBudgetMutationProgram struct {
@@ -328,7 +328,7 @@ func TestTransactionSimulatorRejectsAndRollsBackInstructionAboveComputeBudget(t 
 func TestTransactionSimulatorRejectsAddressTablesUntilResolverIsAvailable(t *testing.T) {
 	payerKey, payerPrivateKey := newSimulationSigner(t)
 	blockhash := newTestHash(214)
-	message := structure.SolanaMessage{
+	message := structure.OrdexusMessage{
 		Header: structure.MessageHeader{
 			NumRequiredSignatures:       1,
 			NumReadonlyUnsignedAccounts: 1,

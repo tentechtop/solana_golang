@@ -3,13 +3,17 @@ package bpfloader
 import (
 	"fmt"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
-const MaxLoaderInstructionBytes = svm.MaxInstructionDataSize
+const (
+	MaxLoaderInstructionBytes     = structure.MaxInstructionDataSize
+	MaxLoaderInstructionDataBytes = MaxLoaderInstructionBytes - 12
+	MaxLoaderTransactionDataBytes = 48 * 1024
+)
 
 type InstructionType uint32
 
@@ -103,22 +107,32 @@ func (instruction Instruction) Validate() error {
 		if len(instruction.Data) == 0 {
 			return fmt.Errorf("bpfloader: write data is empty")
 		}
-		return validateProgramDataLength(instruction.Data)
+		return validateLoaderInstructionDataLength(instruction.Data)
 	case InstructionFinalize:
 		return nil
 	case InstructionDeploy:
 		if len(instruction.Data) == 0 {
 			return fmt.Errorf("bpfloader: deploy data is empty")
 		}
-		return validateProgramDataLength(instruction.Data)
+		return validateLoaderInstructionDataLength(instruction.Data)
 	case InstructionUpgrade:
 		if len(instruction.Data) == 0 {
 			return fmt.Errorf("bpfloader: upgrade data is empty")
 		}
-		return validateProgramDataLength(instruction.Data)
+		return validateLoaderInstructionDataLength(instruction.Data)
 	default:
 		return fmt.Errorf("bpfloader: invalid instruction type %d", instruction.Type)
 	}
+}
+
+func validateLoaderInstructionDataLength(data []byte) error {
+	if err := validateProgramDataLength(data); err != nil {
+		return err
+	}
+	if len(data) > MaxLoaderInstructionDataBytes {
+		return fmt.Errorf("bpfloader: instruction data length %d exceeds %d", len(data), MaxLoaderInstructionDataBytes)
+	}
+	return nil
 }
 
 // MarshalBinary 序列化 loader 指令 + 固定格式供交易签名和执行复算。
@@ -211,30 +225,30 @@ func (program Program) executeUpgrade(instruction Instruction, context runtime.I
 	if err != nil {
 		return err
 	}
-	currentManifest, ok, err := svm.DecodeProgramManifest(programAccount.Data)
+	currentManifest, ok, err := ovm.DecodeProgramManifest(programAccount.Data)
 	if err != nil {
 		return fmt.Errorf("bpfloader: decode current manifest: %w", err)
 	}
 	if !ok {
 		return fmt.Errorf("%w: executable program is immutable without manifest", structure.ErrInvalidInstruction)
 	}
-	if currentManifest.UpgradeAuthority == (svm.Address{}) {
+	if currentManifest.UpgradeAuthority == (ovm.Address{}) {
 		return fmt.Errorf("%w: executable program has no upgrade authority", structure.ErrInvalidInstruction)
 	}
 	if !program.isVMAddressSigner(currentManifest.UpgradeAuthority, context) {
 		return fmt.Errorf("%w: upgrade authority must sign", structure.ErrMissingRequiredSignature)
 	}
-	if err := validateSVMProgramData(instruction.Data, program.programID); err != nil {
+	if err := validateOVMProgramData(instruction.Data, program.programID); err != nil {
 		return err
 	}
-	nextManifest, ok, err := svm.DecodeProgramManifest(instruction.Data)
+	nextManifest, ok, err := ovm.DecodeProgramManifest(instruction.Data)
 	if err != nil {
 		return fmt.Errorf("bpfloader: decode next manifest: %w", err)
 	}
 	if !ok {
 		return fmt.Errorf("%w: upgraded program must keep manifest", structure.ErrInvalidInstruction)
 	}
-	if nextManifest.UpgradeAuthority != (svm.Address{}) && nextManifest.UpgradeAuthority != currentManifest.UpgradeAuthority {
+	if nextManifest.UpgradeAuthority != (ovm.Address{}) && nextManifest.UpgradeAuthority != currentManifest.UpgradeAuthority {
 		return fmt.Errorf("%w: upgrade cannot rotate authority", structure.ErrInvalidInstruction)
 	}
 	if err := programAccount.SetData(instruction.Data, context.RentConfig); err != nil {
@@ -253,7 +267,7 @@ func (program Program) loadWritableProgramAccount(context runtime.InstructionCon
 		return structure.PublicKey{}, structure.Account{}, fmt.Errorf("bpfloader: instruction requires program account")
 	}
 	programAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
-	if !runtime.IsSignerAddress(programAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(programAddress, context) {
 		return structure.PublicKey{}, structure.Account{}, fmt.Errorf("%w: program account must sign", structure.ErrMissingRequiredSignature)
 	}
 	if !runtime.IsWritableMessageAccount(int(context.Instruction.AccountIndexes[0]), context.Message) {
@@ -294,22 +308,22 @@ func (program Program) loadWritableExecutableProgramAccount(context runtime.Inst
 }
 
 func (program Program) validateDeployment(context runtime.InstructionContext, programAccount structure.Account, data []byte) error {
-	if err := validateSVMProgramData(data, program.programID); err != nil {
+	if err := validateOVMProgramData(data, program.programID); err != nil {
 		return err
 	}
 	policy := program.policy.Normalize()
 	if policy.RequireManifest {
-		if _, ok, err := svm.DecodeProgramManifest(data); err != nil {
+		if _, ok, err := ovm.DecodeProgramManifest(data); err != nil {
 			return fmt.Errorf("bpfloader: decode deployment manifest: %w", err)
 		} else if !ok {
 			return fmt.Errorf("%w: manifest is required", structure.ErrInvalidInstruction)
 		}
 	}
-	manifest, hasManifest, err := svm.DecodeProgramManifest(data)
+	manifest, hasManifest, err := ovm.DecodeProgramManifest(data)
 	if err != nil {
 		return fmt.Errorf("bpfloader: decode deployment manifest: %w", err)
 	}
-	if hasManifest && manifest.UpgradeAuthority != (svm.Address{}) {
+	if hasManifest && manifest.UpgradeAuthority != (ovm.Address{}) {
 		if !policy.AllowUpgradeableContracts {
 			return fmt.Errorf("%w: upgradeable contracts are disabled", structure.ErrInvalidInstruction)
 		}
@@ -344,9 +358,9 @@ func (program Program) isDeploymentAllowedByPolicy(context runtime.InstructionCo
 	return programAccount.Lamports-minimumBalance >= policy.MinDeploymentDepositLamports
 }
 
-func (program Program) isVMAddressSigner(address svm.Address, context runtime.InstructionContext) bool {
+func (program Program) isVMAddressSigner(address ovm.Address, context runtime.InstructionContext) bool {
 	publicKey := publicKeyFromVMAddress(address)
-	return runtime.IsSignerAddress(publicKey, context.Message)
+	return runtime.IsSignerContextAddress(publicKey, context)
 }
 
 func (policy DeploymentPolicy) Normalize() DeploymentPolicy {
@@ -388,17 +402,17 @@ func feePayerAddress(context runtime.InstructionContext) structure.PublicKey {
 	return context.Message.AccountKeys[0]
 }
 
-func validateSVMProgramData(data []byte, loaderProgramID structure.PublicKey) error {
+func validateOVMProgramData(data []byte, loaderProgramID structure.PublicKey) error {
 	if err := validateProgramDataLength(data); err != nil {
 		return err
 	}
-	programAccount := svm.ProgramAccount{
+	programAccount := ovm.ProgramAccount{
 		Owner:      vmAddressFromPublicKey(loaderProgramID),
 		Executable: true,
 		Data:       cloneBytes(data),
 	}
-	if _, err := (svm.BytecodeLoader{}).Load(programAccount, vmAddressFromPublicKey(loaderProgramID)); err != nil {
-		return fmt.Errorf("bpfloader: validate svm bytecode: %w", err)
+	if _, err := (ovm.BytecodeLoader{}).Load(programAccount, vmAddressFromPublicKey(loaderProgramID)); err != nil {
+		return fmt.Errorf("bpfloader: validate ovm bytecode: %w", err)
 	}
 	return nil
 }
@@ -407,19 +421,19 @@ func validateProgramDataLength(data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("bpfloader: program data is empty")
 	}
-	if len(data) > svm.MaxProgramDataSize {
-		return fmt.Errorf("bpfloader: program data length %d exceeds %d", len(data), svm.MaxProgramDataSize)
+	if len(data) > ovm.MaxProgramDataSize {
+		return fmt.Errorf("bpfloader: program data length %d exceeds %d", len(data), ovm.MaxProgramDataSize)
 	}
 	return nil
 }
 
-func vmAddressFromPublicKey(publicKey structure.PublicKey) svm.Address {
-	var address svm.Address
+func vmAddressFromPublicKey(publicKey structure.PublicKey) ovm.Address {
+	var address ovm.Address
 	copy(address[:], publicKey[:])
 	return address
 }
 
-func publicKeyFromVMAddress(address svm.Address) structure.PublicKey {
+func publicKeyFromVMAddress(address ovm.Address) structure.PublicKey {
 	var publicKey structure.PublicKey
 	copy(publicKey[:], address[:])
 	return publicKey

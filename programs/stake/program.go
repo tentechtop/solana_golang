@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -127,10 +127,8 @@ func (program Program) Execute(context runtime.InstructionContext) error {
 		return executeWithdrawUnstaked(instruction, context)
 	case InstructionExitValidator:
 		return executeExitValidator(context)
-	case InstructionSlashValidator:
-		return executeSlashValidator(instruction, context)
-	case InstructionJailValidator:
-		return executeJailValidator(instruction, context)
+	case InstructionSlashValidator, InstructionJailValidator:
+		return fmt.Errorf("stake: validator punishment is consensus-managed and cannot be submitted as a transaction")
 	case InstructionDelegate:
 		return executeDelegate(instruction, context)
 	case InstructionUndelegate:

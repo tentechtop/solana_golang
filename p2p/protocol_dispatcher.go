@@ -9,16 +9,17 @@ import (
 	"log/slog"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	defaultProtocolWorkerCount = 4
-	defaultProtocolPartitions  = 4
-	maxProtocolWorkerCount     = 1024
-	defaultProtocolQueueSize   = 1024
-	maxProtocolQueueSize       = 16384
-	defaultProtocolJobTimeout  = 10 * time.Second
+	defaultProtocolWorkerCount         = 4
+	defaultProtocolPartitionMultiplier = 4
+	maxProtocolWorkerCount             = 1024
+	defaultProtocolQueueSize           = 1024
+	maxProtocolQueueSize               = 16384
+	defaultProtocolJobTimeout          = 10 * time.Second
 )
 
 // ProtocolSchedulerConfig 保存协议调度配置 + 用优先级队列隔离慢业务处理和连接读循环。
@@ -35,12 +36,15 @@ type protocolDispatcher struct {
 	host       *Host
 	config     ProtocolSchedulerConfig
 	partitions []*protocolPartition
+	wake       chan struct{}
+	nextScan   atomic.Uint64
 }
 
 type protocolPartition struct {
 	highQueue   chan protocolJob
 	normalQueue chan protocolJob
 	lowQueue    chan protocolJob
+	claimed     atomic.Bool
 }
 
 type protocolJob struct {
@@ -56,9 +60,14 @@ func newProtocolDispatcher(host *Host, config ProtocolSchedulerConfig) *protocol
 		host:       host,
 		config:     normalized,
 		partitions: make([]*protocolPartition, normalized.PartitionCount),
+		wake:       make(chan struct{}, normalized.WorkerCount),
 	}
+	partitionConfig := normalized
+	partitionConfig.HighQueueSize = protocolPartitionQueueSize(normalized.HighQueueSize, normalized.PartitionCount)
+	partitionConfig.NormalQueueSize = protocolPartitionQueueSize(normalized.NormalQueueSize, normalized.PartitionCount)
+	partitionConfig.LowQueueSize = protocolPartitionQueueSize(normalized.LowQueueSize, normalized.PartitionCount)
 	for index := range dispatcher.partitions {
-		dispatcher.partitions[index] = newProtocolPartition(normalized)
+		dispatcher.partitions[index] = newProtocolPartition(partitionConfig)
 	}
 	return dispatcher
 }
@@ -79,12 +88,12 @@ func normalizeProtocolSchedulerConfig(config ProtocolSchedulerConfig) ProtocolSc
 		config.WorkerCount = maxProtocolWorkerCount
 	}
 	if config.PartitionCount <= 0 {
-		config.PartitionCount = config.WorkerCount
+		config.PartitionCount = config.WorkerCount * defaultProtocolPartitionMultiplier
 	}
 	if config.PartitionCount > maxProtocolWorkerCount {
 		config.PartitionCount = maxProtocolWorkerCount
 	}
-	if config.PartitionCount != config.WorkerCount {
+	if config.WorkerCount > config.PartitionCount {
 		config.WorkerCount = config.PartitionCount
 	}
 	if config.PartitionCount <= 0 {
@@ -98,6 +107,13 @@ func normalizeProtocolSchedulerConfig(config ProtocolSchedulerConfig) ProtocolSc
 		config.JobTimeout = defaultProtocolJobTimeout
 	}
 	return config
+}
+
+func protocolPartitionQueueSize(totalSize int, partitionCount int) int {
+	if partitionCount <= 1 {
+		return maxInt(1, totalSize)
+	}
+	return maxInt(1, (totalSize+partitionCount-1)/partitionCount)
 }
 
 func normalizeProtocolQueueSize(size int, workerCount int) int {
@@ -122,8 +138,7 @@ func (dispatcher *protocolDispatcher) start(ctx context.Context) {
 		return
 	}
 	for workerID := 0; workerID < dispatcher.config.WorkerCount; workerID++ {
-		partition := dispatcher.partitions[workerID%len(dispatcher.partitions)]
-		go dispatcher.worker(ctx, workerID, partition)
+		go dispatcher.worker(ctx, workerID)
 	}
 }
 
@@ -142,6 +157,7 @@ func (dispatcher *protocolDispatcher) enqueue(connection Connection, message Mes
 	select {
 	case queue <- job:
 		dispatcher.host.metrics.protocolJobsQueued.Add(1)
+		dispatcher.notifyWorker()
 		return nil
 	default:
 		dispatcher.host.metrics.protocolJobsDropped.Add(1)
@@ -177,46 +193,75 @@ func (partition *protocolPartition) queue(priority MessagePriority) chan protoco
 	}
 }
 
-func (dispatcher *protocolDispatcher) worker(ctx context.Context, workerID int, partition *protocolPartition) {
+func (dispatcher *protocolDispatcher) worker(ctx context.Context, workerID int) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	for {
-		job, ok := dispatcher.nextJob(ctx, partition)
+		partition, job, ok := dispatcher.nextJob(ctx)
 		if !ok {
 			return
 		}
 		dispatcher.handleJob(ctx, workerID, job)
+		partition.claimed.Store(false)
+		if partition.hasJobs() {
+			dispatcher.notifyWorker()
+		}
 	}
 }
 
-func (dispatcher *protocolDispatcher) nextJob(ctx context.Context, partition *protocolPartition) (protocolJob, bool) {
+func (dispatcher *protocolDispatcher) nextJob(ctx context.Context) (*protocolPartition, protocolJob, bool) {
 	for {
 		select {
 		case <-ctx.Done():
-			return protocolJob{}, false
+			return nil, protocolJob{}, false
 		default:
 		}
-		if job, ok := tryReadProtocolJob(partition.highQueue); ok {
-			return job, true
+		if partition, job, ok := dispatcher.tryClaimJob(MessagePriorityHigh); ok {
+			return partition, job, true
 		}
-		if job, ok := tryReadProtocolJob(partition.normalQueue); ok {
-			return job, true
+		if partition, job, ok := dispatcher.tryClaimJob(MessagePriorityNormal); ok {
+			return partition, job, true
 		}
-		if job, ok := tryReadProtocolJob(partition.lowQueue); ok {
-			return job, true
+		if partition, job, ok := dispatcher.tryClaimJob(MessagePriorityLow); ok {
+			return partition, job, true
 		}
 		select {
 		case <-ctx.Done():
-			return protocolJob{}, false
-		case job := <-partition.highQueue:
-			return job, true
-		case job := <-partition.normalQueue:
-			return job, true
-		case job := <-partition.lowQueue:
-			return job, true
+			return nil, protocolJob{}, false
+		case <-dispatcher.wake:
 		}
 	}
+}
+
+func (dispatcher *protocolDispatcher) tryClaimJob(priority MessagePriority) (*protocolPartition, protocolJob, bool) {
+	partitionCount := len(dispatcher.partitions)
+	if partitionCount == 0 {
+		return nil, protocolJob{}, false
+	}
+	start := int(dispatcher.nextScan.Add(1) % uint64(partitionCount))
+	for offset := 0; offset < partitionCount; offset++ {
+		partition := dispatcher.partitions[(start+offset)%partitionCount]
+		if !partition.claimed.CompareAndSwap(false, true) {
+			continue
+		}
+		if job, ok := tryReadProtocolJob(partition.queue(priority)); ok {
+			return partition, job, true
+		}
+		partition.claimed.Store(false)
+	}
+	return nil, protocolJob{}, false
+}
+
+func (dispatcher *protocolDispatcher) notifyWorker() {
+	select {
+	case dispatcher.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (partition *protocolPartition) hasJobs() bool {
+	return len(partition.highQueue) > 0 || len(partition.normalQueue) > 0 || len(partition.lowQueue) > 0
 }
 
 func tryReadProtocolJob(queue chan protocolJob) (protocolJob, bool) {
@@ -309,7 +354,13 @@ func isKnownProtocolID(protocolID ProtocolID) bool {
 		ProtocolPoSEvidenceV1,
 		ProtocolPoSBlockLocatorV1,
 		ProtocolPoSCommonAncestorV1,
-		ProtocolPoSRPCForwardV1:
+		ProtocolPoSRPCForwardV1,
+		ProtocolPoSEmergencyRecoveryV1,
+		ProtocolPoSMultiValidatorActivationV1,
+		ProtocolPoSBlockQCV1,
+		ProtocolPoSEpochTransitionV1,
+		ProtocolPoSEpochProofV1,
+		ProtocolPoSEpochProofBatchV1:
 		return true
 	default:
 		return false
@@ -340,7 +391,22 @@ func protocolPartitionIndexForSpec(message Message, partitionCount int, spec Pro
 	if !ok {
 		return protocolPartitionIndex(message, partitionCount)
 	}
+	if spec.Concurrency == ProtocolConcurrencyStateKey {
+		return protocolPartitionIndexForStateKey(message.Type, partitionCount, shardKey)
+	}
 	return protocolPartitionIndexWithShard(message, partitionCount, shardKey)
+}
+
+func protocolPartitionIndexForStateKey(protocolID ProtocolID, partitionCount int, stateKey string) int {
+	if partitionCount <= 1 {
+		return 0
+	}
+	hash := fnv.New32a()
+	var protocolBytes [4]byte
+	binary.LittleEndian.PutUint32(protocolBytes[:], uint32(protocolID))
+	_, _ = hash.Write(protocolBytes[:])
+	_, _ = hash.Write([]byte(strings.ToLower(stateKey)))
+	return int(hash.Sum32() % uint32(partitionCount))
 }
 
 func protocolPartitionIndexWithShard(message Message, partitionCount int, shardKey string) int {

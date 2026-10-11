@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestQUICHolePunchMessageRoundTrip(t *testing.T) {

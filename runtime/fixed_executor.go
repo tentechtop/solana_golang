@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // FixedExecutor 执行固定指令交易 + 作为 VM 接入前的生产闭环执行入口。

@@ -2,11 +2,13 @@ package posnode
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	livenessGateReasonDisabled             = "consensus_disabled"
 	livenessGateReasonSnapshotUnavailable  = "validator_snapshot_unavailable"
 	livenessGateReasonReachableStakeQuorum = "reachable_stake_quorum_ready"
+	livenessGateReasonQuorumStabilizing    = "reachable_stake_quorum_stabilizing"
 	livenessGateReasonReachableStakeLow    = "reachable_stake_below_quorum"
 
 	minLivenessGateInterval        = time.Second
@@ -61,11 +64,55 @@ func (node *posNode) refreshLivenessGate(now time.Time) livenessGateJSON {
 
 	node.mutex.Lock()
 	previous := node.livenessGate
+	gate = node.applyLivenessQuorumStabilizationLocked(gate, now)
 	node.livenessGate = gate
 	changed := livenessGateChanged(previous, gate)
 	node.mutex.Unlock()
 	node.logLivenessGateTransition(previous, gate, changed)
 	return gate
+}
+
+// applyLivenessQuorumStabilizationLocked 要求同一批 quorum 验证者保持可达一段完整同步窗口。
+// TCP 已连接不代表节点已经追到同一链头；恢复后立即启动 round 会让旧节点先 timeout、追块节点随后 confirm。
+func (node *posNode) applyLivenessQuorumStabilizationLocked(gate livenessGateJSON, now time.Time) livenessGateJSON {
+	if !gate.Applicable || !gate.QuorumReady {
+		node.livenessQuorumReadySince = time.Time{}
+		node.livenessQuorumFingerprint = ""
+		return gate
+	}
+	fingerprint := strings.Join(gate.ReachableValidatorIDs, "\x00")
+	if node.livenessQuorumReadySince.IsZero() || node.livenessQuorumFingerprint != fingerprint {
+		// 法定权重持续存在时，少量节点进出不应让全网暂停。稳定窗口只用于从
+		// 低于 quorum 的状态恢复，避免各节点观察成员变化的时间差制造超时轮次。
+		if node.livenessGate.QuorumReady && node.livenessGate.ProductionEnabled {
+			node.livenessQuorumReadySince = now
+			node.livenessQuorumFingerprint = fingerprint
+			return gate
+		}
+		node.livenessQuorumReadySince = now
+		node.livenessQuorumFingerprint = fingerprint
+	}
+	if !now.Before(node.livenessQuorumReadySince.Add(node.livenessQuorumStabilizationDelay())) {
+		return gate
+	}
+	gate.State = livenessGateStateDegraded
+	gate.Mode = livenessGateModeWaitingQuorum
+	gate.Reason = livenessGateReasonQuorumStabilizing
+	gate.QuorumReady = false
+	gate.ProductionEnabled = false
+	gate.UserTransactionPackagingEnabled = false
+	return gate
+}
+
+func (node *posNode) livenessQuorumStabilizationDelay() time.Duration {
+	delay := node.peerStatusTimeout() * 2
+	if delay < 2*time.Second {
+		return 2 * time.Second
+	}
+	if delay > 10*time.Second {
+		return 10 * time.Second
+	}
+	return delay
 }
 
 // livenessRecentReachablePeerIDs 收集近期可达 peer + 只把仍有连接活动的验证者计入 quorum。
@@ -186,9 +233,14 @@ func connectionRecentlyReachable(state p2p.ConnectionState, now time.Time, windo
 	return time.Duration(nowUnixMilli-lastReachableUnixMilli)*time.Millisecond <= window
 }
 
-// livenessRequiredStake 计算 2/3 stake 阈值 + 复用 QC quorum 规则避免边界不一致。
+// livenessRequiredStake 计算严格大于 2/3 的在线权益阈值 + 使用商和余数避免乘法溢出。
 func livenessRequiredStake(totalStake uint64) (uint64, error) {
-	return (consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3}).RequiredStake(totalStake)
+	if totalStake == 0 {
+		return 0, fmt.Errorf("%w: total active stake is zero", consensus.ErrInvalidQuorum)
+	}
+	quotient := totalStake / 3
+	remainder := totalStake % 3
+	return quotient*2 + remainder*2/3 + 1, nil
 }
 
 // livenessGateAllowsProduction 判断是否允许生产 + 不适用 gate 的 RPC 节点不能被误判为降级。

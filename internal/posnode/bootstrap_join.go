@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/rpc"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -58,14 +58,14 @@ func prepareBootstrapJoinConfig(ctx context.Context, config nodeConfig, logger *
 		registerResult, registerErr := callBootstrapRPC[rpc.BootstrapRegisterValidatorResult](ctx, config.BootstrapJoin.RPCURL, rpc.MethodBootstrapRegisterValidator, []any{registration})
 		if registerErr != nil {
 			if isBootstrapManifestFrozenError(registerErr) {
-				logger.Info("bootstrap manifest already frozen; applying manifest for known validator",
+				logger.Info("bootstrap manifest already frozen; applying manifest for joining validator",
 					slog.String("peer_id", registration.PeerID),
 				)
-				joinedConfig, applyErr := fetchAndApplyReadyBootstrapManifest(ctx, config, registration.PeerID, logger)
+				joinedConfig, applyErr := fetchAndApplyReadyBootstrapManifest(ctx, config, logger)
 				if applyErr == nil {
 					return joinedConfig, nil
 				}
-				return nodeConfig{}, fmt.Errorf("posnode: bootstrap manifest already frozen; local validator cannot join frozen manifest: %w", applyErr)
+				return nodeConfig{}, fmt.Errorf("posnode: apply frozen bootstrap manifest: %w", applyErr)
 			}
 			logger.Warn("bootstrap validator register failed", slog.Any("error", registerErr))
 			if err := sleepBootstrapJoin(ctx, pollInterval); err != nil {
@@ -96,12 +96,12 @@ func prepareBootstrapJoinConfig(ctx context.Context, config nodeConfig, logger *
 			}
 			continue
 		}
-		return applyReadyBootstrapManifest(config, manifest, registration.PeerID, logger)
+		return applyReadyBootstrapManifest(config, manifest, logger)
 	}
 }
 
-// fetchAndApplyReadyBootstrapManifest 拉取冻结引导清单 + 允许已入网验证者重启后恢复链配置。
-func fetchAndApplyReadyBootstrapManifest(ctx context.Context, config nodeConfig, localPeerID string, logger *slog.Logger) (nodeConfig, error) {
+// fetchAndApplyReadyBootstrapManifest 拉取冻结引导清单 + 已有和新增验证者共享同一权威链配置。
+func fetchAndApplyReadyBootstrapManifest(ctx context.Context, config nodeConfig, logger *slog.Logger) (nodeConfig, error) {
 	manifest, err := callBootstrapRPC[rpc.BootstrapManifestResult](ctx, config.BootstrapJoin.RPCURL, rpc.MethodGetBootstrapManifest, []any{})
 	if err != nil {
 		return nodeConfig{}, fmt.Errorf("fetch bootstrap manifest: %w", err)
@@ -109,12 +109,12 @@ func fetchAndApplyReadyBootstrapManifest(ctx context.Context, config nodeConfig,
 	if !manifest.Ready {
 		return nodeConfig{}, fmt.Errorf("posnode: bootstrap manifest is not ready")
 	}
-	return applyReadyBootstrapManifest(config, manifest, localPeerID, logger)
+	return applyReadyBootstrapManifest(config, manifest, logger)
 }
 
 // applyReadyBootstrapManifest 校验并应用权威清单 + 避免正常加入与重启恢复出现两套链身份逻辑。
-func applyReadyBootstrapManifest(config nodeConfig, manifest rpc.BootstrapManifestResult, localPeerID string, logger *slog.Logger) (nodeConfig, error) {
-	if err := validateBootstrapManifestForLocalNode(manifest, localPeerID); err != nil {
+func applyReadyBootstrapManifest(config nodeConfig, manifest rpc.BootstrapManifestResult, logger *slog.Logger) (nodeConfig, error) {
+	if err := validateBootstrapManifest(manifest); err != nil {
 		return nodeConfig{}, err
 	}
 	joinedConfig, err := applyBootstrapManifest(config, manifest)
@@ -200,7 +200,7 @@ func buildBootstrapRegistration(config nodeConfig) (rpc.BootstrapValidatorRegist
 	return request, nil
 }
 
-func validateBootstrapManifestForLocalNode(manifest rpc.BootstrapManifestResult, localPeerID string) error {
+func validateBootstrapManifest(manifest rpc.BootstrapManifestResult) error {
 	if strings.TrimSpace(manifest.ChainID) == "" {
 		return fmt.Errorf("posnode: bootstrap manifest chain id is empty")
 	}
@@ -213,12 +213,7 @@ func validateBootstrapManifestForLocalNode(manifest rpc.BootstrapManifestResult,
 	if manifest.ValidatorCount < manifest.MinValidators {
 		return fmt.Errorf("posnode: bootstrap manifest validator count below threshold")
 	}
-	for _, validator := range manifest.Genesis.InitialValidators {
-		if validator.PeerID == localPeerID {
-			return nil
-		}
-	}
-	return fmt.Errorf("posnode: bootstrap manifest does not include local validator")
+	return nil
 }
 
 func callBootstrapRPC[T any](ctx context.Context, rpcURL string, method string, params any) (T, error) {

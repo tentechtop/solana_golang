@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"solana_golang/programs/stake"
-	"solana_golang/runtime"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestStageBusinessValidatorRegisterActivatesAndWeightsNextEpoch(t *testing.T) {
@@ -20,7 +20,7 @@ func TestStageBusinessValidatorRegisterActivatesAndWeightsNextEpoch(t *testing.T
 		t.Fatalf("leader for slot: %v", err)
 	}
 
-	instruction, err := stake.NewRegisterValidatorInstruction(fixture.consensusKeys[1].PublicKey, "stage-peer-1", 0, fixture.stakes[1])
+	instruction, err := stake.NewRegisterValidatorInstructionWithBLS(fixture.consensusKeys[1].PublicKey, fixture.blsKeys[1].PublicKey, "stage-peer-1", 0, fixture.stakes[1])
 	if err != nil {
 		t.Fatalf("register instruction: %v", err)
 	}
@@ -88,6 +88,7 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 	fixture := newPoSTestFixture(t)
 	executor := newPoSTestExecutor(t)
 	state, parentHash := stageRegisteredState(t, fixture, executor)
+	epochZero := stageEpochZeroSnapshot(t, fixture)
 	epochOne := mustEpochSnapshot(t, 1, 33, 32, parentHash, fixture.validatorSetFromStakeAccounts(t, state, 1))
 	scheduleOne := mustLeaderSchedule(t, epochOne)
 	leaderID, err := scheduleOne.LeaderForSlot(33)
@@ -100,8 +101,10 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 		t.Fatalf("unstake instruction: %v", err)
 	}
 	unstakeTransaction := fixture.signStakeTransaction(t, 0, unstakeInstruction)
+	unstakeTimeoutQC := collectQC(t, epochZero, VoteTypeSkip, 32, 2, parentHash)
 	unstakeProposal, unstakedState, err := (BlockProducer{ChainID: "stage-business", Executor: executor}).ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           33,
+		ParentSlot:     1,
 		Height:         2,
 		EpochSnapshot:  epochOne,
 		Schedule:       scheduleOne,
@@ -111,6 +114,8 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 		Transactions:   []structure.Transaction{unstakeTransaction},
 		BlockhashQueue: fixture.blockhashQueue,
 		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+		TimeoutQC:      &unstakeTimeoutQC,
+		ProofSnapshots: []EpochSnapshot{epochZero},
 	})
 	if err != nil {
 		t.Fatalf("produce unstake block: %v", err)
@@ -143,8 +148,10 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader for withdraw slot: %v", err)
 	}
+	withdrawTimeoutQC := collectQC(t, epochOne, VoteTypeSkip, 64, 3, withdrawParentHash)
 	withdrawProposal, withdrawnState, err := (BlockProducer{ChainID: "stage-business", Executor: executor}).ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           65,
+		ParentSlot:     33,
 		Height:         3,
 		EpochSnapshot:  epochTwo,
 		Schedule:       scheduleTwo,
@@ -154,6 +161,8 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 		Transactions:   []structure.Transaction{fixture.signStakeTransaction(t, 0, withdrawInstruction)},
 		BlockhashQueue: fixture.blockhashQueue,
 		LeaderKeyPair:  fixture.consensusKeyPairByID(t, withdrawLeaderID),
+		TimeoutQC:      &withdrawTimeoutQC,
+		ProofSnapshots: []EpochSnapshot{epochOne},
 	})
 	if err != nil {
 		t.Fatalf("produce withdraw block: %v", err)
@@ -179,6 +188,7 @@ func TestStageBusinessUnstakeWithdrawAndRestakeLifecycle(t *testing.T) {
 	}
 	restakeProposal, restakedState, err := (BlockProducer{ChainID: "stage-business", Executor: executor}).ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           66,
+		ParentSlot:     65,
 		Height:         4,
 		EpochSnapshot:  epochTwo,
 		Schedule:       scheduleTwo,
@@ -219,6 +229,7 @@ func TestStageBusinessProposalRewardTamperingIsRejected(t *testing.T) {
 	rewardQC := collectQC(t, epochOne, VoteTypeConfirm, 33, 2, mustHashFromText(t, "stage-finalized-block"))
 	proposal, _, err := (BlockProducer{ChainID: "stage-business", Executor: executor}).ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           35,
+		ParentSlot:     34,
 		Height:         5,
 		EpochSnapshot:  epochOne,
 		Schedule:       scheduleOne,
@@ -249,11 +260,57 @@ func TestStageBusinessProposalRewardTamperingIsRejected(t *testing.T) {
 	}
 }
 
+func TestStageBusinessProposalRewardQCRemovalIsRejectedEvenWithoutStateEffect(t *testing.T) {
+	fixture := newPoSTestFixture(t)
+	executor := newPoSTestExecutor(t)
+	state, parentHash := stageRegisteredState(t, fixture, executor)
+	epochOne := mustEpochSnapshot(t, 1, 33, 32, parentHash, fixture.validatorSetFromStakeAccounts(t, state, 1))
+	scheduleOne := mustLeaderSchedule(t, epochOne)
+	leaderID, err := scheduleOne.LeaderForSlot(35)
+	if err != nil {
+		t.Fatalf("leader for proof commitment slot: %v", err)
+	}
+	skipQC := collectQC(t, epochOne, VoteTypeSkip, 33, 2, mustHashFromText(t, "stage-skip-proof"))
+	proposal, _, err := (BlockProducer{ChainID: "stage-business", Executor: executor}).ProduceBlock(context.Background(), ProduceBlockRequest{
+		Slot:           35,
+		ParentSlot:     34,
+		Height:         5,
+		EpochSnapshot:  epochOne,
+		Schedule:       scheduleOne,
+		ParentHash:     parentHash,
+		PreviousQCHash: mustHashFromText(t, "stage-prepare-proof-qc"),
+		ParentState:    state,
+		BlockhashQueue: fixture.blockhashQueue,
+		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+		RewardQCs:      []QuorumCertificate{skipQC},
+	})
+	if err != nil {
+		t.Fatalf("produce proof commitment block: %v", err)
+	}
+	if len(proposal.RewardQCs) != 1 || len(proposal.Rewards) != 0 {
+		t.Fatalf("proposal proof/rewards = %d/%d, want 1/0", len(proposal.RewardQCs), len(proposal.Rewards))
+	}
+
+	proposal.RewardQCs = nil
+	if _, err := (ProposalVerifier{ChainID: "stage-business", Executor: executor}).VerifyProposal(context.Background(), VerifyProposalRequest{
+		Proposal:       proposal,
+		EpochSnapshot:  epochOne,
+		Schedule:       scheduleOne,
+		ParentHash:     parentHash,
+		ParentState:    state,
+		BlockhashQueue: fixture.blockhashQueue,
+		Leader:         fixture.validatorByID(t, epochOne, leaderID),
+	}); err == nil {
+		t.Fatal("VerifyProposal() error = nil, want committed reward qc removal rejection")
+	}
+}
+
 func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
 	fixture := newPoSTestFixture(t)
 	executor := newPoSTestExecutor(t)
 	chainID := "accepted-determinism"
 	registeredState, registeredHash := stageRegisteredState(t, fixture, executor)
+	epochZero := stageEpochZeroSnapshot(t, fixture)
 	epochOne := mustEpochSnapshot(t, 1, 33, 32, registeredHash, fixture.validatorSetFromStakeAccounts(t, registeredState, 1))
 	scheduleOne := mustLeaderSchedule(t, epochOne)
 	producer := BlockProducer{ChainID: chainID, Executor: executor}
@@ -269,6 +326,7 @@ func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
 		2,
 		registeredHash,
 		registeredState,
+		[]EpochSnapshot{epochZero},
 	)
 	if err != nil {
 		t.Fatalf("produce block 33: %v", err)
@@ -285,6 +343,7 @@ func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
 		3,
 		block33Hash,
 		state33,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("produce block 34: %v", err)
@@ -322,6 +381,7 @@ func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
 		},
 	}
 	rewardQC := collectQC(t, epochOne, VoteTypeConfirm, 33, 2, block33Hash)
+	timeoutQC := collectQC(t, epochOne, VoteTypeSkip, slot-1, 4, block34Hash)
 	proposal, producedState, err := producer.ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           slot,
 		ParentSlot:     34,
@@ -336,6 +396,7 @@ func TestAcceptedBlockResultIsDeterministicAcrossValidators(t *testing.T) {
 		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
 		RewardQCs:      []QuorumCertificate{rewardQC},
 		Evidence:       []SlashingEvidence{evidence},
+		TimeoutQC:      &timeoutQC,
 	})
 	if err != nil {
 		t.Fatalf("produce accepted block: %v", err)
@@ -465,6 +526,18 @@ func stageRegisteredState(t *testing.T, fixture posTestFixture, executor runtime
 	return state, proposalHashOrFail(t, proposal)
 }
 
+func stageEpochZeroSnapshot(t *testing.T, fixture posTestFixture) EpochSnapshot {
+	t.Helper()
+	return mustEpochSnapshot(
+		t,
+		0,
+		1,
+		32,
+		mustHashFromText(t, "stage-register-all-seed"),
+		fixture.validatorSetFromGenesis(t),
+	)
+}
+
 func produceDeterministicEmptyBlock(
 	t *testing.T,
 	producer BlockProducer,
@@ -476,11 +549,21 @@ func produceDeterministicEmptyBlock(
 	height uint64,
 	parentHash structure.Hash,
 	parentState ChainState,
+	proofSnapshots []EpochSnapshot,
 ) (BlockProposal, ChainState, error) {
 	t.Helper()
 	leaderID, err := schedule.LeaderForSlot(slot)
 	if err != nil {
 		return BlockProposal{}, ChainState{}, err
+	}
+	var timeoutQC *QuorumCertificate
+	if parentSlot < slot-1 {
+		timeoutSnapshot, snapshotErr := proofSnapshotForSlot(slot-1, snapshot, proofSnapshots)
+		if snapshotErr != nil {
+			return BlockProposal{}, ChainState{}, snapshotErr
+		}
+		certificate := collectQC(t, timeoutSnapshot, VoteTypeSkip, slot-1, height, parentHash)
+		timeoutQC = &certificate
 	}
 	return producer.ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           slot,
@@ -493,6 +576,8 @@ func produceDeterministicEmptyBlock(
 		ParentState:    parentState,
 		BlockhashQueue: fixture.blockhashQueue,
 		LeaderKeyPair:  fixture.consensusKeyPairByID(t, leaderID),
+		TimeoutQC:      timeoutQC,
+		ProofSnapshots: proofSnapshots,
 	})
 }
 

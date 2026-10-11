@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -235,6 +235,15 @@ func executeRegisterSyscall(context *Context, memory registerMemory, registers *
 	output, err := context.Syscalls.Invoke(context, syscallID, input)
 	if err != nil {
 		return err
+	}
+	if len(output) > 0 && registers[3] != 0 {
+		outputCapacity := registers[4]
+		if uint64(len(output)) > outputCapacity {
+			return fmt.Errorf("%w: syscall output length %d exceeds capacity %d", ErrExecutionFailed, len(output), outputCapacity)
+		}
+		if err := memory.Write(registers[3], output); err != nil {
+			return fmt.Errorf("%w: write syscall output: %w", ErrExecutionFailed, err)
+		}
 	}
 	registers[0] = uint64(len(output))
 	return nil

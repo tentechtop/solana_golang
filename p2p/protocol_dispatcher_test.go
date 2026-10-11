@@ -1,11 +1,14 @@
 package p2p
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"testing"
+	"time"
 )
 
-func TestProtocolSchedulerUsesOneWorkerPerPartition(t *testing.T) {
+func TestProtocolSchedulerUsesMorePartitionsThanWorkers(t *testing.T) {
 	config := normalizeProtocolSchedulerConfig(ProtocolSchedulerConfig{
 		WorkerCount:    8,
 		PartitionCount: 2,
@@ -15,19 +18,130 @@ func TestProtocolSchedulerUsesOneWorkerPerPartition(t *testing.T) {
 	}
 
 	config = normalizeProtocolSchedulerConfig(ProtocolSchedulerConfig{WorkerCount: 8})
-	if config.WorkerCount != 8 || config.PartitionCount != 8 {
-		t.Fatalf("default partitions = workers %d partitions %d, want 8/8", config.WorkerCount, config.PartitionCount)
+	if config.WorkerCount != 8 || config.PartitionCount != 32 {
+		t.Fatalf("default partitions = workers %d partitions %d, want 8/32", config.WorkerCount, config.PartitionCount)
 	}
 
 	config = normalizeProtocolSchedulerConfig(ProtocolSchedulerConfig{PartitionCount: maxProtocolWorkerCount + 1})
-	if config.WorkerCount != maxProtocolWorkerCount || config.PartitionCount != maxProtocolWorkerCount {
-		t.Fatalf("capped config = workers %d partitions %d, want %d/%d",
+	if config.WorkerCount > config.PartitionCount || config.PartitionCount != maxProtocolWorkerCount {
+		t.Fatalf("capped config = workers %d partitions %d, want workers <= partitions and %d partitions",
 			config.WorkerCount,
 			config.PartitionCount,
 			maxProtocolWorkerCount,
-			maxProtocolWorkerCount,
 		)
 	}
+}
+
+func TestProtocolSchedulerSplitsTotalQueueCapacityAcrossPartitions(t *testing.T) {
+	dispatcher := newProtocolDispatcher(&Host{}, ProtocolSchedulerConfig{
+		WorkerCount:     2,
+		PartitionCount:  8,
+		HighQueueSize:   80,
+		NormalQueueSize: 40,
+		LowQueueSize:    16,
+	})
+	partition := dispatcher.partitions[0]
+	if cap(partition.highQueue) != 10 || cap(partition.normalQueue) != 5 || cap(partition.lowQueue) != 2 {
+		t.Fatalf("partition queue capacity = %d/%d/%d, want 10/5/2",
+			cap(partition.highQueue),
+			cap(partition.normalQueue),
+			cap(partition.lowQueue),
+		)
+	}
+}
+
+func TestProtocolSchedulerWorkerStealsReadyPartition(t *testing.T) {
+	registry := NewProtocolRegistry()
+	host := &Host{
+		maxMessageSize: DefaultMaxMessageSize,
+		logger:         slog.Default(),
+		peerProtection: newPeerProtection(PeerProtectionConfig{}),
+		registry:       registry,
+	}
+	const protocolID ProtocolID = 9300
+	blocked := make(chan struct{})
+	started := make(chan struct{}, 1)
+	completed := make(chan string, 2)
+	if err := registry.RegisterVoidHandler(ProtocolSpec{
+		ID:       protocolID,
+		Name:     "/p2p/test/work-stealing/1.0.0",
+		Priority: MessagePriorityHigh,
+	}, func(ctx context.Context, message Message) error {
+		if string(message.Payload) == "slow" {
+			started <- struct{}{}
+			select {
+			case <-blocked:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		completed <- string(message.Payload)
+		return nil
+	}); err != nil {
+		t.Fatalf("RegisterVoidHandler() error = %v", err)
+	}
+	dispatcher := newProtocolDispatcher(host, ProtocolSchedulerConfig{WorkerCount: 2, PartitionCount: 16})
+	host.protocolDispatcher = dispatcher
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dispatcher.start(ctx)
+
+	slowPeerID, fastPeerID := distinctProtocolPartitionPeers(t, dispatcher, protocolID)
+	slowMessage, err := NewMessage(protocolID, []byte("slow"))
+	if err != nil {
+		t.Fatalf("NewMessage(slow) error = %v", err)
+	}
+	slowMessage.FromPeerID = slowPeerID
+	if err := dispatcher.enqueue(nil, slowMessage); err != nil {
+		t.Fatalf("enqueue(slow) error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow handler did not start")
+	}
+
+	fastMessage, err := NewMessage(protocolID, []byte("fast"))
+	if err != nil {
+		t.Fatalf("NewMessage(fast) error = %v", err)
+	}
+	fastMessage.FromPeerID = fastPeerID
+	if err := dispatcher.enqueue(nil, fastMessage); err != nil {
+		t.Fatalf("enqueue(fast) error = %v", err)
+	}
+	select {
+	case value := <-completed:
+		if value != "fast" {
+			t.Fatalf("completed = %q, want fast while slow partition is occupied", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready partition was not handled by idle worker")
+	}
+	close(blocked)
+}
+
+func distinctProtocolPartitionPeers(t *testing.T, dispatcher *protocolDispatcher, protocolID ProtocolID) (string, string) {
+	t.Helper()
+	firstPeerID := testPeerID(71)
+	firstMessage, err := NewMessage(protocolID, []byte("slow"))
+	if err != nil {
+		t.Fatalf("NewMessage(first) error = %v", err)
+	}
+	firstMessage.FromPeerID = firstPeerID
+	firstPartition := dispatcher.partitionIndex(firstMessage)
+	for seed := byte(72); seed < 120; seed++ {
+		peerID := testPeerID(seed)
+		message, messageErr := NewMessage(protocolID, []byte("fast"))
+		if messageErr != nil {
+			t.Fatalf("NewMessage(candidate) error = %v", messageErr)
+		}
+		message.FromPeerID = peerID
+		if dispatcher.partitionIndex(message) != firstPartition {
+			return firstPeerID, peerID
+		}
+	}
+	t.Fatal("could not find peers mapped to distinct partitions")
+	return "", ""
 }
 
 func TestProtocolSchedulerCapsQueueSizes(t *testing.T) {
@@ -151,6 +265,10 @@ func TestProtocolPartitionShardsStatefulProtocolByStateKey(t *testing.T) {
 	}
 	if protocolPartitionIndexForSpec(first, 32, spec) != protocolPartitionIndexForSpec(second, 32, spec) {
 		t.Fatal("same state key used different partitions, want ordered handling")
+	}
+	second.FromPeerID = testPeerID(44)
+	if protocolPartitionIndexForSpec(first, 32, spec) != protocolPartitionIndexForSpec(second, 32, spec) {
+		t.Fatal("same state key from different relay peers used different partitions")
 	}
 
 	seen := make(map[int]struct{})

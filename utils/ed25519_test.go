@@ -29,7 +29,7 @@ func TestGenerateEd25519KeyPair(t *testing.T) {
 }
 func TestEd25519DeriveSignAndVerify(t *testing.T) {
 	seed := bytes.Repeat([]byte{0x01}, Ed25519KeySize)
-	data := []byte("solana transaction message")
+	data := []byte("ordexus transaction message")
 
 	publicKey, err := DeriveEd25519PublicKeyFromPrivateKey(seed)
 	if err != nil {

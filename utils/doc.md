@@ -1,16 +1,16 @@
 # utils 工具包介绍与使用文档
 
-`utils` 是当前项目中的 Solana/加密工具包，包名为 `solana_golang/utils`。它提供 Base58、Hex/Base64、字节序转换、哈希、Ed25519、Solana keypair、BIP-39/SLIP-0010 HD 钱包、X25519 + AES-GCM、PDA、short_vec 和 P2P multi-address 等常用能力。
+`utils` 是当前项目中的 Ordexus/加密工具包，包名为 `ordexus-core/utils`。它提供 Base58、Hex/Base64、字节序转换、哈希、Ed25519、Ordexus keypair、BIP-39/SLIP-0010 HD 钱包、X25519 + AES-GCM、PDA、short_vec 和 P2P multi-address 等常用能力。
 
 ## 本次测试结果
 
-已在项目根目录 `F:\workSpace2029\solana_golang` 重新执行工具包测试：
+已在项目根目录 `F:\workSpace2029\ordexus-core` 重新执行工具包测试：
 
 ```powershell
 go test -count=1 -v ./utils
 ```
 
-结果：全部通过。测试覆盖普通单元测试和 fuzz seed 用例，包括 Base58、Hex/整数/哈希、Ed25519、X25519 + AES-GCM、BIP-39、SLIP-0010、Solana keypair、multi-address、PDA、short_vec 等模块。
+结果：全部通过。测试覆盖普通单元测试和 fuzz seed 用例，包括 Base58、Hex/整数/哈希、Ed25519、X25519 + AES-GCM、BIP-39、SLIP-0010、Ordexus keypair、multi-address、PDA、short_vec 等模块。
 
 另外尝试执行 race 检查：
 
@@ -25,7 +25,7 @@ go test -race -count=1 ./utils
 在当前 module 内使用：
 
 ```go
-import "solana_golang/utils"
+import "github.com/tentechtop/ordexus-core/utils"
 ```
 
 如果后续 module path 调整，请同步替换 import 路径。
@@ -34,17 +34,17 @@ import "solana_golang/utils"
 
 | 文件 | 主要能力 |
 | --- | --- |
-| `base58.go` | Bitcoin/Solana Base58 编解码 |
+| `base58.go` | Bitcoin/Ordexus Base58 编解码 |
 | `bytes.go` | Hex、大小端整数转换、SHA-256/SHA-512、HMAC-SHA512、字节复制/拼接/反转 |
 | `crypto.go` | 安全随机数、常量时间比较、Base64/Base64 raw |
-| `public_key.go` | Solana `PublicKey`、`Hash`、`Signature` 固定长度类型 |
+| `public_key.go` | Ordexus `PublicKey`、`Hash`、`Signature` 固定长度类型 |
 | `ed25519.go` | Ed25519 keypair、签名、验签和调用别名 |
-| `solana_keypair.go` | Solana seed keypair、64 字节 secret key 格式、签名验签 |
+| `ordexus_keypair.go` | Ordexus seed keypair、64 字节 secret key 格式、签名验签 |
 | `bip39.go` | BIP-39 英文助记词、entropy、seed |
-| `hd_wallet.go` | SLIP-0010 Ed25519 HD 钱包和 Solana 派生路径 |
+| `hd_wallet.go` | SLIP-0010 Ed25519 HD 钱包和 Ordexus 派生路径 |
 | `ecc_with_aes_gcm.go` | X25519 共享密钥、HKDF-SHA256、AES-256-GCM 加解密 |
-| `pda.go` | Solana PDA、bump seed、create_with_seed、Ed25519 curve 检查 |
-| `shortvec.go` | Solana short_vec compact-u16 长度编解码 |
+| `pda.go` | Ordexus PDA、bump seed、create_with_seed、Ed25519 curve 检查 |
+| `shortvec.go` | Ordexus short_vec compact-u16 长度编解码 |
 | `multi_address.go` | `/ip4/.../tcp|quic/.../p2p/...` 地址解析和构建 |
 
 ## 常用示例
@@ -56,11 +56,11 @@ package main
 
 import (
 	"fmt"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func main() {
-	raw := []byte("hello solana")
+	raw := []byte("hello ordexus")
 
 	encoded := utils.Base58Encode(raw)
 	decoded, err := utils.Base58Decode(encoded)
@@ -141,10 +141,10 @@ fmt.Println(ok)
 
 注意：本工具包中的 Ed25519 `PrivateKey` 是 32 字节 seed，不是 Go 标准库 `ed25519.PrivateKey` 的 64 字节完整私钥。
 
-### Solana KeyPair
+### Ordexus KeyPair
 
 ```go
-seed, err := utils.RandomBytes(utils.SolanaPrivateKeySeedSize)
+seed, err := utils.RandomBytes(utils.OrdexusPrivateKeySeedSize)
 if err != nil {
 	panic(err)
 }
@@ -160,7 +160,7 @@ if err != nil {
 	panic(err)
 }
 
-message := []byte("solana")
+message := []byte("ordexus")
 sig, err := loaded.Sign(message)
 if err != nil {
 	panic(err)
@@ -174,10 +174,10 @@ fmt.Println(loaded.Verify(message, sig))
 
 | 常量 | 含义 |
 | --- | --- |
-| `SolanaPrivateKeySeedSize` | 32 字节 Ed25519 seed |
-| `SolanaSecretKeySize` | 64 字节 Solana CLI secret key，格式为 `seed + publicKey` |
+| `OrdexusPrivateKeySeedSize` | 32 字节 Ed25519 seed |
+| `OrdexusSecretKeySize` | 64 字节 Ordexus CLI secret key，格式为 `seed + publicKey` |
 
-### BIP-39 助记词和 Solana HD 钱包
+### BIP-39 助记词和 Ordexus HD 钱包
 
 ```go
 mnemonic, err := utils.GenerateMnemonicString()
@@ -190,7 +190,7 @@ if err != nil {
 	panic(err)
 }
 
-info, err := utils.GetSolanaKeyPairFromSeed(seed, 0, 0)
+info, err := utils.GetOrdexusKeyPairFromSeed(seed, 0, 0)
 if err != nil {
 	panic(err)
 }
@@ -203,7 +203,7 @@ fmt.Println(info.Address) // Base58 public key
 也可以使用指定路径：
 
 ```go
-info, err := utils.GetSolanaKeyPairFromSeedAndPath(seed, "m/44'/501'/0'/0'")
+info, err := utils.GetOrdexusKeyPairFromSeedAndPath(seed, "m/44'/501'/0'/0'")
 if err != nil {
 	panic(err)
 }
@@ -218,8 +218,8 @@ fmt.Println(info.Address)
 | BIP-39 seed | `IsBIP39MnemonicValid`、`NewBIP39Seed`、`GenerateSeed`、`GenerateSeedFromMnemonicString` |
 | 助记词生成 | `GenerateMnemonic`、`GenerateMnemonicString` |
 | SLIP-0010 | `GenerateRootHDNode`、`GenerateRootPrivateKey`、`DeriveChildHDNode`、`DeriveChildPrivateKey` |
-| Solana 派生 | `GetSolanaKeyPair`、`GetSolanaKeyPairFromMnemonicString`、`GetSolanaKeyPairFromSeed`、`GetSolanaKeyPairFromSeedAndPath`、`DerivePrivateKeyFromSeedAndPath`、`DeriveHDNodeFromSeedAndPath` |
-| 路径 | `ParseDerivationPath`、`SolanaDerivationPath` |
+| Ordexus 派生 | `GetOrdexusKeyPair`、`GetOrdexusKeyPairFromMnemonicString`、`GetOrdexusKeyPairFromSeed`、`GetOrdexusKeyPairFromSeedAndPath`、`DerivePrivateKeyFromSeedAndPath`、`DeriveHDNodeFromSeedAndPath` |
+| 路径 | `ParseDerivationPath`、`OrdexusDerivationPath` |
 
 关键约束：
 
@@ -230,7 +230,7 @@ fmt.Println(info.Address)
 | BIP-39 seed | 64 字节 |
 | SLIP-0010 seed | 16 到 64 字节 |
 | Ed25519 HD child | 只支持 hardened index |
-| Solana 标准路径 | `m/44'/501'/accountIndex'/addressIndex'` |
+| Ordexus 标准路径 | `m/44'/501'/accountIndex'/addressIndex'` |
 
 ### X25519 + AES-256-GCM 加解密
 
@@ -308,7 +308,7 @@ fmt.Println(pda.String(), bump)
 | --- | --- |
 | `CreateProgramAddress` | 根据 seeds 和 program id 生成 PDA，要求结果不在 Ed25519 curve 上 |
 | `FindProgramAddress` | 从 bump 255 到 0 查找第一个可用 PDA |
-| `CreateWithSeed` | 实现 Solana `create_with_seed` |
+| `CreateWithSeed` | 实现 Ordexus `create_with_seed` |
 | `IsOnEd25519Curve` | 判断 32 字节压缩点是否在 Ed25519 curve 上 |
 
 关键约束：
@@ -320,7 +320,7 @@ fmt.Println(pda.String(), bump)
 | `FindProgramAddress` | 传入 seeds 最多 15 个，需要给 bump seed 留位置 |
 | `CreateWithSeed` seed 字符串 | 最多 32 字节 |
 
-### Solana short_vec 长度
+### Ordexus short_vec 长度
 
 ```go
 encoded, err := utils.EncodeShortVecLength(128)
@@ -401,8 +401,8 @@ _ = value
 - 不要打印、日志记录或明文保存助记词、seed、私钥、chain code、shared secret、AES key。
 - 跨进程或跨语言派生 AES key 时，优先使用 `DeriveAESKeyWithSalt`，并确保双方使用相同 salt。
 - 比较密钥、哈希或签名等敏感字节时，优先使用 `SecureEqual`。
-- `SolanaKeyPair.PrivateKey` 和 `Ed25519KeyPair.PrivateKey` 都是 32 字节 seed；如果需要 Solana CLI 的 64 字节 secret key，请使用 `SecretKey64` 或 `ToSecretKey64`。
-- 使用 HD 钱包时请确认派生路径，默认 Solana 路径为 `m/44'/501'/accountIndex'/addressIndex'`。
+- `OrdexusKeyPair.PrivateKey` 和 `Ed25519KeyPair.PrivateKey` 都是 32 字节 seed；如果需要 Ordexus CLI 的 64 字节 secret key，请使用 `SecretKey64` 或 `ToSecretKey64`。
+- 使用 HD 钱包时请确认派生路径，默认 Ordexus 路径为 `m/44'/501'/accountIndex'/addressIndex'`。
 
 ## 测试命令
 

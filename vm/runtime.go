@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-// Runtime 执行 Solana 风格程序调用 + 将 loader、executor、meter 组合为稳定入口。
+// Runtime 执行 Ordexus 风格程序调用 + 将 loader、executor、meter 组合为稳定入口。
 type Runtime struct {
 	Loader          Loader
 	Executor        Executor

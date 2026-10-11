@@ -6,7 +6,7 @@ import (
 
 	"github.com/cloudflare/circl/sign/bls"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (

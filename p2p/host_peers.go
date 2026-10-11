@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // AddPeer 添加或更新节点 + 校验地址归属后写入节点表。

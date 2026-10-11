@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func BenchmarkMessageFrameRoundTrip(b *testing.B) {

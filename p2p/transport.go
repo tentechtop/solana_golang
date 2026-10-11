@@ -3,7 +3,7 @@ package p2p
 import (
 	"context"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // ConnectionHandler 处理入站连接 + 由传输层接收连接后交给上层协议。

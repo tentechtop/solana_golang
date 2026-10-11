@@ -3,7 +3,7 @@ package runtime
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // AccountLockSet 管理交易账户锁 + 写锁互斥且读锁可共享。
@@ -76,7 +76,7 @@ func (locks *AccountLockSet) UnlockTransaction(transaction structure.Transaction
 
 // TransactionLockAccounts 拆分交易读写账户 + 账户 meta 是锁粒度的唯一来源。
 func TransactionLockAccounts(transaction structure.Transaction) (map[structure.PublicKey]struct{}, map[structure.PublicKey]struct{}, error) {
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return nil, nil, err
 	}

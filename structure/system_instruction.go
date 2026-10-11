@@ -3,7 +3,7 @@ package structure
 import (
 	"fmt"
 
-	"solana_golang/codec/borsh"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
 )
 
 type SystemInstructionType uint32

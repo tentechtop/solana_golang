@@ -6,9 +6,9 @@ import (
 	"sort"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 type consensusStakeRecord struct {
@@ -30,8 +30,15 @@ func (node *posNode) GetConsensusStatus(ctx context.Context) (any, error) {
 func (node *posNode) consensusStatusForSlotLocked(slot uint64) consensusStatusJSON {
 	localValidatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
 	status := consensusStatusJSON{
-		Slot:             slot,
-		LocalValidatorID: string(localValidatorID),
+		Slot:                          slot,
+		Mode:                          string(node.consensusMode),
+		ProvisionalHead:               node.consensusMode == consensus.NetworkModeRecoveryElder,
+		RecoverySequence:              node.recoverySequence,
+		ElderValidatorID:              string(node.recoveryElderValidatorID),
+		ValidatorThreshold:            node.config.ConsensusPolicy.MultiValidatorThreshold,
+		MultiValidatorActivationEpoch: node.multiValidatorActivationEpoch,
+		SafetyCheckpoint:              node.safetyCheckpoint,
+		LocalValidatorID:              string(localValidatorID),
 		LocalValidator: consensusValidatorStatusJSON{
 			ValidatorID:  string(localValidatorID),
 			TurbineLayer: -1,
@@ -51,6 +58,13 @@ func (node *posNode) consensusStatusForSlotLocked(slot uint64) consensusStatusJS
 	status.EpochStartSlot = epochContextValue.Snapshot.StartSlot
 	status.EpochEndSlot = epochContextValue.Snapshot.EndSlot
 	status.TotalActiveStake = epochContextValue.Snapshot.TotalActiveStake
+	if candidateSet, err := node.ledger.ValidatorSetFromStateAtEpoch(epochContextValue.EpochID); err == nil {
+		status.CandidateEpochID = epochContextValue.EpochID
+		status.CandidateValidatorCount = len(candidateSet.Validators())
+		if root, rootErr := consensus.ValidatorSetRoot(candidateSet); rootErr == nil {
+			status.CandidateValidatorSetRoot = root.String()
+		}
+	}
 	stakeRecords := node.consensusStakeRecords(status.EpochID)
 	currentValidators := currentValidatorMap(epochContextValue.Snapshot)
 	tree, treeAvailable := node.turbineTreeForStatusLocked(slot, epochContextValue)

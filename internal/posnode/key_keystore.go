@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const maxNodeKeystoreBytes = 8192
@@ -38,20 +38,20 @@ func loadRawKeyPair(seedText string, keyPath string, config nodeConfig, purpose 
 	return rawKeyPairFromSeedText(seedText)
 }
 
-func loadStructureKeyPair(seedText string, keyPath string, config nodeConfig, purpose string) (structure.SolanaKeyPair, error) {
+func loadStructureKeyPair(seedText string, keyPath string, config nodeConfig, purpose string) (structure.OrdexusKeyPair, error) {
 	if strings.TrimSpace(keyPath) != "" {
 		keyFile, err := loadNodeKeystoreFile(keyPath, isProductionNodeConfig(config))
 		if err != nil {
-			return structure.SolanaKeyPair{}, err
+			return structure.OrdexusKeyPair{}, err
 		}
-		keyPair, err := solanaKeyPairFromKeystore(keyFile)
+		keyPair, err := ordexusKeyPairFromKeystore(keyFile)
 		if err != nil {
-			return structure.SolanaKeyPair{}, fmt.Errorf("posnode: load %s keypair: %w", purpose, err)
+			return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: load %s keypair: %w", purpose, err)
 		}
 		return keyPair, nil
 	}
 	if isProductionNodeConfig(config) {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: %s key path is required in production", purpose)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: %s key path is required in production", purpose)
 	}
 	return keyPairFromSeed(seedText)
 }
@@ -118,17 +118,17 @@ func rawKeyPairFromKeystore(keyFile nodeKeystoreFile, purpose string) (rawKeyPai
 	return keyPair, nil
 }
 
-func solanaKeyPairFromKeystore(keyFile nodeKeystoreFile) (structure.SolanaKeyPair, error) {
+func ordexusKeyPairFromKeystore(keyFile nodeKeystoreFile) (structure.OrdexusKeyPair, error) {
 	seed, expectedPublicKey, err := ed25519SeedFromKeystore(keyFile)
 	if err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	keyPair, err := structure.KeyPairFromSeed(seed)
 	if err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	if len(expectedPublicKey) > 0 && !bytes.Equal(keyPair.PublicKey[:], expectedPublicKey) {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: public key does not match private key")
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: public key does not match private key")
 	}
 	return keyPair, nil
 }
@@ -187,14 +187,14 @@ func ed25519SeedFromKeystore(keyFile nodeKeystoreFile) ([]byte, []byte, error) {
 	if strings.TrimSpace(keyFile.SecretKeyBase64) == "" {
 		return nil, nil, fmt.Errorf("posnode: keystore has no key material")
 	}
-	secretKey, err := decodeSizedKeystoreBase64(keyFile.SecretKeyBase64, structure.SolanaSecretKeySize, "ed25519 secret key")
+	secretKey, err := decodeSizedKeystoreBase64(keyFile.SecretKeyBase64, structure.OrdexusSecretKeySize, "ed25519 secret key")
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(expectedPublicKey) > 0 && !bytes.Equal(secretKey[structure.SolanaPrivateKeySeedSize:], expectedPublicKey) {
+	if len(expectedPublicKey) > 0 && !bytes.Equal(secretKey[structure.OrdexusPrivateKeySeedSize:], expectedPublicKey) {
 		return nil, nil, fmt.Errorf("posnode: secret key public key mismatch")
 	}
-	return secretKey[:structure.SolanaPrivateKeySeedSize], secretKey[structure.SolanaPrivateKeySeedSize:], nil
+	return secretKey[:structure.OrdexusPrivateKeySeedSize], secretKey[structure.OrdexusPrivateKeySeedSize:], nil
 }
 
 func optionalKeystorePublicKey(encodedPublicKey string) ([]byte, error) {

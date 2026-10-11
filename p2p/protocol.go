@@ -272,6 +272,12 @@ func DefaultProtocolSpecs() []ProtocolSpec {
 		defaultProtocolSpec(ProtocolPoSProposalV1, "/pos/proposal/1.0.0", false),
 		defaultProtocolSpec(ProtocolPoSVoteV1, "/pos/vote/1.0.0", false),
 		defaultProtocolSpec(ProtocolPoSQCV1, "/pos/qc/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSEmergencyRecoveryV1, "/pos/recovery/elder/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSMultiValidatorActivationV1, "/pos/recovery/activate/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSBlockQCV1, "/pos/sync/block-qc/1.0.0", true),
+		defaultProtocolSpec(ProtocolPoSEpochTransitionV1, "/pos/epoch-transition/1.0.0", false),
+		defaultProtocolSpec(ProtocolPoSEpochProofV1, "/pos/sync/epoch-proof/1.0.0", true),
+		defaultProtocolSpec(ProtocolPoSEpochProofBatchV1, "/pos/sync/epoch-proof-batch/1.0.0", true),
 	}
 }
 

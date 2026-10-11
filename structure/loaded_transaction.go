@@ -128,7 +128,7 @@ func (loadedAddresses LoadedAddresses) ToView() LoadedAddressView {
 }
 
 // NewResolvedMessage 创建执行期消息 + 合并静态账户和地址表账户。
-func NewResolvedMessage(message SolanaMessage, loadedAddresses LoadedAddresses) (ResolvedMessage, error) {
+func NewResolvedMessage(message OrdexusMessage, loadedAddresses LoadedAddresses) (ResolvedMessage, error) {
 	if err := message.Validate(); err != nil {
 		return ResolvedMessage{}, err
 	}
@@ -184,7 +184,7 @@ func (message ResolvedMessage) Validate() error {
 
 // StaticAccountMetas 还原静态账户权限 + 给加载账户阶段生成权限快照。
 func (message ResolvedMessage) StaticAccountMetas() []AccountMeta {
-	return SolanaMessage{
+	return OrdexusMessage{
 		Header:          message.Header,
 		AccountKeys:     clonePublicKeys(message.StaticAccountKeys),
 		RecentBlockhash: message.RecentBlockhash,

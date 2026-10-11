@@ -23,14 +23,14 @@ import (
 	"syscall"
 	"time"
 
-	"solana_golang/p2p"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
 	stressProtocolID        p2p.ProtocolID = 100000
-	defaultNetworkID                       = "solana_golang:p2p-stress:00000000000000000000000000000000"
-	defaultSoftware                        = "solana_golang/p2pstress/0.1.0"
+	defaultNetworkID                       = "ordexus-core:p2p-stress:00000000000000000000000000000000"
+	defaultSoftware                        = "github.com/tentechtop/ordexus-core/p2pstress/0.1.0"
 	defaultRequestTimeout                  = 5 * time.Second
 	defaultReportInterval                  = 5 * time.Second
 	maxLatencySamples                      = 300000
@@ -643,7 +643,7 @@ func stressWorker(
 ) {
 	defer workers.Done()
 	payload := make([]byte, config.payloadBytes)
-	copy(payload[stressPayloadHeaderSize:], []byte("solana_golang_p2p_stress_payload"))
+	copy(payload[stressPayloadHeaderSize:], []byte("ordexus-core_p2p_stress_payload"))
 	for {
 		if ctx.Err() != nil {
 			return

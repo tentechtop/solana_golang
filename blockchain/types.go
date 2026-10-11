@@ -3,8 +3,8 @@ package blockchain
 import (
 	"encoding/base64"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // GenesisConfig 描述创世账本 + 初始化资金账户和启动验证者。
@@ -65,6 +65,7 @@ type CommitBlockRequest struct {
 type ImportSnapshotRequest struct {
 	Proposal consensus.BlockProposal
 	State    consensus.ChainState
+	QC       *consensus.QuorumCertificate
 }
 
 // ForkDecision 描述分叉裁决结果 + 用于审计重组是否发生。
@@ -87,6 +88,7 @@ type storedProposal struct {
 	Header          consensus.BlockHeader         `json:"header"`
 	Transactions    []string                      `json:"transactions"`
 	RewardQCs       []consensus.QuorumCertificate `json:"reward_qcs,omitempty"`
+	TimeoutQC       *consensus.QuorumCertificate  `json:"timeout_qc,omitempty"`
 	Evidence        []consensus.SlashingEvidence  `json:"evidence,omitempty"`
 	Rewards         []consensus.BlockReward       `json:"rewards,omitempty"`
 	LeaderSignature string                        `json:"leader_signature"`

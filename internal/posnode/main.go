@@ -3,6 +3,7 @@ package posnode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,28 +15,28 @@ import (
 	"syscall"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/database"
-	"solana_golang/p2p"
-	bpfloader "solana_golang/programs/bpfloader"
-	shieldedprogram "solana_golang/programs/shielded"
-	"solana_golang/programs/stake"
-	"solana_golang/programs/system"
-	tokenprogram "solana_golang/programs/token"
-	vmprogram "solana_golang/programs/vm"
-	"solana_golang/rpc"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/p2p"
+	bpfloader "github.com/tentechtop/ordexus-core/programs/bpfloader"
+	shieldedprogram "github.com/tentechtop/ordexus-core/programs/shielded"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/programs/system"
+	tokenprogram "github.com/tentechtop/ordexus-core/programs/token"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 const (
-	protocolNetworkID                = "pos-localnet"
-	posNodeSoftwareVersion           = "posnode/1.0.0"
-	defaultConsensusQuorum           = 2
-	minActiveValidatorsForProduction = 2
+	protocolNetworkID      = "pos-localnet"
+	posNodeSoftwareVersion = "posnode/1.0.0"
+	defaultConsensusQuorum = 2
+	defaultTimeoutQuorum   = 2
 )
 
 type posNode struct {
@@ -53,9 +54,9 @@ type posNode struct {
 	executor                         runtime.FixedExecutor
 	peerKeyPair                      rawKeyPair
 	stakerAddress                    structure.PublicKey
-	stakerKeyPair                    structure.SolanaKeyPair
-	validatorKeyPair                 structure.SolanaKeyPair
-	consensusKeyPair                 structure.SolanaKeyPair
+	stakerKeyPair                    structure.OrdexusKeyPair
+	validatorKeyPair                 structure.OrdexusKeyPair
+	consensusKeyPair                 structure.OrdexusKeyPair
 	blsKeyPair                       consensus.BLSKeyPair
 	blockhashQueue                   structure.BlockhashQueue
 	mempool                          []structure.Transaction
@@ -94,6 +95,31 @@ type posNode struct {
 	workerGroup                      sync.WaitGroup
 	doubleVoteInjected               bool
 	doubleProposalInjected           bool
+	localVoteSigningMutex            sync.Mutex
+	acceptedQCs                      map[string]uint64
+	localVoteBroadcastAt             map[string]time.Time
+	prepareQCs                       map[structure.Hash]consensus.QuorumCertificate
+	epochTransitionCandidates        map[uint64]*epochTransitionCandidate
+	lastPreparedSlot                 uint64
+	lastTimeoutVotedSlot             uint64
+	latestTimeoutQC                  *consensus.QuorumCertificate
+	roundSlot                        uint64
+	roundParentHash                  structure.Hash
+	roundStartedAt                   time.Time
+	roundLockedProposalReplayAt      time.Time
+	livenessQuorumReadySince         time.Time
+	livenessQuorumFingerprint        string
+	transactionForwardLimiter        chan struct{}
+	activeRecoveryValidator          *consensus.ValidatorState
+	recoverySequence                 uint64
+	recoveryApplyMutex               sync.Mutex
+	consensusMode                    consensus.NetworkMode
+	multiValidatorActivated          bool
+	multiValidatorActivationEpoch    uint64
+	founderElderValidatorID          consensus.ValidatorID
+	recoveryElderValidatorID         consensus.ValidatorID
+	recoveryActivationSlot           uint64
+	safetyCheckpoint                 consensusSafetyCheckpoint
 }
 
 type rawKeyPair struct {
@@ -104,9 +130,9 @@ type rawKeyPair struct {
 
 type localValidatorKeyPairs struct {
 	stakerAddress structure.PublicKey
-	staker        structure.SolanaKeyPair
-	validator     structure.SolanaKeyPair
-	consensus     structure.SolanaKeyPair
+	staker        structure.OrdexusKeyPair
+	validator     structure.OrdexusKeyPair
+	consensus     structure.OrdexusKeyPair
 	bls           consensus.BLSKeyPair
 }
 
@@ -119,16 +145,35 @@ func PeerIDFromSeed(seedText string) (string, error) {
 }
 
 func Run(configPath string) error {
-	config, err := loadNodeConfig(configPath)
-	if err != nil {
-		return err
-	}
 	logger, err := utils.LoggerFromEnv()
 	if err != nil {
 		return err
 	}
 	slog.SetDefault(logger)
-	config, err = prepareBootstrapJoinConfig(context.Background(), config, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx, configPath, logger, false)
+}
+
+// RunContext embeds the existing node in an application. Cancellation closes
+// its listeners and ledger without sending process-wide signals.
+func RunContext(ctx context.Context, configPath string, logger *slog.Logger) error {
+	return runContext(ctx, configPath, logger, true)
+}
+
+func runContext(parent context.Context, configPath string, logger *slog.Logger, quietPairing bool) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	config, err := loadNodeConfig(configPath)
+	if err != nil {
+		return err
+	}
+	config.quietPairingQR = quietPairing
+	config, err = prepareBootstrapJoinConfig(parent, config, logger)
 	if err != nil {
 		return err
 	}
@@ -136,12 +181,10 @@ func Run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	if err := node.start(ctx); err != nil {
-		return err
-	}
 	defer func() {
+		cancel()
 		if node.rpcServer != nil {
 			shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_ = node.rpcServer.Shutdown(shutdownContext)
@@ -150,18 +193,17 @@ func Run(configPath string) error {
 		if node.host != nil {
 			_ = node.host.Close()
 		}
+		node.waitForWorkers(3 * time.Second)
 		if node.db != nil {
 			_ = node.db.Close()
 		}
 	}()
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-	<-signals
+	if err := node.start(ctx); err != nil {
+		return err
+	}
+	<-ctx.Done()
 	logger.Info("posnode shutdown requested")
-	cancel()
-	node.waitForWorkers(3 * time.Second)
 	return nil
 }
 
@@ -207,6 +249,11 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		epochSnapshots:                   make(map[uint64]consensus.EpochSnapshot),
 		leaderSchedules:                  make(map[uint64]consensus.LeaderSchedule),
 		rpcForwardFanoutLimiter:          make(chan struct{}, transactionFanoutWorkers),
+		acceptedQCs:                      make(map[string]uint64),
+		localVoteBroadcastAt:             make(map[string]time.Time),
+		prepareQCs:                       make(map[structure.Hash]consensus.QuorumCertificate),
+		epochTransitionCandidates:        make(map[uint64]*epochTransitionCandidate),
+		transactionForwardLimiter:        make(chan struct{}, transactionForwardWorkers),
 	}
 	if config.BootstrapCoordinator.Enabled {
 		coordinator, err := newBootstrapCoordinator(config, logger)
@@ -230,8 +277,31 @@ func newPosNode(config nodeConfig, logger *slog.Logger) (*posNode, error) {
 		return nil, err
 	}
 	head := node.ledger.Head()
-	epochID, startSlot := node.epochForSlot(head.Slot + 1)
-	if err := node.rebuildEpoch(epochID, startSlot, node.epochSeed(epochID)); err != nil {
+	if err := node.loadConsensusModeState(); err != nil {
+		return nil, err
+	}
+	nextSlot := head.Slot
+	if nextSlot != ^uint64(0) {
+		nextSlot++
+	}
+	epochID, startSlot := node.epochForSlot(nextSlot)
+	if epochID == 0 {
+		// 创世 epoch 需要按链上策略初始化并持久化共识模式；它本身由创世配置提供信任根。
+		if err := node.rebuildEpoch(epochID, startSlot, node.epochSeed(epochID)); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := node.installAuthenticatedStartupEpoch(nextSlot); err != nil {
+			return nil, err
+		}
+	}
+	if err := node.loadPersistedLocalProposals(); err != nil {
+		return nil, err
+	}
+	if err := node.loadPersistedLocalVoteEnvelopes(); err != nil {
+		return nil, err
+	}
+	if err := node.loadPersistedTimeoutQC(); err != nil {
 		return nil, err
 	}
 	return node, nil
@@ -301,6 +371,7 @@ func (node *posNode) start(ctx context.Context) error {
 	if err := node.startValidatorPairing(); err != nil {
 		return err
 	}
+	node.replayPersistedCurrentRoundVotes(ctx)
 	node.startLedgerWorkers(ctx)
 	return nil
 }
@@ -411,23 +482,23 @@ func loadLocalValidatorKeyPairs(config nodeConfig) (localValidatorKeyPairs, erro
 }
 
 // loadLocalStakerIdentity 加载质押控制者身份 + 验证者运行只需 staker 公钥，质押签名留在钱包。
-func loadLocalStakerIdentity(config nodeConfig) (structure.SolanaKeyPair, structure.PublicKey, error) {
+func loadLocalStakerIdentity(config nodeConfig) (structure.OrdexusKeyPair, structure.PublicKey, error) {
 	if strings.TrimSpace(config.StakerKeyPath) != "" || strings.TrimSpace(config.StakerSeed) != "" {
 		keyPair, err := loadStructureKeyPair(config.StakerSeed, config.StakerKeyPath, config, "staker")
 		if err != nil {
-			return structure.SolanaKeyPair{}, structure.PublicKey{}, err
+			return structure.OrdexusKeyPair{}, structure.PublicKey{}, err
 		}
 		return keyPair, keyPair.PublicKey, nil
 	}
 	addressText := strings.TrimSpace(config.StakerAddress)
 	if addressText == "" {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, fmt.Errorf("posnode: staker address is required")
+		return structure.OrdexusKeyPair{}, structure.PublicKey{}, fmt.Errorf("posnode: staker address is required")
 	}
 	address, err := structure.PublicKeyFromBase58(addressText)
 	if err != nil {
-		return structure.SolanaKeyPair{}, structure.PublicKey{}, fmt.Errorf("posnode: decode staker address: %w", err)
+		return structure.OrdexusKeyPair{}, structure.PublicKey{}, fmt.Errorf("posnode: decode staker address: %w", err)
 	}
-	return structure.SolanaKeyPair{}, address, nil
+	return structure.OrdexusKeyPair{}, address, nil
 }
 
 // startWorker 跟踪后台任务 + 关闭时需要等待 goroutine 退出后再关闭数据库。
@@ -465,6 +536,34 @@ func (node *posNode) startRPC() error {
 	if node.config.BootstrapCoordinator.Enabled {
 		router = rpc.NewBootstrapRouter(node)
 	}
+	if !node.config.publicRPCMode() && !node.config.BootstrapCoordinator.Enabled && node.config.EmergencyRecovery.Enabled {
+		if err := router.Register("submitEmergencyRecovery", func(ctx context.Context, params json.RawMessage) (any, *rpc.Error) {
+			var values []string
+			if err := json.Unmarshal(params, &values); err != nil || len(values) != 1 || strings.TrimSpace(values[0]) == "" {
+				return nil, rpc.ErrInvalidParams
+			}
+			transactionID, err := node.SubmitEmergencyRecovery(ctx, values[0])
+			if err != nil {
+				return nil, &rpc.Error{Code: rpc.CodeInternalError, Message: "emergency recovery rejected", Data: err.Error()}
+			}
+			return transactionID, nil
+		}); err != nil {
+			return fmt.Errorf("posnode: register emergency recovery rpc: %w", err)
+		}
+		if err := router.Register("submitMultiValidatorActivation", func(ctx context.Context, params json.RawMessage) (any, *rpc.Error) {
+			var values []string
+			if err := json.Unmarshal(params, &values); err != nil || len(values) != 1 || strings.TrimSpace(values[0]) == "" {
+				return nil, rpc.ErrInvalidParams
+			}
+			checkpointHash, err := node.SubmitMultiValidatorActivation(ctx, values[0])
+			if err != nil {
+				return nil, &rpc.Error{Code: rpc.CodeInternalError, Message: "multi-validator activation rejected", Data: err.Error()}
+			}
+			return checkpointHash, nil
+		}); err != nil {
+			return fmt.Errorf("posnode: register multi-validator activation rpc: %w", err)
+		}
+	}
 	server := rpc.NewServer(rpc.ServerConfig{Address: address, Logger: node.logger}, router)
 	node.rpcServer = server
 	go func() {
@@ -500,14 +599,13 @@ func (node *posNode) openLedger() error {
 	}
 	node.ledger = ledger
 	node.ledger.SetLogger(node.logger)
+	if err := node.ensureStakePayoutSchedule(); err != nil {
+		_ = db.Close()
+		return err
+	}
 	head := ledger.Head()
-	node.blockhashQueue = structure.NewBlockhashQueue(150)
-	if err := node.blockhashQueue.Add(structure.RecentBlockhashEntry{
-		Blockhash:     head.BlockHash,
-		Slot:          head.Slot,
-		FeeCalculator: structure.DefaultFeeCalculator(),
-		TimestampUnix: time.Now().Unix(),
-	}); err != nil {
+	node.blockhashQueue, err = restoreRecentBlockhashQueue(ledger)
+	if err != nil {
 		return fmt.Errorf("posnode: init blockhash queue: %w", err)
 	}
 	if err := node.loadMempool(); err != nil {
@@ -586,7 +684,7 @@ func (node *posNode) startP2P(ctx context.Context) error {
 	allowInsecureP2P := node.config.allowInsecureP2P()
 	hostConfig := p2p.HostConfig{
 		PeerID:             node.peerKeyPair.peerID,
-		Role:               node.config.ResolvedNodeRole,
+		Role:               node.config.advertisedP2PRole(),
 		Capabilities:       node.config.ResolvedNodeCapabilities,
 		AllowInsecure:      allowInsecureP2P,
 		Production:         node.config.Production,
@@ -594,6 +692,7 @@ func (node *posNode) startP2P(ctx context.Context) error {
 		PreferredProtocols: preferredP2PProtocols(p2pProtocol),
 		MaxPeers:           128,
 		MaxConnections:     128,
+		BlockedPeerIDs:     append([]string(nil), node.config.FaultInjection.BlockedPeerIDs...),
 		Logger:             node.logger,
 	}
 	hostConfig.AdvertisedAddresses = advertisedAddresses
@@ -700,7 +799,13 @@ func newRuntimeExecutorWithPolicy(deploymentPolicy bpfloader.DeploymentPolicy, l
 	if err := registerProgramsWithLoaderPolicy(&executor, deploymentPolicy); err != nil {
 		return runtime.FixedExecutor{}, err
 	}
-	virtualMachineProgram := vmprogram.NewProgram(structure.DefaultBuiltinProgramIDs.BPFLoader, svm.Runtime{})
+	virtualMachineProgram := vmprogram.NewProgramWithInvoker(
+		structure.DefaultBuiltinProgramIDs.BPFLoader,
+		ovm.Runtime{},
+		func(context runtime.InstructionContext) error {
+			return executor.Programs.Execute(context)
+		},
+	)
 	if err := executor.SetFallbackProgramHandler(virtualMachineProgram.Execute); err != nil {
 		return runtime.FixedExecutor{}, fmt.Errorf("posnode: register vm fallback: %w", err)
 	}
@@ -763,18 +868,21 @@ func deploymentPolicyFromConfig(config contractDeploymentPolicyConfig) bpfloader
 
 func (node *posNode) registerProtocols() error {
 	if node.ledger == nil {
-		spec := p2p.ProtocolSpec{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless}
+		spec := p2p.ProtocolSpec{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless}
 		if err := node.host.RegisterResultHandler(spec, node.handleStatusRequest); err != nil {
 			return fmt.Errorf("posnode: register protocol %s: %w", spec.Name, err)
 		}
 		return nil
 	}
 	specs := []p2p.ProtocolSpec{
-		{ID: p2p.ProtocolPoSTransactionV1, Name: "/pos/transaction/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
+		{ID: p2p.ProtocolPoSTransactionV1, Name: "/pos/transaction/1.0.0", Priority: p2p.MessagePriorityNormal, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateKey, PartitionKey: transactionMessagePartitionKey},
 		{ID: p2p.ProtocolPoSProposalV1, Name: "/pos/proposal/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
-		{ID: p2p.ProtocolPoSVoteV1, Name: "/pos/vote/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
-		{ID: p2p.ProtocolPoSQCV1, Name: "/pos/qc/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
+		{ID: p2p.ProtocolPoSVoteV1, Name: "/pos/vote/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateKey, PartitionKey: voteMessagePartitionKey},
+		{ID: p2p.ProtocolPoSQCV1, Name: "/pos/qc/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateKey, PartitionKey: qcMessagePartitionKey},
 		{ID: p2p.ProtocolPoSEvidenceV1, Name: "/pos/evidence/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData},
+		{ID: p2p.ProtocolPoSEmergencyRecoveryV1, Name: "/pos/recovery/elder/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl},
+		{ID: p2p.ProtocolPoSMultiValidatorActivationV1, Name: "/pos/recovery/activate/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl},
+		{ID: p2p.ProtocolPoSEpochTransitionV1, Name: "/pos/epoch-transition/1.0.0", Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl},
 	}
 	handlers := []p2p.VoidProtocolHandler{
 		node.handleTransactionMessage,
@@ -782,6 +890,9 @@ func (node *posNode) registerProtocols() error {
 		node.handleVoteMessage,
 		node.handleQCMessage,
 		node.handleEvidenceMessage,
+		node.handleEmergencyRecoveryMessage,
+		node.handleMultiValidatorActivationMessage,
+		node.handleEpochTransitionMessage,
 	}
 	for index, spec := range specs {
 		if err := node.host.RegisterVoidHandler(spec, handlers[index]); err != nil {
@@ -791,20 +902,26 @@ func (node *posNode) registerProtocols() error {
 	resultSpecs := []p2p.ProtocolSpec{
 		{ID: p2p.ProtocolPoSBlockByHashV1, Name: "/pos/sync/block-by-hash/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSBlockByHeightV1, Name: "/pos/sync/block-by-height/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSBlockQCV1, Name: "/pos/sync/block-qc/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSStateSnapshotV1, Name: "/pos/sync/state-snapshot/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityLow, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
-		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSStatusV1, Name: "/pos/status/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSBlockLocatorV1, Name: "/pos/sync/block-locator/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSCommonAncestorV1, Name: "/pos/sync/common-ancestor/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassData, Concurrency: p2p.ProtocolConcurrencyStateless},
 		{ID: p2p.ProtocolPoSRPCForwardV1, Name: "/pos/rpc/forward/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityNormal, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSEpochProofV1, Name: "/pos/sync/epoch-proof/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless},
+		{ID: p2p.ProtocolPoSEpochProofBatchV1, Name: "/pos/sync/epoch-proof-batch/1.0.0", HasResponse: true, Priority: p2p.MessagePriorityHigh, Class: p2p.ProtocolClassControl, Concurrency: p2p.ProtocolConcurrencyStateless},
 	}
 	resultHandlers := []p2p.ResultProtocolHandler{
 		node.handleBlockByHashRequest,
 		node.handleBlockByHeightRequest,
+		node.handleBlockQCRequest,
 		node.handleStateSnapshotRequest,
 		node.handleStatusRequest,
 		node.handleBlockLocatorRequest,
 		node.handleCommonAncestorRequest,
 		node.handleRPCForwardRequest,
+		node.handleEpochProofRequest,
+		node.handleEpochProofBatchRequest,
 	}
 	for index, spec := range resultSpecs {
 		if err := node.host.RegisterResultHandler(spec, resultHandlers[index]); err != nil {
@@ -915,7 +1032,7 @@ func (node *posNode) autoRegisterLoop(ctx context.Context) {
 			node.logger.Info("posnode register validator skipped; local validator stake account exists")
 			return
 		}
-		if !node.autoRegisterBlockhashReady() {
+		if !node.autoRegisterBlockhashReady(ctx) {
 			continue
 		}
 		transaction, err := node.buildRegisterTransaction()
@@ -943,40 +1060,68 @@ func (node *posNode) localValidatorStakeAccountExists() bool {
 	return found && account.Owner == structure.DefaultBuiltinProgramIDs.Stake && len(account.Data) > 0
 }
 
-func (node *posNode) autoRegisterBlockhashReady() bool {
-	headSlot := node.ledger.Head().Slot
-	wallSlot := node.currentWallSlot()
-	if headSlot >= wallSlot {
+func (node *posNode) autoRegisterBlockhashReady(ctx context.Context) bool {
+	if node.ledger == nil {
+		return false
+	}
+	head := node.ledger.Head()
+	// 加入节点必须先同步到至少一个 finalized 区块，再用当前链头构造注册交易；
+	// 直接使用本地创世哈希会在长老节点上因 recent blockhash 过期而被拒绝。
+	if head.Height == 0 || head.FinalizedHeight == 0 || head.BlockHash.IsZero() {
+		return false
+	}
+	if len(node.config.BootstrapPeers) == 0 {
 		return true
 	}
-	if wallSlot-headSlot <= structure.MaxRecentBlockhashAgeSlots {
-		return true
+	if node.host == nil {
+		return false
 	}
-	node.logger.Debug("posnode auto register waits for ledger sync",
-		slog.Uint64("head_slot", headSlot),
-		slog.Uint64("wall_slot", wallSlot),
-		slog.Uint64("max_recent_blockhash_age_slots", structure.MaxRecentBlockhashAgeSlots),
-	)
+	for _, peer := range node.config.BootstrapPeers {
+		if peer.PeerID == "" || peer.PeerID == node.peerKeyPair.peerID {
+			continue
+		}
+		if _, connected := node.host.ConnectionState(peer.PeerID); !connected {
+			continue
+		}
+		statusContext, cancel := context.WithTimeout(ctx, node.peerStatusTimeout())
+		status, err := node.requestStatus(statusContext, peer.PeerID)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if status.HeadSlot <= head.Slot+structure.MaxRecentBlockhashAgeSlots {
+			return true
+		}
+	}
 	return false
 }
 
-// currentWallSlot 计算当前墙钟 slot + 自动注册必须避免使用过期 blockhash。
-func (node *posNode) currentWallSlot() uint64 {
-	startedAt := node.config.genesisStartTime()
-	now := time.Now()
-	if !now.After(startedAt) {
-		return 1
+// currentConsensusSlot 以已确认链头和最新超时证书推进轮次，不依赖创世墙钟。
+func (node *posNode) currentConsensusSlot() uint64 {
+	head := node.ledger.Head()
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	return node.currentConsensusSlotLocked(head)
+}
+
+func (node *posNode) currentConsensusSlotLocked(head blockchain.Head) uint64 {
+	if head.Slot == ^uint64(0) {
+		return head.Slot
 	}
-	return uint64(now.Sub(startedAt)/node.config.slotDuration()) + 1
+	if node.latestTimeoutQC != nil &&
+		node.latestTimeoutQC.BlockHash == head.BlockHash &&
+		head.Height != ^uint64(0) &&
+		node.latestTimeoutQC.BlockHeight == head.Height+1 &&
+		node.latestTimeoutQC.Slot >= head.Slot {
+		if node.latestTimeoutQC.Slot == ^uint64(0) {
+			return node.latestTimeoutQC.Slot
+		}
+		return node.latestTimeoutQC.Slot + 1
+	}
+	return head.Slot + 1
 }
 
 func (node *posNode) slotLoop(ctx context.Context) {
-	startedAt := node.config.genesisStartTime()
-	clock, err := consensus.NewSlotClock(startedAt, 1, node.config.slotDuration(), node.slotSkipTimeout())
-	if err != nil {
-		node.logger.Error("posnode slot clock failed", slog.Any("error", err))
-		return
-	}
 	ticker := time.NewTicker(node.slotTickInterval())
 	defer ticker.Stop()
 	for {
@@ -984,47 +1129,89 @@ func (node *posNode) slotLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			node.onSlotTick(ctx, clock.Tick(now))
+			node.onRoundTick(ctx, now)
 		}
 	}
 }
 
-func (node *posNode) onSlotTick(ctx context.Context, tick consensus.SlotTick) {
+func (node *posNode) onRoundTick(ctx context.Context, now time.Time) {
 	if !node.config.consensusEnabled() {
 		return
 	}
-	if !tick.Started {
+	head := node.ledger.Head()
+	node.mutex.Lock()
+	slot := node.currentConsensusSlotLocked(head)
+	node.mutex.Unlock()
+	epochReady, err := node.ensureEpochTransition(ctx, slot)
+	if err != nil || !epochReady {
+		node.mutex.Lock()
+		node.roundStartedAt = time.Time{}
+		node.mutex.Unlock()
+		if err != nil {
+			node.logger.Warn("posnode production paused for unauthenticated epoch",
+				slog.Uint64("slot", slot),
+				slog.Any("error", err),
+			)
+		}
 		return
 	}
-	node.mutex.Lock()
-	if tick.Slot <= node.lastProducedSlot {
+	livenessGate := node.refreshLivenessGate(now)
+	if !livenessGateAllowsProduction(livenessGate) {
+		node.mutex.Lock()
+		// 法定人数恢复后必须重新获得完整 leader 窗口，不能沿用网络尚未就绪时的超时计时。
+		node.roundStartedAt = time.Time{}
 		node.mutex.Unlock()
 		return
 	}
-	if tick.Slot > node.epochSnapshot.EndSlot || tick.Slot < node.epochSnapshot.StartSlot {
-		if err := node.ensureEpochForSlotLocked(tick.Slot); err != nil {
-			node.logger.Error("posnode rebuild epoch failed", slog.Uint64("slot", tick.Slot), slog.Any("error", err))
-			node.mutex.Unlock()
-			return
-		}
+	head = node.ledger.Head()
+	node.mutex.Lock()
+	slot = node.currentConsensusSlotLocked(head)
+	if slot > node.epochSnapshot.EndSlot || slot < node.epochSnapshot.StartSlot {
+		installedEpochID := node.epochSnapshot.EpochID
+		installedEndSlot := node.epochSnapshot.EndSlot
+		// 链头可能在本轮完成 epoch 检查后并发推进到下一 epoch；本轮安全延后，由下一次 tick 安装证明。
+		node.roundStartedAt = time.Time{}
+		node.mutex.Unlock()
+		node.logger.Debug("posnode round deferred for concurrent epoch transition",
+			slog.Uint64("slot", slot),
+			slog.Uint64("installed_epoch_id", installedEpochID),
+			slog.Uint64("installed_epoch_end_slot", installedEndSlot),
+		)
+		return
 	}
-	leaderID, err := node.leaderSchedule.LeaderForSlot(tick.Slot)
+	roundStarted := node.roundSlot != slot || node.roundParentHash != head.BlockHash || node.roundStartedAt.IsZero()
+	if roundStarted {
+		node.roundSlot = slot
+		node.roundParentHash = head.BlockHash
+		node.roundStartedAt = now
+		node.roundLockedProposalReplayAt = time.Time{}
+	}
+	leaderID, err := node.leaderSchedule.LeaderForSlot(slot)
 	if err != nil {
 		node.mutex.Unlock()
 		return
 	}
 	isLeader := leaderID == consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	proposalReady := roundProposalReadyAt(
+		now,
+		node.roundStartedAt,
+		node.config.slotDuration(),
+		len(node.epochSnapshot.Validators),
+	)
+	timedOut := !now.Before(node.roundStartedAt.Add(node.roundLeaderTimeout(head.Slot, slot)))
 	node.mutex.Unlock()
-	if isLeader && tick.ShouldSkip {
-		node.logger.Warn("posnode leader slot skipped after deadline",
-			slog.Uint64("slot", tick.Slot),
-			slog.Time("slot_deadline", tick.SlotDeadline),
-			slog.Duration("elapsed", tick.Elapsed),
-		)
-		return
+	if roundStarted {
+		// 故障恢复后重放本轮已落盘的提案和投票，确保重启节点沿用原选择并重新参与 QC 聚合。
+		node.replayPersistedCurrentRoundProposal(ctx)
+		node.replayPersistedCurrentRoundVotes(ctx)
 	}
-	if isLeader {
-		node.produceCurrentSlot(ctx, tick.Slot)
+	if isLeader && proposalReady {
+		node.produceCurrentSlot(ctx, slot)
+	}
+	if timedOut {
+		if !node.replayConfirmedProposalAfterTimeout(ctx, slot, head, now) {
+			node.voteForTimeout(ctx, slot, head)
+		}
 	}
 }
 
@@ -1035,51 +1222,40 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 	if !node.applyFaultInjectedProposalDelay(ctx, slot) {
 		return
 	}
-	now := time.Now()
-	if node.slotDeadlinePassed(slot, now) {
-		node.logger.Warn("posnode produce skipped after slot deadline",
-			slog.Uint64("slot", slot),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-		)
-		return
-	}
-	if !node.slotProductionBudgetAvailable(slot, now) {
-		node.logger.Warn("posnode produce skipped near slot deadline",
-			slog.Uint64("slot", slot),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-			slog.Duration("min_remaining", node.slotProductionMinRemaining()),
-		)
-		return
-	}
 	node.mutex.Lock()
+	currentHead := node.ledger.Head()
+	if slot != node.currentConsensusSlotLocked(currentHead) {
+		node.mutex.Unlock()
+		node.logger.Info("posnode delayed proposal cancelled after round advanced",
+			slog.Uint64("slot", slot),
+			slog.Uint64("current_slot", node.currentConsensusSlot()),
+		)
+		return
+	}
 	if slot <= node.lastProducedSlot {
 		node.mutex.Unlock()
 		return
 	}
 	head := node.ledger.Head()
-	if slot <= head.Slot {
+	if slot <= head.Slot || head.Height == ^uint64(0) {
 		node.mutex.Unlock()
 		return
 	}
 	epochID := node.epochSnapshot.EpochID
 	epochSnapshot := node.epochSnapshot
-	activeValidatorCount := len(epochSnapshot.Validators)
 	node.mutex.Unlock()
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.logger.Warn("posnode production paused for insufficient active validators",
-			slog.Uint64("slot", slot),
-			slog.Uint64("epoch_id", epochID),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return
-	}
 	if stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(epochSnapshot); !active || stakeValue == 0 {
 		node.logger.Warn("posnode production paused for inactive local validator",
 			slog.Uint64("slot", slot),
 			slog.Uint64("epoch_id", epochID),
+		)
+		return
+	}
+	if err := node.ensureLocalValidatorCurrentState(epochSnapshot); err != nil {
+		node.logger.Warn("posnode production paused for incomplete validator state",
+			slog.Uint64("slot", slot),
+			slog.Uint64("epoch_id", epochID),
+			slog.Any("error", err),
 		)
 		return
 	}
@@ -1099,7 +1275,7 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		)
 		return
 	}
-	if node.shouldPauseProductionForSync(ctx, head, node.slotProductionDeadline(slot)) {
+	if node.shouldPauseProductionForSync(ctx, head) {
 		node.logger.Info("posnode production paused for block sync",
 			slog.Uint64("slot", slot),
 			slog.Uint64("local_height", head.Height),
@@ -1122,47 +1298,18 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.tryRecoverStaleHeadQC(ctx, head, qcHeight)
 		return
 	}
-	now = time.Now()
-	if node.slotDeadlinePassed(slot, now) {
-		node.logger.Warn("posnode produce skipped after sync delay",
-			slog.Uint64("slot", slot),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-		)
-		return
-	}
-	if !node.slotProductionBudgetAvailable(slot, now) {
-		node.logger.Warn("posnode produce skipped after sync budget exhausted",
-			slog.Uint64("slot", slot),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-			slog.Duration("min_remaining", node.slotProductionMinRemaining()),
-		)
-		return
-	}
 	node.mutex.Lock()
 	if slot <= node.lastProducedSlot {
 		node.mutex.Unlock()
 		return
 	}
 	head = node.ledger.Head()
-	if slot <= head.Slot {
+	if slot <= head.Slot || head.Height == ^uint64(0) {
 		node.mutex.Unlock()
 		return
 	}
 	epochID = node.epochSnapshot.EpochID
 	epochSnapshot = node.epochSnapshot
-	activeValidatorCount = len(epochSnapshot.Validators)
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode production cancelled for insufficient active validators",
-			slog.Uint64("slot", slot),
-			slog.Uint64("epoch_id", epochID),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return
-	}
 	if stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(epochSnapshot); !active || stakeValue == 0 {
 		node.mutex.Unlock()
 		node.logger.Warn("posnode production cancelled for inactive local validator",
@@ -1204,6 +1351,17 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		)
 		return
 	}
+	var timeoutQC *consensus.QuorumCertificate
+	if head.Slot != ^uint64(0) && slot > head.Slot+1 {
+		if node.latestTimeoutQC == nil || slot == 0 || node.latestTimeoutQC.Slot != slot-1 ||
+			node.latestTimeoutQC.BlockHeight != head.Height+1 || node.latestTimeoutQC.BlockHash != head.BlockHash {
+			node.mutex.Unlock()
+			node.logger.Warn("posnode production cancelled without matching timeout qc", slog.Uint64("slot", slot))
+			return
+		}
+		copyValue := *node.latestTimeoutQC
+		timeoutQC = &copyValue
+	}
 	transactions, removeTransactionIDs := node.selectMempoolTransactionsLocked(time.Now().UnixMilli(), slot)
 	rewardQCs, err := node.ledger.RewardQCs(head.FinalizedHeight, consensus.MaxRewardQCsPerBlock)
 	if err != nil {
@@ -1212,6 +1370,12 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 	}
 	parentState := node.ledger.State()
 	evidence := node.pendingEvidenceSnapshotForSlotLocked(slot, parentState)
+	proofSnapshots, err := node.consensusProofSnapshotsLocked(rewardQCs, evidence, timeoutQC, epochSnapshot)
+	if err != nil {
+		node.mutex.Unlock()
+		node.logger.Error("posnode consensus proof snapshot load failed", slog.Uint64("slot", slot), slog.Any("error", err))
+		return
+	}
 	request := consensus.ProduceBlockRequest{
 		Slot:           slot,
 		ParentSlot:     head.Slot,
@@ -1220,13 +1384,15 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		Schedule:       node.leaderSchedule,
 		ParentHash:     head.BlockHash,
 		PreviousQCHash: head.QCHash,
+		TimeoutQC:      timeoutQC,
 		ParentState:    parentState,
 		Transactions:   transactions,
 		BlockhashQueue: node.blockhashQueue,
 		LeaderKeyPair:  node.consensusKeyPair,
 		RewardQCs:      rewardQCs,
 		Evidence:       evidence,
-		RewardConfig:   consensus.DefaultRewardConfig(),
+		ProofSnapshots: proofSnapshots,
+		RewardConfig:   node.config.rewardConfig(),
 	}
 	node.mutex.Unlock()
 	node.deleteMempoolTransactions(removeTransactionIDs)
@@ -1237,16 +1403,6 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode produce block failed", slog.Uint64("slot", slot), slog.Any("error", err))
 		return
 	}
-	now = time.Now()
-	if !node.slotProductionBudgetAvailable(slot, now) {
-		node.logger.Warn("posnode produced candidate discarded near slot deadline",
-			slog.Uint64("slot", slot),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-			slog.Duration("min_remaining", node.slotProductionMinRemaining()),
-		)
-		return
-	}
 	proposal := productionResult.Proposal
 	nextState := productionResult.State
 	proposalHash, err := proposal.Hash()
@@ -1254,9 +1410,22 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 		node.logger.Error("posnode hash proposal failed", slog.Any("error", err))
 		return
 	}
+	proposal, err = node.prepareDurableLocalProposal(proposal)
+	if err != nil {
+		node.logger.Error("posnode persist produced proposal failed", slog.Uint64("slot", slot), slog.Any("error", err))
+		return
+	}
+	proposalHash, err = proposal.Hash()
+	if err != nil {
+		node.logger.Error("posnode hash persisted proposal failed", slog.Any("error", err))
+		return
+	}
 	if _, err := node.ledger.SaveBlockCandidate(blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}); err != nil {
 		node.logger.Error("posnode save produced candidate failed", slog.Uint64("slot", slot), slog.Any("error", err))
 		return
+	}
+	if err := node.confirmBlockIfPrepared(ctx, proposalHash); err != nil {
+		node.logger.Warn("posnode produced candidate prepare qc check failed", slog.Uint64("slot", slot), slog.Any("error", err))
 	}
 	node.removeRejectedMempoolTransactions(productionResult.RejectedTransactions, request.Slot)
 	if err := node.promoteBlockIfCertified(ctx, proposalHash); err != nil {
@@ -1267,9 +1436,6 @@ func (node *posNode) produceCurrentSlot(ctx context.Context, slot uint64) {
 			slog.Any("error", err),
 		)
 	}
-	node.mutex.Lock()
-	node.lastProducedSlot = slot
-	node.mutex.Unlock()
 	node.metrics.blocksProduced.Add(1)
 	node.logger.Info("posnode block proposed",
 		slog.Uint64("slot", slot),
@@ -1311,13 +1477,11 @@ func (node *posNode) productionHeadQCFreshWithPeerState(head blockchain.Head) (b
 }
 
 func headQCLagAcceptable(headHeight uint64, qcHeight uint64, qcExists bool, maxAllowedLag uint64) bool {
-	if !qcExists {
-		return headHeight <= maxAllowedLag
-	}
-	if qcHeight >= headHeight {
+	_ = maxAllowedLag
+	if headHeight == 0 {
 		return true
 	}
-	return headHeight-qcHeight <= maxAllowedLag
+	return qcExists && qcHeight == headHeight
 }
 
 func (node *posNode) tryRecoverStaleHeadQC(ctx context.Context, head blockchain.Head, qcHeight uint64) {
@@ -1506,7 +1670,7 @@ func (node *posNode) handleTransactionMessage(ctx context.Context, message p2p.M
 		slog.String("tx_id", transactionID),
 		slog.String("from_peer", message.FromPeerID),
 	)
-	node.forwardTransaction(ctx, transaction, route, message.FromPeerID)
+	node.scheduleTransactionForward(transaction, route, message.FromPeerID)
 	return nil
 }
 
@@ -1528,23 +1692,11 @@ func (node *posNode) handleProposalMessage(ctx context.Context, message p2p.Mess
 		slog.String("from_peer", message.FromPeerID),
 		slog.Int("tx_count", len(proposal.Transactions)),
 	)
+	if err := node.ensurePeerProposalEpochProof(ctx, message.FromPeerID, proposal); err != nil {
+		return fmt.Errorf("posnode: authenticate proposal epoch: %w", err)
+	}
 	node.observeProposalForEvidence(ctx, proposal, proposalHash)
 	firstSeen := node.markProposalSeen(proposalHash)
-	now := time.Now()
-	if node.slotDeadlinePassed(proposal.Header.Slot, now) {
-		if firstSeen {
-			node.metrics.proposalsRejected.Add(1)
-			node.logger.Warn("posnode proposal rejected after slot deadline",
-				slog.Uint64("slot", proposal.Header.Slot),
-				slog.Uint64("height", proposal.Header.Height),
-				slog.String("block_hash", proposalHash.String()),
-				slog.String("from_peer", message.FromPeerID),
-				slog.Time("slot_deadline", node.slotProductionDeadline(proposal.Header.Slot)),
-				slog.Time("now", now),
-			)
-		}
-		return nil
-	}
 	if err := node.syncProposalBranch(ctx, message.FromPeerID, proposal); err != nil {
 		node.logger.Warn("posnode proposal branch sync failed",
 			slog.String("from_peer", message.FromPeerID),
@@ -1578,17 +1730,6 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		node.mutex.Unlock()
 		return err
 	}
-	activeValidatorCount := len(epochContextValue.Snapshot.Validators)
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode vote ignored for insufficient active validators",
-			slog.Uint64("slot", envelope.Vote.Slot),
-			slog.String("validator_id", envelope.Vote.VoterID),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return nil
-	}
 	validatorOrder := epochContextValue.Snapshot.ValidatorOrder()
 	voteCollector := epochContextValue.VoteCollector
 	var qc consensus.QuorumCertificate
@@ -1606,21 +1747,36 @@ func (node *posNode) handleVoteMessage(ctx context.Context, message p2p.Message)
 		return err
 	}
 	if formed {
-		if _, err := node.ledger.SaveQC(qc); err != nil {
-			return err
-		}
-		if err := node.promoteCertifiedBlock(ctx, qc); err != nil {
-			return err
-		}
-		if !node.markQCSeen(qc) {
-			return nil
+		switch qc.Type {
+		case consensus.VoteTypePrepare:
+			if err := node.acceptPrepareQC(ctx, qc); err != nil {
+				return err
+			}
+		case consensus.VoteTypeConfirm:
+			if _, err := node.ledger.SaveQC(qc); err != nil {
+				return err
+			}
+			if err := node.promoteCertifiedBlock(ctx, qc); err != nil {
+				return err
+			}
+		case consensus.VoteTypeSkip:
+			if err := node.acceptTimeoutQC(qc); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("posnode: unsupported formed qc type %d", qc.Type)
 		}
 		qcHash, err := hashQC(qc)
 		if err != nil {
 			return err
 		}
+		node.markQCAccepted(qcHash, qc.Slot)
+		if !node.markQCSeen(qc) {
+			return nil
+		}
 		node.metrics.qcFormed.Add(1)
 		node.logger.Info("posnode qc formed",
+			slog.Uint64("vote_type", uint64(qc.Type)),
 			slog.Uint64("slot", qc.Slot),
 			slog.Uint64("height", qc.BlockHeight),
 			slog.String("block_hash", qc.BlockHash.String()),
@@ -1645,42 +1801,54 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	if err != nil {
 		return err
 	}
+	qcHash, err := hashQC(envelope.QC)
+	if err != nil {
+		return err
+	}
+	receivedQCHash := qcHash
+	if node.hasQCAccepted(receivedQCHash) {
+		return nil
+	}
+	qcEpochID, _ := node.epochForSlot(envelope.QC.Slot)
+	if qcEpochID > 0 {
+		if err := node.syncEpochProofChainFromPeer(ctx, message.FromPeerID, qcEpochID); err != nil {
+			return fmt.Errorf("posnode: sync qc epoch proof: %w", err)
+		}
+	}
 	if err := node.verifyQuorumCertificate(envelope.QC); err != nil {
 		return err
-	}
-	node.mutex.Lock()
-	epochContextValue, err := node.epochContextForSlotLocked(envelope.QC.Slot)
-	if err != nil {
-		node.mutex.Unlock()
-		return err
-	}
-	activeValidatorCount := len(epochContextValue.Snapshot.Validators)
-	node.mutex.Unlock()
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.logger.Warn("posnode qc ignored for insufficient active validators",
-			slog.Uint64("slot", envelope.QC.Slot),
-			slog.Uint64("height", envelope.QC.BlockHeight),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return nil
 	}
 	if node.hasQCSeen(envelope.QC) {
 		return nil
 	}
-	head, err := node.ledger.SaveQC(envelope.QC)
-	if err != nil {
-		return err
+	switch envelope.QC.Type {
+	case consensus.VoteTypePrepare:
+		if err := node.acceptPrepareQC(ctx, envelope.QC); err != nil {
+			return err
+		}
+	case consensus.VoteTypeConfirm:
+		head, err := node.ledger.SaveQC(envelope.QC)
+		if err != nil {
+			return err
+		}
+		qcHash = head.QCHash
+		if err := node.promoteCertifiedBlock(ctx, envelope.QC); err != nil {
+			return err
+		}
+	case consensus.VoteTypeSkip:
+		if err := node.acceptTimeoutQC(envelope.QC); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("posnode: unsupported received qc type %d", envelope.QC.Type)
 	}
-	if err := node.promoteCertifiedBlock(ctx, envelope.QC); err != nil {
-		return err
-	}
+	node.markQCAccepted(receivedQCHash, envelope.QC.Slot)
 	if !node.markQCSeen(envelope.QC) {
 		return nil
 	}
-	qcHash := head.QCHash
 	node.metrics.qcReceived.Add(1)
 	node.logger.Info("posnode qc received",
+		slog.Uint64("vote_type", uint64(envelope.QC.Type)),
 		slog.Uint64("slot", envelope.QC.Slot),
 		slog.Uint64("height", envelope.QC.BlockHeight),
 		slog.String("block_hash", envelope.QC.BlockHash.String()),
@@ -1692,6 +1860,172 @@ func (node *posNode) handleQCMessage(ctx context.Context, message p2p.Message) e
 	return nil
 }
 
+// acceptPrepareQC 接受提案准备证书。准备证书只触发 Confirm 投票，不写入账本、不提交区块。
+func (node *posNode) acceptPrepareQC(ctx context.Context, certificate consensus.QuorumCertificate) error {
+	if certificate.Type != consensus.VoteTypePrepare {
+		return fmt.Errorf("posnode: certificate is not a prepare qc")
+	}
+	if err := node.verifyQuorumCertificate(certificate); err != nil {
+		return fmt.Errorf("posnode: verify prepare qc: %w", err)
+	}
+	node.mutex.Lock()
+	if node.prepareQCs == nil {
+		node.prepareQCs = make(map[structure.Hash]consensus.QuorumCertificate)
+	}
+	existing, exists := node.prepareQCs[certificate.BlockHash]
+	if !exists || certificate.ConfirmedStake > existing.ConfirmedStake {
+		node.prepareQCs[certificate.BlockHash] = certificate
+	}
+	if !exists {
+		head := node.ledger.Head()
+		if node.roundSlot == certificate.Slot &&
+			node.roundParentHash == head.BlockHash &&
+			certificate.BlockHeight == head.Height+1 {
+			// PrepareQC 开启独立的 Confirm 阶段计时，避免 QC 恰好在提案阶段截止时到达，
+			// 将诚实验证者永久切分为 ConfirmVote 与 TimeoutVote 两组。
+			node.roundStartedAt = time.Now()
+			node.roundLockedProposalReplayAt = time.Time{}
+		}
+	}
+	node.mutex.Unlock()
+	return node.voteForPreparedBlock(ctx, certificate)
+}
+
+func (node *posNode) confirmBlockIfPrepared(ctx context.Context, blockHash structure.Hash) error {
+	node.mutex.Lock()
+	certificate, exists := node.prepareQCs[blockHash]
+	node.mutex.Unlock()
+	if !exists {
+		return nil
+	}
+	return node.voteForPreparedBlock(ctx, certificate)
+}
+
+// voteForPreparedBlock 只在验证过 PrepareQC 且本地已有完整提案时签署决定阶段投票。
+func (node *posNode) voteForPreparedBlock(ctx context.Context, certificate consensus.QuorumCertificate) error {
+	if !node.config.consensusEnabled() || node.ledger == nil {
+		return nil
+	}
+	proposal, found, err := node.ledger.BlockByHash(certificate.BlockHash)
+	if err != nil || !found {
+		return err
+	}
+	if proposal.Header.Slot != certificate.Slot || proposal.Header.Height != certificate.BlockHeight {
+		return fmt.Errorf("posnode: prepare qc proposal mismatch")
+	}
+	head := node.ledger.Head()
+	if proposal.Header.ParentHash != head.BlockHash || proposal.Header.Height != head.Height+1 || proposal.Header.Slot <= head.Slot {
+		return nil
+	}
+
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	node.mutex.Lock()
+	epochContextValue, err := node.epochContextForSlotLocked(proposal.Header.Slot)
+	if err != nil {
+		node.mutex.Unlock()
+		return err
+	}
+	cachedEnvelope, hasCachedEnvelope := node.cachedLocalVoteEnvelopeLocked(proposal.Header.Slot, certificate.BlockHash, validatorID)
+	decisionEnvelope, hasDecision := node.cachedDecisionLocalVoteEnvelopeLocked(proposal.Header.Slot, validatorID)
+	node.mutex.Unlock()
+	if hasDecision {
+		if hasCachedEnvelope {
+			return node.sendPreparedLocalVoteEnvelope(ctx, cachedEnvelope, false)
+		}
+		node.logger.Debug("posnode confirm vote skipped for existing decision",
+			slog.Uint64("slot", proposal.Header.Slot),
+			slog.Uint64("vote_type", uint64(decisionEnvelope.Vote.Type)),
+			slog.String("validator_id", string(validatorID)),
+		)
+		return nil
+	}
+	stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(epochContextValue.Snapshot)
+	if !active || stakeValue == 0 {
+		return nil
+	}
+	vote := consensus.Vote{
+		Type:               consensus.VoteTypeConfirm,
+		Slot:               proposal.Header.Slot,
+		BlockHeight:        proposal.Header.Height,
+		BlockHash:          certificate.BlockHash,
+		VoterID:            string(validatorID),
+		Stake:              stakeValue,
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	node.logger.Info("posnode confirm vote sent",
+		slog.Uint64("slot", vote.Slot),
+		slog.Uint64("height", vote.BlockHeight),
+		slog.String("block_hash", vote.BlockHash.String()),
+		slog.String("validator_id", vote.VoterID),
+		slog.Uint64("stake", vote.Stake),
+	)
+	if err := node.sendLocalVote(ctx, vote, false); err != nil {
+		// PrepareQC 与本地超时计时器可能并发到达；若超时决定已先持久化，
+		// 这是正常的轮次竞争，不应把发送 QC 的诚实 peer 记为协议失败。
+		node.mutex.Lock()
+		_, decisionExists := node.cachedDecisionLocalVoteEnvelopeLocked(proposal.Header.Slot, validatorID)
+		node.mutex.Unlock()
+		if decisionExists {
+			return nil
+		}
+		return err
+	}
+	node.metrics.votesSent.Add(1)
+	return nil
+}
+
+// acceptTimeoutQC 接受绑定当前链头的超时证书，并将下一轮推进到证书 slot+1。
+func (node *posNode) acceptTimeoutQC(certificate consensus.QuorumCertificate) error {
+	if certificate.Type != consensus.VoteTypeSkip {
+		return fmt.Errorf("posnode: certificate is not a timeout qc")
+	}
+	if err := node.verifyQuorumCertificate(certificate); err != nil {
+		return fmt.Errorf("posnode: verify timeout qc: %w", err)
+	}
+	head := node.ledger.Head()
+	if head.Height == ^uint64(0) || head.Slot == ^uint64(0) ||
+		certificate.BlockHash != head.BlockHash || certificate.BlockHeight != head.Height+1 || certificate.Slot <= head.Slot {
+		// 合法的旧轮次证书会在节点追块或网络恢复时重复到达。它不能推进当前链头，
+		// 但也不属于发送方的协议违规，否则诚实节点会因正常网络延迟被 P2P 保护误罚。
+		node.logger.Debug("posnode stale timeout qc ignored",
+			slog.Uint64("certificate_slot", certificate.Slot),
+			slog.Uint64("certificate_height", certificate.BlockHeight),
+			slog.String("certificate_block_hash", certificate.BlockHash.String()),
+			slog.Uint64("head_slot", head.Slot),
+			slog.Uint64("head_height", head.Height),
+			slog.String("head_block_hash", head.BlockHash.String()),
+		)
+		return nil
+	}
+	node.mutex.Lock()
+	if node.latestTimeoutQC != nil && node.latestTimeoutQC.BlockHash == certificate.BlockHash && node.latestTimeoutQC.Slot >= certificate.Slot {
+		node.mutex.Unlock()
+		return nil
+	}
+	node.mutex.Unlock()
+	if err := node.persistTimeoutQC(certificate); err != nil {
+		return err
+	}
+	if node.ledger.Head().BlockHash != certificate.BlockHash {
+		return nil
+	}
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	copyValue := certificate
+	node.latestTimeoutQC = &copyValue
+	node.prunePrepareQCsThroughSlotLocked(certificate.Slot)
+	node.roundStartedAt = time.Time{}
+	return nil
+}
+
+func (node *posNode) prunePrepareQCsThroughSlotLocked(slot uint64) {
+	for blockHash, certificate := range node.prepareQCs {
+		if certificate.Slot <= slot {
+			delete(node.prepareQCs, blockHash)
+		}
+	}
+}
+
 func (node *posNode) promoteBlockIfCertified(ctx context.Context, blockHash structure.Hash) error {
 	qc, exists, err := node.ledger.BlockQC(blockHash)
 	if err != nil || !exists {
@@ -1701,8 +2035,11 @@ func (node *posNode) promoteBlockIfCertified(ctx context.Context, blockHash stru
 }
 
 func (node *posNode) promoteCertifiedBlock(ctx context.Context, qc consensus.QuorumCertificate) error {
-	if qc.BlockHash.IsZero() {
-		return nil
+	if qc.Type != consensus.VoteTypeConfirm || qc.BlockHash.IsZero() {
+		return fmt.Errorf("posnode: block promotion requires confirm qc")
+	}
+	if err := node.verifyQuorumCertificate(qc); err != nil {
+		return fmt.Errorf("posnode: verify block qc: %w", err)
 	}
 	head := node.ledger.Head()
 	if head.BlockHash != qc.BlockHash {
@@ -1758,10 +2095,13 @@ func (node *posNode) promoteCertifiedBlock(ctx context.Context, qc consensus.Quo
 
 func (node *posNode) applyCertifiedProposalEffects(ctx context.Context, proposal consensus.BlockProposal, blockHash structure.Hash) {
 	node.pruneFinalizedPendingEvidence()
+	node.pruneFinalizedLocalVoteJournal()
+	node.pruneFinalizedLocalProposalJournal()
 	node.removeCommittedMempoolTransactions(proposal.Transactions)
 	node.recordCommittedBlockhash(proposal.Header.Slot, blockHash)
 	node.pruneMempool(time.Now().UnixMilli(), node.mempoolCurrentSlot())
 	node.mutex.Lock()
+	node.prunePrepareQCsThroughSlotLocked(proposal.Header.Slot)
 	node.pruneFutureEpochContextCachesLocked(proposal.Header.EpochID)
 	node.mutex.Unlock()
 	node.metrics.proposalsAccepted.Add(1)
@@ -1790,19 +2130,11 @@ func (node *posNode) handleEvidenceMessage(ctx context.Context, message p2p.Mess
 }
 
 func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.BlockProposal) error {
-	now := time.Now()
-	if node.slotDeadlinePassed(proposal.Header.Slot, now) {
-		node.metrics.proposalsRejected.Add(1)
-		node.logger.Warn("posnode proposal vote rejected after slot deadline",
-			slog.Uint64("slot", proposal.Header.Slot),
-			slog.Uint64("height", proposal.Header.Height),
-			slog.Time("slot_deadline", node.slotProductionDeadline(proposal.Header.Slot)),
-			slog.Time("now", now),
-		)
-		return nil
+	if handled, err := node.replayCachedLocalVoteForProposal(ctx, proposal); handled {
+		return err
 	}
 	node.mutex.Lock()
-	if node.config.consensusEnabled() && proposal.Header.Slot <= node.lastVotedSlot {
+	if node.config.consensusEnabled() && proposal.Header.Slot <= node.localProposalVoteWatermarkLocked() {
 		node.mutex.Unlock()
 		return nil
 	}
@@ -1810,17 +2142,6 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	if err != nil {
 		node.mutex.Unlock()
 		return err
-	}
-	activeValidatorCount := len(epochContextValue.Snapshot.Validators)
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode proposal vote skipped for insufficient active validators",
-			slog.Uint64("slot", proposal.Header.Slot),
-			slog.Uint64("height", proposal.Header.Height),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return nil
 	}
 	leader, exists := epochContextValue.Snapshot.ValidatorByID(proposal.Header.LeaderID)
 	if !exists {
@@ -1830,16 +2151,36 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	epochSnapshot := epochContextValue.Snapshot
 	leaderSchedule := epochContextValue.Schedule
 	blockhashQueue := node.blockhashQueue
+	proofSnapshots, err := node.consensusProofSnapshotsLocked(proposal.RewardQCs, proposal.Evidence, proposal.TimeoutQC, epochSnapshot)
+	if err != nil {
+		node.mutex.Unlock()
+		return err
+	}
 	node.mutex.Unlock()
+	if proposal.TimeoutQC != nil {
+		if err := node.verifyQuorumCertificate(*proposal.TimeoutQC); err != nil {
+			return fmt.Errorf("posnode: verify proposal timeout qc: %w", err)
+		}
+	}
 
 	parentState, parentReady := node.ensureParentAvailable(ctx, proposal.Header.ParentHash)
 	if !parentReady {
 		node.storeOrphanProposal(proposal)
 		return nil
 	}
+	if err := node.verifyProposalParentCertificate(proposal); err != nil {
+		if errors.Is(err, errProposalParentQCMissing) {
+			node.storeOrphanProposal(proposal)
+			return nil
+		}
+		return err
+	}
 	parentSlot, err := node.parentSlotForProposal(proposal.Header.ParentHash)
 	if err != nil {
 		return err
+	}
+	if node.config.consensusEnabled() && proposal.Header.Slot > parentSlot+1 && proposal.TimeoutQC == nil {
+		return fmt.Errorf("posnode: proposal skipped slots without timeout qc")
 	}
 	request := consensus.VerifyProposalRequest{
 		Proposal:       proposal,
@@ -1850,7 +2191,8 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		ParentState:    parentState,
 		BlockhashQueue: blockhashQueue,
 		Leader:         leader,
-		RewardConfig:   consensus.DefaultRewardConfig(),
+		ProofSnapshots: proofSnapshots,
+		RewardConfig:   node.config.rewardConfig(),
 	}
 
 	verifier := consensus.ProposalVerifier{ChainID: node.config.ChainID, Executor: node.executor}
@@ -1865,6 +2207,14 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 	commitRequest := blockchain.CommitBlockRequest{Proposal: proposal, NextState: nextState}
 	if _, err := node.ledger.SaveBlockCandidate(commitRequest); err != nil {
 		return err
+	}
+	if err := node.confirmBlockIfPrepared(ctx, proposalHash); err != nil {
+		return err
+	}
+	if proposal.TimeoutQC != nil {
+		if err := node.acceptTimeoutQC(*proposal.TimeoutQC); err != nil {
+			return err
+		}
 	}
 	if err := node.promoteBlockIfCertified(ctx, proposalHash); err != nil {
 		node.logger.Warn("posnode candidate promotion check failed",
@@ -1889,14 +2239,13 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		return nil
 	}
 	node.mutex.Lock()
-	if proposal.Header.Slot <= node.lastVotedSlot {
+	if proposal.Header.Slot <= node.localProposalVoteWatermarkLocked() {
 		node.mutex.Unlock()
 		return nil
 	}
-	node.lastVotedSlot = proposal.Header.Slot
 	node.mutex.Unlock()
 	vote := consensus.Vote{
-		Type:               consensus.VoteTypeConfirm,
+		Type:               consensus.VoteTypePrepare,
 		Slot:               proposal.Header.Slot,
 		BlockHeight:        proposal.Header.Height,
 		BlockHash:          proposalHash,
@@ -1904,33 +2253,53 @@ func (node *posNode) voteForProposal(ctx context.Context, proposal consensus.Blo
 		Stake:              stakeValue,
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
-	node.logger.Info("posnode vote sent",
+	node.logger.Info("posnode prepare vote sent",
 		slog.Uint64("slot", vote.Slot),
 		slog.Uint64("height", vote.BlockHeight),
 		slog.String("block_hash", vote.BlockHash.String()),
 		slog.String("validator_id", vote.VoterID),
 		slog.Uint64("stake", vote.Stake),
 	)
+	if err := node.sendLocalVote(ctx, vote, false); err != nil {
+		return err
+	}
 	node.metrics.votesSent.Add(1)
-	return node.sendLocalVote(ctx, vote, false)
+	return nil
+}
+
+// replayCachedLocalVoteForProposal 收到同一提案时重放原签名，帮助重启 leader 重新聚合而不产生第二次签名。
+func (node *posNode) replayCachedLocalVoteForProposal(ctx context.Context, proposal consensus.BlockProposal) (bool, error) {
+	if !node.config.consensusEnabled() {
+		return false, nil
+	}
+	proposalHash, err := proposal.Hash()
+	if err != nil {
+		return true, err
+	}
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	node.mutex.Lock()
+	envelope, exactChoice := node.cachedLocalPrepareVoteEnvelopeLocked(proposal.Header.Slot, proposalHash, validatorID)
+	_, hasPrepareChoice := node.cachedLocalPrepareVoteEnvelopeLocked(proposal.Header.Slot, structure.Hash{}, validatorID)
+	_, hasDecisionChoice := node.cachedDecisionLocalVoteEnvelopeLocked(proposal.Header.Slot, validatorID)
+	node.mutex.Unlock()
+	if exactChoice {
+		node.logger.Info("posnode cached proposal vote replayed",
+			slog.Uint64("slot", envelope.Vote.Slot),
+			slog.Uint64("height", envelope.Vote.BlockHeight),
+			slog.String("block_hash", envelope.Vote.BlockHash.String()),
+			slog.String("validator_id", envelope.Vote.VoterID),
+		)
+		return true, node.sendPreparedLocalVoteEnvelope(ctx, envelope, false)
+	}
+	return hasPrepareChoice || hasDecisionChoice, nil
 }
 
 func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, blockHeight uint64, blockHash structure.Hash) {
 	if !node.config.consensusEnabled() {
 		return
 	}
-	now := time.Now()
-	if node.slotDeadlinePassed(slot, now) {
-		node.logger.Warn("posnode leader self vote skipped after slot deadline",
-			slog.Uint64("slot", slot),
-			slog.String("block_hash", blockHash.String()),
-			slog.Time("slot_deadline", node.slotProductionDeadline(slot)),
-			slog.Time("now", now),
-		)
-		return
-	}
 	node.mutex.Lock()
-	if slot <= node.lastVotedSlot {
+	if slot <= node.localProposalVoteWatermarkLocked() {
 		node.mutex.Unlock()
 		return
 	}
@@ -1945,17 +2314,7 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 		return
 	}
 	epochSnapshot := epochContextValue.Snapshot
-	activeValidatorCount := len(epochContextValue.Snapshot.Validators)
 	node.mutex.Unlock()
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.logger.Warn("posnode leader self vote skipped for insufficient active validators",
-			slog.Uint64("slot", slot),
-			slog.String("block_hash", blockHash.String()),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return
-	}
 	stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(epochSnapshot)
 	if !active || stakeValue == 0 {
 		node.logger.Warn("posnode leader self vote skipped for inactive local validator",
@@ -1965,14 +2324,13 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 		return
 	}
 	node.mutex.Lock()
-	if slot <= node.lastVotedSlot {
+	if slot <= node.localProposalVoteWatermarkLocked() {
 		node.mutex.Unlock()
 		return
 	}
-	node.lastVotedSlot = slot
 	node.mutex.Unlock()
 	vote := consensus.Vote{
-		Type:               consensus.VoteTypeConfirm,
+		Type:               consensus.VoteTypePrepare,
 		Slot:               slot,
 		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
@@ -1980,17 +2338,67 @@ func (node *posNode) voteForKnownProposal(ctx context.Context, slot uint64, bloc
 		Stake:              stakeValue,
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
-	node.logger.Info("posnode leader self vote sent",
+	node.logger.Info("posnode leader self prepare vote sent",
 		slog.Uint64("slot", vote.Slot),
 		slog.Uint64("height", vote.BlockHeight),
 		slog.String("block_hash", vote.BlockHash.String()),
 		slog.String("validator_id", vote.VoterID),
 		slog.Uint64("stake", vote.Stake),
 	)
-	node.metrics.votesSent.Add(1)
 	if err := node.sendLocalVote(ctx, vote, false); err != nil {
 		node.logger.Warn("posnode local vote failed", slog.Any("error", err))
+		return
 	}
+	node.metrics.votesSent.Add(1)
+}
+
+// voteForTimeout 在当前 leader 轮次超时后投票；父块绑定防止不同分叉聚合为同一证书。
+func (node *posNode) voteForTimeout(ctx context.Context, slot uint64, observedHead blockchain.Head) {
+	if !node.config.consensusEnabled() || observedHead.Height == ^uint64(0) {
+		return
+	}
+	node.mutex.Lock()
+	currentHead := node.ledger.Head()
+	if currentHead.BlockHash != observedHead.BlockHash || currentHead.Height != observedHead.Height ||
+		slot != node.currentConsensusSlotLocked(currentHead) || slot <= node.localSignedVoteWatermarkLocked() {
+		node.mutex.Unlock()
+		return
+	}
+	epochContextValue, err := node.epochContextForSlotLocked(slot)
+	if err != nil {
+		node.mutex.Unlock()
+		node.logger.Warn("posnode timeout vote epoch lookup failed", slog.Uint64("slot", slot), slog.Any("error", err))
+		return
+	}
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(epochContextValue.Snapshot)
+	if !active || stakeValue == 0 {
+		node.mutex.Unlock()
+		return
+	}
+	node.mutex.Unlock()
+
+	vote := consensus.Vote{
+		Type:               consensus.VoteTypeSkip,
+		Slot:               slot,
+		BlockHeight:        observedHead.Height + 1,
+		BlockHash:          observedHead.BlockHash,
+		VoterID:            string(validatorID),
+		Stake:              stakeValue,
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	node.logger.Info("posnode timeout vote sent",
+		slog.Uint64("slot", slot),
+		slog.Uint64("height", vote.BlockHeight),
+		slog.String("parent_hash", vote.BlockHash.String()),
+		slog.String("validator_id", vote.VoterID),
+		slog.Uint64("stake", vote.Stake),
+	)
+	if err := node.sendLocalVote(ctx, vote, false); err != nil {
+		node.logger.Warn("posnode timeout vote failed", slog.Uint64("slot", slot), slog.Any("error", err))
+		return
+	}
+	node.metrics.votesSent.Add(1)
 }
 
 func (node *posNode) voteForCommittedHead(
@@ -2005,17 +2413,6 @@ func (node *posNode) voteForCommittedHead(
 	if err != nil {
 		node.mutex.Unlock()
 		return err
-	}
-	activeValidatorCount := len(epochContextValue.Snapshot.Validators)
-	if !hasMinimumActiveValidatorCount(activeValidatorCount) {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode stale head qc recovery vote skipped for insufficient active validators",
-			slog.Uint64("slot", proposal.Header.Slot),
-			slog.Uint64("height", proposal.Header.Height),
-			slog.Int("active_validator_count", activeValidatorCount),
-			slog.Int("required_active_validators", minActiveValidatorsForProduction),
-		)
-		return nil
 	}
 	epochSnapshot := epochContextValue.Snapshot
 	cachedEnvelope, hasCachedEnvelope := node.cachedLocalVoteEnvelopeLocked(proposal.Header.Slot, blockHash, validatorID)
@@ -2058,47 +2455,6 @@ func (node *posNode) voteForCommittedHead(
 		CreatedAtUnixMilli: time.Now().UnixMilli(),
 	}
 
-	node.mutex.Lock()
-	cachedEnvelope, hasCachedEnvelope = node.cachedLocalVoteEnvelopeLocked(proposal.Header.Slot, blockHash, validatorID)
-	anyCachedEnvelope, hasAnyCachedEnvelope = node.cachedAnyLocalVoteEnvelopeLocked(proposal.Header.Slot, validatorID)
-	if hasAnyCachedEnvelope && !hasCachedEnvelope {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode stale head qc recovery vote skipped for conflicting local choice",
-			slog.Uint64("slot", proposal.Header.Slot),
-			slog.Uint64("height", proposal.Header.Height),
-			slog.String("block_hash", blockHash.String()),
-			slog.String("cached_block_hash", anyCachedEnvelope.Vote.BlockHash.String()),
-			slog.String("validator_id", string(validatorID)),
-			slog.Uint64("qc_height", qcHeight),
-		)
-		return nil
-	}
-	if hasCachedEnvelope {
-		node.mutex.Unlock()
-		node.replayLocalVoteEnvelope(ctx, cachedEnvelope, qcHeight)
-		return nil
-	}
-	envelope, err := node.newLocalVoteEnvelope(vote)
-	if err != nil {
-		node.mutex.Unlock()
-		return err
-	}
-	if !node.rememberLocalVoteEnvelopeLocked(envelope) {
-		node.mutex.Unlock()
-		node.logger.Warn("posnode stale head qc recovery vote skipped for conflicting local choice",
-			slog.Uint64("slot", proposal.Header.Slot),
-			slog.Uint64("height", proposal.Header.Height),
-			slog.String("block_hash", blockHash.String()),
-			slog.String("validator_id", string(validatorID)),
-			slog.Uint64("qc_height", qcHeight),
-		)
-		return nil
-	}
-	if proposal.Header.Slot > node.lastVotedSlot {
-		node.lastVotedSlot = proposal.Header.Slot
-	}
-	node.mutex.Unlock()
-
 	node.logger.Info("posnode stale head qc recovery vote sent",
 		slog.Uint64("slot", vote.Slot),
 		slog.Uint64("height", vote.BlockHeight),
@@ -2107,24 +2463,57 @@ func (node *posNode) voteForCommittedHead(
 		slog.Uint64("stake", vote.Stake),
 		slog.Uint64("qc_height", qcHeight),
 	)
+	if err := node.sendLocalVote(ctx, vote, true); err != nil {
+		return err
+	}
 	node.metrics.votesSent.Add(1)
-	return node.sendPreparedLocalVoteEnvelope(ctx, envelope, true)
+	return nil
 }
 
 func (node *posNode) sendLocalVote(ctx context.Context, vote consensus.Vote, directRecovery bool) error {
-	envelope, err := node.newLocalVoteEnvelope(vote)
+	authenticatedSnapshot, err := node.authenticatedEpochSnapshotForSlot(vote.Slot)
 	if err != nil {
 		return err
 	}
-	if !node.rememberLocalVoteEnvelope(envelope) {
-		return fmt.Errorf("posnode: local vote choice conflict for slot %d", vote.Slot)
+	if err := node.ensureLocalValidatorCurrentState(authenticatedSnapshot); err != nil {
+		return err
 	}
+	node.localVoteSigningMutex.Lock()
+	preparedEnvelope, exists, err := node.preparedLocalVoteEnvelope(vote)
+	if err != nil {
+		node.localVoteSigningMutex.Unlock()
+		return err
+	}
+	if exists {
+		node.localVoteSigningMutex.Unlock()
+		return node.sendPreparedLocalVoteEnvelope(ctx, preparedEnvelope, directRecovery)
+	}
+	envelope, err := node.newLocalVoteEnvelope(vote)
+	if err != nil {
+		node.localVoteSigningMutex.Unlock()
+		return err
+	}
+	envelope, err = node.prepareDurableLocalVoteEnvelope(envelope)
+	if err != nil {
+		node.localVoteSigningMutex.Unlock()
+		return err
+	}
+	node.localVoteSigningMutex.Unlock()
 	return node.sendPreparedLocalVoteEnvelope(ctx, envelope, directRecovery)
 }
 
 func (node *posNode) sendPreparedLocalVoteEnvelope(ctx context.Context, envelope voteEnvelope, directRecovery bool) error {
-	node.broadcastVoteEnvelope(ctx, envelope)
-	if directRecovery {
+	retryAfter := node.localVoteBroadcastRetryInterval(envelope.Vote.Slot)
+	broadcastRegular, broadcastRecovery := node.claimLocalVoteBroadcastRoutes(
+		envelope,
+		directRecovery,
+		time.Now(),
+		retryAfter,
+	)
+	if broadcastRegular {
+		node.broadcastVoteEnvelope(ctx, envelope)
+	}
+	if broadcastRecovery {
 		node.broadcastStaleHeadRecoveryVoteEnvelope(ctx, envelope)
 	}
 	if err := node.handleLocalVoteEnvelope(ctx, envelope); err != nil {
@@ -2132,6 +2521,62 @@ func (node *posNode) sendPreparedLocalVoteEnvelope(ctx context.Context, envelope
 	}
 	node.injectDoubleVoteFault(ctx, envelope.Vote)
 	return nil
+}
+
+func (node *posNode) localVoteBroadcastRetryInterval(slot uint64) time.Duration {
+	parentSlot := uint64(0)
+	if node.ledger != nil {
+		parentSlot = node.ledger.Head().Slot
+	} else if slot > 0 {
+		parentSlot = slot - 1
+	}
+	retryAfter := node.roundLeaderTimeout(parentSlot, slot)
+	if retryAfter <= 0 {
+		return time.Second
+	}
+	return retryAfter
+}
+
+// claimLocalVoteBroadcastRoutes 限制同一份本地签名投票在一个 Leader 超时窗口内重复扩散。
+// 普通路由和落后节点恢复路由分别计时，确保后触发的恢复广播不会被普通广播吞掉。
+func (node *posNode) claimLocalVoteBroadcastRoutes(
+	envelope voteEnvelope,
+	directRecovery bool,
+	now time.Time,
+	retryAfter time.Duration,
+) (bool, bool) {
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	if envelope.Vote.VoterID != string(validatorID) || envelope.PublicKey != node.consensusKeyPair.PublicKey {
+		return true, directRecovery
+	}
+	if retryAfter <= 0 {
+		retryAfter = time.Second
+	}
+	choiceKey := localVoteEnvelopeChoiceKey(envelope.Vote.Slot, validatorID, envelope.Vote.Type)
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if node.localVoteBroadcastAt == nil {
+		node.localVoteBroadcastAt = make(map[string]time.Time)
+	}
+	claim := func(route string) bool {
+		key := localVoteBroadcastRouteKey(choiceKey, route)
+		lastBroadcastAt, exists := node.localVoteBroadcastAt[key]
+		if exists && now.Before(lastBroadcastAt.Add(retryAfter)) {
+			return false
+		}
+		node.localVoteBroadcastAt[key] = now
+		return true
+	}
+	broadcastRegular := claim("regular")
+	broadcastRecovery := false
+	if directRecovery {
+		broadcastRecovery = claim("recovery")
+	}
+	return broadcastRegular, broadcastRecovery
+}
+
+func localVoteBroadcastRouteKey(choiceKey string, route string) string {
+	return choiceKey + "/" + route
 }
 
 func (node *posNode) newLocalVoteEnvelope(vote consensus.Vote) (voteEnvelope, error) {
@@ -2188,7 +2633,7 @@ func (node *posNode) rememberLocalVoteEnvelopeLocked(envelope voteEnvelope) bool
 	if envelope.Vote.VoterID != string(validatorID) {
 		return false
 	}
-	key := localVoteEnvelopeChoiceKey(envelope.Vote.Slot, validatorID)
+	key := localVoteEnvelopeChoiceKey(envelope.Vote.Slot, validatorID, envelope.Vote.Type)
 	if node.voteEnvelopeChoices == nil {
 		node.voteEnvelopeChoices = make(map[string]voteEnvelope)
 	}
@@ -2201,7 +2646,7 @@ func (node *posNode) rememberLocalVoteEnvelopeLocked(envelope voteEnvelope) bool
 }
 
 func (node *posNode) cachedLocalVoteEnvelopeLocked(slot uint64, blockHash structure.Hash, validatorID consensus.ValidatorID) (voteEnvelope, bool) {
-	envelope, exists := node.cachedAnyLocalVoteEnvelopeLocked(slot, validatorID)
+	envelope, exists := node.cachedDecisionLocalVoteEnvelopeLocked(slot, validatorID)
 	if !exists {
 		return voteEnvelope{}, false
 	}
@@ -2214,11 +2659,31 @@ func (node *posNode) cachedLocalVoteEnvelopeLocked(slot uint64, blockHash struct
 	return envelope, true
 }
 
+func (node *posNode) cachedLocalPrepareVoteEnvelopeLocked(slot uint64, blockHash structure.Hash, validatorID consensus.ValidatorID) (voteEnvelope, bool) {
+	envelope, exists := node.cachedLocalVoteEnvelopeForPhaseLocked(slot, validatorID, consensus.VoteTypePrepare)
+	if !exists || envelope.Vote.Type != consensus.VoteTypePrepare {
+		return voteEnvelope{}, false
+	}
+	if !blockHash.IsZero() && envelope.Vote.BlockHash != blockHash {
+		return voteEnvelope{}, false
+	}
+	return envelope, true
+}
+
+func (node *posNode) cachedDecisionLocalVoteEnvelopeLocked(slot uint64, validatorID consensus.ValidatorID) (voteEnvelope, bool) {
+	return node.cachedLocalVoteEnvelopeForPhaseLocked(slot, validatorID, consensus.VoteTypeConfirm)
+}
+
+// cachedAnyLocalVoteEnvelopeLocked 保留原有调用语义，仅返回 Confirm/Skip 决定阶段的投票。
 func (node *posNode) cachedAnyLocalVoteEnvelopeLocked(slot uint64, validatorID consensus.ValidatorID) (voteEnvelope, bool) {
+	return node.cachedDecisionLocalVoteEnvelopeLocked(slot, validatorID)
+}
+
+func (node *posNode) cachedLocalVoteEnvelopeForPhaseLocked(slot uint64, validatorID consensus.ValidatorID, voteType consensus.VoteType) (voteEnvelope, bool) {
 	if node.voteEnvelopeChoices == nil {
 		return voteEnvelope{}, false
 	}
-	envelope, exists := node.voteEnvelopeChoices[localVoteEnvelopeChoiceKey(slot, validatorID)]
+	envelope, exists := node.voteEnvelopeChoices[localVoteEnvelopeChoiceKey(slot, validatorID, voteType)]
 	if !exists {
 		return voteEnvelope{}, false
 	}
@@ -2228,8 +2693,12 @@ func (node *posNode) cachedAnyLocalVoteEnvelopeLocked(slot uint64, validatorID c
 	return cloneVoteEnvelope(envelope), true
 }
 
-func localVoteEnvelopeChoiceKey(slot uint64, validatorID consensus.ValidatorID) string {
-	return fmt.Sprintf("vote-envelope/%d/%s", slot, validatorID)
+func localVoteEnvelopeChoiceKey(slot uint64, validatorID consensus.ValidatorID, voteType consensus.VoteType) string {
+	phase := "decision"
+	if voteType == consensus.VoteTypePrepare {
+		phase = "prepare"
+	}
+	return fmt.Sprintf("vote-envelope/%d/%s/%s", slot, phase, validatorID)
 }
 
 func cloneVoteEnvelope(envelope voteEnvelope) voteEnvelope {
@@ -2487,6 +2956,46 @@ func (node *posNode) forwardTransaction(ctx context.Context, transaction structu
 	node.broadcastTransactionWithRoute(ctx, transaction, nextRoute, fromPeerID)
 }
 
+// scheduleTransactionForward 将已入池交易的后续扩散移出协议处理线程。
+// 分区期间不可达目标的拨号不能占住 P2P 调度 worker；入池持久化仍在调用方返回前完成。
+func (node *posNode) scheduleTransactionForward(transaction structure.Transaction, route transactionRouteEnvelope, fromPeerID string) {
+	if node.host == nil || !node.config.transactionForwardEnabled() {
+		return
+	}
+	if node.transactionForwardLimiter != nil {
+		select {
+		case node.transactionForwardLimiter <- struct{}{}:
+		case <-node.runtimeDone():
+			return
+		default:
+			node.logger.Warn("posnode transaction forward saturated",
+				slog.String("from_peer", fromPeerID),
+				slog.Int("limit", cap(node.transactionForwardLimiter)),
+			)
+			return
+		}
+	}
+	node.startWorker(func() {
+		if node.transactionForwardLimiter != nil {
+			defer func() { <-node.transactionForwardLimiter }()
+		}
+		baseContext := node.runtimeContext
+		if baseContext == nil {
+			baseContext = context.Background()
+		}
+		forwardContext, cancel := context.WithTimeout(baseContext, transactionForwardTimeout)
+		defer cancel()
+		node.forwardTransaction(forwardContext, transaction, route, fromPeerID)
+	})
+}
+
+func (node *posNode) runtimeDone() <-chan struct{} {
+	if node.runtimeContext == nil {
+		return nil
+	}
+	return node.runtimeContext.Done()
+}
+
 func (node *posNode) broadcastTransactionWithRoute(ctx context.Context, transaction structure.Transaction, route transactionRouteEnvelope, fromPeerID string) {
 	transactionID, txIDErr := transaction.TxIDString()
 	if txIDErr != nil {
@@ -2564,7 +3073,7 @@ func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.B
 		node.logger.Error("posnode encode proposal failed", slog.Any("error", err))
 		return
 	}
-	peerIDs, position, err := node.turbineChildPeerIDs(ctx, proposal.Header.Slot, proposal.Header.LeaderID, "")
+	turbinePeerIDs, position, err := node.turbineChildPeerIDs(ctx, proposal.Header.Slot, proposal.Header.LeaderID, "")
 	if err != nil {
 		node.logger.Warn("posnode turbine proposal route failed",
 			slog.Uint64("slot", proposal.Header.Slot),
@@ -2572,8 +3081,11 @@ func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.B
 			slog.String("block_hash", proposalHash.String()),
 			slog.Any("error", err),
 		)
-		return
 	}
+	// Proposal 是本轮唯一可投票对象。恢复期间 Turbine 的固定首层节点可能尚未完成协议注册，
+	// 只投递给树子节点会让已达到 quorum 的网络在超时前无人收到提案，最终分裂为 confirm/timeout 两组。
+	// Leader 同时直发当前已连接验证者；后续转发仍沿用 Turbine，兼顾首轮可靠性和迟到节点传播。
+	peerIDs := uniquePeerIDs(append(turbinePeerIDs, node.connectedValidatorPeerIDsSnapshot(true)...))
 	if len(peerIDs) == 0 {
 		node.logger.Debug("posnode turbine proposal has no children",
 			slog.Uint64("slot", proposal.Header.Slot),
@@ -2598,7 +3110,8 @@ func (node *posNode) broadcastProposal(ctx context.Context, proposal consensus.B
 		slog.Uint64("height", proposal.Header.Height),
 		slog.String("block_hash", proposalHash.String()),
 		slog.Int("turbine_layer", position.Layer),
-		slog.Int("child_count", len(peerIDs)),
+		slog.Int("child_count", len(turbinePeerIDs)),
+		slog.Int("peer_count", len(peerIDs)),
 	)
 }
 
@@ -2654,7 +3167,11 @@ func (node *posNode) broadcastStaleHeadRecoveryVoteEnvelope(ctx context.Context,
 		node.logger.Error("posnode encode recovery vote failed", slog.Any("error", err))
 		return
 	}
-	peerIDs := node.connectedValidatorPeerIDsSnapshot(true)
+	peerIDs := recoveryVoteTargetPeerIDs(
+		node.connectedValidatorPeerIDsSnapshot(true),
+		node.futureLeaderCollectorPeerIDs(envelope.Vote.Slot),
+		node.peerKeyPair.peerID,
+	)
 	if len(peerIDs) == 0 {
 		return
 	}
@@ -2676,6 +3193,16 @@ func (node *posNode) broadcastStaleHeadRecoveryVoteEnvelope(ctx context.Context,
 		slog.String("validator_id", envelope.Vote.VoterID),
 		slog.Int("peer_count", len(peerIDs)),
 	)
+}
+
+// recoveryVoteTargetPeerIDs 优先向当前实际连通的全部验证者补发原签名投票。
+// 静态未来 Leader 只在连接视图尚未建立时兜底，避免法定人数分区因收集器位于另一侧而永久停滞。
+func recoveryVoteTargetPeerIDs(connectedPeerIDs []string, scheduledCollectorPeerIDs []string, excludedPeerIDs ...string) []string {
+	targets := connectedPeerIDs
+	if len(targets) == 0 {
+		targets = scheduledCollectorPeerIDs
+	}
+	return removePeerIDs(uniquePeerIDs(targets), excludedPeerIDs...)
 }
 
 func (node *posNode) forwardVote(ctx context.Context, envelope voteEnvelope, fromPeerID string) {
@@ -2762,37 +3289,29 @@ func (node *posNode) verifyVoteEnvelope(envelope voteEnvelope) error {
 }
 
 func (node *posNode) verifyQuorumCertificate(qc consensus.QuorumCertificate) error {
-	if err := qc.Validate(); err != nil {
-		return err
-	}
 	node.mutex.Lock()
 	epochContextValue, err := node.epochContextForSlotLocked(qc.Slot)
 	if err != nil {
 		node.mutex.Unlock()
 		return err
 	}
-	validatorOrder := epochContextValue.Snapshot.ValidatorOrder()
-	publicKeysByValidator := epochContextValue.Snapshot.BLSPublicKeys()
-	stakeByValidator := epochContextValue.Snapshot.StakeMap()
-	blsComplete := len(epochContextValue.Snapshot.Validators) > 0 &&
-		len(publicKeysByValidator) == len(epochContextValue.Snapshot.Validators)
+	snapshot := epochContextValue.Snapshot
 	node.mutex.Unlock()
-	if qc.SignatureScheme == "" {
-		if blsComplete {
-			return fmt.Errorf("posnode: aggregate qc required for bls validator set")
-		}
-		return nil
+	quorum := consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3, Strict: true}
+	if qc.Type == consensus.VoteTypeSkip {
+		quorum = consensus.Quorum{Numerator: defaultTimeoutQuorum, Denominator: 3, Strict: true}
 	}
-	return consensus.VerifyBLSAggregateWithStake(
+	return consensus.VerifyQuorumCertificateForSnapshot(
 		qc,
-		validatorOrder,
-		publicKeysByValidator,
-		stakeByValidator,
-		consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3},
+		snapshot,
+		quorum,
 	)
 }
 
 func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertificate, excludedPeerID string) {
+	if node.host == nil {
+		return
+	}
 	qcHash, hashErr := hashQC(qc)
 	if hashErr != nil {
 		qcHash = structure.Hash{}
@@ -2802,25 +3321,22 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		QC:              qc,
 		RootValidatorID: string(rootValidatorID),
 		OriginPeerID:    node.peerKeyPair.peerID,
-		HopCount:        0,
-		MaxHops:         defaultQCMaxHops,
+		// QC 已由形成节点直接投递给全部已连接验证者；该次投递就是唯一传播跳，
+		// 接收方不得再次全员转发，否则节点数增加后会产生 O(n^2) 消息风暴。
+		HopCount: defaultQCMaxHops,
+		MaxHops:  defaultQCMaxHops,
 	}
 	message, err := encodeQCEnvelopeMessage(envelope)
 	if err != nil {
 		node.logger.Error("posnode encode qc failed", slog.Any("error", err))
 		return
 	}
-	targets, position, err := node.turbineChildPeerIDsForRoot(ctx, qc.Slot, rootValidatorID, excludedPeerID)
-	if err != nil {
-		node.logger.Warn("posnode qc turbine route failed",
-			slog.Uint64("slot", qc.Slot),
-			slog.String("block_hash", qc.BlockHash.String()),
-			slog.String("qc_hash", qcHash.String()),
-			slog.String("root_validator_id", string(rootValidatorID)),
-			slog.Any("error", err),
-		)
-		return
-	}
+	// QC 是阶段转换的必要证据，直接发送给所有已连接验证者，避免树形路由在中间节点掉线时将证书分割在少数子树。
+	targets := removePeerIDs(
+		node.connectedValidatorPeerIDsSnapshot(true),
+		node.peerKeyPair.peerID,
+		excludedPeerID,
+	)
 	if len(targets) == 0 {
 		return
 	}
@@ -2831,7 +3347,6 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 			slog.String("block_hash", qc.BlockHash.String()),
 			slog.String("qc_hash", qcHash.String()),
 			slog.String("root_validator_id", string(rootValidatorID)),
-			slog.Int("turbine_layer", position.Layer),
 			slog.Any("error", err),
 		)
 		return
@@ -2842,12 +3357,14 @@ func (node *posNode) broadcastQC(ctx context.Context, qc consensus.QuorumCertifi
 		slog.String("block_hash", qc.BlockHash.String()),
 		slog.String("qc_hash", qcHash.String()),
 		slog.String("root_validator_id", string(rootValidatorID)),
-		slog.Int("turbine_layer", position.Layer),
 		slog.Int("peer_count", len(targets)),
 	)
 }
 
 func (node *posNode) forwardQC(ctx context.Context, envelope qcEnvelope, fromPeerID string) {
+	if node.host == nil {
+		return
+	}
 	if envelope.MaxHops == 0 {
 		envelope.MaxHops = defaultQCMaxHops
 	}
@@ -2882,18 +3399,12 @@ func (node *posNode) forwardQC(ctx context.Context, envelope qcEnvelope, fromPee
 	if hashErr != nil {
 		qcHash = structure.Hash{}
 	}
-	targets, position, err := node.turbineChildPeerIDsForRoot(ctx, envelope.QC.Slot, rootValidatorID, fromPeerID)
-	if err != nil {
-		node.logger.Warn("posnode qc forward route failed",
-			slog.Uint64("slot", envelope.QC.Slot),
-			slog.String("block_hash", envelope.QC.BlockHash.String()),
-			slog.String("qc_hash", qcHash.String()),
-			slog.String("root_validator_id", string(rootValidatorID)),
-			slog.Any("error", err),
-		)
-		return
-	}
-	targets = removePeerIDs(targets, envelope.OriginPeerID)
+	targets := removePeerIDs(
+		node.connectedValidatorPeerIDsSnapshot(true),
+		node.peerKeyPair.peerID,
+		fromPeerID,
+		envelope.OriginPeerID,
+	)
 	if len(targets) == 0 {
 		return
 	}
@@ -2913,7 +3424,6 @@ func (node *posNode) forwardQC(ctx context.Context, envelope qcEnvelope, fromPee
 		slog.String("block_hash", envelope.QC.BlockHash.String()),
 		slog.String("qc_hash", qcHash.String()),
 		slog.String("root_validator_id", string(rootValidatorID)),
-		slog.Int("turbine_layer", position.Layer),
 		slog.Int("peer_count", len(targets)),
 		slog.Uint64("hop_count", uint64(envelope.HopCount)),
 	)
@@ -2937,19 +3447,55 @@ func (node *posNode) rebuildEpoch(epochID uint64, startSlot uint64, seed structu
 }
 
 func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed structure.Hash) error {
-	validatorSet, err := node.ledger.ValidatorSetFromFinalizedStateAtEpoch(epochID)
+	snapshot, persisted, err := node.loadEpochSnapshot(epochID, startSlot, node.config.EpochSlots, seed)
 	if err != nil {
 		return err
 	}
-	snapshot, err := consensus.NewEpochSnapshot(epochID, startSlot, node.config.EpochSlots, seed, validatorSet)
+	if !persisted {
+		snapshot, err = node.buildEpochSnapshotLocked(epochID, startSlot, seed)
+		if err != nil {
+			return err
+		}
+		if err := node.persistEpochSnapshot(snapshot); err != nil {
+			return err
+		}
+	}
+	return node.installEpochSnapshotLocked(snapshot)
+}
+
+// replaceEpochLocked 仅在法定签名证书已经验证后重建当前 epoch，用于显式共识模式交接。
+func (node *posNode) replaceEpochLocked(epochID uint64, startSlot uint64, seed structure.Hash) error {
+	snapshot, err := node.buildEpochSnapshotLocked(epochID, startSlot, seed)
 	if err != nil {
+		return err
+	}
+	if err := node.replaceEpochSnapshot(snapshot); err != nil {
+		return err
+	}
+	return node.installEpochSnapshotLocked(snapshot)
+}
+
+func (node *posNode) buildEpochSnapshotLocked(epochID uint64, startSlot uint64, seed structure.Hash) (consensus.EpochSnapshot, error) {
+	validatorSet, err := node.ledger.ValidatorSetFromFinalizedStateAtEpoch(epochID)
+	if err != nil {
+		return consensus.EpochSnapshot{}, err
+	}
+	validatorSet, err = node.effectiveValidatorSetLocked(validatorSet, epochID, seed)
+	if err != nil {
+		return consensus.EpochSnapshot{}, err
+	}
+	return consensus.NewEpochSnapshot(epochID, startSlot, node.config.EpochSlots, seed, validatorSet)
+}
+
+func (node *posNode) installEpochSnapshotLocked(snapshot consensus.EpochSnapshot) error {
+	if err := node.reconcileConsensusModeForInstalledSnapshotLocked(snapshot); err != nil {
 		return err
 	}
 	schedule, err := consensus.NewLeaderSchedule(snapshot)
 	if err != nil {
 		return err
 	}
-	collector, err := node.voteCollectorForEpochLocked(epochID, snapshot)
+	collector, err := node.voteCollectorForEpochLocked(snapshot.EpochID, snapshot)
 	if err != nil {
 		return err
 	}
@@ -2962,11 +3508,11 @@ func (node *posNode) rebuildEpochLocked(epochID uint64, startSlot uint64, seed s
 	if node.leaderSchedules == nil {
 		node.leaderSchedules = make(map[uint64]consensus.LeaderSchedule)
 	}
-	node.epochSnapshots[epochID] = snapshot
-	node.leaderSchedules[epochID] = schedule
+	node.epochSnapshots[snapshot.EpochID] = snapshot
+	node.leaderSchedules[snapshot.EpochID] = schedule
 	node.logger.Info("posnode epoch ready",
-		slog.Uint64("epoch", epochID),
-		slog.Uint64("start_slot", startSlot),
+		slog.Uint64("epoch", snapshot.EpochID),
+		slog.Uint64("start_slot", snapshot.StartSlot),
 		slog.Uint64("end_slot", snapshot.EndSlot),
 		slog.Int("validators", len(snapshot.Validators)),
 		slog.Uint64("total_stake", snapshot.TotalActiveStake),
@@ -2982,7 +3528,11 @@ func (node *posNode) voteCollectorForEpochLocked(epochID uint64, snapshot consen
 	if collector, exists := node.voteCollectors[epochID]; exists {
 		return collector, nil
 	}
-	collector, err := consensus.NewVoteCollector(snapshot.StakeMap(), consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3})
+	collector, err := consensus.NewVoteCollectorWithQuorums(
+		snapshot.StakeMap(),
+		consensus.Quorum{Numerator: defaultConsensusQuorum, Denominator: 3, Strict: true},
+		consensus.Quorum{Numerator: defaultTimeoutQuorum, Denominator: 3, Strict: true},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -3027,7 +3577,7 @@ func newAccount(address structure.PublicKey, lamports uint64, owner structure.Pu
 	return structure.AddressedAccount{Address: address, Account: account}
 }
 
-func mustStructureKeyPair(seedText string) structure.SolanaKeyPair {
+func mustStructureKeyPair(seedText string) structure.OrdexusKeyPair {
 	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(seedText)))
 	if err != nil {
 		panic(err)

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/p2p"
-	"solana_golang/rpc"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/rpc"
 )
 
 const (

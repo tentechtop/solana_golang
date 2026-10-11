@@ -7,19 +7,19 @@ import (
 )
 
 const (
-	// Ed25519KeySize 定义 Solana 核心密钥长度 + 使用 Ed25519 seed 大小。
+	// Ed25519KeySize 定义 Ordexus 核心密钥长度 + 使用 Ed25519 seed 大小。
 	Ed25519KeySize = ed25519.SeedSize
 	// Ed25519SignatureSize 定义 Ed25519 签名长度 + 用于签名输入校验。
 	Ed25519SignatureSize = ed25519.SignatureSize
 )
 
-// Ed25519KeyPair 保存 Solana 密钥对 + 使用 32 字节公钥和 32 字节私钥种子。
+// Ed25519KeyPair 保存 Ordexus 密钥对 + 使用 32 字节公钥和 32 字节私钥种子。
 type Ed25519KeyPair struct {
 	PublicKey  []byte
 	PrivateKey []byte
 }
 
-// GenerateEd25519KeyPair 生成 Ed25519 密钥对 + 返回 32 字节 seed 兼容 Solana 派生。
+// GenerateEd25519KeyPair 生成 Ed25519 密钥对 + 返回 32 字节 seed 兼容 Ordexus 派生。
 func GenerateEd25519KeyPair() (Ed25519KeyPair, error) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

@@ -3,9 +3,11 @@ package posnode
 import (
 	"bytes"
 	"testing"
+	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestPOSBinaryTransactionEnvelopeRoundTrip(t *testing.T) {
@@ -93,6 +95,30 @@ func TestPOSBinarySyncResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPOSBinaryBlockQCResponseRoundTrip(t *testing.T) {
+	certificate := consensus.QuorumCertificate{
+		Type:               consensus.VoteTypeConfirm,
+		Slot:               11,
+		BlockHeight:        7,
+		BlockHash:          mustHash("block-qc-response"),
+		ThresholdStake:     67,
+		ConfirmedStake:     70,
+		Voters:             []string{"validator-a", "validator-b"},
+		CreatedAtUnixMilli: 1710000000000,
+	}
+	payload, err := marshalBlockQCResponseBinary(blockQCResponseEnvelope{Found: true, QC: certificate})
+	if err != nil {
+		t.Fatalf("marshalBlockQCResponseBinary() error = %v", err)
+	}
+	decoded, err := unmarshalBlockQCResponseBinary(payload)
+	if err != nil {
+		t.Fatalf("unmarshalBlockQCResponseBinary() error = %v", err)
+	}
+	if !decoded.Found || decoded.QC.BlockHash != certificate.BlockHash || decoded.QC.ConfirmedStake != certificate.ConfirmedStake {
+		t.Fatalf("decoded block qc response = %+v", decoded)
+	}
+}
+
 func TestPOSBinaryStateSnapshotRoundTrip(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
 	head := node.ledger.Head()
@@ -160,10 +186,236 @@ func TestPOSBinaryRejectsLegacyJSONPayload(t *testing.T) {
 	if _, err := unmarshalBlockResponseBinary(p2p.ProtocolPoSBlockByHeightV1, []byte(`{"found":false}`)); err == nil {
 		t.Fatal("unmarshalBlockResponseBinary(JSON) error = nil, want error")
 	}
+	if _, err := unmarshalEpochTransitionProofBinary([]byte(`{"certificate":{}}`)); err == nil {
+		t.Fatal("unmarshalEpochTransitionProofBinary(JSON) error = nil, want error")
+	}
+	if _, err := unmarshalEmergencyRecoveryCertificateBinary([]byte(`{"version":2}`)); err == nil {
+		t.Fatal("unmarshalEmergencyRecoveryCertificateBinary(JSON) error = nil, want error")
+	}
 }
 
 func TestPOSBinaryRejectsOversizedBlockLocatorRequest(t *testing.T) {
 	if _, err := marshalBlockLocatorRequestBinary(blockLocatorRequestEnvelope{MaxEntries: posMaxListEntries + 1}); err == nil {
 		t.Fatal("marshalBlockLocatorRequestBinary(oversized) error = nil, want error")
+	}
+}
+
+func TestPOSBinaryEpochTransitionProofRoundTrip(t *testing.T) {
+	node, keys, previousSnapshot, targetSnapshot := newEpochTransitionTestFixture(t, nil)
+	proof := signedEpochTransitionProof(t, node, keys[:3], previousSnapshot, targetSnapshot)
+	payload, err := marshalEpochTransitionProofBinary(proof)
+	if err != nil {
+		t.Fatalf("marshalEpochTransitionProofBinary() error = %v", err)
+	}
+	if len(payload) == 0 || payload[0] == '{' {
+		t.Fatalf("epoch transition payload is not binary: %q", payload)
+	}
+	decoded, err := unmarshalEpochTransitionProofBinary(payload)
+	if err != nil {
+		t.Fatalf("unmarshalEpochTransitionProofBinary() error = %v", err)
+	}
+	if decoded.Certificate.Transition != proof.Certificate.Transition {
+		t.Fatalf("decoded transition = %+v, want %+v", decoded.Certificate.Transition, proof.Certificate.Transition)
+	}
+	if decoded.Snapshot.SnapshotStateRoot != targetSnapshot.SnapshotStateRoot ||
+		len(decoded.Snapshot.Validators) != len(targetSnapshot.Validators) {
+		t.Fatalf("decoded snapshot root=%s validators=%d", decoded.Snapshot.SnapshotStateRoot.String(), len(decoded.Snapshot.Validators))
+	}
+	if len(decoded.Certificate.Signatures) != 3 {
+		t.Fatalf("decoded signature count = %d, want 3", len(decoded.Certificate.Signatures))
+	}
+}
+
+func TestPOSBinaryEpochTransitionRejectsVersionProtocolAndTrailingBytes(t *testing.T) {
+	node, keys, previousSnapshot, targetSnapshot := newEpochTransitionTestFixture(t, nil)
+	proof := signedEpochTransitionProof(t, node, keys[:3], previousSnapshot, targetSnapshot)
+	payload, err := marshalEpochTransitionProofBinary(proof)
+	if err != nil {
+		t.Fatalf("marshalEpochTransitionProofBinary() error = %v", err)
+	}
+
+	unknownVersion := append([]byte(nil), payload...)
+	unknownVersion[4]++
+	if _, err := unmarshalEpochTransitionProofBinary(unknownVersion); err == nil {
+		t.Fatal("unmarshalEpochTransitionProofBinary(unknown version) error = nil, want error")
+	}
+
+	wrongProtocol := append([]byte(nil), payload...)
+	wrongProtocol[6]++
+	if _, err := unmarshalEpochTransitionProofBinary(wrongProtocol); err == nil {
+		t.Fatal("unmarshalEpochTransitionProofBinary(wrong protocol) error = nil, want error")
+	}
+
+	withTrailingBytes := append(append([]byte(nil), payload...), 0)
+	if _, err := unmarshalEpochTransitionProofBinary(withTrailingBytes); err == nil {
+		t.Fatal("unmarshalEpochTransitionProofBinary(trailing byte) error = nil, want error")
+	}
+}
+
+func TestPOSBinaryEpochProofRequestAndResponseRoundTrip(t *testing.T) {
+	requestPayload, err := marshalEpochProofRequestBinary(epochProofRequest{FromEpochID: 7, ToEpochID: 8})
+	if err != nil {
+		t.Fatalf("marshalEpochProofRequestBinary() error = %v", err)
+	}
+	request, err := unmarshalEpochProofRequestBinary(requestPayload)
+	if err != nil {
+		t.Fatalf("unmarshalEpochProofRequestBinary() error = %v", err)
+	}
+	if request.FromEpochID != 7 || request.ToEpochID != 8 {
+		t.Fatalf("decoded epoch proof request = %+v", request)
+	}
+
+	node, keys, previousSnapshot, targetSnapshot := newEpochTransitionTestFixture(t, nil)
+	proof := signedEpochTransitionProof(t, node, keys[:3], previousSnapshot, targetSnapshot)
+	responsePayload, err := marshalEpochProofResponseBinary(epochProofResponse{Found: true, Proof: proof})
+	if err != nil {
+		t.Fatalf("marshalEpochProofResponseBinary() error = %v", err)
+	}
+	response, err := unmarshalEpochProofResponseBinary(responsePayload)
+	if err != nil {
+		t.Fatalf("unmarshalEpochProofResponseBinary() error = %v", err)
+	}
+	if !response.Found || response.Proof.Snapshot.SnapshotStateRoot != targetSnapshot.SnapshotStateRoot {
+		t.Fatalf("decoded epoch proof response = %+v", response)
+	}
+}
+
+func TestPOSBinaryEpochProofBatchRoundTripAndRejectsGap(t *testing.T) {
+	node, keys, previousSnapshot, _ := newEpochTransitionTestFixture(t, nil)
+	proofs := epochTransitionProofChain(t, node, keys[:3], previousSnapshot, 3)
+	requestPayload, err := marshalEpochProofBatchRequestBinary(epochProofBatchRequest{
+		FromEpochID:    0,
+		TargetEpochID:  3,
+		MaxProofs:      2,
+		MaxPayloadSize: defaultEpochProofBatchPayloadBytes,
+	})
+	if err != nil {
+		t.Fatalf("marshalEpochProofBatchRequestBinary() error = %v", err)
+	}
+	request, err := unmarshalEpochProofBatchRequestBinary(requestPayload)
+	if err != nil {
+		t.Fatalf("unmarshalEpochProofBatchRequestBinary() error = %v", err)
+	}
+	if request.FromEpochID != 0 || request.TargetEpochID != 3 || request.MaxProofs != 2 {
+		t.Fatalf("decoded epoch proof batch request = %+v", request)
+	}
+
+	responsePayload, err := marshalEpochProofBatchResponseBinary(epochProofBatchResponse{
+		FromEpochID:   0,
+		TargetEpochID: 3,
+		Complete:      true,
+		Proofs:        proofs,
+	})
+	if err != nil {
+		t.Fatalf("marshalEpochProofBatchResponseBinary() error = %v", err)
+	}
+	if len(responsePayload) == 0 || responsePayload[0] == '{' {
+		t.Fatalf("epoch proof batch payload is not binary: %q", responsePayload)
+	}
+	response, err := unmarshalEpochProofBatchResponseBinary(responsePayload)
+	if err != nil {
+		t.Fatalf("unmarshalEpochProofBatchResponseBinary() error = %v", err)
+	}
+	if !response.Complete || len(response.Proofs) != 3 || response.Proofs[2].Snapshot.EpochID != 3 {
+		t.Fatalf("decoded epoch proof batch response = %+v", response)
+	}
+
+	if _, err := marshalEpochProofBatchResponseBinary(epochProofBatchResponse{
+		FromEpochID:   0,
+		TargetEpochID: 3,
+		Complete:      true,
+		Proofs:        []epochTransitionProof{proofs[0], proofs[2]},
+	}); err == nil {
+		t.Fatal("marshalEpochProofBatchResponseBinary(gap) error = nil, want error")
+	}
+	legacyJSON := []byte(`{"from_epoch_id":0,"target_epoch_id":3}`)
+	if _, err := unmarshalEpochProofBatchRequestBinary(legacyJSON); err == nil {
+		t.Fatal("unmarshalEpochProofBatchRequestBinary(JSON) error = nil, want binary rejection")
+	}
+}
+
+func TestPOSBinaryRecoveryCertificatesRoundTrip(t *testing.T) {
+	key := mustStructureKeyPair("binary-recovery-signer")
+	recovery := consensus.EmergencyRecoveryCertificate{
+		Version:                consensus.EmergencyRecoveryCertificateVersion,
+		ChainID:                "binary-recovery-chain",
+		Sequence:               3,
+		FinalizedHeight:        17,
+		FinalizedHash:          testHashFromText(t, "binary-recovery-finalized").String(),
+		SafetyEpochID:          2,
+		SafetyValidatorSetRoot: testHashFromText(t, "binary-recovery-safety-root").String(),
+		ElderValidatorID:       string(consensus.NewValidatorID(key.PublicKey)),
+		ExcludedValidatorIDs:   []string{"validator-b", "validator-a"},
+		ExpiresAtUnixMilli:     time.Now().Add(time.Hour).UnixMilli(),
+	}
+	recovery.Signatures = []consensus.EmergencyRecoverySignature{signBinaryRecoveryCertificate(t, key, recovery)}
+	recoveryPayload, err := marshalEmergencyRecoveryCertificateBinary(recovery)
+	if err != nil {
+		t.Fatalf("marshalEmergencyRecoveryCertificateBinary() error = %v", err)
+	}
+	decodedRecovery, err := unmarshalEmergencyRecoveryCertificateBinary(recoveryPayload)
+	if err != nil {
+		t.Fatalf("unmarshalEmergencyRecoveryCertificateBinary() error = %v", err)
+	}
+	if decodedRecovery.Sequence != recovery.Sequence || decodedRecovery.FinalizedHash != recovery.FinalizedHash || len(decodedRecovery.Signatures) != 1 {
+		t.Fatalf("decoded recovery certificate = %+v", decodedRecovery)
+	}
+
+	activation := consensus.MultiValidatorActivationCertificate{
+		Version:                consensus.MultiValidatorActivationCertificateVersion,
+		ChainID:                recovery.ChainID,
+		Sequence:               4,
+		SafetyFinalizedHeight:  recovery.FinalizedHeight,
+		SafetyFinalizedHash:    recovery.FinalizedHash,
+		SafetyEpochID:          recovery.SafetyEpochID,
+		SafetyValidatorSetRoot: recovery.SafetyValidatorSetRoot,
+		TargetHeight:           21,
+		TargetHash:             testHashFromText(t, "binary-activation-target").String(),
+		TargetEpochID:          3,
+		TargetValidatorSetRoot: testHashFromText(t, "binary-activation-target-root").String(),
+		ExpiresAtUnixMilli:     recovery.ExpiresAtUnixMilli,
+	}
+	activation.Signatures = []consensus.EmergencyRecoverySignature{signBinaryActivationCertificate(t, key, activation)}
+	activationPayload, err := marshalMultiValidatorActivationCertificateBinary(activation)
+	if err != nil {
+		t.Fatalf("marshalMultiValidatorActivationCertificateBinary() error = %v", err)
+	}
+	decodedActivation, err := unmarshalMultiValidatorActivationCertificateBinary(activationPayload)
+	if err != nil {
+		t.Fatalf("unmarshalMultiValidatorActivationCertificateBinary() error = %v", err)
+	}
+	if decodedActivation.Sequence != activation.Sequence || decodedActivation.TargetHash != activation.TargetHash || len(decodedActivation.Signatures) != 1 {
+		t.Fatalf("decoded activation certificate = %+v", decodedActivation)
+	}
+}
+
+func signBinaryRecoveryCertificate(t *testing.T, key structure.OrdexusKeyPair, certificate consensus.EmergencyRecoveryCertificate) consensus.EmergencyRecoverySignature {
+	t.Helper()
+	message, err := certificate.SignBytes()
+	if err != nil {
+		t.Fatalf("recovery SignBytes() error = %v", err)
+	}
+	return signBinaryCertificateMessage(t, key, message)
+}
+
+func signBinaryActivationCertificate(t *testing.T, key structure.OrdexusKeyPair, certificate consensus.MultiValidatorActivationCertificate) consensus.EmergencyRecoverySignature {
+	t.Helper()
+	message, err := certificate.SignBytes()
+	if err != nil {
+		t.Fatalf("activation SignBytes() error = %v", err)
+	}
+	return signBinaryCertificateMessage(t, key, message)
+}
+
+func signBinaryCertificateMessage(t *testing.T, key structure.OrdexusKeyPair, message []byte) consensus.EmergencyRecoverySignature {
+	t.Helper()
+	signature, err := key.Sign(message)
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	return consensus.EmergencyRecoverySignature{
+		ValidatorID: string(consensus.NewValidatorID(key.PublicKey)),
+		PublicKey:   key.PublicKey.String(),
+		Signature:   signature.String(),
 	}
 }

@@ -3,7 +3,7 @@ package p2p
 import (
 	"fmt"
 
-	"solana_golang/schema"
+	"github.com/tentechtop/ordexus-core/schema"
 )
 
 const (

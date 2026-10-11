@@ -10,7 +10,7 @@ import (
 
 const (
 	bip44Purpose          = 44
-	solanaCoinType        = 501
+	ordexusCoinType        = 501
 	mnemonicEntropyBits   = 128
 	hardenedDeriveOffset  = uint32(0x80000000)
 	bip39SeedLength       = 64
@@ -126,46 +126,46 @@ func DeriveChildPrivateKey(parentPrivateKey []byte, parentChainCode []byte, inde
 	return child.PrivateKey, child.ChainCode, nil
 }
 
-// GetSolanaAddress 生成 Solana 地址 + 地址格式为 Base58 公钥。
-func GetSolanaAddress(publicKey []byte) (string, error) {
-	if err := requireLength(publicKey, Ed25519KeySize, "solana public key"); err != nil {
+// GetOrdexusAddress 生成 Ordexus 地址 + 地址格式为 Base58 公钥。
+func GetOrdexusAddress(publicKey []byte) (string, error) {
+	if err := requireLength(publicKey, Ed25519KeySize, "ordexus public key"); err != nil {
 		return "", err
 	}
 	return Base58Encode(publicKey), nil
 }
 
-// GetSolanaKeyPair 派生 Solana 密钥对 + 使用助记词和标准路径参数。
-func GetSolanaKeyPair(mnemonic []string, accountIndex int, addressIndex int) (KeyInfo, error) {
+// GetOrdexusKeyPair 派生 Ordexus 密钥对 + 使用助记词和标准路径参数。
+func GetOrdexusKeyPair(mnemonic []string, accountIndex int, addressIndex int) (KeyInfo, error) {
 	seed, err := GenerateSeed(mnemonic, "")
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	return GetSolanaKeyPairFromSeed(seed, accountIndex, addressIndex)
+	return GetOrdexusKeyPairFromSeed(seed, accountIndex, addressIndex)
 }
 
-// GetSolanaKeyPairFromMnemonicString 派生 Solana 密钥对 + 使用助记词字符串。
-func GetSolanaKeyPairFromMnemonicString(mnemonic string, accountIndex int, addressIndex int) (KeyInfo, error) {
+// GetOrdexusKeyPairFromMnemonicString 派生 Ordexus 密钥对 + 使用助记词字符串。
+func GetOrdexusKeyPairFromMnemonicString(mnemonic string, accountIndex int, addressIndex int) (KeyInfo, error) {
 	seed, err := GenerateSeedFromMnemonicString(mnemonic, "")
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	return GetSolanaKeyPairFromSeed(seed, accountIndex, addressIndex)
+	return GetOrdexusKeyPairFromSeed(seed, accountIndex, addressIndex)
 }
 
-// GetSolanaKeyPairFromSeed 派生标准路径密钥对 + 路径为 m/44'/501'/accountIndex'/addressIndex'。
-func GetSolanaKeyPairFromSeed(seed []byte, accountIndex int, addressIndex int) (KeyInfo, error) {
+// GetOrdexusKeyPairFromSeed 派生标准路径密钥对 + 路径为 m/44'/501'/accountIndex'/addressIndex'。
+func GetOrdexusKeyPairFromSeed(seed []byte, accountIndex int, addressIndex int) (KeyInfo, error) {
 	if accountIndex < 0 {
 		return KeyInfo{}, fmt.Errorf("utils: account index cannot be negative")
 	}
 	if addressIndex < 0 {
 		return KeyInfo{}, fmt.Errorf("utils: address index cannot be negative")
 	}
-	path := SolanaDerivationPath(accountIndex, addressIndex)
-	return GetSolanaKeyPairFromSeedAndPath(seed, path)
+	path := OrdexusDerivationPath(accountIndex, addressIndex)
+	return GetOrdexusKeyPairFromSeedAndPath(seed, path)
 }
 
-// GetSolanaKeyPairFromSeedAndPath 派生 Solana 密钥对 + 使用 seed 和 SLIP-0010 路径。
-func GetSolanaKeyPairFromSeedAndPath(seed []byte, path string) (KeyInfo, error) {
+// GetOrdexusKeyPairFromSeedAndPath 派生 Ordexus 密钥对 + 使用 seed 和 SLIP-0010 路径。
+func GetOrdexusKeyPairFromSeedAndPath(seed []byte, path string) (KeyInfo, error) {
 	node, err := DeriveHDNodeFromSeedAndPath(seed, path)
 	if err != nil {
 		return KeyInfo{}, err
@@ -174,7 +174,7 @@ func GetSolanaKeyPairFromSeedAndPath(seed []byte, path string) (KeyInfo, error) 
 	if err != nil {
 		return KeyInfo{}, err
 	}
-	address, err := GetSolanaAddress(publicKey)
+	address, err := GetOrdexusAddress(publicKey)
 	if err != nil {
 		return KeyInfo{}, err
 	}
@@ -260,9 +260,9 @@ func ParseDerivationPath(path string) ([]uint32, string, error) {
 	return indexes, "m/" + strings.Join(normalized, "/"), nil
 }
 
-// SolanaDerivationPath 构造 Solana 标准路径 + 格式为 m/44'/501'/accountIndex'/addressIndex'。
-func SolanaDerivationPath(accountIndex int, addressIndex int) string {
-	return fmt.Sprintf("m/%d'/%d'/%d'/%d'", bip44Purpose, solanaCoinType, accountIndex, addressIndex)
+// OrdexusDerivationPath 构造 Ordexus 标准路径 + 格式为 m/44'/501'/accountIndex'/addressIndex'。
+func OrdexusDerivationPath(accountIndex int, addressIndex int) string {
+	return fmt.Sprintf("m/%d'/%d'/%d'/%d'", bip44Purpose, ordexusCoinType, accountIndex, addressIndex)
 }
 
 // hmacSHA512 计算 HMAC-SHA512 + 作为 SLIP-0010 主密钥和子密钥派生核心。

@@ -97,15 +97,15 @@ func TestEnvelopeRejectsHashMismatch(t *testing.T) {
 }
 
 func TestCanonicalHashIncludesMetadata(t *testing.T) {
-	hash, err := CanonicalHash("solana_golang:test", "transfer", 1, []byte("payload"))
+	hash, err := CanonicalHash("ordexus-core:test", "transfer", 1, []byte("payload"))
 	if err != nil {
 		t.Fatalf("CanonicalHash() error = %v", err)
 	}
-	otherDomainHash, err := CanonicalHash("solana_golang:other", "transfer", 1, []byte("payload"))
+	otherDomainHash, err := CanonicalHash("ordexus-core:other", "transfer", 1, []byte("payload"))
 	if err != nil {
 		t.Fatalf("CanonicalHash(other domain) error = %v", err)
 	}
-	otherVersionHash, err := CanonicalHash("solana_golang:test", "transfer", 2, []byte("payload"))
+	otherVersionHash, err := CanonicalHash("ordexus-core:test", "transfer", 2, []byte("payload"))
 	if err != nil {
 		t.Fatalf("CanonicalHash(other version) error = %v", err)
 	}

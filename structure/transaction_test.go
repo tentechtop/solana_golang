@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestTransactionValidateMarshalAndHash(t *testing.T) {
@@ -62,12 +62,12 @@ func TestTransactionBuildSignDataExcludesSignatures(t *testing.T) {
 	}
 	transaction.Signatures[0] = originalSignature
 }
-func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
+func TestTransactionBuildsOrdexusMessageFromAccountMeta(t *testing.T) {
 	transaction := newTestTransaction(t)
 
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
-		t.Fatalf("SolanaMessage() error = %v", err)
+		t.Fatalf("OrdexusMessage() error = %v", err)
 	}
 
 	if message.Header.NumRequiredSignatures != 1 {
@@ -80,9 +80,9 @@ func TestTransactionBuildsSolanaMessageFromAccountMeta(t *testing.T) {
 		t.Fatalf("AccountKeys length = %d, want %d", len(message.AccountKeys), len(transaction.Accounts))
 	}
 }
-func TestVersionedSolanaMessageAllowsAddressTableIndexes(t *testing.T) {
+func TestVersionedOrdexusMessageAllowsAddressTableIndexes(t *testing.T) {
 	transaction := newTestTransaction(t)
-	transaction.Message = SolanaMessage{
+	transaction.Message = OrdexusMessage{
 		Header: MessageHeader{
 			NumRequiredSignatures:       1,
 			NumReadonlySignedAccounts:   0,
@@ -370,7 +370,7 @@ func newTestTransaction(t *testing.T) Transaction {
 func newTestVersionedTransaction() Transaction {
 	return Transaction{
 		Signatures: []Signature{newTestSignature(1)},
-		Message: SolanaMessage{
+		Message: OrdexusMessage{
 			Header: MessageHeader{
 				NumRequiredSignatures:       1,
 				NumReadonlySignedAccounts:   0,
@@ -421,7 +421,7 @@ func newOversizedWireTransaction() Transaction {
 			{
 				ProgramIDIndex: uint8(len(accounts) - 1),
 				AccountIndexes: []uint8{0},
-				Data:           make([]byte, MaxSolanaTransactionSize),
+				Data:           make([]byte, MaxOrdexusTransactionSize),
 			},
 		},
 		RecentBlockhash: newTestHash(3),

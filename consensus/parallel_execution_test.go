@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestExecuteTransactionsParallelRunsNonConflictingAccountsTogether(t *testing.T) {

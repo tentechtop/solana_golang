@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const peerIDByteSize = 32

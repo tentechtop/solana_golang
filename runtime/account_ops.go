@@ -3,7 +3,7 @@ package runtime
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // IsSignerAddress 判断地址是否为交易签名者 + 程序执行统一使用同一签名语义。

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (

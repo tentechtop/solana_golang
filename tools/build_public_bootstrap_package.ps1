@@ -141,7 +141,7 @@ $config = [ordered]@{
     environment = "stage"
     production = $false
     node_name = "public-bootstrap"
-    data_path = "/opt/solana_golang/data/public-bootstrap"
+    data_path = "/opt/ordexus-core/data/public-bootstrap"
     listen_ip = "0.0.0.0"
     listen_port = $P2PPort
     network = "tcp"
@@ -170,7 +170,7 @@ $config = [ordered]@{
         enabled = $true
         min_validators = $MinValidators
         genesis_start_delay_millis = 30000
-        registry_path = "/opt/solana_golang/data/public-bootstrap/bootstrap-registry.json"
+        registry_path = "/opt/ordexus-core/data/public-bootstrap/bootstrap-registry.json"
     }
     genesis = [ordered]@{
         initial_supply_lamports = 100000000000000000
@@ -183,7 +183,7 @@ Write-JsonFile -Path (Join-Path $configDir "public-bootstrap.json") -Value $conf
 $startScript = @'
 #!/usr/bin/env sh
 set -eu
-cd /opt/solana_golang
+cd /opt/ordexus-core
 mkdir -p data/public-bootstrap logs run
 chmod 700 data
 chmod +x bin/posnode
@@ -194,14 +194,14 @@ echo "public bootstrap pid: $(cat ./run/public-bootstrap.pid)"
 Write-Utf8NoBomFile -Path (Join-Path $scriptsDir "start-public-bootstrap.sh") -Text $startScript
 
 $readme = @"
-Copy this directory to the public host as /opt/solana_golang.
+Copy this directory to the public host as /opt/ordexus-core.
 
 Required inbound TCP ports:
 - $P2PPort for P2P
 - $RpcPort for JSON-RPC bootstrap registration
 
 Start command on the public host:
-  cd /opt/solana_golang
+  cd /opt/ordexus-core
   sh ./scripts/start-public-bootstrap.sh
 
 Health check from local Windows:

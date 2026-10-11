@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/internal/poswire"
-	"solana_golang/p2p"
-	"solana_golang/rpc"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/internal/poswire"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -287,7 +287,7 @@ func (node *posNode) bootstrapPreferredTransactionPeerIDsFromStatus(ctx context.
 
 // bootstrapPreferredTransactionPeerIDsFromConfig 兜底计算启动期 leader + bootstrap 无账本时仍能覆盖初始 leader 窗口。
 func (node *posNode) bootstrapPreferredTransactionPeerIDsFromConfig() []string {
-	chainID, genesisStartMs, slotMillis, epochSlots, forwardSlots, validators := node.bootstrapRoutingConfigSnapshot()
+	chainID, epochSlots, forwardSlots, validators := node.bootstrapRoutingConfigSnapshot()
 	if chainID == "" || epochSlots == 0 || len(validators) == 0 {
 		return nil
 	}
@@ -296,7 +296,7 @@ func (node *posNode) bootstrapPreferredTransactionPeerIDsFromConfig() []string {
 		node.logger.Debug("bootstrap transaction route genesis validators unavailable", slog.Any("error", err))
 		return nil
 	}
-	startSlot := bootstrapRoutingSlot(genesisStartMs, slotMillis)
+	startSlot := uint64(1)
 	epochID, epochStartSlot := epochForSlotWithEpochSlots(startSlot, epochSlots)
 	snapshot, err := consensus.NewEpochSnapshot(epochID, epochStartSlot, epochSlots, mustHash(fmt.Sprintf("%s-epoch-%d", chainID, epochID)), validatorSet)
 	if err != nil {
@@ -329,13 +329,11 @@ func (node *posNode) bootstrapPreferredTransactionPeerIDsFromConfig() []string {
 	return uniquePeerIDs(peerIDs)
 }
 
-func (node *posNode) bootstrapRoutingConfigSnapshot() (string, int64, int, uint64, int, []genesisValidatorConfig) {
+func (node *posNode) bootstrapRoutingConfigSnapshot() (string, uint64, int, []genesisValidatorConfig) {
 	node.mutex.Lock()
 	defer node.mutex.Unlock()
 	validators := append([]genesisValidatorConfig(nil), node.config.Genesis.InitialValidators...)
 	return node.config.ChainID,
-		node.config.GenesisStartMs,
-		node.config.SlotMillis,
 		node.config.EpochSlots,
 		node.config.TransactionLeaderForwardSlots,
 		validators
@@ -366,18 +364,6 @@ func bootstrapValidatorSetFromGenesis(validators []genesisValidatorConfig) (cons
 		})
 	}
 	return consensus.NewValidatorSet(states)
-}
-
-func bootstrapRoutingSlot(genesisStartMs int64, slotMillis int) uint64 {
-	if slotMillis <= 0 {
-		return 1
-	}
-	startedAt := time.UnixMilli(genesisStartMs)
-	now := time.Now()
-	if !now.After(startedAt) {
-		return 1
-	}
-	return uint64(now.Sub(startedAt)/(time.Duration(slotMillis)*time.Millisecond)) + 1
 }
 
 func epochForSlotWithEpochSlots(slot uint64, epochSlots uint64) (uint64, uint64) {

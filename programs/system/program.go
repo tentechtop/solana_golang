@@ -3,8 +3,8 @@ package system
 import (
 	"fmt"
 
-	"solana_golang/runtime"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // Program 执行系统固定指令 + 保持账户基础操作不进入 structure。
@@ -52,8 +52,14 @@ func executeSystemTransfer(systemInstruction structure.SystemInstruction, contex
 	}
 	sourceAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
 	destinationAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
-	if !runtime.IsSignerAddress(sourceAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(sourceAddress, context) {
 		return fmt.Errorf("%w: transfer source must sign", structure.ErrMissingRequiredSignature)
+	}
+	if err := requireSystemOwnedAccount(sourceAddress, context); err != nil {
+		return err
+	}
+	if len(context.Accounts[sourceAddress].Data) != 0 {
+		return fmt.Errorf("%w: transfer source must not contain data", structure.ErrInvalidSystemInstruction)
 	}
 	return runtime.TransferLamports(sourceAddress, destinationAddress, systemInstruction.Transfer.Lamports, context.Accounts, context.RentConfig)
 }
@@ -64,8 +70,23 @@ func executeSystemCreateAccount(systemInstruction structure.SystemInstruction, c
 	}
 	payerAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
 	newAccountAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[1]]
-	if !runtime.IsSignerAddress(payerAddress, context.Message) || !runtime.IsSignerAddress(newAccountAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(payerAddress, context) || !runtime.IsSignerContextAddress(newAccountAddress, context) {
 		return fmt.Errorf("%w: create account requires payer and new account signatures", structure.ErrMissingRequiredSignature)
+	}
+	if payerAddress == newAccountAddress {
+		return fmt.Errorf("%w: payer cannot be the new account", structure.ErrInvalidSystemInstruction)
+	}
+	if err := requireSystemOwnedAccount(payerAddress, context); err != nil {
+		return err
+	}
+	if len(context.Accounts[payerAddress].Data) != 0 {
+		return fmt.Errorf("%w: payer must not contain data", structure.ErrInvalidSystemInstruction)
+	}
+	if err := requireSystemOwnedAccount(newAccountAddress, context); err != nil {
+		return err
+	}
+	if len(context.Accounts[newAccountAddress].Data) != 0 {
+		return fmt.Errorf("%w: account already initialized", structure.ErrInvalidSystemInstruction)
 	}
 	if err := runtime.TransferLamports(payerAddress, newAccountAddress, systemInstruction.CreateAccount.Lamports, context.Accounts, context.RentConfig); err != nil {
 		return err
@@ -86,8 +107,11 @@ func executeSystemAssign(systemInstruction structure.SystemInstruction, context 
 		return fmt.Errorf("%w: assign requires target account", structure.ErrInvalidSystemInstruction)
 	}
 	targetAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
-	if !runtime.IsSignerAddress(targetAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(targetAddress, context) {
 		return fmt.Errorf("%w: assign target must sign", structure.ErrMissingRequiredSignature)
+	}
+	if err := requireSystemOwnedAccount(targetAddress, context); err != nil {
+		return err
 	}
 	account := context.Accounts[targetAddress].Clone()
 	account.Owner = systemInstruction.Assign.Owner
@@ -100,13 +124,27 @@ func executeSystemAllocate(systemInstruction structure.SystemInstruction, contex
 		return fmt.Errorf("%w: allocate requires target account", structure.ErrInvalidSystemInstruction)
 	}
 	targetAddress := context.Message.AccountKeys[context.Instruction.AccountIndexes[0]]
-	if !runtime.IsSignerAddress(targetAddress, context.Message) {
+	if !runtime.IsSignerContextAddress(targetAddress, context) {
 		return fmt.Errorf("%w: allocate target must sign", structure.ErrMissingRequiredSignature)
+	}
+	if err := requireSystemOwnedAccount(targetAddress, context); err != nil {
+		return err
 	}
 	account := context.Accounts[targetAddress].Clone()
 	if err := account.ResizeData(int(systemInstruction.Allocate.Space), context.RentConfig); err != nil {
 		return err
 	}
 	context.Accounts[targetAddress] = account
+	return nil
+}
+
+// A state-account key only signs its allocation. It cannot override the program
+// that owns its data, reassign the account, or withdraw that program's rent.
+func requireSystemOwnedAccount(address structure.PublicKey, context runtime.InstructionContext) error {
+	account := context.Accounts[address]
+	programID := context.Message.AccountKeys[context.Instruction.ProgramIDIndex]
+	if account.Owner != programID || account.Executable {
+		return fmt.Errorf("%w: system instruction requires a non-executable system-owned account", structure.ErrInvalidSystemInstruction)
+	}
 	return nil
 }

@@ -5,109 +5,18 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
 	ConsensusCodecVersion uint16 = 1
-	DefaultSlotDuration          = 400 * time.Millisecond
-	DefaultSkipTimeout           = 250 * time.Millisecond
 
 	maxConsensusTextLength      = 128
 	maxCertificateVoters        = 2048
 	maxConsensusContainerLength = 64 * 1024
 )
-
-// SlotClock 提供本地 slot 时钟 + 使用 time.Time 单调分量避免墙上时间回拨影响 slot 推进。
-type SlotClock struct {
-	startedAt    time.Time
-	initialSlot  uint64
-	slotDuration time.Duration
-	skipTimeout  time.Duration
-}
-
-// SlotTick 描述当前 slot 观测结果 + 让调用方决定是否广播 skip 投票。
-type SlotTick struct {
-	Slot          uint64
-	SlotStartedAt time.Time
-	SlotDeadline  time.Time
-	Elapsed       time.Duration
-	ShouldSkip    bool
-	Started       bool
-}
-
-// NewSlotClock 创建 slot 时钟 + 固定 slot 时间和 skip 超时必须显式校验。
-func NewSlotClock(startedAt time.Time, initialSlot uint64, slotDuration time.Duration, skipTimeout time.Duration) (*SlotClock, error) {
-	if startedAt.IsZero() {
-		return nil, fmt.Errorf("%w: started_at is zero", ErrInvalidClockConfig)
-	}
-	if slotDuration <= 0 {
-		return nil, fmt.Errorf("%w: slot duration must be positive", ErrInvalidClockConfig)
-	}
-	if skipTimeout <= 0 || skipTimeout > slotDuration {
-		return nil, fmt.Errorf("%w: skip timeout must be within slot duration", ErrInvalidClockConfig)
-	}
-
-	return &SlotClock{
-		startedAt:    startedAt,
-		initialSlot:  initialSlot,
-		slotDuration: slotDuration,
-		skipTimeout:  skipTimeout,
-	}, nil
-}
-
-// Tick 计算当前 slot + startedAt 和 now 来自 time.Now 时 Go 会优先使用单调时钟差值。
-func (clock *SlotClock) Tick(now time.Time) SlotTick {
-	elapsed := now.Sub(clock.startedAt)
-	started := true
-	if elapsed < 0 {
-		elapsed = 0
-		started = false
-	}
-
-	slotOffset := uint64(elapsed / clock.slotDuration)
-	slot := clock.initialSlot + slotOffset
-	if slot < clock.initialSlot {
-		slot = ^uint64(0)
-	}
-	slotElapsed := elapsed - time.Duration(slotOffset)*clock.slotDuration
-	if slotElapsed < 0 {
-		slotElapsed = 0
-	}
-
-	slotStartedAt := clock.SlotStart(slot)
-	slotDeadline := slotStartedAt.Add(clock.skipTimeout)
-	return SlotTick{
-		Slot:          slot,
-		SlotStartedAt: slotStartedAt,
-		SlotDeadline:  slotDeadline,
-		Elapsed:       slotElapsed,
-		ShouldSkip:    !now.Before(slotDeadline),
-		Started:       started,
-	}
-}
-
-// SlotStart 计算 slot 起始时间 + 统一由初始时间和固定 slot 时长推导。
-func (clock *SlotClock) SlotStart(slot uint64) time.Time {
-	if slot <= clock.initialSlot {
-		return clock.startedAt
-	}
-
-	slotOffset := slot - clock.initialSlot
-	maxOffset := uint64(time.Duration(1<<63-1) / clock.slotDuration)
-	if slotOffset > maxOffset {
-		return clock.startedAt.Add(time.Duration(1<<63 - 1))
-	}
-	return clock.startedAt.Add(time.Duration(slotOffset) * clock.slotDuration)
-}
-
-// SlotDeadline 计算 slot 超时时间 + skip 判断需要稳定的本地截止点。
-func (clock *SlotClock) SlotDeadline(slot uint64) time.Time {
-	return clock.SlotStart(slot).Add(clock.skipTimeout)
-}
 
 // VoteType 描述投票语义 + 区分正常区块确认和超时 skip 确认。
 type VoteType uint8
@@ -116,6 +25,7 @@ const (
 	VoteTypeUnknown VoteType = 0
 	VoteTypeConfirm VoteType = 1
 	VoteTypeSkip    VoteType = 2
+	VoteTypePrepare VoteType = 3
 )
 
 // Vote 描述验证者投票 + 通过 Borsh 在网络和存储之间复用同一套二进制格式。
@@ -131,7 +41,7 @@ type Vote struct {
 
 // Validate 校验投票输入 + 拒绝非法网络载荷进入共识路径。
 func (vote Vote) Validate() error {
-	if vote.Type != VoteTypeConfirm && vote.Type != VoteTypeSkip {
+	if vote.Type != VoteTypeConfirm && vote.Type != VoteTypeSkip && vote.Type != VoteTypePrepare {
 		return fmt.Errorf("%w: unknown vote type", ErrInvalidVote)
 	}
 	if strings.TrimSpace(vote.VoterID) == "" || len(vote.VoterID) > maxConsensusTextLength {
@@ -143,17 +53,17 @@ func (vote Vote) Validate() error {
 	if vote.CreatedAtUnixMilli <= 0 {
 		return fmt.Errorf("%w: created_at must be positive", ErrInvalidVote)
 	}
-	if vote.Type == VoteTypeConfirm && vote.BlockHash.IsZero() {
-		return fmt.Errorf("%w: confirm vote requires block hash", ErrInvalidVote)
+	if (vote.Type == VoteTypePrepare || vote.Type == VoteTypeConfirm) && vote.BlockHash.IsZero() {
+		return fmt.Errorf("%w: block vote requires block hash", ErrInvalidVote)
 	}
-	if vote.Type == VoteTypeConfirm && vote.BlockHeight == 0 {
-		return fmt.Errorf("%w: confirm vote requires block height", ErrInvalidVote)
+	if (vote.Type == VoteTypePrepare || vote.Type == VoteTypeConfirm) && vote.BlockHeight == 0 {
+		return fmt.Errorf("%w: block vote requires block height", ErrInvalidVote)
 	}
-	if vote.Type == VoteTypeSkip && !vote.BlockHash.IsZero() {
-		return fmt.Errorf("%w: skip vote requires empty block hash", ErrInvalidVote)
+	if vote.Type == VoteTypeSkip && vote.BlockHash.IsZero() {
+		return fmt.Errorf("%w: skip vote requires parent block hash", ErrInvalidVote)
 	}
-	if vote.Type == VoteTypeSkip && vote.BlockHeight != 0 {
-		return fmt.Errorf("%w: skip vote requires empty block height", ErrInvalidVote)
+	if vote.Type == VoteTypeSkip && vote.BlockHeight == 0 {
+		return fmt.Errorf("%w: skip vote requires target block height", ErrInvalidVote)
 	}
 	return nil
 }
@@ -237,13 +147,14 @@ func UnmarshalVoteBinary(data []byte) (Vote, error) {
 	return vote, vote.Validate()
 }
 
-// Quorum 描述确认阈值 + 使用整数分数避免浮点误差。
+// Quorum 描述确认阈值 + Strict 表示权益必须严格大于该分数。
 type Quorum struct {
 	Numerator   uint64
 	Denominator uint64
+	Strict      bool
 }
 
-// RequiredStake 计算需要的 stake + 向上取整保证阈值不会被低估。
+// RequiredStake 计算需要的 stake + 普通阈值向上取整，严格阈值取 floor 后加一。
 func (quorum Quorum) RequiredStake(totalStake uint64) (uint64, error) {
 	if quorum.Numerator == 0 || quorum.Denominator == 0 {
 		return 0, fmt.Errorf("%w: zero value", ErrInvalidQuorum)
@@ -258,6 +169,9 @@ func (quorum Quorum) RequiredStake(totalStake uint64) (uint64, error) {
 	maxUint64 := ^uint64(0)
 	if totalStake > (maxUint64-quorum.Denominator+1)/quorum.Numerator {
 		return 0, fmt.Errorf("%w: stake overflow", ErrInvalidQuorum)
+	}
+	if quorum.Strict {
+		return totalStake*quorum.Numerator/quorum.Denominator + 1, nil
 	}
 	return (totalStake*quorum.Numerator + quorum.Denominator - 1) / quorum.Denominator, nil
 }
@@ -279,20 +193,20 @@ type QuorumCertificate struct {
 
 // Validate 校验证书字段 + 防止伪造或不完整 QC 被上层接受。
 func (certificate QuorumCertificate) Validate() error {
-	if certificate.Type != VoteTypeConfirm && certificate.Type != VoteTypeSkip {
+	if certificate.Type != VoteTypeConfirm && certificate.Type != VoteTypeSkip && certificate.Type != VoteTypePrepare {
 		return fmt.Errorf("%w: unknown certificate type", ErrInvalidCertificate)
 	}
-	if certificate.Type == VoteTypeConfirm && certificate.BlockHash.IsZero() {
-		return fmt.Errorf("%w: confirm certificate requires block hash", ErrInvalidCertificate)
+	if (certificate.Type == VoteTypePrepare || certificate.Type == VoteTypeConfirm) && certificate.BlockHash.IsZero() {
+		return fmt.Errorf("%w: block certificate requires block hash", ErrInvalidCertificate)
 	}
-	if certificate.Type == VoteTypeConfirm && certificate.BlockHeight == 0 {
-		return fmt.Errorf("%w: confirm certificate requires block height", ErrInvalidCertificate)
+	if (certificate.Type == VoteTypePrepare || certificate.Type == VoteTypeConfirm) && certificate.BlockHeight == 0 {
+		return fmt.Errorf("%w: block certificate requires block height", ErrInvalidCertificate)
 	}
-	if certificate.Type == VoteTypeSkip && !certificate.BlockHash.IsZero() {
-		return fmt.Errorf("%w: skip certificate requires empty block hash", ErrInvalidCertificate)
+	if certificate.Type == VoteTypeSkip && certificate.BlockHash.IsZero() {
+		return fmt.Errorf("%w: skip certificate requires parent block hash", ErrInvalidCertificate)
 	}
-	if certificate.Type == VoteTypeSkip && certificate.BlockHeight != 0 {
-		return fmt.Errorf("%w: skip certificate requires empty block height", ErrInvalidCertificate)
+	if certificate.Type == VoteTypeSkip && certificate.BlockHeight == 0 {
+		return fmt.Errorf("%w: skip certificate requires target block height", ErrInvalidCertificate)
 	}
 	if certificate.ThresholdStake == 0 || certificate.ConfirmedStake < certificate.ThresholdStake {
 		return fmt.Errorf("%w: insufficient stake", ErrInvalidCertificate)
@@ -377,31 +291,55 @@ func UnmarshalCertificateBinary(data []byte) (QuorumCertificate, error) {
 
 // VoteCollector 聚合本地投票 + 用可信 stake 表而不是网络载荷决定投票权重。
 type VoteCollector struct {
-	mutex          sync.Mutex
-	validatorStake map[string]uint64
-	thresholdStake uint64
-	totalStake     uint64
-	buckets        map[voteKey]*voteBucket
-	voterChoices   map[voterChoiceKey]structure.Hash
+	mutex                 sync.Mutex
+	validatorStake        map[string]uint64
+	confirmThresholdStake uint64
+	timeoutThresholdStake uint64
+	totalStake            uint64
+	buckets               map[voteKey]*voteBucket
+	voterChoices          map[voterChoiceKey]voteChoice
 }
 
 // NewVoteCollector 创建投票聚合器 + 验证者 stake 表是确认阈值的信任根。
 func NewVoteCollector(validatorStake map[string]uint64, quorum Quorum) (*VoteCollector, error) {
+	return NewVoteCollectorWithQuorums(validatorStake, quorum, quorum)
+}
+
+// NewVoteCollectorWithQuorums 为确认票和超时票配置独立阈值。
+// 两类证书的最小交集必须严格大于最大拜占庭权益，避免恶意双签者独占交集。
+func NewVoteCollectorWithQuorums(
+	validatorStake map[string]uint64,
+	confirmQuorum Quorum,
+	timeoutQuorum Quorum,
+) (*VoteCollector, error) {
 	normalizedStake, totalStake, err := normalizeValidatorStake(validatorStake)
 	if err != nil {
 		return nil, err
 	}
-	thresholdStake, err := quorum.RequiredStake(totalStake)
+	confirmThresholdStake, err := confirmQuorum.RequiredStake(totalStake)
 	if err != nil {
 		return nil, err
 	}
+	timeoutThresholdStake, err := timeoutQuorum.RequiredStake(totalStake)
+	if err != nil {
+		return nil, err
+	}
+	intersectionStake := uint64(0)
+	if confirmThresholdStake > totalStake-timeoutThresholdStake {
+		intersectionStake = confirmThresholdStake - (totalStake - timeoutThresholdStake)
+	}
+	maximumByzantineStake := (totalStake - 1) / 3
+	if intersectionStake <= maximumByzantineStake {
+		return nil, fmt.Errorf("%w: confirm and timeout thresholds lack an honest intersection", ErrInvalidQuorum)
+	}
 
 	return &VoteCollector{
-		validatorStake: normalizedStake,
-		thresholdStake: thresholdStake,
-		totalStake:     totalStake,
-		buckets:        make(map[voteKey]*voteBucket),
-		voterChoices:   make(map[voterChoiceKey]structure.Hash),
+		validatorStake:        normalizedStake,
+		confirmThresholdStake: confirmThresholdStake,
+		timeoutThresholdStake: timeoutThresholdStake,
+		totalStake:            totalStake,
+		buckets:               make(map[voteKey]*voteBucket),
+		voterChoices:          make(map[voterChoiceKey]voteChoice),
 	}, nil
 }
 
@@ -437,9 +375,14 @@ func (collector *VoteCollector) addVote(vote Vote, blsSignature []byte, validato
 		return QuorumCertificate{}, false, fmt.Errorf("%w: stake mismatch", ErrInvalidVote)
 	}
 
-	choiceKey := voterChoiceKey{slot: vote.Slot, voteType: vote.Type, voterID: vote.VoterID}
-	if existingHash, exists := collector.voterChoices[choiceKey]; exists {
-		return QuorumCertificate{}, false, duplicateOrConflictError(existingHash, vote.BlockHash)
+	choiceKey := voterChoiceKey{slot: vote.Slot, phase: votePhaseForChoice(vote.Type), voterID: vote.VoterID}
+	if existingChoice, exists := collector.voterChoices[choiceKey]; exists {
+		if existingChoice.voteType == vote.Type &&
+			existingChoice.blockHeight == vote.BlockHeight &&
+			existingChoice.blockHash == vote.BlockHash {
+			return QuorumCertificate{}, false, ErrDuplicateVote
+		}
+		return QuorumCertificate{}, false, ErrConflictingVote
 	}
 
 	key := voteKey{slot: vote.Slot, voteType: vote.Type, blockHash: vote.BlockHash}
@@ -447,6 +390,7 @@ func (collector *VoteCollector) addVote(vote Vote, blsSignature []byte, validato
 	if bucket.blockHeight != 0 && bucket.blockHeight != vote.BlockHeight {
 		return QuorumCertificate{}, false, fmt.Errorf("%w: block height mismatch", ErrInvalidVote)
 	}
+	previousStake := bucket.stake
 	bucket.stake += registeredStake
 	bucket.blockHeight = vote.BlockHeight
 	bucket.voters[vote.VoterID] = struct{}{}
@@ -456,12 +400,22 @@ func (collector *VoteCollector) addVote(vote Vote, blsSignature []byte, validato
 	if vote.CreatedAtUnixMilli > bucket.createdAtUnixMilli {
 		bucket.createdAtUnixMilli = vote.CreatedAtUnixMilli
 	}
-	collector.voterChoices[choiceKey] = vote.BlockHash
+	collector.voterChoices[choiceKey] = voteChoice{
+		voteType:    vote.Type,
+		blockHeight: vote.BlockHeight,
+		blockHash:   vote.BlockHash,
+	}
 
-	if bucket.stake < collector.thresholdStake {
+	thresholdStake := collector.thresholdStakeForVoteType(vote.Type)
+	if bucket.stake < thresholdStake {
 		return QuorumCertificate{}, false, nil
 	}
-	certificate := collector.certificate(key, bucket)
+	// 首次跨过法定人数时立即形成 QC 以推进共识；之后只在收齐全体权重时再形成一次
+	// 完整 QC 供奖励统计使用，避免每增加一票都重新聚合并广播证书。
+	if previousStake >= thresholdStake && bucket.stake < collector.totalStake {
+		return QuorumCertificate{}, false, nil
+	}
+	certificate := collector.certificate(key, bucket, thresholdStake)
 	if len(validatorOrder) == 0 || len(bucket.blsSignatures) != len(bucket.voters) {
 		return certificate, true, nil
 	}
@@ -476,7 +430,14 @@ func (collector *VoteCollector) addVote(vote Vote, blsSignature []byte, validato
 func (collector *VoteCollector) ThresholdStake() uint64 {
 	collector.mutex.Lock()
 	defer collector.mutex.Unlock()
-	return collector.thresholdStake
+	return collector.confirmThresholdStake
+}
+
+// ThresholdStakeForVoteType 返回指定阶段的证书阈值。
+func (collector *VoteCollector) ThresholdStakeForVoteType(voteType VoteType) uint64 {
+	collector.mutex.Lock()
+	defer collector.mutex.Unlock()
+	return collector.thresholdStakeForVoteType(voteType)
 }
 
 // TotalStake 返回总 stake + 用于确认阈值和日志展示。
@@ -493,9 +454,29 @@ type voteKey struct {
 }
 
 type voterChoiceKey struct {
-	slot     uint64
-	voteType VoteType
-	voterID  string
+	slot    uint64
+	phase   votePhase
+	voterID string
+}
+
+type votePhase uint8
+
+const (
+	votePhasePrepare votePhase = iota + 1
+	votePhaseDecision
+)
+
+func votePhaseForChoice(voteType VoteType) votePhase {
+	if voteType == VoteTypePrepare {
+		return votePhasePrepare
+	}
+	return votePhaseDecision
+}
+
+type voteChoice struct {
+	voteType    VoteType
+	blockHeight uint64
+	blockHash   structure.Hash
 }
 
 type voteBucket struct {
@@ -519,7 +500,14 @@ func (collector *VoteCollector) bucket(key voteKey) *voteBucket {
 	return bucket
 }
 
-func (collector *VoteCollector) certificate(key voteKey, bucket *voteBucket) QuorumCertificate {
+func (collector *VoteCollector) thresholdStakeForVoteType(voteType VoteType) uint64 {
+	if voteType == VoteTypeSkip {
+		return collector.timeoutThresholdStake
+	}
+	return collector.confirmThresholdStake
+}
+
+func (collector *VoteCollector) certificate(key voteKey, bucket *voteBucket, thresholdStake uint64) QuorumCertificate {
 	voters := make([]string, 0, len(bucket.voters))
 	for voterID := range bucket.voters {
 		voters = append(voters, voterID)
@@ -530,7 +518,7 @@ func (collector *VoteCollector) certificate(key voteKey, bucket *voteBucket) Quo
 		Slot:               key.slot,
 		BlockHeight:        bucket.blockHeight,
 		BlockHash:          key.blockHash,
-		ThresholdStake:     collector.thresholdStake,
+		ThresholdStake:     thresholdStake,
 		ConfirmedStake:     bucket.stake,
 		Voters:             voters,
 		CreatedAtUnixMilli: bucket.createdAtUnixMilli,
@@ -628,13 +616,6 @@ func normalizeValidatorStake(validatorStake map[string]uint64) (map[string]uint6
 		totalStake += stake
 	}
 	return normalized, totalStake, nil
-}
-
-func duplicateOrConflictError(existingHash structure.Hash, incomingHash structure.Hash) error {
-	if existingHash == incomingHash {
-		return ErrDuplicateVote
-	}
-	return ErrConflictingVote
 }
 
 func validateVoterList(voters []string) error {

@@ -4,21 +4,27 @@ import (
 	"bytes"
 	"fmt"
 
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
-// Program 执行可执行程序账户 + 作为未来 Solana SBF 后端接入点。
+// Program 执行可执行程序账户 + 作为未来 Ordexus SBF 后端接入点。
 type Program struct {
 	LoaderProgram structure.PublicKey
-	Runtime       svm.Runtime
+	Runtime       ovm.Runtime
+	InvokeProgram runtime.ProgramHandler
 }
 
 // NewProgram 创建 VM 兜底程序 + 未注册固定程序时由 runtime 调用。
-func NewProgram(loaderProgram structure.PublicKey, runtimeValue svm.Runtime) Program {
+func NewProgram(loaderProgram structure.PublicKey, runtimeValue ovm.Runtime) Program {
 	return Program{LoaderProgram: loaderProgram, Runtime: runtimeValue}
+}
+
+// NewProgramWithInvoker 创建支持 CPI 的 VM 适配器 + 嵌套调用继续走节点统一程序注册表。
+func NewProgramWithInvoker(loaderProgram structure.PublicKey, runtimeValue ovm.Runtime, invokeProgram runtime.ProgramHandler) Program {
+	return Program{LoaderProgram: loaderProgram, Runtime: runtimeValue, InvokeProgram: invokeProgram}
 }
 
 // ProgramID 返回零值 + VM 适配器只作为 fallback 使用。
@@ -26,28 +32,29 @@ func (program Program) ProgramID() structure.PublicKey {
 	return structure.PublicKey{}
 }
 
-// Execute 执行 VM 程序 + 保持交易格式为 Solana CompiledInstruction。
+// Execute 执行 VM 程序 + 保持交易格式为 Ordexus CompiledInstruction。
 func (program Program) Execute(context runtime.InstructionContext) error {
 	programID, programAccount, err := loadProgramAccount(program, context)
 	if err != nil {
 		return err
 	}
-	return executeProgramAccount(program.Runtime, program.loaderProgram(context.BuiltinPrograms), programID, programAccount, context)
+	return executeProgramAccount(program.Runtime, program.loaderProgram(context.BuiltinPrograms), program.InvokeProgram, programID, programAccount, context)
 }
 
 func executeProgramAccount(
-	runtimeValue svm.Runtime,
+	runtimeValue ovm.Runtime,
 	loaderProgram structure.PublicKey,
+	invokeProgram runtime.ProgramHandler,
 	programID structure.PublicKey,
-	programAccount svm.ProgramAccount,
+	programAccount ovm.ProgramAccount,
 	context runtime.InstructionContext,
 ) error {
 	vmAccounts, err := buildInstructionAccounts(context)
 	if err != nil {
 		return err
 	}
-	if runtimeValue.LoaderID == (svm.Address{}) {
-		runtimeValue = svm.NewRuntime(vmAddressFromPublicKey(loaderProgram))
+	if runtimeValue.LoaderID == (ovm.Address{}) {
+		runtimeValue = ovm.NewRuntime(vmAddressFromPublicKey(loaderProgram))
 	}
 	if err := attachStakePoolSyscall(&runtimeValue, context); err != nil {
 		return err
@@ -55,16 +62,19 @@ func executeProgramAccount(
 	if err := attachAssetSyscall(&runtimeValue, context); err != nil {
 		return err
 	}
-	result, err := runtimeValue.Execute(svm.Invocation{
+	if invokeProgram != nil {
+		runtimeValue.CPI = newContractCPIRuntime(context, invokeProgram)
+	}
+	result, err := runtimeValue.Execute(ovm.Invocation{
 		ProgramID:       vmAddressFromPublicKey(programID),
 		ProgramAccount:  programAccount,
 		Accounts:        vmAccounts,
 		InstructionData: utils.CloneBytes(context.Instruction.Data),
 		CurrentSlot:     context.CurrentSlot,
 		ComputeLimit:    context.ComputeBudget.MaxComputeUnits,
-		Sysvars: svm.Sysvars{
-			Clock: svm.ClockSysvar{Slot: context.CurrentSlot},
-			Rent: svm.RentSysvar{
+		Sysvars: ovm.Sysvars{
+			Clock: ovm.ClockSysvar{Slot: context.CurrentSlot},
+			Rent: ovm.RentSysvar{
 				LamportsPerByteYear:        context.RentConfig.LamportsPerByteYear,
 				ExemptionThresholdYears:    context.RentConfig.ExemptionThresholdYears,
 				AccountStorageOverheadSize: context.RentConfig.AccountStorageOverheadSize,
@@ -77,19 +87,34 @@ func executeProgramAccount(
 	if context.ComputeUnitsUsed != nil {
 		*context.ComputeUnitsUsed += result.UnitsConsumed
 	}
+	appendVMExecutionTrace(context.ExecutionTrace, result)
 	return writeResultAccounts(result.Accounts, context)
 }
 
-func loadProgramAccount(program Program, context runtime.InstructionContext) (structure.PublicKey, svm.ProgramAccount, error) {
+func appendVMExecutionTrace(trace *runtime.ProgramExecutionTrace, result ovm.Result) {
+	if trace == nil {
+		return
+	}
+	trace.LogMessages = append(trace.LogMessages, result.Logs...)
+	if result.ReturnData == nil {
+		return
+	}
+	trace.ReturnData = &structure.TransactionReturnData{
+		ProgramID: publicKeyFromVMAddress(result.ReturnData.ProgramID),
+		Data:      utils.CloneBytes(result.ReturnData.Data),
+	}
+}
+
+func loadProgramAccount(program Program, context runtime.InstructionContext) (structure.PublicKey, ovm.ProgramAccount, error) {
 	if int(context.Instruction.ProgramIDIndex) >= len(context.Message.AccountKeys) {
-		return structure.PublicKey{}, svm.ProgramAccount{}, fmt.Errorf("%w: vm program index out of range", structure.ErrInvalidInstruction)
+		return structure.PublicKey{}, ovm.ProgramAccount{}, fmt.Errorf("%w: vm program index out of range", structure.ErrInvalidInstruction)
 	}
 	programID := context.Message.AccountKeys[context.Instruction.ProgramIDIndex]
 	account, exists := context.Accounts[programID]
 	if !exists {
-		return structure.PublicKey{}, svm.ProgramAccount{}, fmt.Errorf("%w: vm program account not found", structure.ErrInvalidLoadedTransaction)
+		return structure.PublicKey{}, ovm.ProgramAccount{}, fmt.Errorf("%w: vm program account not found", structure.ErrInvalidLoadedTransaction)
 	}
-	return programID, svm.ProgramAccount{
+	return programID, ovm.ProgramAccount{
 		Address:    vmAddressFromPublicKey(programID),
 		Owner:      vmAddressFromPublicKey(account.Owner),
 		Executable: account.Executable,
@@ -97,8 +122,8 @@ func loadProgramAccount(program Program, context runtime.InstructionContext) (st
 	}, nil
 }
 
-func buildInstructionAccounts(context runtime.InstructionContext) ([]svm.Account, error) {
-	accounts := make([]svm.Account, len(context.Instruction.AccountIndexes))
+func buildInstructionAccounts(context runtime.InstructionContext) ([]ovm.Account, error) {
+	accounts := make([]ovm.Account, len(context.Instruction.AccountIndexes))
 	for index, messageAccountIndex := range context.Instruction.AccountIndexes {
 		account, err := buildInstructionAccount(context, int(messageAccountIndex))
 		if err != nil {
@@ -109,28 +134,28 @@ func buildInstructionAccounts(context runtime.InstructionContext) ([]svm.Account
 	return accounts, nil
 }
 
-func buildInstructionAccount(context runtime.InstructionContext, messageAccountIndex int) (svm.Account, error) {
+func buildInstructionAccount(context runtime.InstructionContext, messageAccountIndex int) (ovm.Account, error) {
 	if messageAccountIndex < 0 || messageAccountIndex >= len(context.Message.AccountKeys) {
-		return svm.Account{}, fmt.Errorf("%w: vm account index %d out of range", structure.ErrInvalidInstruction, messageAccountIndex)
+		return ovm.Account{}, fmt.Errorf("%w: vm account index %d out of range", structure.ErrInvalidInstruction, messageAccountIndex)
 	}
 	address := context.Message.AccountKeys[messageAccountIndex]
 	account, exists := context.Accounts[address]
 	if !exists {
-		return svm.Account{}, fmt.Errorf("%w: vm account %s not found", structure.ErrInvalidLoadedTransaction, address.String())
+		return ovm.Account{}, fmt.Errorf("%w: vm account %s not found", structure.ErrInvalidLoadedTransaction, address.String())
 	}
-	return svm.Account{
+	return ovm.Account{
 		Address:    vmAddressFromPublicKey(address),
 		Lamports:   account.Lamports,
 		Data:       utils.CloneBytes(account.Data),
 		Owner:      vmAddressFromPublicKey(account.Owner),
 		Executable: account.Executable,
 		RentEpoch:  account.RentEpoch,
-		IsSigner:   runtime.IsSignerAddress(address, context.Message),
+		IsSigner:   runtime.IsSignerContextAddress(address, context),
 		IsWritable: runtime.IsWritableMessageAccount(messageAccountIndex, context.Message),
 	}, nil
 }
 
-func writeResultAccounts(vmAccounts []svm.Account, context runtime.InstructionContext) error {
+func writeResultAccounts(vmAccounts []ovm.Account, context runtime.InstructionContext) error {
 	for _, vmAccount := range vmAccounts {
 		address := publicKeyFromVMAddress(vmAccount.Address)
 		account, exists := context.Accounts[address]
@@ -160,13 +185,13 @@ func (program Program) loaderProgram(programIDs structure.BuiltinProgramIDs) str
 	return programIDs.BPFLoader
 }
 
-func vmAddressFromPublicKey(publicKey structure.PublicKey) svm.Address {
-	var address svm.Address
+func vmAddressFromPublicKey(publicKey structure.PublicKey) ovm.Address {
+	var address ovm.Address
 	copy(address[:], publicKey[:])
 	return address
 }
 
-func publicKeyFromVMAddress(address svm.Address) structure.PublicKey {
+func publicKeyFromVMAddress(address ovm.Address) structure.PublicKey {
 	var publicKey structure.PublicKey
 	copy(publicKey[:], address[:])
 	return publicKey

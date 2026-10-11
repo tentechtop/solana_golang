@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // normalizeDialTimeout 归一化拨号超时 + 防止零值导致拨号永久阻塞。

@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"solana_golang/blockchain"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type chainIdentityPayload struct {
@@ -20,6 +20,7 @@ type chainIdentityPayload struct {
 	SlotMillis                    int    `json:"slot_millis"`
 	EpochSlots                    uint64 `json:"epoch_slots"`
 	FinalityDepth                 uint64 `json:"finality_depth"`
+	MultiValidatorThreshold       int    `json:"multi_validator_threshold"`
 	TurbineFanout                 int    `json:"turbine_fanout"`
 	TransactionLeaderForwardSlots int    `json:"transaction_leader_forward_slots"`
 	TransactionForwardValidators  bool   `json:"transaction_forward_validators"`
@@ -47,6 +48,7 @@ func enrichNodeChainIdentity(config nodeConfig) (nodeConfig, error) {
 		SlotMillis:                    config.SlotMillis,
 		EpochSlots:                    config.EpochSlots,
 		FinalityDepth:                 config.FinalityDepth,
+		MultiValidatorThreshold:       config.ConsensusPolicy.MultiValidatorThreshold,
 		TurbineFanout:                 config.TurbineFanout,
 		TransactionLeaderForwardSlots: config.TransactionLeaderForwardSlots,
 		TransactionForwardValidators:  config.forwardTransactionsToValidators(),

@@ -7,8 +7,8 @@ import (
 	"math"
 	"math/big"
 
-	"solana_golang/structure"
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 // SpendInput 是钱包本地持有的可花费 note + 节点只会看到其 nullifier 和零知识证明。
@@ -28,7 +28,7 @@ type NoteOutput struct {
 
 // TransparentInput 描述 t→z 的透明输入 + 该账户同时支付透明手续费。
 type TransparentInput struct {
-	Account structure.SolanaKeyPair
+	Account structure.OrdexusKeyPair
 	Amount  uint64
 }
 
@@ -45,7 +45,7 @@ type TransferRequest struct {
 	Outputs             []NoteOutput
 	TransparentInput    *TransparentInput
 	TransparentOutput   *TransparentOutput
-	TransparentFeePayer *structure.SolanaKeyPair
+	TransparentFeePayer *structure.OrdexusKeyPair
 	RecentBlockhash     structure.Blockhash
 	FeeCalculator       structure.FeeCalculator
 	Parameters          *zk.ShieldedCircuitParameters
@@ -235,7 +235,7 @@ func BuildTransfer(request TransferRequest) (TransferResult, error) {
 		Accounts:        messageAccounts,
 		Instructions:    []structure.CompiledInstruction{compiledInstruction},
 		RecentBlockhash: request.RecentBlockhash,
-	}).SolanaMessage()
+	}).OrdexusMessage()
 	if err != nil {
 		return TransferResult{}, err
 	}
@@ -430,7 +430,7 @@ func populatePublicWitness(assignment *zk.ShieldedCircuit, bundle structure.Shie
 	return nil
 }
 
-func buildTransferAccounts(request TransferRequest, actions []structure.ShieldedAction, signer *structure.SolanaKeyPair) ([]structure.AccountMeta, []structure.PublicKey, error) {
+func buildTransferAccounts(request TransferRequest, actions []structure.ShieldedAction, signer *structure.OrdexusKeyPair) ([]structure.AccountMeta, []structure.PublicKey, error) {
 	orderedInstructionAccounts := []structure.PublicKey{structure.DefaultShieldedPoolAddress}
 	messageAccounts := make([]structure.AccountMeta, 0, 6)
 	if signer != nil {
@@ -461,7 +461,7 @@ func buildTransferAccounts(request TransferRequest, actions []structure.Shielded
 	return structure.SortAccountMetasForMessage(mergedAccounts), orderedInstructionAccounts, nil
 }
 
-func transferFeeSource(request TransferRequest) (structure.FeePaymentSource, *structure.SolanaKeyPair, int, error) {
+func transferFeeSource(request TransferRequest) (structure.FeePaymentSource, *structure.OrdexusKeyPair, int, error) {
 	if request.TransparentInput != nil {
 		if len(request.TransparentInput.Account.PrivateKey) == 0 {
 			return 0, nil, 0, fmt.Errorf("shielded: transparent input private key is missing")

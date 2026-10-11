@@ -1,6 +1,6 @@
 package vm
 
-import "solana_golang/utils"
+import "github.com/tentechtop/ordexus-core/utils"
 
 const (
 	AddressSize                   = 32
@@ -23,10 +23,10 @@ const (
 	RegisterMaxMemoryAccessSize   = 4096
 )
 
-// Address 表示 VM 内部地址 + 使用固定 32 字节对齐 Solana 公钥。
+// Address 表示 VM 内部地址 + 使用固定 32 字节对齐 Ordexus 公钥。
 type Address [AddressSize]byte
 
-// Account 表示 VM 可见账户 + 保留 Solana AccountInfo 执行所需字段。
+// Account 表示 VM 可见账户 + 保留 Ordexus AccountInfo 执行所需字段。
 type Account struct {
 	Address    Address
 	Lamports   uint64
@@ -46,7 +46,7 @@ type ProgramAccount struct {
 	Data       []byte
 }
 
-// Invocation 描述一次程序调用 + 由 Solana instruction 映射而来。
+// Invocation 描述一次程序调用 + 由 Ordexus instruction 映射而来。
 type Invocation struct {
 	ProgramID       Address
 	ProgramAccount  ProgramAccount
@@ -85,7 +85,7 @@ type Sysvars struct {
 	Rent  RentSysvar
 }
 
-// ReturnData 描述程序返回数据 + 对齐 Solana return data 模型。
+// ReturnData 描述程序返回数据 + 对齐 Ordexus return data 模型。
 type ReturnData struct {
 	ProgramID Address
 	Data      []byte

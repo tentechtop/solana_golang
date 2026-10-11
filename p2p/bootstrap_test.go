@@ -7,9 +7,47 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
+
+func TestBootstrapReusesExistingBootnodeConnectionForDiscovery(t *testing.T) {
+	localPeerID := testPeerID(84)
+	bootnodePeerID := testPeerID(85)
+	host, err := NewHost(HostConfig{
+		PeerID:        localPeerID,
+		AllowInsecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	connection := newRequestResponderConnection(bootnodePeerID, localPeerID)
+	setHostConnectionForTest(host, bootnodePeerID, connection)
+	contextValue, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go host.HandleConnection(contextValue, connection)
+
+	address := testAddress(t, utils.ProtocolTCP, 5084, bootnodePeerID)
+	summary, err := host.Bootstrap(contextValue, BootstrapConfig{
+		Bootnodes:            []utils.MultiAddress{address},
+		QueryLimit:           8,
+		RefreshTargetCount:   1,
+		DialTimeout:          time.Second,
+		StartConnectionLoops: true,
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if summary.ConnectedBootnodes != 1 || summary.FindNodeQueryCount != 1 || summary.FindNodeFailureCount != 0 {
+		t.Fatalf("bootstrap summary = %+v, want existing connection queried successfully", summary)
+	}
+	if written := connection.waitWrite(t); written.Type != ProtocolFindNodeRequestV1 {
+		t.Fatalf("bootstrap message type = %d, want find-node request", written.Type)
+	}
+}
 
 func TestHostListenSkipsWildcardAdvertisementWithoutWarning(t *testing.T) {
 	peerID := testPeerID(80)

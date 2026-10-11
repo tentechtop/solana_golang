@@ -3,7 +3,7 @@ package structure
 import (
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // SignatureVerification 描述签名校验结果 + 为交易池拒绝原因和日志提供明确上下文。
@@ -36,7 +36,7 @@ func VerifyMessageSignature(publicKey PublicKey, message []byte, signature Signa
 
 // VerifySignatures 校验交易签名 + 按消息账户顺序校验前 N 个签名账户。
 func (transaction Transaction) VerifySignatures() ([]SignatureVerification, error) {
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (transaction Transaction) HasValidSignatures() (bool, error) {
 
 // Sign 使用账户私钥签署交易 + 按消息签名账户顺序生成签名列表。
 func (transaction Transaction) Sign(privateKeys map[PublicKey][]byte) (Transaction, error) {
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return Transaction{}, err
 	}

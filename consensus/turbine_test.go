@@ -3,9 +3,9 @@ package consensus
 import (
 	"testing"
 
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestTurbineTreeLayersAndChildren(t *testing.T) {
@@ -166,9 +166,9 @@ func newTurbineTestSnapshot(t *testing.T, count int) EpochSnapshot {
 	return snapshot
 }
 
-func turbineTestKeyPair(t *testing.T, seed byte) structure.SolanaKeyPair {
+func turbineTestKeyPair(t *testing.T, seed byte) structure.OrdexusKeyPair {
 	t.Helper()
-	value := make([]byte, structure.SolanaPrivateKeySeedSize)
+	value := make([]byte, structure.OrdexusPrivateKeySeedSize)
 	for index := range value {
 		value[index] = seed + byte(index)
 	}

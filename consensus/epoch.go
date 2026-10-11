@@ -3,8 +3,8 @@ package consensus
 import (
 	"fmt"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // EpochConfig 描述 epoch 参数 + 固定 slot 数和 quorum 使本地测试可复现。
@@ -28,6 +28,9 @@ type EpochSnapshot struct {
 func NewEpochSnapshot(epochID uint64, startSlot uint64, epochSlots uint64, seed structure.Hash, set ValidatorSet) (EpochSnapshot, error) {
 	if epochSlots == 0 {
 		return EpochSnapshot{}, fmt.Errorf("%w: epoch slots is zero", ErrInvalidQuorum)
+	}
+	if startSlot > ^uint64(0)-(epochSlots-1) {
+		return EpochSnapshot{}, fmt.Errorf("%w: epoch slot range overflows", ErrInvalidQuorum)
 	}
 
 	activeValidators := set.ActiveValidators(epochID)
@@ -56,6 +59,32 @@ func NewEpochSnapshot(epochID uint64, startSlot uint64, epochSlots uint64, seed 
 		Validators:        activeValidators,
 		SnapshotStateRoot: stateRoot,
 	}, nil
+}
+
+// Validate 重算 epoch 快照承诺，防止验证者地址、公钥或权重被替换后继续用于奖励和处罚。
+func (snapshot EpochSnapshot) Validate() error {
+	if snapshot.EndSlot < snapshot.StartSlot || snapshot.EndSlot-snapshot.StartSlot == ^uint64(0) {
+		return fmt.Errorf("consensus: invalid epoch snapshot slot range")
+	}
+	validatorSet, err := NewValidatorSet(snapshot.Validators)
+	if err != nil {
+		return err
+	}
+	recomputed, err := NewEpochSnapshot(
+		snapshot.EpochID,
+		snapshot.StartSlot,
+		snapshot.EndSlot-snapshot.StartSlot+1,
+		snapshot.RandomSeed,
+		validatorSet,
+	)
+	if err != nil {
+		return err
+	}
+	if recomputed.TotalActiveStake != snapshot.TotalActiveStake ||
+		recomputed.SnapshotStateRoot != snapshot.SnapshotStateRoot {
+		return fmt.Errorf("consensus: epoch snapshot commitment mismatch")
+	}
+	return nil
 }
 
 // StakeMap 返回快照 stake 表 + 防止投票消息自报权重。
@@ -108,10 +137,16 @@ func hashEpochSnapshot(epochID uint64, startSlot uint64, epochSlots uint64, seed
 	encoded = append(encoded, seed[:]...)
 	for _, validator := range validators {
 		encoded = append(encoded, []byte(validator.ValidatorID)...)
+		encoded = append(encoded, validator.AccountAddress[:]...)
 		encoded = append(encoded, validator.ConsensusPublicKey[:]...)
 		encoded = appendUint64ForHash(encoded, uint64(len(validator.BLSPublicKey)))
 		encoded = append(encoded, validator.BLSPublicKey...)
+		encoded = appendUint64ForHash(encoded, uint64(len(validator.P2PPeerID)))
+		encoded = append(encoded, []byte(validator.P2PPeerID)...)
 		encoded = appendUint64ForHash(encoded, validator.StakeLamports)
+		encoded = append(encoded, byte(validator.Status))
+		encoded = appendUint64ForHash(encoded, uint64(validator.CommissionBps))
+		encoded = appendUint64ForHash(encoded, validator.JailUntilEpoch)
 	}
 	return structure.NewHash(utils.SHA256(encoded))
 }

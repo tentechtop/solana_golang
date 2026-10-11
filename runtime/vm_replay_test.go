@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	svm "solana_golang/vm"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestVirtualMachineReplayIsDeterministicAcrossNodes(t *testing.T) {
@@ -62,9 +62,9 @@ func TestVirtualMachineReplayIsDeterministicAcrossNodes(t *testing.T) {
 
 func mustGovernedWriteInstructionDataProgram(t *testing.T) []byte {
 	t.Helper()
-	programData, err := svm.EncodeGovernedBytecode(
-		svm.BuildProgramCode(svm.BuildWriteInstructionDataOp(0, 0)),
-		svm.ProgramManifest{ComputeUnitLimit: svm.DefaultComputeUnitLimit},
+	programData, err := ovm.EncodeGovernedBytecode(
+		ovm.BuildProgramCode(ovm.BuildWriteInstructionDataOp(0, 0)),
+		ovm.ProgramManifest{ComputeUnitLimit: ovm.DefaultComputeUnitLimit},
 	)
 	if err != nil {
 		t.Fatalf("EncodeGovernedBytecode() error = %v", err)

@@ -3,7 +3,7 @@ package structure
 import (
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // NewCompiledInstruction 创建已编译指令 + 复制输入切片防止外部修改。

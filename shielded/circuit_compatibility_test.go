@@ -6,8 +6,8 @@ import (
 	"math/big"
 	"testing"
 
-	"solana_golang/structure"
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 func TestWalletPrimitivesMatchShieldedCircuit(t *testing.T) {

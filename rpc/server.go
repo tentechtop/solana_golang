@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (

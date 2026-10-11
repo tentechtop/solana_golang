@@ -6,10 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"unicode/utf8"
 
-	"solana_golang/schema"
+	"github.com/tentechtop/ordexus-core/schema"
 )
 
 const (
@@ -262,8 +261,9 @@ func normalizeMaxContainerLength(maxContainerLength int) int {
 	if maxContainerLength <= 0 {
 		return DefaultMaxContainerLength
 	}
-	if maxContainerLength > math.MaxUint32 {
-		return math.MaxUint32
+	maxUint32 := uint64(^uint32(0))
+	if uint64(maxContainerLength) > maxUint32 {
+		return int(maxUint32)
 	}
 	return maxContainerLength
 }

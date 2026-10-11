@@ -23,8 +23,8 @@ p2p:
   listen_port: 5002
   default_protocol: "tcp"
   max_peers: 64
-  network_id: "solana_golang:localnet:00000000000000000000000000000000"
-  software_version: "solana_golang/0.1.0"
+  network_id: "ordexus-core:localnet:00000000000000000000000000000000"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 8
   bootstrap_timeout_millis: 5000
 
@@ -179,7 +179,7 @@ network_id 是硬隔离字段，用于防止不同网络的节点误连。
 
 示例：
 
-solana_golang:localnet:00000000000000000000000000000000
+ordexus-core:localnet:00000000000000000000000000000000
 
 规则：
 

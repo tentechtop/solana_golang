@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const pdaDomain = "GoSVMProgramDerivedAddress"
+const pdaDomain = "GoOVMProgramDerivedAddress"
 
 // CreateProgramAddress 派生程序地址 + 用域隔离和 seed 限制保证确定性。
 func CreateProgramAddress(programID Address, seeds [][]byte) (Address, error) {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (

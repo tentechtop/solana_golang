@@ -3,7 +3,7 @@ package consensus
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 type blockResourceUsage struct {

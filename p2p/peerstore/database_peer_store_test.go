@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	"solana_golang/database"
-	"solana_golang/p2p"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestDatabasePeerStoreSaveLoadDelete(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 func TestRuntimeWritesInstructionDataToOwnedWritableAccount(t *testing.T) {
@@ -225,7 +225,7 @@ func TestRuntimeSyscallVerifiesSchnorrProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSchnorrKeyPair() error = %v", err)
 	}
-	message := []byte("gosvm schnorr authorization")
+	message := []byte("goovm schnorr authorization")
 	proof, err := zk.NewSchnorrProofBytes(keyPair.PrivateScalar, message)
 	if err != nil {
 		t.Fatalf("NewSchnorrProofBytes() error = %v", err)

@@ -4,10 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
 func (host *Host) acceptInboundMessage(message Message) error {
+	if err := host.checkStaticPeerBlock(message.FromPeerID); err != nil {
+		return err
+	}
 	trafficClass := host.messageTrafficClass(message)
 	snapshot, err := host.peerProtection.acceptInboundMessage(message.FromPeerID, message.ID, trafficClass, time.Now())
 	if err == nil {
@@ -39,6 +43,9 @@ func (host *Host) acceptInboundMessage(message Message) error {
 }
 
 func (host *Host) checkPeerDialAllowed(peerID string) error {
+	if err := host.checkStaticPeerBlock(peerID); err != nil {
+		return err
+	}
 	if err := host.peerProtection.checkDial(peerID, time.Now()); err == nil {
 		return nil
 	} else {
@@ -48,6 +55,30 @@ func (host *Host) checkPeerDialAllowed(peerID string) error {
 		host.syncPeerProtectionSnapshot(host.peerProtection.snapshot(peerID, time.Now()))
 		return err
 	}
+}
+
+// normalizeBlockedPeerIDs builds an immutable startup-only block set used by local fault tests.
+// Production nodes do not expose this setting through the node configuration.
+func normalizeBlockedPeerIDs(peerIDs []string, localPeerID string) (map[string]struct{}, error) {
+	blocked := make(map[string]struct{}, len(peerIDs))
+	for _, rawPeerID := range peerIDs {
+		peerID := strings.TrimSpace(rawPeerID)
+		if err := validatePeerID(peerID); err != nil {
+			return nil, fmt.Errorf("%w: invalid blocked peer id: %w", ErrInvalidMessage, err)
+		}
+		if peerID == localPeerID {
+			return nil, fmt.Errorf("%w: local peer cannot block itself", ErrInvalidMessage)
+		}
+		blocked[peerID] = struct{}{}
+	}
+	return blocked, nil
+}
+
+func (host *Host) checkStaticPeerBlock(peerID string) error {
+	if _, blocked := host.blockedPeerIDs[peerID]; blocked {
+		return fmt.Errorf("%w: statically blocked peer %s", ErrPeerBlocked, peerID)
+	}
+	return nil
 }
 
 // checkPeerDialAllowedOrConnected 保护真实拨号失败 + 避免已有连接被拨号退避误伤。

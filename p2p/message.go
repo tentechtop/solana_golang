@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/codec/borsh"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
 )
 
 const (

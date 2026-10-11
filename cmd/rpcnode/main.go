@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"solana_golang/internal/rpcnode"
+	"github.com/tentechtop/ordexus-core/internal/rpcnode"
 )
 
 func main() {

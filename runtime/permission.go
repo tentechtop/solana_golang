@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // ExecuteInstructionSandbox 执行单条指令沙箱 + 失败或越权时丢弃临时状态防止污染交易。
@@ -15,9 +15,10 @@ func ExecuteInstructionSandbox(
 	accounts map[structure.PublicKey]structure.Account,
 	input TransactionSimulationInput,
 	registry ProgramRegistry,
-) (uint64, error) {
+) (uint64, ProgramExecutionTrace, error) {
 	sandboxAccounts := cloneAccountMap(accounts)
 	computeUnitsUsed := uint64(0)
+	executionTrace := ProgramExecutionTrace{}
 	executionErr := registry.Execute(InstructionContext{
 		InstructionIndex: instructionIndex,
 		Instruction:      instruction,
@@ -32,23 +33,24 @@ func ExecuteInstructionSandbox(
 		BuiltinPrograms:  input.BuiltinPrograms,
 		Logger:           input.Logger,
 		ComputeUnitsUsed: &computeUnitsUsed,
+		ExecutionTrace:   &executionTrace,
 	})
 	instructionComputeUnits := normalizeInstructionComputeUnits(computeUnitsUsed)
 	if instructionComputeUnits > input.ComputeBudget.MaxComputeUnits {
-		return instructionComputeUnits, fmt.Errorf(
+		return instructionComputeUnits, executionTrace, fmt.Errorf(
 			"runtime: instruction compute units %d exceed remaining budget %d",
 			instructionComputeUnits,
 			input.ComputeBudget.MaxComputeUnits,
 		)
 	}
 	if executionErr != nil {
-		return instructionComputeUnits, executionErr
+		return instructionComputeUnits, executionTrace, executionErr
 	}
 	if err := ValidateInstructionWrites(instruction, message, accounts, sandboxAccounts, input.BuiltinPrograms); err != nil {
-		return instructionComputeUnits, err
+		return instructionComputeUnits, executionTrace, err
 	}
 	replaceAccountMap(accounts, sandboxAccounts)
-	return instructionComputeUnits, nil
+	return instructionComputeUnits, executionTrace, nil
 }
 
 // ValidateInstructionWrites 校验指令写集 + runtime 统一拦截未声明 writable 的账户变更。

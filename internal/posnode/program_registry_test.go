@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"solana_golang/runtime"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestRegisterProgramsRegistersBuiltinHandlers(t *testing.T) {

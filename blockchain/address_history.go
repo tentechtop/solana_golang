@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"solana_golang/consensus"
-	"solana_golang/database"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -90,7 +90,7 @@ func (node *posNode) preflightShieldedMempoolTransaction(ctx context.Context, tr
 }
 
 func transactionContainsShieldedInstruction(transaction structure.Transaction) (bool, error) {
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return false, err
 	}
@@ -319,7 +319,7 @@ func shieldedNullifiersFromTransaction(transaction structure.Transaction) ([]str
 }
 
 func shieldedMempoolResourcesFromTransaction(transaction structure.Transaction) (shieldedMempoolResources, error) {
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return shieldedMempoolResources{}, err
 	}

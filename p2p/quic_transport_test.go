@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestQUICTransportSendMessage(t *testing.T) {

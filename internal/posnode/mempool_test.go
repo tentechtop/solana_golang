@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestAddTransactionAcceptsSignedUserTransaction(t *testing.T) {
@@ -322,10 +322,10 @@ func TestAddTransactionRejectsInvalidRecentBlockhash(t *testing.T) {
 
 func TestAddTransactionAcceptsRecentBlockhashWhenWallClockSlotAdvanced(t *testing.T) {
 	node := newMempoolTestNode(10, 60_000)
-	source := mustStructureKeyPair("routing-solana-source")
-	destination := mustStructureKeyPair("routing-solana-destination")
+	source := mustStructureKeyPair("routing-ordexus-source")
+	destination := mustStructureKeyPair("routing-ordexus-destination")
 	ledger, err := blockchain.NewLedgerFromGenesis(nil, blockchain.GenesisConfig{
-		ChainID: "mempool-routing-solana",
+		ChainID: "mempool-routing-ordexus",
 		FundedAccounts: []blockchain.GenesisAccount{
 			{Address: source.PublicKey, Lamports: 1_000_000},
 		},

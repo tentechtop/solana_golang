@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"solana_golang/consensus"
+	"github.com/tentechtop/ordexus-core/consensus"
 )
 
 func BenchmarkTransactionFastPathForSlot(b *testing.B) {

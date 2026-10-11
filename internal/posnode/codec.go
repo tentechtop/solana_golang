@@ -3,10 +3,10 @@ package posnode
 import (
 	"fmt"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 type transactionEnvelope struct {
@@ -62,6 +62,12 @@ type blockResponseEnvelope struct {
 	Error    string
 }
 
+type blockQCResponseEnvelope struct {
+	Found bool
+	QC    consensus.QuorumCertificate
+	Error string
+}
+
 type blockLocatorEntryJSON struct {
 	Height uint64 `json:"height"`
 	Hash   string `json:"hash"`
@@ -115,6 +121,8 @@ type statusResponseEnvelope struct {
 	CapabilityNames   []string            `json:"node_capability_names,omitempty"`
 	ValidatorEnabled  bool                `json:"validator_enabled"`
 	ConsensusEnabled  bool                `json:"consensus_enabled"`
+	ConsensusMode     string              `json:"consensus_mode"`
+	ProvisionalHead   bool                `json:"provisional_head"`
 	HeadHeight        uint64              `json:"head_height"`
 	HeadSlot          uint64              `json:"head_slot"`
 	HeadHash          string              `json:"head_hash"`
@@ -171,17 +179,27 @@ type transactionFastJSON struct {
 }
 
 type consensusStatusJSON struct {
-	Available        bool                           `json:"available"`
-	Slot             uint64                         `json:"slot"`
-	EpochID          uint64                         `json:"epoch_id"`
-	EpochStartSlot   uint64                         `json:"epoch_start_slot"`
-	EpochEndSlot     uint64                         `json:"epoch_end_slot"`
-	TotalActiveStake uint64                         `json:"total_active_stake_lamports"`
-	ValidatorCount   int                            `json:"validator_count"`
-	LocalValidatorID string                         `json:"local_validator_id,omitempty"`
-	LocalValidator   consensusValidatorStatusJSON   `json:"local_validator"`
-	Liveness         livenessGateJSON               `json:"liveness"`
-	Validators       []consensusValidatorStatusJSON `json:"validators,omitempty"`
+	Available                     bool                           `json:"available"`
+	Slot                          uint64                         `json:"slot"`
+	EpochID                       uint64                         `json:"epoch_id"`
+	EpochStartSlot                uint64                         `json:"epoch_start_slot"`
+	EpochEndSlot                  uint64                         `json:"epoch_end_slot"`
+	TotalActiveStake              uint64                         `json:"total_active_stake_lamports"`
+	ValidatorCount                int                            `json:"validator_count"`
+	Mode                          string                         `json:"mode"`
+	ProvisionalHead               bool                           `json:"provisional_head"`
+	RecoverySequence              uint64                         `json:"recovery_sequence"`
+	ElderValidatorID              string                         `json:"elder_validator_id,omitempty"`
+	ValidatorThreshold            int                            `json:"multi_validator_threshold"`
+	MultiValidatorActivationEpoch uint64                         `json:"multi_validator_activation_epoch,omitempty"`
+	SafetyCheckpoint              consensusSafetyCheckpoint      `json:"safety_checkpoint"`
+	CandidateEpochID              uint64                         `json:"candidate_epoch_id"`
+	CandidateValidatorCount       int                            `json:"candidate_validator_count"`
+	CandidateValidatorSetRoot     string                         `json:"candidate_validator_set_root,omitempty"`
+	LocalValidatorID              string                         `json:"local_validator_id,omitempty"`
+	LocalValidator                consensusValidatorStatusJSON   `json:"local_validator"`
+	Liveness                      livenessGateJSON               `json:"liveness"`
+	Validators                    []consensusValidatorStatusJSON `json:"validators,omitempty"`
 }
 
 type livenessGateJSON struct {
@@ -304,7 +322,7 @@ func decodeProposalMessage(message p2p.Message) (consensus.BlockProposal, error)
 	return envelope.Proposal, err
 }
 
-func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair) (p2p.Message, error) {
+func encodeVoteMessage(vote consensus.Vote, keyPair structure.OrdexusKeyPair, blsKeyPair consensus.BLSKeyPair) (p2p.Message, error) {
 	envelope, err := newSignedVoteEnvelope(vote, keyPair, blsKeyPair)
 	if err != nil {
 		return p2p.Message{}, err
@@ -312,7 +330,7 @@ func encodeVoteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, bls
 	return encodeSignedVoteEnvelopeMessage(envelope)
 }
 
-func encodeVoteRouteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair, route voteRouteEnvelope) (p2p.Message, error) {
+func encodeVoteRouteMessage(vote consensus.Vote, keyPair structure.OrdexusKeyPair, blsKeyPair consensus.BLSKeyPair, route voteRouteEnvelope) (p2p.Message, error) {
 	envelope, err := newSignedVoteEnvelope(vote, keyPair, blsKeyPair)
 	if err != nil {
 		return p2p.Message{}, err
@@ -323,7 +341,7 @@ func encodeVoteRouteMessage(vote consensus.Vote, keyPair structure.SolanaKeyPair
 	return encodeSignedVoteEnvelopeMessage(envelope)
 }
 
-func newSignedVoteEnvelope(vote consensus.Vote, keyPair structure.SolanaKeyPair, blsKeyPair consensus.BLSKeyPair) (voteEnvelope, error) {
+func newSignedVoteEnvelope(vote consensus.Vote, keyPair structure.OrdexusKeyPair, blsKeyPair consensus.BLSKeyPair) (voteEnvelope, error) {
 	voteBytes, err := vote.MarshalBinary()
 	if err != nil {
 		return voteEnvelope{}, err

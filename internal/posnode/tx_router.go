@@ -6,15 +6,19 @@ import (
 	"log/slog"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
 )
 
 const kadTransactionRouteQueryLimit = 8
 const defaultTransactionMaxHops uint8 = 2
 const defaultVoteMaxHops uint8 = 4
-const defaultQCMaxHops uint8 = 8
+const defaultQCMaxHops uint8 = 1
 const consensusFallbackFanout = 2
+const transactionForwardFanout = 2
+const transactionForwardWorkers = 16
+const transactionForwardTimeout = 3 * time.Second
+const timeoutVoteCollectorRounds = 3
 
 type transactionRouteEnvelope struct {
 	OriginPeerID string
@@ -88,26 +92,49 @@ func (node *posNode) transactionRouteTargets(ctx context.Context) ([]string, []s
 }
 
 func (node *posNode) transactionForwardTargets(ctx context.Context, excludedPeerID string) []string {
-	preferredPeerIDs := node.preferredTransactionPeerIDs()
-	resolvedPreferred := make([]string, 0, len(preferredPeerIDs))
-	seenPreferred := make(map[string]struct{}, len(preferredPeerIDs))
-	for _, peerID := range preferredPeerIDs {
-		if peerID == "" || peerID == node.peerKeyPair.peerID || peerID == excludedPeerID {
+	excluded := map[string]struct{}{
+		node.peerKeyPair.peerID: {},
+		excludedPeerID:          {},
+	}
+	targets := make([]string, 0, transactionForwardFanout)
+	appendTarget := func(peerID string) {
+		if len(targets) >= transactionForwardFanout || peerID == "" {
+			return
+		}
+		if _, exists := excluded[peerID]; exists {
+			return
+		}
+		excluded[peerID] = struct{}{}
+		targets = append(targets, peerID)
+	}
+
+	// 接收节点只沿 Turbine 子树做有界转发；原始 RPC 节点已经直达未来 Leader，不能再由每个接收者全员广播。
+	for _, peerID := range node.transactionLayeredFallbackPeerIDs(ctx, excluded, excludedPeerID) {
+		appendTarget(peerID)
+	}
+	for _, peerID := range node.preferredTransactionPeerIDs() {
+		if len(targets) >= transactionForwardFanout {
+			break
+		}
+		if _, exists := excluded[peerID]; exists {
 			continue
 		}
-		if _, exists := seenPreferred[peerID]; exists {
-			continue
-		}
-		seenPreferred[peerID] = struct{}{}
 		if node.ensureRoutablePeer(ctx, peerID) {
-			resolvedPreferred = append(resolvedPreferred, peerID)
+			appendTarget(peerID)
 		}
 	}
-	fallbackPeerIDs := node.transactionLayeredFallbackPeerIDs(ctx, seenPreferred, excludedPeerID)
-	return append(resolvedPreferred, fallbackPeerIDs...)
+	return targets
 }
 
 func (node *posNode) voteRouteTargets(ctx context.Context, vote consensus.Vote, fromPeerID string, originPeerID string) []string {
+	if vote.Type == consensus.VoteTypeSkip {
+		return removePeerIDs(
+			node.futureLeaderCollectorPeerIDs(vote.Slot),
+			node.peerKeyPair.peerID,
+			fromPeerID,
+			originPeerID,
+		)
+	}
 	leaderPeerID, leaderID, found := node.leaderPeerForSlot(vote.Slot)
 	if !found {
 		return nil
@@ -120,6 +147,24 @@ func (node *posNode) voteRouteTargets(ctx context.Context, vote consensus.Vote, 
 		targets = append(targets, parentPeerID)
 	}
 	return removePeerIDs(targets, node.peerKeyPair.peerID, fromPeerID, originPeerID)
+}
+
+func (node *posNode) futureLeaderCollectorPeerIDs(slot uint64) []string {
+	collectorPeerIDs := make([]string, 0, timeoutVoteCollectorRounds)
+	for offset := uint64(1); offset <= timeoutVoteCollectorRounds && slot <= ^uint64(0)-offset; offset++ {
+		leaderPeerID, _, found := node.leaderPeerForSlot(slot + offset)
+		if found {
+			collectorPeerIDs = append(collectorPeerIDs, leaderPeerID)
+		}
+	}
+	if len(collectorPeerIDs) > 0 {
+		return uniquePeerIDs(collectorPeerIDs)
+	}
+	return rotateLimitedPeerIDs(
+		node.validatorPeerIDsSnapshot(true),
+		slot,
+		timeoutVoteCollectorRounds,
+	)
 }
 
 func (node *posNode) leaderPeerForSlot(slot uint64) (string, consensus.ValidatorID, bool) {
@@ -279,18 +324,7 @@ func validatorPeerIDsFromSnapshot(snapshot consensus.EpochSnapshot) []string {
 }
 
 func (node *posNode) currentRoutingSlotLocked() uint64 {
-	wallSlot := uint64(1)
-	startedAt := node.config.genesisStartTime()
-	now := time.Now()
-	if now.After(startedAt) {
-		elapsedSlots := uint64(now.Sub(startedAt) / node.config.slotDuration())
-		wallSlot = elapsedSlots + 1
-	}
-	headSlot := node.ledger.Head().Slot + 1
-	if headSlot > wallSlot {
-		return headSlot
-	}
-	return wallSlot
+	return node.currentConsensusSlotLocked(node.ledger.Head())
 }
 
 func (node *posNode) ensureRoutablePeer(ctx context.Context, targetPeerID string) bool {

@@ -3,10 +3,10 @@ package posnode
 import (
 	"fmt"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -283,6 +283,77 @@ func unmarshalBlockResponseBinary(protocolID p2p.ProtocolID, data []byte) (block
 	}
 	if err := reader.EnsureEOF(); err != nil {
 		return blockResponseEnvelope{}, fmt.Errorf("posnode: block response eof: %w", err)
+	}
+	return response, nil
+}
+
+func marshalBlockQCRequestBinary(request blockHashRequestEnvelope) ([]byte, error) {
+	writer := newPOSPayloadWriter(p2p.ProtocolPoSBlockQCV1)
+	if err := writeOptionalHashString(writer, request.Hash, "block qc request hash"); err != nil {
+		return nil, err
+	}
+	return writer.Bytes(), nil
+}
+
+func unmarshalBlockQCRequestBinary(data []byte) (blockHashRequestEnvelope, error) {
+	reader, err := newPOSPayloadReader(data, p2p.ProtocolPoSBlockQCV1)
+	if err != nil {
+		return blockHashRequestEnvelope{}, err
+	}
+	hash, err := readOptionalHashString(reader, "block qc request hash")
+	if err != nil {
+		return blockHashRequestEnvelope{}, err
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		return blockHashRequestEnvelope{}, fmt.Errorf("posnode: block qc request eof: %w", err)
+	}
+	return blockHashRequestEnvelope{Hash: hash}, nil
+}
+
+func marshalBlockQCResponseBinary(response blockQCResponseEnvelope) ([]byte, error) {
+	writer := newPOSPayloadWriter(p2p.ProtocolPoSBlockQCV1)
+	writer.WriteBool(response.Found)
+	if err := writer.WriteString(response.Error); err != nil {
+		return nil, fmt.Errorf("posnode: marshal block qc response error: %w", err)
+	}
+	if response.Found {
+		certificateBytes, err := response.QC.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		if err := writer.WriteBytes(certificateBytes); err != nil {
+			return nil, fmt.Errorf("posnode: marshal block qc response certificate: %w", err)
+		}
+	}
+	return writer.Bytes(), nil
+}
+
+func unmarshalBlockQCResponseBinary(data []byte) (blockQCResponseEnvelope, error) {
+	reader, err := newPOSPayloadReader(data, p2p.ProtocolPoSBlockQCV1)
+	if err != nil {
+		return blockQCResponseEnvelope{}, err
+	}
+	found, err := reader.ReadBool()
+	if err != nil {
+		return blockQCResponseEnvelope{}, fmt.Errorf("posnode: unmarshal block qc response found: %w", err)
+	}
+	errorText, err := reader.ReadString()
+	if err != nil {
+		return blockQCResponseEnvelope{}, fmt.Errorf("posnode: unmarshal block qc response error: %w", err)
+	}
+	response := blockQCResponseEnvelope{Found: found, Error: errorText}
+	if found {
+		certificateBytes, err := reader.ReadBytes()
+		if err != nil {
+			return blockQCResponseEnvelope{}, fmt.Errorf("posnode: unmarshal block qc response certificate: %w", err)
+		}
+		response.QC, err = consensus.UnmarshalCertificateBinary(certificateBytes)
+		if err != nil {
+			return blockQCResponseEnvelope{}, err
+		}
+	}
+	if err := reader.EnsureEOF(); err != nil {
+		return blockQCResponseEnvelope{}, fmt.Errorf("posnode: block qc response eof: %w", err)
 	}
 	return response, nil
 }
@@ -576,6 +647,16 @@ func writeBlockProposalBinary(writer *borsh.Writer, proposal consensus.BlockProp
 			return fmt.Errorf("posnode: marshal proposal transaction bytes %d: %w", index, err)
 		}
 	}
+	writer.WriteBool(proposal.TimeoutQC != nil)
+	if proposal.TimeoutQC != nil {
+		certificateBytes, err := proposal.TimeoutQC.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("posnode: marshal proposal timeout qc: %w", err)
+		}
+		if err := writer.WriteBytes(certificateBytes); err != nil {
+			return fmt.Errorf("posnode: marshal proposal timeout qc bytes: %w", err)
+		}
+	}
 	if err := writeQCListBinary(writer, proposal.RewardQCs, consensus.MaxRewardQCsPerBlock); err != nil {
 		return err
 	}
@@ -612,6 +693,22 @@ func readBlockProposalBinary(reader *borsh.Reader, depth int) (consensus.BlockPr
 			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal transaction %d: %w", index, err)
 		}
 	}
+	hasTimeoutQC, err := reader.ReadBool()
+	if err != nil {
+		return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal timeout qc flag: %w", err)
+	}
+	var timeoutQC *consensus.QuorumCertificate
+	if hasTimeoutQC {
+		certificateBytes, err := reader.ReadBytes()
+		if err != nil {
+			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal timeout qc bytes: %w", err)
+		}
+		certificate, err := consensus.UnmarshalCertificateBinary(certificateBytes)
+		if err != nil {
+			return consensus.BlockProposal{}, fmt.Errorf("posnode: unmarshal proposal timeout qc: %w", err)
+		}
+		timeoutQC = &certificate
+	}
 	rewardQCs, err := readQCListBinary(reader, consensus.MaxRewardQCsPerBlock, "proposal reward qcs")
 	if err != nil {
 		return consensus.BlockProposal{}, err
@@ -635,6 +732,7 @@ func readBlockProposalBinary(reader *borsh.Reader, depth int) (consensus.BlockPr
 	return consensus.BlockProposal{
 		Header:          header,
 		Transactions:    transactions,
+		TimeoutQC:       timeoutQC,
 		RewardQCs:       rewardQCs,
 		Evidence:        evidence,
 		Rewards:         rewards,
@@ -650,12 +748,16 @@ func writeBlockHeaderBinary(writer *borsh.Writer, header consensus.BlockHeader) 
 	writer.WriteUint64(header.Height)
 	writer.WriteFixedBytes(header.ParentHash[:])
 	writer.WriteFixedBytes(header.PreviousQCHash[:])
+	writer.WriteFixedBytes(header.TimeoutQCHash[:])
 	if err := writer.WriteString(string(header.LeaderID)); err != nil {
 		return fmt.Errorf("posnode: marshal header leader id: %w", err)
 	}
 	writer.WriteUint64(header.EpochID)
+	writer.WriteFixedBytes(header.EpochSnapshotRoot[:])
 	writer.WriteFixedBytes(header.TxRoot[:])
 	writer.WriteFixedBytes(header.ReceiptRoot[:])
+	writer.WriteFixedBytes(header.RewardQCRoot[:])
+	writer.WriteFixedBytes(header.EvidenceRoot[:])
 	writer.WriteFixedBytes(header.RewardRoot[:])
 	writer.WriteFixedBytes(header.StateRoot[:])
 	writer.WriteFixedBytes(header.AccountRoot[:])
@@ -684,6 +786,10 @@ func readBlockHeaderBinary(reader *borsh.Reader) (consensus.BlockHeader, error) 
 	if err != nil {
 		return consensus.BlockHeader{}, err
 	}
+	timeoutQCHash, err := readHash(reader, "header timeout qc hash")
+	if err != nil {
+		return consensus.BlockHeader{}, err
+	}
 	leaderID, err := reader.ReadString()
 	if err != nil {
 		return consensus.BlockHeader{}, fmt.Errorf("posnode: unmarshal header leader id: %w", err)
@@ -692,11 +798,23 @@ func readBlockHeaderBinary(reader *borsh.Reader) (consensus.BlockHeader, error) 
 	if err != nil {
 		return consensus.BlockHeader{}, fmt.Errorf("posnode: unmarshal header epoch: %w", err)
 	}
+	epochSnapshotRoot, err := readHash(reader, "header epoch snapshot root")
+	if err != nil {
+		return consensus.BlockHeader{}, err
+	}
 	txRoot, err := readHash(reader, "header tx root")
 	if err != nil {
 		return consensus.BlockHeader{}, err
 	}
 	receiptRoot, err := readHash(reader, "header receipt root")
+	if err != nil {
+		return consensus.BlockHeader{}, err
+	}
+	rewardQCRoot, err := readHash(reader, "header reward qc root")
+	if err != nil {
+		return consensus.BlockHeader{}, err
+	}
+	evidenceRoot, err := readHash(reader, "header evidence root")
 	if err != nil {
 		return consensus.BlockHeader{}, err
 	}
@@ -722,10 +840,14 @@ func readBlockHeaderBinary(reader *borsh.Reader) (consensus.BlockHeader, error) 
 		Height:             height,
 		ParentHash:         parentHash,
 		PreviousQCHash:     previousQCHash,
+		TimeoutQCHash:      timeoutQCHash,
 		LeaderID:           consensus.ValidatorID(leaderID),
 		EpochID:            epochID,
+		EpochSnapshotRoot:  epochSnapshotRoot,
 		TxRoot:             txRoot,
 		ReceiptRoot:        receiptRoot,
+		RewardQCRoot:       rewardQCRoot,
+		EvidenceRoot:       evidenceRoot,
 		RewardRoot:         rewardRoot,
 		StateRoot:          stateRoot,
 		AccountRoot:        accountRoot,

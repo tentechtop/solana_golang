@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/database"
-	shieldedprogram "solana_golang/programs/shielded"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	shieldedprogram "github.com/tentechtop/ordexus-core/programs/shielded"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 var (
@@ -38,6 +38,7 @@ type Ledger struct {
 	state                 consensus.ChainState
 	committedTransactions map[string]structure.Hash
 	finalityDepth         uint64
+	finalitySuspended     bool
 	closed                bool
 }
 
@@ -603,6 +604,9 @@ func (ledger *Ledger) SaveQC(qc consensus.QuorumCertificate) (savedHead Head, er
 	if err := qc.Validate(); err != nil {
 		return Head{}, err
 	}
+	if qc.Type != consensus.VoteTypeConfirm {
+		return Head{}, fmt.Errorf("%w: only confirm qc can be persisted as a block certificate", ErrInvalidCommit)
+	}
 	qcHash, err = HashCanonicalQC(qc)
 	if err != nil {
 		return Head{}, err
@@ -1032,6 +1036,37 @@ func (ledger *Ledger) FinalityDepth() uint64 {
 	return ledger.finalityDepth
 }
 
+// SetFinalitySuspended 控制临时长老阶段的最终性；区块仍可提交，但 finalized 检查点保持不变。
+func (ledger *Ledger) SetFinalitySuspended(suspended bool) {
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	ledger.finalitySuspended = suspended
+}
+
+// FinalitySuspended 返回当前账本是否只接受临时区块。
+func (ledger *Ledger) FinalitySuspended() bool {
+	ledger.mutex.RLock()
+	defer ledger.mutex.RUnlock()
+	return ledger.finalitySuspended
+}
+
+// AdvanceFinalizedCheckpoint 使用外部已验证的激活证书确认主链检查点。
+func (ledger *Ledger) AdvanceFinalizedCheckpoint(height uint64, blockHash structure.Hash) (Head, error) {
+	ledger.mutex.Lock()
+	defer ledger.mutex.Unlock()
+	if ledger.closed {
+		return Head{}, ErrLedgerClosed
+	}
+	advanced, head, err := ledger.tryAdvanceFinalizedCheckpointLocked(height, blockHash)
+	if err != nil {
+		return Head{}, err
+	}
+	if !advanced {
+		return Head{}, fmt.Errorf("%w: activation checkpoint is not on the main chain", ErrInvalidCommit)
+	}
+	return head, nil
+}
+
 // StateAtBlockHash 读取指定区块状态快照 + 分叉验证必须基于父块快照而不是当前 head。
 func (ledger *Ledger) StateAtBlockHash(blockHash structure.Hash) (consensus.ChainState, error) {
 	ledger.mutex.RLock()
@@ -1112,7 +1147,9 @@ func ValidatorSetFromStateAtEpoch(state consensus.ChainState, epochID uint64) (c
 		if err != nil {
 			continue
 		}
-		if stakeState.Status == stake.ValidatorStatusJailed {
+		// Project eligibility at the target epoch before its first block matures
+		// account state. A jail with no expiry remains explicitly disabled.
+		if stakeState.Status == stake.ValidatorStatusJailed && (stakeState.JailUntilEpoch == 0 || stakeState.JailUntilEpoch > epochID) {
 			continue
 		}
 		effectiveStake, err := stake.EffectiveStakeAtEpoch(stakeState, epochID)
@@ -1398,6 +1435,21 @@ func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (He
 	if stateRoot != request.Proposal.Header.StateRoot {
 		return Head{}, fmt.Errorf("%w: snapshot state root mismatch", ErrInvalidCommit)
 	}
+	if request.QC == nil {
+		return Head{}, fmt.Errorf("%w: snapshot confirm qc is required", ErrInvalidCommit)
+	}
+	if err := request.QC.Validate(); err != nil {
+		return Head{}, fmt.Errorf("%w: invalid snapshot qc: %v", ErrInvalidCommit, err)
+	}
+	if request.QC.Type != consensus.VoteTypeConfirm ||
+		request.QC.BlockHash != blockHash ||
+		request.QC.BlockHeight != request.Proposal.Header.Height {
+		return Head{}, fmt.Errorf("%w: snapshot qc binding mismatch", ErrInvalidCommit)
+	}
+	snapshotQCHash, err := HashCanonicalQC(*request.QC)
+	if err != nil {
+		return Head{}, fmt.Errorf("%w: hash snapshot qc: %v", ErrInvalidCommit, err)
+	}
 	if request.Proposal.Header.Height < ledger.head.FinalizedHeight {
 		return ledger.head, nil
 	}
@@ -1424,6 +1476,7 @@ func (ledger *Ledger) ImportFinalizedSnapshot(request ImportSnapshotRequest) (He
 		FinalizedHash:   blockHash,
 		UpdatedAtMs:     time.Now().UnixMilli(),
 	}
+	nextHead.QCHash = snapshotQCHash
 	if nextHead.QCHash.IsZero() {
 		nextHead.QCHash = blockHash
 	}
@@ -1805,6 +1858,25 @@ func (ledger *Ledger) persistImportedSnapshotLocked(
 		database.NewUpdateOperation(database.TableHeightToHash, uint64Key(head.Height), blockHash[:]),
 		database.NewUpdateOperation(database.TableHashToHeight, blockHash[:], uint64Key(head.Height)),
 	)
+	if request.QC != nil {
+		qcBytes, err := request.QC.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("blockchain: marshal imported snapshot qc: %w", err)
+		}
+		canonicalQCHash, err := HashCanonicalQC(*request.QC)
+		if err != nil {
+			return nil, err
+		}
+		fullQCHash, err := HashQC(*request.QC)
+		if err != nil {
+			return nil, err
+		}
+		operations = append(operations,
+			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, fullQCHash), qcBytes),
+			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcKeyPrefix, canonicalQCHash), qcBytes),
+			database.NewUpdateOperation(database.TableChain, prefixedHashKey(qcBlockKeyPrefix, blockHash), qcBytes),
+		)
+	}
 	if err := appendAddressHistoryIndexOps(&operations, request.Proposal, blockHash); err != nil {
 		return nil, err
 	}
@@ -2364,6 +2436,7 @@ func marshalProposal(proposal consensus.BlockProposal) ([]byte, error) {
 		Header:          proposal.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), proposal.RewardQCs...),
+		TimeoutQC:       proposal.TimeoutQC,
 		Evidence:        append([]consensus.SlashingEvidence(nil), proposal.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), proposal.Rewards...),
 		LeaderSignature: encodeBytes(proposal.LeaderSignature[:]),
@@ -2400,6 +2473,7 @@ func unmarshalProposal(data []byte) (consensus.BlockProposal, error) {
 		Header:          payload.Header,
 		Transactions:    transactions,
 		RewardQCs:       append([]consensus.QuorumCertificate(nil), payload.RewardQCs...),
+		TimeoutQC:       payload.TimeoutQC,
 		Evidence:        append([]consensus.SlashingEvidence(nil), payload.Evidence...),
 		Rewards:         append([]consensus.BlockReward(nil), payload.Rewards...),
 		LeaderSignature: signature,
@@ -2731,6 +2805,9 @@ func finalizedHashFromReorgPlan(
 }
 
 func (ledger *Ledger) nextFinalizedHeight(nextHeight uint64) uint64 {
+	if ledger.finalitySuspended {
+		return ledger.head.FinalizedHeight
+	}
 	finalityDepth := ledger.finalityDepth
 	if finalityDepth == 0 {
 		finalityDepth = DefaultFinalityDepth

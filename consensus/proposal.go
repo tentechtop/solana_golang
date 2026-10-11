@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -27,10 +27,14 @@ type BlockHeader struct {
 	Height             uint64
 	ParentHash         structure.Hash
 	PreviousQCHash     structure.Hash
+	TimeoutQCHash      structure.Hash
 	LeaderID           ValidatorID
 	EpochID            uint64
+	EpochSnapshotRoot  structure.Hash
 	TxRoot             structure.Hash
 	ReceiptRoot        structure.Hash
+	RewardQCRoot       structure.Hash
+	EvidenceRoot       structure.Hash
 	RewardRoot         structure.Hash
 	StateRoot          structure.Hash
 	AccountRoot        structure.Hash
@@ -42,6 +46,7 @@ type BlockProposal struct {
 	Header          BlockHeader
 	Transactions    []structure.Transaction
 	RewardQCs       []QuorumCertificate
+	TimeoutQC       *QuorumCertificate
 	Evidence        []SlashingEvidence
 	Rewards         []BlockReward
 	LeaderSignature structure.Signature
@@ -132,17 +137,18 @@ func (producer BlockProducer) ProduceBlockWithReport(
 		return BlockProductionResult{}, fmt.Errorf("consensus: block leader not in epoch snapshot")
 	}
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
-		Slot:          request.Slot,
-		ParentSlot:    request.ParentSlot,
-		Height:        request.Height,
-		EpochID:       request.EpochSnapshot.EpochID,
-		EpochSnapshot: request.EpochSnapshot,
-		Schedule:      request.Schedule,
-		Leader:        leader,
-		FeeDetails:    feeDetails,
-		RewardQCs:     request.RewardQCs,
-		Evidence:      request.Evidence,
-		Config:        request.RewardConfig,
+		Slot:           request.Slot,
+		ParentSlot:     request.ParentSlot,
+		Height:         request.Height,
+		EpochID:        request.EpochSnapshot.EpochID,
+		EpochSnapshot:  request.EpochSnapshot,
+		Schedule:       request.Schedule,
+		Leader:         leader,
+		FeeDetails:     feeDetails,
+		RewardQCs:      request.RewardQCs,
+		Evidence:       request.Evidence,
+		ProofSnapshots: request.ProofSnapshots,
+		Config:         request.RewardConfig,
 	})
 	if err != nil {
 		return BlockProductionResult{}, err
@@ -167,6 +173,10 @@ func (producer BlockProducer) ProduceBlockWithReport(
 		Evidence:        append([]SlashingEvidence(nil), request.Evidence...),
 		Rewards:         append([]BlockReward(nil), rewards...),
 		LeaderSignature: signature,
+	}
+	if request.TimeoutQC != nil {
+		timeoutQC := *request.TimeoutQC
+		proposal.TimeoutQC = &timeoutQC
 	}
 	return BlockProductionResult{
 		Proposal:             proposal,
@@ -226,17 +236,18 @@ func (verifier ProposalVerifier) VerifyProposal(
 	receipts := executionOutput.Receipts
 	feeDetails := executionOutput.FeeDetails
 	nextState, rewards, err := ApplyBlockRewards(nextState, BlockRewardInput{
-		Slot:          request.Proposal.Header.Slot,
-		ParentSlot:    request.ParentSlot,
-		Height:        request.Proposal.Header.Height,
-		EpochID:       request.EpochSnapshot.EpochID,
-		EpochSnapshot: request.EpochSnapshot,
-		Schedule:      request.Schedule,
-		Leader:        request.Leader,
-		FeeDetails:    feeDetails,
-		RewardQCs:     request.Proposal.RewardQCs,
-		Evidence:      request.Proposal.Evidence,
-		Config:        request.RewardConfig,
+		Slot:           request.Proposal.Header.Slot,
+		ParentSlot:     request.ParentSlot,
+		Height:         request.Proposal.Header.Height,
+		EpochID:        request.EpochSnapshot.EpochID,
+		EpochSnapshot:  request.EpochSnapshot,
+		Schedule:       request.Schedule,
+		Leader:         request.Leader,
+		FeeDetails:     feeDetails,
+		RewardQCs:      request.Proposal.RewardQCs,
+		Evidence:       request.Proposal.Evidence,
+		ProofSnapshots: request.ProofSnapshots,
+		Config:         request.RewardConfig,
 	})
 	if err != nil {
 		return ChainState{}, err
@@ -279,10 +290,14 @@ func (header BlockHeader) SignBytes() ([]byte, error) {
 	encoded = appendUint64ForHash(encoded, header.Height)
 	encoded = append(encoded, header.ParentHash[:]...)
 	encoded = append(encoded, header.PreviousQCHash[:]...)
+	encoded = append(encoded, header.TimeoutQCHash[:]...)
 	encoded = append(encoded, []byte(header.LeaderID)...)
 	encoded = appendUint64ForHash(encoded, header.EpochID)
+	encoded = append(encoded, header.EpochSnapshotRoot[:]...)
 	encoded = append(encoded, header.TxRoot[:]...)
 	encoded = append(encoded, header.ReceiptRoot[:]...)
+	encoded = append(encoded, header.RewardQCRoot[:]...)
+	encoded = append(encoded, header.EvidenceRoot[:]...)
 	encoded = append(encoded, header.RewardRoot[:]...)
 	encoded = append(encoded, header.StateRoot[:]...)
 	encoded = append(encoded, header.AccountRoot[:]...)
@@ -298,12 +313,14 @@ type ProduceBlockRequest struct {
 	Schedule       LeaderSchedule
 	ParentHash     structure.Hash
 	PreviousQCHash structure.Hash
+	TimeoutQC      *QuorumCertificate
 	ParentState    ChainState
 	Transactions   []structure.Transaction
 	BlockhashQueue structure.BlockhashQueue
-	LeaderKeyPair  structure.SolanaKeyPair
+	LeaderKeyPair  structure.OrdexusKeyPair
 	RewardQCs      []QuorumCertificate
 	Evidence       []SlashingEvidence
+	ProofSnapshots []EpochSnapshot
 	RewardConfig   RewardConfig
 }
 
@@ -316,15 +333,25 @@ type VerifyProposalRequest struct {
 	ParentState    ChainState
 	BlockhashQueue structure.BlockhashQueue
 	Leader         ValidatorState
+	ProofSnapshots []EpochSnapshot
 	RewardConfig   RewardConfig
 }
 
 func (request ProduceBlockRequest) validate() error {
+	if err := request.EpochSnapshot.Validate(); err != nil {
+		return err
+	}
 	if request.LeaderKeyPair.PublicKey.IsZero() {
 		return fmt.Errorf("consensus: leader key is empty")
 	}
 	if request.ParentSlot != 0 && request.ParentSlot >= request.Slot {
 		return fmt.Errorf("consensus: parent slot must be lower than proposal slot")
+	}
+	if err := validateTimeoutQC(request.Slot, request.ParentSlot, request.Height, request.ParentHash, request.TimeoutQC); err != nil {
+		return err
+	}
+	if err := verifyTimeoutQCProof(request.TimeoutQC, request.EpochSnapshot, request.ProofSnapshots); err != nil {
+		return err
 	}
 	leaderID, err := request.Schedule.LeaderForSlot(request.Slot)
 	if err != nil {
@@ -338,14 +365,33 @@ func (request ProduceBlockRequest) validate() error {
 }
 
 func (request VerifyProposalRequest) validate() error {
+	if err := request.EpochSnapshot.Validate(); err != nil {
+		return err
+	}
 	if request.Proposal.Header.ParentHash != request.ParentHash {
 		return fmt.Errorf("consensus: parent hash mismatch")
 	}
 	if request.ParentSlot != 0 && request.ParentSlot >= request.Proposal.Header.Slot {
 		return fmt.Errorf("consensus: parent slot must be lower than proposal slot")
 	}
+	if err := validateTimeoutQC(request.Proposal.Header.Slot, request.ParentSlot, request.Proposal.Header.Height, request.ParentHash, request.Proposal.TimeoutQC); err != nil {
+		return err
+	}
+	if err := verifyTimeoutQCProof(request.Proposal.TimeoutQC, request.EpochSnapshot, request.ProofSnapshots); err != nil {
+		return err
+	}
+	timeoutQCHash, err := HashQuorumCertificate(request.Proposal.TimeoutQC)
+	if err != nil {
+		return err
+	}
+	if request.Proposal.Header.TimeoutQCHash != timeoutQCHash {
+		return fmt.Errorf("consensus: timeout qc hash mismatch")
+	}
 	if request.Proposal.Header.EpochID != request.EpochSnapshot.EpochID {
 		return fmt.Errorf("consensus: epoch mismatch")
+	}
+	if request.Proposal.Header.EpochSnapshotRoot != request.EpochSnapshot.SnapshotStateRoot {
+		return fmt.Errorf("consensus: epoch snapshot root mismatch")
 	}
 	if len(request.Proposal.Transactions) > MaxProposalTransactions {
 		return fmt.Errorf("consensus: proposal transaction count exceeds limit")
@@ -423,7 +469,19 @@ func buildProposalHeader(
 	if err != nil {
 		return BlockHeader{}, err
 	}
+	rewardQCRoot, err := HashRewardQuorumCertificates(request.RewardQCs)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	evidenceRoot, err := HashSlashingEvidenceList(request.Evidence)
+	if err != nil {
+		return BlockHeader{}, err
+	}
 	stateRoot, err := state.RootHash()
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	timeoutQCHash, err := HashQuorumCertificate(request.TimeoutQC)
 	if err != nil {
 		return BlockHeader{}, err
 	}
@@ -433,15 +491,71 @@ func buildProposalHeader(
 		Height:             request.Height,
 		ParentHash:         request.ParentHash,
 		PreviousQCHash:     request.PreviousQCHash,
+		TimeoutQCHash:      timeoutQCHash,
 		LeaderID:           leaderID,
 		EpochID:            request.EpochSnapshot.EpochID,
+		EpochSnapshotRoot:  request.EpochSnapshot.SnapshotStateRoot,
 		TxRoot:             txRoot,
 		ReceiptRoot:        receiptRoot,
+		RewardQCRoot:       rewardQCRoot,
+		EvidenceRoot:       evidenceRoot,
 		RewardRoot:         rewardRoot,
 		StateRoot:          stateRoot,
 		AccountRoot:        stateRoot,
 		TimestampUnixMilli: time.Now().UnixMilli(),
 	}, nil
+}
+
+// HashQuorumCertificate 计算提案所携超时证书的完整哈希；nil 证书对应零哈希。
+func HashQuorumCertificate(certificate *QuorumCertificate) (structure.Hash, error) {
+	if certificate == nil {
+		return structure.Hash{}, nil
+	}
+	data, err := certificate.MarshalBinary()
+	if err != nil {
+		return structure.Hash{}, fmt.Errorf("consensus: marshal quorum certificate: %w", err)
+	}
+	return structure.NewHash(utils.SHA256(data))
+}
+
+func validateTimeoutQC(slot uint64, parentSlot uint64, height uint64, parentHash structure.Hash, certificate *QuorumCertificate) error {
+	if certificate == nil {
+		if slot > 0 && parentSlot < slot-1 {
+			return fmt.Errorf("consensus: skipped round requires timeout qc")
+		}
+		return nil
+	}
+	if slot > 0 && parentSlot == slot-1 {
+		return fmt.Errorf("consensus: consecutive proposal must not carry timeout qc")
+	}
+	if err := certificate.Validate(); err != nil {
+		return err
+	}
+	if slot == 0 || certificate.Type != VoteTypeSkip || certificate.Slot != slot-1 {
+		return fmt.Errorf("consensus: timeout qc slot mismatch")
+	}
+	if certificate.BlockHeight != height || certificate.BlockHash != parentHash {
+		return fmt.Errorf("consensus: timeout qc parent mismatch")
+	}
+	return nil
+}
+
+func verifyTimeoutQCProof(certificate *QuorumCertificate, current EpochSnapshot, snapshots []EpochSnapshot) error {
+	if certificate == nil {
+		return nil
+	}
+	snapshot, err := proofSnapshotForSlot(certificate.Slot, current, snapshots)
+	if err != nil {
+		return fmt.Errorf("consensus: timeout qc snapshot: %w", err)
+	}
+	if err := VerifyQuorumCertificateForSnapshot(
+		*certificate,
+		snapshot,
+		Quorum{Numerator: 2, Denominator: 3, Strict: true},
+	); err != nil {
+		return fmt.Errorf("consensus: verify timeout qc: %w", err)
+	}
+	return nil
 }
 
 func verifyProposalRoots(proposal BlockProposal, receipts []structure.Hash, rewards []BlockReward, state ChainState) error {
@@ -457,12 +571,23 @@ func verifyProposalRoots(proposal BlockProposal, receipts []structure.Hash, rewa
 	if err != nil {
 		return err
 	}
+	rewardQCRoot, err := HashRewardQuorumCertificates(proposal.RewardQCs)
+	if err != nil {
+		return err
+	}
+	evidenceRoot, err := HashSlashingEvidenceList(proposal.Evidence)
+	if err != nil {
+		return err
+	}
 	stateRoot, err := state.RootHash()
 	if err != nil {
 		return err
 	}
 	if proposal.Header.TxRoot != txRoot || proposal.Header.ReceiptRoot != receiptRoot {
 		return fmt.Errorf("consensus: proposal transaction roots mismatch")
+	}
+	if proposal.Header.RewardQCRoot != rewardQCRoot || proposal.Header.EvidenceRoot != evidenceRoot {
+		return fmt.Errorf("consensus: proposal proof roots mismatch")
 	}
 	if proposal.Header.RewardRoot != rewardRoot || !EqualBlockRewards(proposal.Rewards, rewards) {
 		return fmt.Errorf("consensus: proposal reward root mismatch")

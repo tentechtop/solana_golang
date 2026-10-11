@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestBlockProducerStopsBeforeEstimatedResourceLimit(t *testing.T) {
@@ -53,12 +53,13 @@ func TestProposalVerifierRejectsEstimatedResourceLimitBeforeExecution(t *testing
 	targetAddress := parallelTestPublicKey(181)
 	transactionCount := int(MaxBlockComputeUnits/structure.DefaultContractCallComputeUnits) + 1
 	header := BlockHeader{
-		ChainID:    "block-resource-test",
-		Slot:       1,
-		Height:     1,
-		ParentHash: parentHash,
-		LeaderID:   leader.ValidatorID,
-		EpochID:    snapshot.EpochID,
+		ChainID:           "block-resource-test",
+		Slot:              1,
+		Height:            1,
+		ParentHash:        parentHash,
+		LeaderID:          leader.ValidatorID,
+		EpochID:           snapshot.EpochID,
+		EpochSnapshotRoot: snapshot.SnapshotStateRoot,
 	}
 	signBytes, err := header.SignBytes()
 	if err != nil {
@@ -166,7 +167,7 @@ func (executor *blockResourceTestExecutor) ExecuteTransaction(
 	}, nil
 }
 
-func blockResourceConsensusFixture(t *testing.T) (structure.SolanaKeyPair, EpochSnapshot, LeaderSchedule, ValidatorState) {
+func blockResourceConsensusFixture(t *testing.T) (structure.OrdexusKeyPair, EpochSnapshot, LeaderSchedule, ValidatorState) {
 	t.Helper()
 	leaderKeyPair := mustKeyPair(t, "block-resource-leader")
 	leader := ValidatorState{

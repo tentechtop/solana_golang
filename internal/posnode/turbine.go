@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func (node *posNode) markProposalSeen(blockHash structure.Hash) bool {
@@ -139,7 +139,7 @@ func (node *posNode) forwardProposalByTurbine(ctx context.Context, proposal cons
 	if node.host == nil {
 		return
 	}
-	peerIDs, position, err := node.turbineChildPeerIDs(ctx, proposal.Header.Slot, proposal.Header.LeaderID, fromPeerID)
+	turbinePeerIDs, position, err := node.turbineChildPeerIDs(ctx, proposal.Header.Slot, proposal.Header.LeaderID, fromPeerID)
 	if err != nil {
 		node.logger.Warn("posnode turbine proposal route failed",
 			slog.Uint64("slot", proposal.Header.Slot),
@@ -147,8 +147,12 @@ func (node *posNode) forwardProposalByTurbine(ctx context.Context, proposal cons
 			slog.String("block_hash", proposalHash.String()),
 			slog.Any("error", err),
 		)
-		return
 	}
+	// 首见提案必须冗余扩散。Leader 可能在只写出部分连接后掉线；若接收者仍只走固定子树，
+	// 在线验证者会永久分裂为 confirm/timeout 两组。seenProposals 保证每个节点只执行一次该泛洪。
+	// Leader 已在首发时直投全部已连接验证者。接收节点只沿 Turbine 子树补充传播，
+	// 禁止再次全员扩散，否则每个提案会放大为 O(n^2) 条消息并反复触发投票重放。
+	peerIDs := uniquePeerIDs(turbinePeerIDs)
 	if len(peerIDs) == 0 {
 		node.logger.Debug("posnode turbine proposal leaf",
 			slog.Uint64("slot", proposal.Header.Slot),
@@ -176,6 +180,7 @@ func (node *posNode) forwardProposalByTurbine(ctx context.Context, proposal cons
 		slog.Uint64("slot", proposal.Header.Slot),
 		slog.String("block_hash", proposalHash.String()),
 		slog.Int("turbine_layer", position.Layer),
-		slog.Int("child_count", len(peerIDs)),
+		slog.Int("child_count", len(turbinePeerIDs)),
+		slog.Int("peer_count", len(peerIDs)),
 	)
 }

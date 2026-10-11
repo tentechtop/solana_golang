@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/programs/stake"
-	"solana_golang/programs/system"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/programs/system"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
@@ -81,9 +81,11 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		t.Fatalf("leader for slot 33: %v", err)
 	}
 	nextLeaderKeyPair := fixture.consensusKeyPairByID(t, nextLeaderID)
+	epochTransitionTimeoutQC := collectQC(t, epochZero, VoteTypeSkip, 32, 2, proposalHash)
 
 	transferProposal, transferState, err := producer.ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           33,
+		ParentSlot:     1,
 		Height:         2,
 		EpochSnapshot:  epochOne,
 		Schedule:       scheduleOne,
@@ -93,6 +95,8 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		Transactions:   []structure.Transaction{transferTransaction},
 		BlockhashQueue: fixture.blockhashQueue,
 		LeaderKeyPair:  nextLeaderKeyPair,
+		TimeoutQC:      &epochTransitionTimeoutQC,
+		ProofSnapshots: []EpochSnapshot{epochZero},
 	})
 	if err != nil {
 		t.Fatalf("produce transfer block: %v", err)
@@ -107,13 +111,15 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		t.Fatalf("destination balance was not increased by transfer amount")
 	}
 
-	skipQC := collectQC(t, epochOne, VoteTypeSkip, 34, 0, structure.Hash{})
+	skipQC := collectQC(t, epochOne, VoteTypeSkip, 34, 3, mustHashFromText(t, "timeout-parent"))
 	if skipQC.Type != VoteTypeSkip || skipQC.ThresholdStake != expectedTwoThirdsThreshold(fixture.stakes) {
 		t.Fatalf("skip qc = %+v, want two thirds threshold", skipQC)
 	}
 
+	conflictingTimeoutQC := collectQC(t, epochZero, VoteTypeSkip, 32, 3, proposalHash)
 	emptyProposal, _, err := producer.ProduceBlock(context.Background(), ProduceBlockRequest{
 		Slot:           33,
+		ParentSlot:     1,
 		Height:         3,
 		EpochSnapshot:  epochOne,
 		Schedule:       scheduleOne,
@@ -123,6 +129,8 @@ func TestPoSRealAccountStakeVoteAndBlockFlow(t *testing.T) {
 		Transactions:   nil,
 		BlockhashQueue: fixture.blockhashQueue,
 		LeaderKeyPair:  nextLeaderKeyPair,
+		TimeoutQC:      &conflictingTimeoutQC,
+		ProofSnapshots: []EpochSnapshot{epochZero},
 	})
 	if err != nil {
 		t.Fatalf("produce conflicting block: %v", err)
@@ -148,8 +156,9 @@ func TestValidatorJoinsOnlyAfterRegisterStakeTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("leader for slot 1: %v", err)
 	}
-	registerInstruction, err := stake.NewRegisterValidatorInstruction(
+	registerInstruction, err := stake.NewRegisterValidatorInstructionWithBLS(
 		fixture.consensusKeys[1].PublicKey,
+		fixture.blsKeys[1].PublicKey,
 		"peer-join-1",
 		0,
 		fixture.stakes[1],
@@ -209,9 +218,10 @@ func TestValidatorJoinsOnlyAfterRegisterStakeTransaction(t *testing.T) {
 }
 
 type posTestFixture struct {
-	stakerKeys     []structure.SolanaKeyPair
-	validatorKeys  []structure.SolanaKeyPair
-	consensusKeys  []structure.SolanaKeyPair
+	stakerKeys     []structure.OrdexusKeyPair
+	validatorKeys  []structure.OrdexusKeyPair
+	consensusKeys  []structure.OrdexusKeyPair
+	blsKeys        []BLSKeyPair
 	stakes         []uint64
 	state          ChainState
 	blockhash      structure.Hash
@@ -221,9 +231,10 @@ type posTestFixture struct {
 func newPoSTestFixture(t *testing.T) posTestFixture {
 	t.Helper()
 	fixture := posTestFixture{
-		stakerKeys:    make([]structure.SolanaKeyPair, 4),
-		validatorKeys: make([]structure.SolanaKeyPair, 4),
-		consensusKeys: make([]structure.SolanaKeyPair, 4),
+		stakerKeys:    make([]structure.OrdexusKeyPair, 4),
+		validatorKeys: make([]structure.OrdexusKeyPair, 4),
+		consensusKeys: make([]structure.OrdexusKeyPair, 4),
+		blsKeys:       make([]BLSKeyPair, 4),
 		stakes:        []uint64{34, 33, 22, 11},
 		blockhash:     mustHashFromText(t, "recent-blockhash"),
 	}
@@ -231,6 +242,7 @@ func newPoSTestFixture(t *testing.T) posTestFixture {
 		fixture.stakerKeys[index] = mustKeyPair(t, fmt.Sprintf("staker-%d", index))
 		fixture.validatorKeys[index] = mustKeyPair(t, fmt.Sprintf("validator-%d", index))
 		fixture.consensusKeys[index] = mustKeyPair(t, fmt.Sprintf("consensus-%d", index))
+		fixture.blsKeys[index] = testBLSKeyPair(t, fixture.consensusKeys[index].PublicKey)
 		fixture.stakes[index] = fixture.stakes[index] * stake.MinimumStakeLamports
 	}
 	fixture.blockhashQueue = structure.NewBlockhashQueue(150)
@@ -283,6 +295,7 @@ func (fixture posTestFixture) validatorSetFromGenesis(t *testing.T) ValidatorSet
 		validators[index] = ValidatorState{
 			AccountAddress:     fixture.validatorKeys[index].PublicKey,
 			ConsensusPublicKey: fixture.consensusKeys[index].PublicKey,
+			BLSPublicKey:       append([]byte(nil), fixture.blsKeys[index].PublicKey...),
 			P2PPeerID:          fmt.Sprintf("peer-%d", index),
 			StakeLamports:      fixture.stakes[index],
 			Status:             ValidatorStatusActive,
@@ -302,6 +315,7 @@ func (fixture posTestFixture) validatorSetFromIndexes(t *testing.T, indexes ...i
 		validators = append(validators, ValidatorState{
 			AccountAddress:     fixture.validatorKeys[index].PublicKey,
 			ConsensusPublicKey: fixture.consensusKeys[index].PublicKey,
+			BLSPublicKey:       append([]byte(nil), fixture.blsKeys[index].PublicKey...),
 			P2PPeerID:          fmt.Sprintf("peer-%d", index),
 			StakeLamports:      fixture.stakes[index],
 			Status:             ValidatorStatusActive,
@@ -333,6 +347,7 @@ func (fixture posTestFixture) validatorSetFromStakeAccounts(t *testing.T, state 
 		validators = append(validators, ValidatorState{
 			AccountAddress:     validator.PublicKey,
 			ConsensusPublicKey: stakeState.ConsensusPublicKey,
+			BLSPublicKey:       append([]byte(nil), stakeState.BLSPublicKey...),
 			P2PPeerID:          stakeState.P2PPeerID,
 			StakeLamports:      effectiveStake,
 			Status:             ValidatorStatusActive,
@@ -371,6 +386,7 @@ func (fixture posTestFixture) validatorSetFromRegisteredStakeAccounts(t *testing
 		validators = append(validators, ValidatorState{
 			AccountAddress:     validator.PublicKey,
 			ConsensusPublicKey: stakeState.ConsensusPublicKey,
+			BLSPublicKey:       append([]byte(nil), stakeState.BLSPublicKey...),
 			P2PPeerID:          stakeState.P2PPeerID,
 			StakeLamports:      effectiveStake,
 			Status:             ValidatorStatusActive,
@@ -407,8 +423,9 @@ func (fixture posTestFixture) registerTransactions(t *testing.T) []structure.Tra
 	t.Helper()
 	transactions := make([]structure.Transaction, len(fixture.stakerKeys))
 	for index := range fixture.stakerKeys {
-		instruction, err := stake.NewRegisterValidatorInstruction(
+		instruction, err := stake.NewRegisterValidatorInstructionWithBLS(
 			fixture.consensusKeys[index].PublicKey,
+			fixture.blsKeys[index].PublicKey,
 			fmt.Sprintf("peer-%d", index),
 			0,
 			fixture.stakes[index],
@@ -481,7 +498,7 @@ func (fixture posTestFixture) signStakeTransaction(t *testing.T, validatorIndex 
 	return signed
 }
 
-func (fixture posTestFixture) consensusKeyPairByID(t *testing.T, validatorID ValidatorID) structure.SolanaKeyPair {
+func (fixture posTestFixture) consensusKeyPairByID(t *testing.T, validatorID ValidatorID) structure.OrdexusKeyPair {
 	t.Helper()
 	for _, keyPair := range fixture.consensusKeys {
 		if NewValidatorID(keyPair.PublicKey) == validatorID {
@@ -489,7 +506,7 @@ func (fixture posTestFixture) consensusKeyPairByID(t *testing.T, validatorID Val
 		}
 	}
 	t.Fatalf("consensus key pair not found for %s", validatorID)
-	return structure.SolanaKeyPair{}
+	return structure.OrdexusKeyPair{}
 }
 
 func (fixture posTestFixture) validatorByID(t *testing.T, snapshot EpochSnapshot, validatorID ValidatorID) ValidatorState {
@@ -503,7 +520,11 @@ func (fixture posTestFixture) validatorByID(t *testing.T, snapshot EpochSnapshot
 
 func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uint64, blockHeight uint64, blockHash structure.Hash) QuorumCertificate {
 	t.Helper()
-	collector, err := NewVoteCollector(snapshot.StakeMap(), Quorum{Numerator: 2, Denominator: 3})
+	collector, err := NewVoteCollectorWithQuorums(
+		snapshot.StakeMap(),
+		Quorum{Numerator: 2, Denominator: 3, Strict: true},
+		Quorum{Numerator: 2, Denominator: 3, Strict: true},
+	)
 	if err != nil {
 		t.Fatalf("new vote collector: %v", err)
 	}
@@ -521,7 +542,12 @@ func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uin
 			Stake:              validator.StakeLamports,
 			CreatedAtUnixMilli: time.Now().UnixMilli(),
 		}
-		qc, formed, err := collector.AddVote(vote)
+		blsKeyPair := testBLSKeyPair(t, validator.ConsensusPublicKey)
+		blsSignature, err := SignBLSVote(blsKeyPair.PrivateKey, vote)
+		if err != nil {
+			t.Fatalf("sign bls vote: %v", err)
+		}
+		qc, formed, err := collector.AddVoteWithBLS(vote, blsSignature, snapshot.ValidatorOrder())
 		if err != nil {
 			t.Fatalf("add vote: %v", err)
 		}
@@ -531,6 +557,15 @@ func collectQC(t *testing.T, snapshot EpochSnapshot, voteType VoteType, slot uin
 	}
 	t.Fatalf("qc was not formed")
 	return QuorumCertificate{}
+}
+
+func testBLSKeyPair(t testing.TB, consensusPublicKey structure.PublicKey) BLSKeyPair {
+	t.Helper()
+	keyPair, err := BLSKeyPairFromSeed(utils.SHA256([]byte("pos-test-bls-" + consensusPublicKey.String())))
+	if err != nil {
+		t.Fatalf("derive test bls key: %v", err)
+	}
+	return keyPair
 }
 
 func mustEpochSnapshot(t *testing.T, epochID uint64, startSlot uint64, epochSlots uint64, seed structure.Hash, set ValidatorSet) EpochSnapshot {
@@ -551,7 +586,7 @@ func mustLeaderSchedule(t *testing.T, snapshot EpochSnapshot) LeaderSchedule {
 	return schedule
 }
 
-func mustKeyPair(t *testing.T, label string) structure.SolanaKeyPair {
+func mustKeyPair(t *testing.T, label string) structure.OrdexusKeyPair {
 	t.Helper()
 	seed := utils.SHA256([]byte(label))
 	keyPair, err := structure.KeyPairFromSeed(seed)

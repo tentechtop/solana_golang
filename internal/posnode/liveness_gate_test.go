@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
 )
 
 func TestLivenessGateWaitsWhenReachableStakeBelowQuorum(t *testing.T) {
@@ -60,20 +60,12 @@ func TestLivenessGateRecoversWhenReachableStakeMeetsQuorum(t *testing.T) {
 	}
 }
 
-func TestLivenessGateUsesCeilTwoThirdsThreshold(t *testing.T) {
+func TestLivenessGateRequiresStakeStrictlyAboveTwoThirds(t *testing.T) {
 	now := time.UnixMilli(1_710_000_000_000)
 	snapshot := livenessTestSnapshot([]uint64{1, 1, 1})
 	localValidatorID := snapshot.Validators[0].ValidatorID
 
-	waitingGate := buildLivenessGateFromSnapshot(snapshot, localValidatorID, nil, now, 3*time.Second, true)
-	if waitingGate.RequiredStakeLamports != 2 {
-		t.Fatalf("required stake = %d, want 2", waitingGate.RequiredStakeLamports)
-	}
-	if waitingGate.QuorumReady {
-		t.Fatal("single stake is quorum ready, want waiting quorum")
-	}
-
-	readyGate := buildLivenessGateFromSnapshot(
+	twoThirdsGate := buildLivenessGateFromSnapshot(
 		snapshot,
 		localValidatorID,
 		map[string]struct{}{snapshot.Validators[1].P2PPeerID: {}},
@@ -81,8 +73,165 @@ func TestLivenessGateUsesCeilTwoThirdsThreshold(t *testing.T) {
 		3*time.Second,
 		true,
 	)
+	if twoThirdsGate.RequiredStakeLamports != 3 {
+		t.Fatalf("required stake = %d, want 3", twoThirdsGate.RequiredStakeLamports)
+	}
+	if twoThirdsGate.QuorumReady {
+		t.Fatal("exactly two thirds stake is quorum ready, want strict supermajority")
+	}
+
+	readyGate := buildLivenessGateFromSnapshot(
+		snapshot,
+		localValidatorID,
+		map[string]struct{}{
+			snapshot.Validators[1].P2PPeerID: {},
+			snapshot.Validators[2].P2PPeerID: {},
+		},
+		now,
+		3*time.Second,
+		true,
+	)
 	if !readyGate.QuorumReady {
-		t.Fatal("two of three stake is not quorum ready")
+		t.Fatal("stake above two thirds is not quorum ready")
+	}
+}
+
+func TestLivenessGateAllowsOneOnlineValidatorWithStakeSupermajority(t *testing.T) {
+	now := time.UnixMilli(1_710_000_000_000)
+	snapshot := livenessTestSnapshot([]uint64{70, 20, 10})
+
+	gate := buildLivenessGateFromSnapshot(
+		snapshot,
+		snapshot.Validators[0].ValidatorID,
+		nil,
+		now,
+		3*time.Second,
+		true,
+	)
+
+	if !gate.ProductionEnabled || !gate.QuorumReady {
+		t.Fatalf("gate = %+v, want production enabled for one online validator with 70%% stake", gate)
+	}
+	if gate.ReachableValidatorCount != 1 || gate.ReachableStakeLamports != 70 || gate.RequiredStakeLamports != 67 {
+		t.Fatalf("reachable validators/stake/required = %d/%d/%d, want 1/70/67",
+			gate.ReachableValidatorCount,
+			gate.ReachableStakeLamports,
+			gate.RequiredStakeLamports,
+		)
+	}
+}
+
+func TestLivenessGateEightValidatorsFaultRecoveryTwice(t *testing.T) {
+	now := time.UnixMilli(1_710_000_000_000)
+	snapshot := livenessTestSnapshot([]uint64{1, 1, 1, 1, 1, 1, 1, 1})
+	localValidatorID := snapshot.Validators[0].ValidatorID
+
+	assertGate := func(name string, peerIndexes []int, wantReady bool, wantReachable int) {
+		t.Helper()
+		reachablePeerIDs := make(map[string]struct{}, len(peerIndexes))
+		for _, index := range peerIndexes {
+			reachablePeerIDs[snapshot.Validators[index].P2PPeerID] = struct{}{}
+		}
+		gate := buildLivenessGateFromSnapshot(
+			snapshot,
+			localValidatorID,
+			reachablePeerIDs,
+			now,
+			3*time.Second,
+			true,
+		)
+		if gate.QuorumReady != wantReady || gate.ProductionEnabled != wantReady {
+			t.Fatalf("%s gate = %+v, want ready=%t", name, gate, wantReady)
+		}
+		if gate.ReachableValidatorCount != wantReachable || gate.RequiredStakeLamports != 6 {
+			t.Fatalf("%s reachable/required = %d/%d, want %d/6",
+				name,
+				gate.ReachableValidatorCount,
+				gate.RequiredStakeLamports,
+				wantReachable,
+			)
+		}
+	}
+
+	assertGate("healthy", []int{1, 2, 3, 4, 5, 6, 7}, true, 8)
+	assertGate("first fault", []int{1, 2, 3, 4}, false, 5)
+	assertGate("first recovery", []int{1, 2, 3, 4, 5, 6, 7}, true, 8)
+	assertGate("second fault", []int{3, 4, 5, 6}, false, 5)
+	assertGate("second recovery", []int{1, 2, 3, 4, 5, 6, 7}, true, 8)
+}
+
+func TestLivenessQuorumStabilizationResetsWhenReachableSetChanges(t *testing.T) {
+	node := &posNode{config: nodeConfig{SlotMillis: 500}}
+	startedAt := time.UnixMilli(1_710_000_000_000)
+	readyGate := livenessGateJSON{
+		State:                           livenessGateStateReady,
+		Mode:                            livenessGateModeProducing,
+		Reason:                          livenessGateReasonReachableStakeQuorum,
+		Applicable:                      true,
+		QuorumReady:                     true,
+		ProductionEnabled:               true,
+		UserTransactionPackagingEnabled: true,
+		ReachableValidatorIDs:           []string{"validator-a", "validator-b", "validator-c"},
+	}
+
+	stabilizing := node.applyLivenessQuorumStabilizationLocked(readyGate, startedAt)
+	if stabilizing.QuorumReady || stabilizing.ProductionEnabled || stabilizing.Reason != livenessGateReasonQuorumStabilizing {
+		t.Fatalf("first ready observation = %+v, want stabilizing", stabilizing)
+	}
+	if got := node.applyLivenessQuorumStabilizationLocked(readyGate, startedAt.Add(2999*time.Millisecond)); got.QuorumReady {
+		t.Fatal("quorum became ready before the 3 second stabilization window")
+	}
+	if got := node.applyLivenessQuorumStabilizationLocked(readyGate, startedAt.Add(3*time.Second)); !got.QuorumReady {
+		t.Fatalf("stable quorum = %+v, want ready", got)
+	}
+
+	node.livenessGate = readyGate
+	changedGate := readyGate
+	changedGate.ReachableValidatorIDs = []string{"validator-a", "validator-b", "validator-d"}
+	if got := node.applyLivenessQuorumStabilizationLocked(changedGate, startedAt.Add(4*time.Second)); !got.QuorumReady {
+		t.Fatalf("membership churn with continuous quorum = %+v, want ready", got)
+	}
+
+	belowQuorum := changedGate
+	belowQuorum.QuorumReady = false
+	belowQuorum.ProductionEnabled = false
+	node.livenessGate = belowQuorum
+	node.applyLivenessQuorumStabilizationLocked(belowQuorum, startedAt.Add(5*time.Second))
+	if got := node.applyLivenessQuorumStabilizationLocked(changedGate, startedAt.Add(6*time.Second)); got.QuorumReady {
+		t.Fatal("quorum recovery skipped stabilization after a real outage")
+	}
+	if got := node.applyLivenessQuorumStabilizationLocked(changedGate, startedAt.Add(9*time.Second)); !got.QuorumReady {
+		t.Fatalf("recovered stable quorum = %+v, want ready", got)
+	}
+}
+
+func TestLivenessRequiredStakeHandlesBoundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		totalStake uint64
+		want       uint64
+	}{
+		{name: "one", totalStake: 1, want: 1},
+		{name: "divisible by three", totalStake: 3, want: 3},
+		{name: "remainder one", totalStake: 4, want: 3},
+		{name: "one hundred", totalStake: 100, want: 67},
+		{name: "maximum uint64", totalStake: ^uint64(0), want: 12_297_829_382_473_034_411},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := livenessRequiredStake(testCase.totalStake)
+			if err != nil {
+				t.Fatalf("livenessRequiredStake() error = %v", err)
+			}
+			if got != testCase.want {
+				t.Fatalf("livenessRequiredStake() = %d, want %d", got, testCase.want)
+			}
+		})
+	}
+
+	if _, err := livenessRequiredStake(0); err == nil {
+		t.Fatal("livenessRequiredStake(0) error = nil, want invalid quorum error")
 	}
 }
 

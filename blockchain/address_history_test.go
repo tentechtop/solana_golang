@@ -3,8 +3,8 @@ package blockchain
 import (
 	"testing"
 
-	"solana_golang/database"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestLedgerAddressHistoryPersistsAndRebuilds(t *testing.T) {

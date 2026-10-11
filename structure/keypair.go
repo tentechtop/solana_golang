@@ -3,47 +3,47 @@ package structure
 import (
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
-	SolanaPrivateKeySeedSize = 32
-	SolanaSecretKeySize      = 64
+	OrdexusPrivateKeySeedSize = 32
+	OrdexusSecretKeySize      = 64
 )
 
-// SolanaKeyPair 保存密钥材料 + 包含公钥和私钥 seed。
-type SolanaKeyPair struct {
+// OrdexusKeyPair 保存密钥材料 + 包含公钥和私钥 seed。
+type OrdexusKeyPair struct {
 	PublicKey  PublicKey
 	PrivateKey []byte
 }
 
 // KeyPairFromSeed 从 seed 派生密钥对 + 校验 32 字节 Ed25519 seed。
-func KeyPairFromSeed(seed []byte) (SolanaKeyPair, error) {
-	if err := requireValueLength(seed, SolanaPrivateKeySeedSize, "private key seed"); err != nil {
-		return SolanaKeyPair{}, err
+func KeyPairFromSeed(seed []byte) (OrdexusKeyPair, error) {
+	if err := requireValueLength(seed, OrdexusPrivateKeySeedSize, "private key seed"); err != nil {
+		return OrdexusKeyPair{}, err
 	}
 	publicKeyBytes, err := utils.DeriveEd25519PublicKeyFromPrivateKey(seed)
 	if err != nil {
-		return SolanaKeyPair{}, err
+		return OrdexusKeyPair{}, err
 	}
 	publicKey, err := NewPublicKey(publicKeyBytes)
 	if err != nil {
-		return SolanaKeyPair{}, err
+		return OrdexusKeyPair{}, err
 	}
-	return SolanaKeyPair{PublicKey: publicKey, PrivateKey: utils.CloneBytes(seed)}, nil
+	return OrdexusKeyPair{PublicKey: publicKey, PrivateKey: utils.CloneBytes(seed)}, nil
 }
 
 // KeyPairFromSecretKey64 加载 CLI 私钥 + 校验 seed 派生公钥与附带公钥一致。
-func KeyPairFromSecretKey64(secretKey []byte) (SolanaKeyPair, error) {
-	if err := requireValueLength(secretKey, SolanaSecretKeySize, "secret key"); err != nil {
-		return SolanaKeyPair{}, err
+func KeyPairFromSecretKey64(secretKey []byte) (OrdexusKeyPair, error) {
+	if err := requireValueLength(secretKey, OrdexusSecretKeySize, "secret key"); err != nil {
+		return OrdexusKeyPair{}, err
 	}
-	keyPair, err := KeyPairFromSeed(secretKey[:SolanaPrivateKeySeedSize])
+	keyPair, err := KeyPairFromSeed(secretKey[:OrdexusPrivateKeySeedSize])
 	if err != nil {
-		return SolanaKeyPair{}, err
+		return OrdexusKeyPair{}, err
 	}
-	if !utils.SecureEqual(keyPair.PublicKey[:], secretKey[SolanaPrivateKeySeedSize:]) {
-		return SolanaKeyPair{}, fmt.Errorf("structure: secret key public key does not match seed")
+	if !utils.SecureEqual(keyPair.PublicKey[:], secretKey[OrdexusPrivateKeySeedSize:]) {
+		return OrdexusKeyPair{}, fmt.Errorf("structure: secret key public key does not match seed")
 	}
 	return keyPair, nil
 }
@@ -58,12 +58,12 @@ func ToSecretKey64(seed []byte) ([]byte, error) {
 }
 
 // SecretKey64 返回 CLI 私钥格式 + 按 seed 加公钥顺序拼接。
-func (keyPair SolanaKeyPair) SecretKey64() []byte {
+func (keyPair OrdexusKeyPair) SecretKey64() []byte {
 	return utils.ConcatBytes(keyPair.PrivateKey, keyPair.PublicKey[:])
 }
 
 // Sign 签名数据 + 使用密钥对中的私钥 seed。
-func (keyPair SolanaKeyPair) Sign(data []byte) (Signature, error) {
+func (keyPair OrdexusKeyPair) Sign(data []byte) (Signature, error) {
 	signature, err := utils.Ed25519Sign(keyPair.PrivateKey, data)
 	if err != nil {
 		return Signature{}, err
@@ -72,6 +72,6 @@ func (keyPair SolanaKeyPair) Sign(data []byte) (Signature, error) {
 }
 
 // Verify 验证签名 + 使用密钥对中的公钥。
-func (keyPair SolanaKeyPair) Verify(data []byte, signature Signature) bool {
+func (keyPair OrdexusKeyPair) Verify(data []byte, signature Signature) bool {
 	return utils.Ed25519Verify(keyPair.PublicKey[:], data, signature[:])
 }

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	appconfig "solana_golang/config"
-	"solana_golang/database"
-	"solana_golang/p2p"
-	"solana_golang/utils"
+	appconfig "github.com/tentechtop/ordexus-core/config"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type closeRecorder struct {
@@ -122,6 +122,21 @@ func TestNodeModeFromConfigReadsYAMLMode(t *testing.T) {
 	}
 	if mode != "posnode" {
 		t.Fatalf("nodeModeFromConfig() = %q, want posnode", mode)
+	}
+}
+
+func TestNodeModeFromConfigReadsFullNodeMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fullnode.json")
+	if err := os.WriteFile(path, []byte(`{"node_mode":"fullnode"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	mode, err := nodeModeFromConfig(path)
+	if err != nil {
+		t.Fatalf("nodeModeFromConfig() error = %v", err)
+	}
+	if mode != "fullnode" {
+		t.Fatalf("nodeModeFromConfig() = %q, want fullnode", mode)
 	}
 }
 func TestNodeModeFromConfigRejectsMissingMode(t *testing.T) {
@@ -452,8 +467,8 @@ func writeRuntimeConfig(t *testing.T, rpcAddress string, p2pPort int, databasePa
 		"  listen_port: " + strconv.Itoa(p2pPort),
 		"  default_protocol: \"tcp\"",
 		"  max_peers: 64",
-		"  network_id: \"solana_golang:test:00000000000000000000000000000000\"",
-		"  software_version: \"solana_golang/test\"",
+		"  network_id: \"ordexus-core:test:00000000000000000000000000000000\"",
+		"  software_version: \"github.com/tentechtop/ordexus-core/test\"",
 		"  min_outbound_peers: 0",
 		"  bootstrap_timeout_millis: 1000",
 		"",

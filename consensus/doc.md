@@ -1,21 +1,21 @@
 # 共识层实现规划
 
 版本：v1  
-状态：设计草案 + 最小示例  
-目标：本系统不使用 PoH 作为时钟，采用本地单调时钟、固定 slot 时间、超时 skip、投票确认的共识雏形，并逐步演进到可生产运行的共识层。
+状态：当前实现说明；未标注“当前实现”的后续章节保留为历史规划
+目标：本系统不使用 PoH 作为全局时钟，采用 QC 驱动轮次、超时证书换轮和逐块父 QC 引用；本地时间只触发投票，不能推进链状态。
 
 ## 一、核心结论
 
 本系统共识层先采用简单、可审计、可测试的设计：
 
-1. 本地单调时钟负责推进 slot。
-2. 每个 slot 有固定时长。
-3. leader 在 slot 内提议区块。
-4. 超过 skip timeout 未收到有效 proposal，验证者投 skip vote。
-5. 收到有效 proposal，验证者投 confirm vote。
-6. confirm vote 或 skip vote 达到 quorum 后生成 QC。
-7. QC 是本系统推进 slot 状态的基础证明。
-8. 当前 `consensus/slot.go` 只是示例，不代表完整生产共识协议。
+1. 已认证链头确定下一轮，不能根据墙钟计算或强制推进 slot。
+2. leader 在当前 round 提议候选块，候选块不会直接改变主链头。
+3. 验证者收到有效 proposal 后先投 prepare vote；PrepareQC 严格超过 `2/3` 后才投 confirm vote，ConfirmQC 严格超过 `2/3` 后提交候选块。
+4. leader 超时后验证者只发送 timeout vote；严格超过 `2/3` 权重形成 TimeoutQC 后才进入下一轮。换轮证书与 ConfirmQC 保持拜占庭安全交集。
+5. 创世后的每个 proposal 必须引用证明父块的 ConfirmQC；跨过空轮时还必须携带上一轮 TimeoutQC。
+6. 本地签名投票必须先写安全日志并刷盘，再通过 P2P 广播；重启后恢复选择和投票高水位。
+7. 连续 TimeoutQC 触发 `1x/2x/4x/8x` 超时退避，新块提交后恢复基础超时。
+8. 验证者集合按 epoch 快照和链上状态计算，网络载荷不能自行声明有效权重。
 
 当前不新建顶层 `Alpenglow` 目录。通用共识能力放在 `consensus/`；如果后续实现协议特定状态机，再放到 `consensus/alpenglow/`。
 
@@ -26,66 +26,49 @@
 3. 链上事实必须由投票和 QC 确认，不由本地时间单独确认。
 4. Borsh 是共识消息唯一二进制格式。
 5. 网络字段不可信，所有 stake、validator、leader 信息必须以本地状态为准。
-6. 每个验证者在同一 slot 的同一投票类型下只能选择一个结果。
-7. 所有状态变化必须可落库、可重放、可审计。
+6. 每个验证者在同一 slot 可以先签一张 prepare；决定阶段的 confirm 与 timeout 严格互斥，同阶段冲突签名是可罚没证据。
+7. 所有状态变化必须可落库、可重放、可审计；投票持久化失败时禁止广播。
 
-## 三、当前已有示例
+## 三、当前实现
 
-当前示例文件：
-
-```text
-consensus/
-  errors.go
-  slot.go
-  slot_test.go
-```
-
-已具备能力：
-
-1. `SlotClock`：根据 `startedAt + slotDuration` 计算当前 slot。
-2. `SlotTick`：返回 slot 起始时间、skip 截止时间、是否需要 skip。
-3. `Vote`：表达 confirm vote 或 skip vote。
-4. `Quorum`：用整数分数计算确认阈值。
-5. `QuorumCertificate`：表达达到阈值后的确认凭证。
-6. `VoteCollector`：聚合本地验证者投票，拒绝重复投票和冲突投票。
-7. `MarshalBinary/Unmarshal...`：投票和 QC 使用 Borsh 编解码。
-
-当前没有实现的能力：
-
-1. 没有签名校验。
-2. 没有 leader schedule。
-3. 没有 proposal 结构。
-4. 没有 fork choice。
-5. 没有 finality 状态机。
-6. 没有 P2P handler 接入。
-7. 没有数据库恢复流程。
+1. `consensus/slot.go`：Vote、严格大于 `2/3` 权重阈值、VoteCollector 和 QuorumCertificate。
+2. `consensus/bls_qc.go`：单票 BLS 验签、聚合签名、validator bitmap 和按 epoch 权重重算 QC。
+3. `consensus/proposal.go`：proposal、父 QC/TimeoutQC 哈希、epoch snapshot root、交易/回执/奖励/证据/state root 和 leader 签名。
+4. `internal/posnode/main.go`：候选块传播、投票聚合、ConfirmQC 提交、TimeoutQC 换轮和证书转发。
+5. `internal/posnode/round_state.go`：TimeoutQC 与本地签名投票安全日志恢复。
+6. `blockchain/ledger.go`：候选块与主链头分离，只有节点层验证过 ConfirmQC 后才提升候选块。
+7. P2P、同步和 RPC 已接入；同步时必须同时取得并验证区块 QC。
 
 ## 四、时间模型
 
 共识层不使用 PoH hash chain 作为时钟。
 
-节点启动后维护本地单调时钟：
+节点为当前 round 维护本地单调计时器：
 
 ```text
-slot = initial_slot + elapsed_monotonic_time / slot_duration
-slot_start = started_at + (slot - initial_slot) * slot_duration
-skip_deadline = slot_start + skip_timeout
+round = certified_head.slot + 1
+round = latest_timeout_qc.slot + 1  // TimeoutQC 必须绑定当前链头
+timeout_deadline = round_started_at + adaptive_timeout
 ```
 
 要求：
 
-1. 代码必须使用 Go `time.Time` 的单调时间差值推进 slot。
+1. 代码使用 Go `time.Time` 的单调时间差值判断是否应发送 timeout vote。
 2. 不允许直接用墙上时间回拨影响 slot。
 3. 网络消息里的时间只能作为观测字段，不能作为共识事实。
-4. 每个 slot 的开始和 skip deadline 必须可重复推导。
-5. 后续需要增加 `clock_drift_tolerance`，用于拒绝明显过早或过晚的远端消息。
+4. 本地 deadline 到达不能直接更新 round、height 或 head。
+5. round 只能由 ConfirmQC 提交新区块或 TimeoutQC 证明换轮。
 
 推荐默认值：
 
 ```text
-slot_duration: 400ms
-skip_timeout: 250ms
-quorum: 2/3 stake
+slot_millis 默认值: 1000ms
+当前示例配置: 400ms
+leader_timeout: slot_millis * 3
+连续超时退避: 1x / 2x / 4x / 8x
+PrepareQC quorum: strict > 2/3 stake
+ConfirmQC quorum: strict > 2/3 stake
+TimeoutQC quorum: strict > 2/3 stake
 ```
 
 默认值只是开发阶段配置，生产环境必须通过链配置或创世配置固定。
@@ -97,6 +80,7 @@ quorum: 2/3 stake
 ```text
 Open
   -> Proposed
+  -> Prepared
   -> Confirmed
   -> Finalized
 
@@ -110,27 +94,28 @@ Open
 1. `Open`：当前 slot 已开始，尚未接受有效 proposal 或 skip。
 2. `Proposed`：收到 leader 的有效 proposal。
 3. `SkipVoted`：本节点已对该 slot 投 skip vote。
-4. `Confirmed`：confirm vote 达到 quorum，生成 block QC。
-5. `Skipped`：skip vote 达到 quorum，生成 skip QC。
-6. `Finalized`：满足最终确认规则，区块不可回滚。
+4. `Prepared`：prepare vote 达到 quorum，生成 PrepareQC，但尚未提交区块。
+5. `Confirmed`：confirm vote 达到 quorum，生成 block QC。
+6. `Skipped`：skip vote 达到 quorum，生成 skip QC。
+7. `Finalized`：满足最终确认规则，区块不可回滚。
 
-当前示例只做到 `Confirmed/Skipped` 的 QC 生成，不实现 `Finalized`。
+当前实现把 ConfirmQC 作为候选块提交证据，把 TimeoutQC 作为换轮证据；`Finalized` 仍由独立最终性规则推进。
 
 ## 六、slot 执行流程
 
 每个 slot 的核心流程：
 
 ```text
-1. 本地时钟进入 slot。
+1. 根据已认证链头或最新 TimeoutQC 确定当前 round。
 2. 判断本节点是否为当前 slot leader。
 3. leader 构造 proposal 并广播。
 4. validator 收到 proposal 后校验 leader、parent、block hash、交易、签名。
-5. proposal 有效则投 confirm vote。
-6. 到达 skip timeout 仍无有效 proposal，则投 skip vote。
-7. 收集 vote，达到 quorum 后生成 QC。
-8. 广播 QC。
-9. 根据 QC 更新 slot 状态。
-10. 进入下一个 slot。
+5. proposal 有效则投 prepare vote。
+6. PrepareQC 形成后投 confirm vote。
+7. 到达 timeout 仍未进入 Confirm 决定时，可投 skip vote；已签 Confirm 的节点不得改投 skip。
+8. 收集 vote，达到 quorum 后生成对应 QC 并广播。
+9. ConfirmQC 提交候选块，或 TimeoutQC 推进到下一轮；PrepareQC 不能改变链头。
+10. 没有 ConfirmQC 或 TimeoutQC 时保持当前 round，即使本地计时器继续流逝也不能推进。
 ```
 
 注意：
@@ -142,18 +127,19 @@ Open
 
 ## 七、proposal 设计
 
-后续需要新增 `Proposal` 结构，建议字段：
+当前 `BlockProposal` 的关键共识字段包括：
 
 ```text
 version u16
 slot u64
-parent_slot u64
 block_height u64
-block_hash [32]byte
 parent_hash [32]byte
+previous_qc_hash [32]byte
+timeout_qc_hash [32]byte
 leader [32]byte
-justify_qc bytes
-payload_hash [32]byte
+epoch u64
+epoch_snapshot_root [32]byte
+tx/receipt/reward/evidence/state roots
 created_at_unix_milli i64
 signature [64]byte
 ```
@@ -165,13 +151,14 @@ signature [64]byte
 3. `parent_slot` 必须小于 `slot`。
 4. `parent_hash` 必须能连接本地已知链状态。
 5. `block_hash` 必须等于区块头确定性 hash。
-6. `justify_qc` 必须能证明父状态可作为扩展基础。
-7. `signature` 必须使用 leader 公钥验签。
-8. Borsh 解码后必须 `Validate`，并执行 `EnsureEOF`。
+6. `PreviousQCHash` 必须等于父块 ConfirmQC 的规范哈希；第一块引用创世哈希。
+7. 跨过空轮的 proposal 必须携带并承诺上一轮 TimeoutQC。
+8. `signature` 必须使用 leader 公钥验签。
+9. Borsh 解码后必须 `Validate`，并执行 `EnsureEOF`。
 
 ## 八、投票设计
 
-当前示例已有 `Vote`：
+当前实现的 `Vote`：
 
 ```text
 type
@@ -182,28 +169,29 @@ stake
 created_at_unix_milli
 ```
 
-生产版本需要调整：
+验证规则：
 
-1. `stake` 只允许作为本地调试字段，网络投票权重必须来自本地 validator set。
-2. `voter_id` 应替换或绑定到 validator public key。
-3. 必须增加 `signature`。
-4. 签名原文必须包含 domain separator、version、vote type、slot、block hash。
-5. skip vote 的 block hash 必须为空。
+1. `stake` 只作为投票声明，实际投票权重必须从本地 epoch snapshot 重算并完全匹配。
+2. `voter_id` 必须绑定签名公钥和 epoch validator set。
+3. 网络信封必须携带 Ed25519 签名和 BLS 单票证明；QC 必须能由完整 epoch BLS 公钥集合验签。
+4. 签名原文包含固定版本、vote type、slot、height、block hash 和 voter ID。
+5. timeout vote 的 block hash 必须绑定当前父块，block height 必须绑定目标高度。
 6. confirm vote 的 block hash 必须非空。
 
 投票限制：
 
-1. 同一 validator 在同一 slot 的 confirm vote 只能选择一个 block hash。
-2. 同一 validator 在同一 slot 的 skip vote 只能投一次。
-3. 收到冲突投票必须记录证据，后续用于惩罚或审计。
+1. 同一 validator 在同一 slot 最多签一张 prepare 和一张决定票。Prepare 后可签 confirm 或 timeout，但 confirm 与 timeout 不能互换。
+2. 同阶段不同类型、block height 或 block hash 构成冲突选择；Prepare 与后续决定票是合法阶段转换。
+3. 收到同阶段冲突投票必须记录证据，后续用于惩罚或审计。
 4. 未知 validator 的投票必须拒绝。
 5. stake 不匹配本地 validator set 的投票必须拒绝。
+6. ConfirmQC 与 TimeoutQC 的最小交集严格大于最大拜占庭权益；在诚实验证者禁止决定阶段双签的前提下，同一 slot 不可能同时形成两类决定证书。
 
 ## 九、QC 设计
 
 QC 是 quorum certificate，表示某一类投票达到阈值。
 
-当前示例已有 `QuorumCertificate`：
+当前实现的 `QuorumCertificate`：
 
 ```text
 type
@@ -215,19 +203,18 @@ voters
 created_at_unix_milli
 ```
 
-生产版本需要增加：
+已实现：
 
-1. validator bitmap 或紧凑 voter index。
-2. 聚合签名或签名列表。
-3. validator set version。
-4. epoch。
-5. QC hash。
+1. validator bitmap。
+2. BLS 聚合签名。
+3. 根据 QC slot 选择 epoch snapshot。
+4. 规范 QC hash 与完整证书 hash。
 
 QC 校验规则：
 
 1. QC 类型必须合法。
-2. confirm QC 必须绑定 block hash。
-3. skip QC 必须使用空 block hash。
+2. PrepareQC 和 ConfirmQC 必须绑定同阶段的 block hash；PrepareQC 只能触发 Confirm 投票，不得作为账本提交凭证。
+3. TimeoutQC 必须绑定当前父块和目标高度。
 4. voters 必须排序、唯一、属于同一 validator set。
 5. confirmed stake 必须大于等于 threshold stake。
 6. 每个签名必须验签通过。

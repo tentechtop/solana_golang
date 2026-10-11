@@ -19,11 +19,11 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -90,7 +90,9 @@ func (node *posNode) startValidatorPairing() error {
 		slog.String("consensus_address", session.payload.ConsensusAddress),
 		slog.Int64("expires_at_unix_millis", session.payload.ExpiresAtUnixMS),
 	)
-	printValidatorPairingQR(session)
+	if !node.config.quietPairingQR {
+		printValidatorPairingQR(session)
+	}
 	return nil
 }
 
@@ -384,26 +386,26 @@ func localFileURI(path string) string {
 	return (&url.URL{Scheme: "file", Path: slashPath}).String()
 }
 
-func loadOrCreatePairingEd25519Key(path string) (structure.SolanaKeyPair, error) {
+func loadOrCreatePairingEd25519Key(path string) (structure.OrdexusKeyPair, error) {
 	if _, err := os.Stat(path); err == nil {
 		return loadStructureKeyPair("", path, nodeConfig{}, "validator pairing ed25519")
 	} else if !os.IsNotExist(err) {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
-	seed, err := randomBytes(structure.SolanaPrivateKeySeedSize)
+	seed, err := randomBytes(structure.OrdexusPrivateKeySeedSize)
 	if err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	keyPair, err := structure.KeyPairFromSeed(seed)
 	if err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	keyFile := nodeKeystoreFile{
 		PrivateKeyBase64: utils.Base64Encode(seed),
 		PublicKeyBase64:  utils.Base64Encode(keyPair.PublicKey[:]),
 	}
 	if err := writeNodeKeystoreFile(path, keyFile); err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	return keyPair, nil
 }
@@ -562,7 +564,11 @@ func (node *posNode) CompleteValidatorPairing(ctx context.Context, request rpc.V
 		ActivationNote:           activationNote,
 	}
 	if isBootstrapPairingPayload(session.payload) && !activationStarted {
-		result.ActivationNote = "validator joins bootstrap after restart; block production starts after the bootstrap threshold is reached"
+		if strings.TrimSpace(request.Signature) == "" {
+			result.ActivationNote = "validator joins the bootstrap genesis after restart"
+		} else {
+			result.ActivationNote = "validator joins the running network after restart and activates next epoch after registration finalizes"
+		}
 	}
 	session.state = state
 	session.completedResult = result
@@ -708,11 +714,13 @@ func (node *posNode) adoptPairedValidatorRuntime(activatedNode *posNode) error {
 	node.rejectedTransactions = activatedNode.rejectedTransactions
 	node.seenProposals = activatedNode.seenProposals
 	node.seenQCs = activatedNode.seenQCs
+	node.acceptedQCs = activatedNode.acceptedQCs
 	node.pendingEvidence = activatedNode.pendingEvidence
 	node.seenEvidence = activatedNode.seenEvidence
 	node.proposalChoices = activatedNode.proposalChoices
 	node.signedVoteChoices = activatedNode.signedVoteChoices
 	node.voteEnvelopeChoices = activatedNode.voteEnvelopeChoices
+	node.localVoteBroadcastAt = activatedNode.localVoteBroadcastAt
 	node.orphanProposals = activatedNode.orphanProposals
 	node.epochSnapshot = activatedNode.epochSnapshot
 	node.leaderSchedule = activatedNode.leaderSchedule
@@ -723,11 +731,15 @@ func (node *posNode) adoptPairedValidatorRuntime(activatedNode *posNode) error {
 	node.metrics.restoreSnapshot(activatedNode.metrics.snapshot())
 	node.lastProducedSlot = activatedNode.lastProducedSlot
 	node.lastVotedSlot = activatedNode.lastVotedSlot
+	node.lastTimeoutVotedSlot = activatedNode.lastTimeoutVotedSlot
 	node.livenessGate = activatedNode.livenessGate
+	node.livenessQuorumReadySince = activatedNode.livenessQuorumReadySince
+	node.livenessQuorumFingerprint = activatedNode.livenessQuorumFingerprint
 	node.registeredSelf = activatedNode.registeredSelf
 	node.knownPeerIDs = activatedNode.knownPeerIDs
 	node.bootstrapManifestApplied = activatedNode.bootstrapManifestApplied
 	node.rpcForwardFanoutLimiter = activatedNode.rpcForwardFanoutLimiter
+	node.transactionForwardLimiter = activatedNode.transactionForwardLimiter
 	node.doubleVoteInjected = activatedNode.doubleVoteInjected
 	node.doubleProposalInjected = activatedNode.doubleProposalInjected
 	return nil
@@ -910,7 +922,7 @@ func validateValidatorPairingRegistrationTransaction(transaction structure.Trans
 	if !signatureValid {
 		return fmt.Errorf("signature verification failed")
 	}
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return fmt.Errorf("decode message: %w", err)
 	}

@@ -3,7 +3,7 @@ package vm
 import (
 	"fmt"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // AccountSet 管理指令账户视图 + 所有写入都经过权限和 owner 校验。

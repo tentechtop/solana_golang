@@ -3,7 +3,7 @@ package posnode
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // validateTransactionResourceDemand 校验未截断资源需求 + 超上限交易不能按封顶手续费进入预执行或交易池。

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestHostHandleConnectionRespondsPong(t *testing.T) {
@@ -1272,6 +1272,13 @@ func TestHostRemovesConnectionOnUnexpectedWriteError(t *testing.T) {
 
 	if _, ok := host.Connection(remotePeerID); ok {
 		t.Fatal("Connection() ok = true after write error, want false")
+	}
+	peer, ok := host.Peer(remotePeerID)
+	if !ok {
+		t.Fatal("Peer() ok = false after write error, want true")
+	}
+	if peer.Score != 0 {
+		t.Fatalf("peer.Score = %d after transport error, want 0", peer.Score)
 	}
 	replacement := newScriptedConnection(utils.ProtocolTCP, remotePeerID, nil)
 	if err := host.storeConnection(remotePeerID, replacement); err != nil {

@@ -9,8 +9,8 @@ import (
 	goruntime "runtime"
 	"strings"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const maxTreasuryKeystoreBytes = 8192
@@ -21,22 +21,22 @@ type treasuryKeystoreFile struct {
 	SecretKeyBase64  string `json:"secret_key_base64,omitempty"`
 }
 
-func (node *posNode) treasuryKeyPair() (structure.SolanaKeyPair, string, error) {
+func (node *posNode) treasuryKeyPair() (structure.OrdexusKeyPair, string, error) {
 	keyPath := strings.TrimSpace(node.config.TreasuryKeyPath)
 	if keyPath != "" {
 		keyPair, err := loadTreasuryKeyPairFromFile(keyPath, isProductionNodeConfig(node.config))
 		if err != nil {
-			return structure.SolanaKeyPair{}, "", err
+			return structure.OrdexusKeyPair{}, "", err
 		}
 		if err := node.validateTreasuryKeyPair(keyPair); err != nil {
-			return structure.SolanaKeyPair{}, "", err
+			return structure.OrdexusKeyPair{}, "", err
 		}
 		return keyPair, "keystore", nil
 	}
-	return structure.SolanaKeyPair{}, "", fmt.Errorf("posnode: treasury keystore is required; consensus only embeds the public key")
+	return structure.OrdexusKeyPair{}, "", fmt.Errorf("posnode: treasury keystore is required; consensus only embeds the public key")
 }
 
-func (node *posNode) validateTreasuryKeyPair(keyPair structure.SolanaKeyPair) error {
+func (node *posNode) validateTreasuryKeyPair(keyPair structure.OrdexusKeyPair) error {
 	expectedAddress := strings.TrimSpace(node.config.Genesis.TreasuryAddress)
 	if expectedAddress == "" {
 		return nil
@@ -51,31 +51,31 @@ func (node *posNode) validateTreasuryKeyPair(keyPair structure.SolanaKeyPair) er
 	return nil
 }
 
-func loadTreasuryKeyPairFromFile(path string, production bool) (structure.SolanaKeyPair, error) {
+func loadTreasuryKeyPairFromFile(path string, production bool) (structure.OrdexusKeyPair, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
 	if cleanPath == "." || cleanPath == "" {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: treasury keystore path is empty")
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: treasury keystore path is empty")
 	}
 	info, err := os.Stat(cleanPath)
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: stat treasury keystore: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: stat treasury keystore: %w", err)
 	}
 	if info.IsDir() {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: treasury keystore is a directory")
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: treasury keystore is a directory")
 	}
 	if info.Size() <= 0 || info.Size() > maxTreasuryKeystoreBytes {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: invalid treasury keystore size")
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: invalid treasury keystore size")
 	}
 	if err := validateTreasuryKeystorePermissions(info, production); err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: read treasury keystore: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: read treasury keystore: %w", err)
 	}
 	keyFile := treasuryKeystoreFile{}
 	if err := json.Unmarshal(data, &keyFile); err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: decode treasury keystore: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: decode treasury keystore: %w", err)
 	}
 	return treasuryKeyPairFromKeystore(keyFile)
 }
@@ -90,11 +90,11 @@ func validateTreasuryKeystorePermissions(info os.FileInfo, production bool) erro
 	return nil
 }
 
-func treasuryKeyPairFromKeystore(keyFile treasuryKeystoreFile) (structure.SolanaKeyPair, error) {
+func treasuryKeyPairFromKeystore(keyFile treasuryKeystoreFile) (structure.OrdexusKeyPair, error) {
 	if strings.TrimSpace(keyFile.Seed) != "" {
 		keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(strings.TrimSpace(keyFile.Seed))))
 		if err != nil {
-			return structure.SolanaKeyPair{}, fmt.Errorf("posnode: derive treasury seed: %w", err)
+			return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: derive treasury seed: %w", err)
 		}
 		return keyPair, nil
 	}
@@ -104,29 +104,29 @@ func treasuryKeyPairFromKeystore(keyFile treasuryKeystoreFile) (structure.Solana
 	if strings.TrimSpace(keyFile.SecretKeyBase64) != "" {
 		return treasuryKeyPairFromBase64Secret(keyFile.SecretKeyBase64)
 	}
-	return structure.SolanaKeyPair{}, fmt.Errorf("posnode: treasury keystore has no key material")
+	return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: treasury keystore has no key material")
 }
 
-func treasuryKeyPairFromBase64Seed(encodedSeed string) (structure.SolanaKeyPair, error) {
+func treasuryKeyPairFromBase64Seed(encodedSeed string) (structure.OrdexusKeyPair, error) {
 	seed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedSeed))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: decode treasury private key seed: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: decode treasury private key seed: %w", err)
 	}
 	keyPair, err := structure.KeyPairFromSeed(seed)
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: build treasury keypair: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: build treasury keypair: %w", err)
 	}
 	return keyPair, nil
 }
 
-func treasuryKeyPairFromBase64Secret(encodedSecret string) (structure.SolanaKeyPair, error) {
+func treasuryKeyPairFromBase64Secret(encodedSecret string) (structure.OrdexusKeyPair, error) {
 	secretKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedSecret))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: decode treasury secret key: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: decode treasury secret key: %w", err)
 	}
 	keyPair, err := structure.KeyPairFromSecretKey64(secretKey)
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: build treasury secret keypair: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: build treasury secret keypair: %w", err)
 	}
 	return keyPair, nil
 }

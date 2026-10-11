@@ -5,7 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"solana_golang/consensus"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -55,6 +56,25 @@ func (node *posNode) markQCSeen(qc consensus.QuorumCertificate) bool {
 	return true
 }
 
+// hasQCAccepted 仅按完整证书哈希跳过已经验证并应用成功的完全相同 QC。
+// 签名、投票人顺序或权重任一不同都会重新走完整验证，不能用该缓存绕过攻击检查。
+func (node *posNode) hasQCAccepted(qcHash structure.Hash) bool {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	_, exists := node.acceptedQCs[qcHash.String()]
+	return exists
+}
+
+func (node *posNode) markQCAccepted(qcHash structure.Hash, slot uint64) {
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+	if node.acceptedQCs == nil {
+		node.acceptedQCs = make(map[string]uint64)
+	}
+	node.acceptedQCs[qcHash.String()] = slot
+	node.pruneAcceptedQCsLocked(slot)
+}
+
 // pruneSeenQCsLocked 清理旧 QC 传播键 + 防止长稳运行时内存无界增长。
 func (node *posNode) pruneSeenQCsLocked(currentSlot uint64) {
 	if len(node.seenQCs) <= maxSeenQuorumCertificates {
@@ -71,6 +91,25 @@ func (node *posNode) pruneSeenQCsLocked(currentSlot uint64) {
 	for key, slot := range node.seenQCs {
 		if slot < cutoffSlot {
 			delete(node.seenQCs, key)
+		}
+	}
+}
+
+func (node *posNode) pruneAcceptedQCsLocked(currentSlot uint64) {
+	if len(node.acceptedQCs) <= maxSeenQuorumCertificates {
+		return
+	}
+	retentionSlots := node.config.EpochSlots
+	if retentionSlots < minSeenQCRetentionSlots {
+		retentionSlots = minSeenQCRetentionSlots
+	}
+	if currentSlot <= retentionSlots {
+		return
+	}
+	cutoffSlot := currentSlot - retentionSlots
+	for key, slot := range node.acceptedQCs {
+		if slot < cutoffSlot {
+			delete(node.acceptedQCs, key)
 		}
 	}
 }

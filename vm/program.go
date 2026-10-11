@@ -10,7 +10,8 @@ import (
 
 const (
 	BytecodeVersion       = uint16(1)
-	bytecodeHeader        = "SVM1"
+	bytecodeHeader        = "OVM1"
+	legacyBytecodeHeader  = "SVM1"
 	programFormatLegacy   = uint16(0)
 	programFormatRegister = uint16(1)
 	programFormatManifest = uint16(2)
@@ -18,6 +19,45 @@ const (
 	registerChecksumSize  = 32
 	manifestHeaderSize    = 62
 )
+
+func isSupportedBytecodeHeader(header string) bool {
+	return header == bytecodeHeader || header == legacyBytecodeHeader
+}
+
+// BytecodeProgramsEqual compares two fully validated programs by their decoded
+// semantics. This deliberately treats the legacy SVM1 and canonical OVM1
+// envelopes as equivalent while rejecting checksum, code, data, or manifest
+// differences.
+func BytecodeProgramsEqual(left []byte, right []byte) bool {
+	loaderID := Address{}
+	load := func(data []byte) (Program, error) {
+		return (BytecodeLoader{}).Load(ProgramAccount{
+			Owner:      loaderID,
+			Executable: true,
+			Data:       data,
+		}, loaderID)
+	}
+	leftProgram, err := load(left)
+	if err != nil {
+		return false
+	}
+	rightProgram, err := load(right)
+	if err != nil {
+		return false
+	}
+	if leftProgram.Version != rightProgram.Version ||
+		leftProgram.Format != rightProgram.Format ||
+		!bytes.Equal(leftProgram.Code, rightProgram.Code) ||
+		!bytes.Equal(leftProgram.ReadOnlyData, rightProgram.ReadOnlyData) {
+		return false
+	}
+	if leftProgram.Manifest == nil || rightProgram.Manifest == nil {
+		return leftProgram.Manifest == nil && rightProgram.Manifest == nil
+	}
+	return leftProgram.Manifest.ComputeUnitLimit == rightProgram.Manifest.ComputeUnitLimit &&
+		leftProgram.Manifest.UpgradeAuthority == rightProgram.Manifest.UpgradeAuthority &&
+		programManifestSyscallsEqual(leftProgram.Manifest.RequiredSyscalls, rightProgram.Manifest.RequiredSyscalls)
+}
 
 // ProgramManifest 描述合约能力声明 + 部署前固定 syscall、升级权限和 compute 上限。
 type ProgramManifest struct {
@@ -122,7 +162,7 @@ func DecodeProgramManifest(data []byte) (ProgramManifest, bool, error) {
 	if len(data) < len(bytecodeHeader)+2 {
 		return ProgramManifest{}, false, fmt.Errorf("%w: bytecode too short", ErrInvalidProgram)
 	}
-	if string(data[:len(bytecodeHeader)]) != bytecodeHeader {
+	if !isSupportedBytecodeHeader(string(data[:len(bytecodeHeader)])) {
 		return ProgramManifest{}, false, fmt.Errorf("%w: invalid bytecode header", ErrInvalidProgram)
 	}
 	if version := binary.LittleEndian.Uint16(data[len(bytecodeHeader):]); version != BytecodeVersion {
@@ -158,7 +198,7 @@ func (loader BytecodeLoader) Load(programAccount ProgramAccount, loaderID Addres
 	if _, err := reader.Read(header); err != nil {
 		return Program{}, fmt.Errorf("%w: read header: %w", ErrInvalidProgram, err)
 	}
-	if string(header) != bytecodeHeader {
+	if !isSupportedBytecodeHeader(string(header)) {
 		return Program{}, fmt.Errorf("%w: invalid bytecode header", ErrInvalidProgram)
 	}
 	version, err := readUint16(reader)

@@ -3,7 +3,6 @@ package consensus
 import "errors"
 
 var (
-	ErrInvalidClockConfig = errors.New("consensus: invalid clock config")
 	ErrInvalidQuorum      = errors.New("consensus: invalid quorum")
 	ErrInvalidVote        = errors.New("consensus: invalid vote")
 	ErrInvalidCertificate = errors.New("consensus: invalid certificate")

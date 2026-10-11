@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestDefaultProgramExecutionPolicyIncludesShieldedFixedProgram(t *testing.T) {

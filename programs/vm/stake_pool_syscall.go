@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"math/bits"
 
-	"solana_golang/codec/borsh"
-	stakeprogram "solana_golang/programs/stake"
-	"solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	stakeprogram "github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 const (
@@ -463,31 +463,31 @@ func UnmarshalStakePoolReceiptStateBinary(data []byte) (StakePoolReceiptState, e
 
 // StakePoolBridgeProgramData 返回内置池化质押 VM 字节码 + 内容等价于 syscall stake_pool_execute; exit。
 func StakePoolBridgeProgramData() ([]byte, error) {
-	dispatchInstruction, err := svm.BuildRegisterInstruction(svm.RegOpSyscall, 0, 0, 0, uint64(svm.SyscallStakePoolExecute))
+	dispatchInstruction, err := ovm.BuildRegisterInstruction(ovm.RegOpSyscall, 0, 0, 0, uint64(ovm.SyscallStakePoolExecute))
 	if err != nil {
 		return nil, err
 	}
-	code, err := svm.BuildRegisterProgramCode(dispatchInstruction)
+	code, err := ovm.BuildRegisterProgramCode(dispatchInstruction)
 	if err != nil {
 		return nil, err
 	}
-	return svm.EncodeGovernedRegisterBytecode(code, nil, svm.ProgramManifest{
-		ComputeUnitLimit: svm.DefaultComputeUnitLimit,
-		RequiredSyscalls: []svm.SyscallID{svm.SyscallStakePoolExecute},
+	return ovm.EncodeGovernedRegisterBytecode(code, nil, ovm.ProgramManifest{
+		ComputeUnitLimit: ovm.DefaultComputeUnitLimit,
+		RequiredSyscalls: []ovm.SyscallID{ovm.SyscallStakePoolExecute},
 	})
 }
 
 // attachStakePoolSyscall 注入池化质押 syscall + VM 只通过受控入口调度固定 Stake Program。
-func attachStakePoolSyscall(runtimeValue *svm.Runtime, context runtime.InstructionContext) error {
+func attachStakePoolSyscall(runtimeValue *ovm.Runtime, context runtime.InstructionContext) error {
 	if runtimeValue == nil {
 		return fmt.Errorf("vm program: runtime is nil")
 	}
 	registry := runtimeValue.Syscalls
 	if registry.IsZero() {
-		registry = svm.DefaultSyscallRegistry()
+		registry = ovm.DefaultSyscallRegistry()
 	}
-	extendedRegistry, err := registry.With(svm.Syscall{
-		ID:      svm.SyscallStakePoolExecute,
+	extendedRegistry, err := registry.With(ovm.Syscall{
+		ID:      ovm.SyscallStakePoolExecute,
 		Name:    "stake_pool_execute",
 		Cost:    stakePoolExecuteSyscallCost,
 		Handler: stakePoolExecuteSyscall(context),
@@ -500,8 +500,8 @@ func attachStakePoolSyscall(runtimeValue *svm.Runtime, context runtime.Instructi
 }
 
 // stakePoolExecuteSyscall 执行池化质押业务 + 成功后同步 VM 和外层账户快照。
-func stakePoolExecuteSyscall(outerContext runtime.InstructionContext) svm.SyscallFunc {
-	return func(vmContext *svm.Context, input []byte) ([]byte, error) {
+func stakePoolExecuteSyscall(outerContext runtime.InstructionContext) ovm.SyscallFunc {
+	return func(vmContext *ovm.Context, input []byte) ([]byte, error) {
 		if vmContext == nil || vmContext.Accounts == nil {
 			return nil, fmt.Errorf("stake pool syscall: vm context is nil")
 		}
@@ -1203,11 +1203,11 @@ func validateStakePoolOwnedWritableAccount(
 }
 
 func commitStakePoolSyscallAccounts(
-	vmContext *svm.Context,
+	vmContext *ovm.Context,
 	outerContext runtime.InstructionContext,
 	workingAccounts map[structure.PublicKey]structure.Account,
 ) error {
-	vmAccounts := make([]svm.Account, len(outerContext.Instruction.AccountIndexes))
+	vmAccounts := make([]ovm.Account, len(outerContext.Instruction.AccountIndexes))
 	for accountIndex, messageAccountIndex := range outerContext.Instruction.AccountIndexes {
 		account, err := buildInstructionAccount(
 			runtime.InstructionContext{Message: outerContext.Message, Accounts: workingAccounts},

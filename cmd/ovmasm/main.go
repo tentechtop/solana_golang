@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"solana_golang/structure"
-	"solana_golang/vm"
-	"solana_golang/vm/assembler"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/vm"
+	"github.com/tentechtop/ordexus-core/vm/assembler"
 )
 
 type manifestFile struct {
@@ -29,14 +29,14 @@ func main() {
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("svmasm", flag.ContinueOnError)
+	flags := flag.NewFlagSet("ovmasm", flag.ContinueOnError)
 	manifestPath := flags.String("manifest", "auto", "manifest path, auto, or none")
 	noManifest := flags.Bool("no-manifest", false, "disable automatic manifest lookup")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 2 {
-		return fmt.Errorf("usage: svmasm [-manifest <path|auto|none>] [-no-manifest] <input.svmasm> <output.svmbin>")
+		return fmt.Errorf("usage: ovmasm [-manifest <path|auto|none>] [-no-manifest] <input.ovmasm> <output.ovmbin>")
 	}
 
 	inputPath := flags.Arg(0)
@@ -88,7 +88,7 @@ func resolveManifest(inputPath string, manifestOption string, noManifest bool) (
 }
 
 func resolveAutomaticManifest(inputPath string) (vm.ProgramManifest, string, bool, error) {
-	candidatePath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".svm.json"
+	candidatePath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".ovm.json"
 	manifest, err := readManifest(candidatePath)
 	if err == nil {
 		return manifest, filepath.Clean(candidatePath), true, nil
@@ -158,33 +158,33 @@ func manifestSyscalls(names []string) ([]vm.SyscallID, error) {
 
 func manifestSyscallByName(name string) (vm.SyscallID, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "log", "sol_log":
+	case "log", "ovm_log", "sol_log":
 		return vm.SyscallLog, nil
-	case "sha256", "sol_sha256":
+	case "sha256", "ovm_sha256", "sol_sha256":
 		return vm.SyscallSHA256, nil
-	case "set_return_data", "sol_set_return_data":
+	case "set_return_data", "ovm_set_return_data", "sol_set_return_data":
 		return vm.SyscallSetReturnData, nil
-	case "get_return_data", "sol_get_return_data":
+	case "get_return_data", "ovm_get_return_data", "sol_get_return_data":
 		return vm.SyscallGetReturnData, nil
-	case "get_clock", "sol_get_clock":
+	case "get_clock", "ovm_get_clock", "sol_get_clock":
 		return vm.SyscallGetClock, nil
-	case "get_rent", "sol_get_rent":
+	case "get_rent", "ovm_get_rent", "sol_get_rent":
 		return vm.SyscallGetRent, nil
-	case "create_program_address", "sol_create_program_address":
+	case "create_program_address", "ovm_create_program_address", "sol_create_program_address":
 		return vm.SyscallCreateProgramAddress, nil
-	case "invoke", "sol_invoke":
+	case "invoke", "ovm_invoke", "sol_invoke":
 		return vm.SyscallInvoke, nil
-	case "invoke_signed", "sol_invoke_signed":
+	case "invoke_signed", "ovm_invoke_signed", "sol_invoke_signed":
 		return vm.SyscallInvokeSigned, nil
 	case "verify_schnorr", "zk_verify_schnorr":
 		return vm.SyscallVerifySchnorr, nil
-	case "get_account_data", "sol_get_account_data":
+	case "get_account_data", "ovm_get_account_data", "sol_get_account_data":
 		return vm.SyscallGetAccountData, nil
-	case "set_account_data", "sol_set_account_data":
+	case "set_account_data", "ovm_set_account_data", "sol_set_account_data":
 		return vm.SyscallSetAccountData, nil
-	case "stake_pool_execute", "sol_stake_pool_execute":
+	case "stake_pool_execute", "ovm_stake_pool_execute", "sol_stake_pool_execute":
 		return vm.SyscallStakePoolExecute, nil
-	case "asset_execute", "sol_asset_execute":
+	case "asset_execute", "ovm_asset_execute", "sol_asset_execute":
 		return vm.SyscallAssetExecute, nil
 	default:
 		return 0, fmt.Errorf("unsupported syscall %q", name)

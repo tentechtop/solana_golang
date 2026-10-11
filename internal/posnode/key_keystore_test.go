@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestLoadRawKeyPairFromKeystore(t *testing.T) {
@@ -41,7 +41,7 @@ func TestLoadStructureKeyPairFromKeystore(t *testing.T) {
 		t.Fatalf("loadStructureKeyPair() error = %v", err)
 	}
 	if keyPair.PublicKey != expected.PublicKey || !bytes.Equal(keyPair.PrivateKey, expected.PrivateKey) {
-		t.Fatal("solana keypair does not match keystore")
+		t.Fatal("ordexus keypair does not match keystore")
 	}
 }
 

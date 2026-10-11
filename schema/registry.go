@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 )
 
@@ -290,10 +289,7 @@ func UnmarshalEnvelope(data []byte, maxPayloadSize int) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("%w: invalid schema id length", ErrInvalidEnvelope)
 	}
 	normalizedMaxPayloadSize := normalizeMaxPayloadSize(maxPayloadSize)
-	if normalizedMaxPayloadSize > math.MaxUint32 {
-		normalizedMaxPayloadSize = math.MaxUint32
-	}
-	if payloadLengthValue > uint32(normalizedMaxPayloadSize) {
+	if uint64(payloadLengthValue) > uint64(normalizedMaxPayloadSize) {
 		return Envelope{}, fmt.Errorf("%w: invalid payload length", ErrInvalidEnvelope)
 	}
 	payloadLength := int(payloadLengthValue)

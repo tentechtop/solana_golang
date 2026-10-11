@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"solana_golang/internal/bootstrapnode"
+	"github.com/tentechtop/ordexus-core/internal/bootstrapnode"
 )
 
 func main() {

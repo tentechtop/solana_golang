@@ -18,11 +18,11 @@ import (
 	"syscall"
 	"time"
 
-	"solana_golang/internal/poswire"
-	"solana_golang/p2p"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/internal/poswire"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -776,8 +776,10 @@ func forwardedMethods() []string {
 	return []string{
 		rpc.MethodGetBalance,
 		rpc.MethodGetAccountType,
+		rpc.MethodGetAccountInfo,
 		rpc.MethodGetLatestBlockhash,
 		rpc.MethodSendTransaction,
+		rpc.MethodSimulateTransaction,
 		rpc.MethodGetBlock,
 		rpc.MethodGetTransaction,
 		rpc.MethodGetAddressTransactions,

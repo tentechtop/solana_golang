@@ -125,15 +125,15 @@ func TestSLIP10Ed25519Vector(t *testing.T) {
 		t.Fatalf("m/0'/1' chain code = %q, want %q", got, want)
 	}
 }
-func TestSolanaKeyPairDerivation(t *testing.T) {
+func TestOrdexusKeyPairDerivation(t *testing.T) {
 	seed, err := GenerateSeedFromMnemonicString(bip39VectorMnemonic, "")
 	if err != nil {
 		t.Fatalf("GenerateSeedFromMnemonicString() error = %v", err)
 	}
 
-	keyInfo, err := GetSolanaKeyPairFromSeed(seed, 0, 0)
+	keyInfo, err := GetOrdexusKeyPairFromSeed(seed, 0, 0)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPairFromSeed() error = %v", err)
+		t.Fatalf("GetOrdexusKeyPairFromSeed() error = %v", err)
 	}
 	if keyInfo.Path != "m/44'/501'/0'/0'" {
 		t.Fatalf("path = %q, want m/44'/501'/0'/0'", keyInfo.Path)
@@ -152,17 +152,17 @@ func TestSolanaKeyPairDerivation(t *testing.T) {
 		t.Fatal("decoded address does not equal public key")
 	}
 
-	signature, err := Ed25519Sign(keyInfo.PrivateKey, []byte("solana hd wallet"))
+	signature, err := Ed25519Sign(keyInfo.PrivateKey, []byte("ordexus hd wallet"))
 	if err != nil {
 		t.Fatalf("Ed25519Sign() error = %v", err)
 	}
-	if !Ed25519Verify(keyInfo.PublicKey, []byte("solana hd wallet"), signature) {
+	if !Ed25519Verify(keyInfo.PublicKey, []byte("ordexus hd wallet"), signature) {
 		t.Fatal("derived key pair signature verification failed")
 	}
 
-	repeated, err := GetSolanaKeyPairFromSeedAndPath(seed, keyInfo.Path)
+	repeated, err := GetOrdexusKeyPairFromSeedAndPath(seed, keyInfo.Path)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPairFromSeedAndPath() error = %v", err)
+		t.Fatalf("GetOrdexusKeyPairFromSeedAndPath() error = %v", err)
 	}
 	if !bytes.Equal(repeated.PrivateKey, keyInfo.PrivateKey) ||
 		!bytes.Equal(repeated.PublicKey, keyInfo.PublicKey) ||
@@ -170,27 +170,27 @@ func TestSolanaKeyPairDerivation(t *testing.T) {
 		t.Fatal("same seed and path derived different key info")
 	}
 }
-func TestGetSolanaKeyPairFromMnemonic(t *testing.T) {
+func TestGetOrdexusKeyPairFromMnemonic(t *testing.T) {
 	words := strings.Fields(bip39VectorMnemonic)
-	keyInfo, err := GetSolanaKeyPair(words, 0, 0)
+	keyInfo, err := GetOrdexusKeyPair(words, 0, 0)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPair() error = %v", err)
+		t.Fatalf("GetOrdexusKeyPair() error = %v", err)
 	}
-	fromString, err := GetSolanaKeyPairFromMnemonicString(bip39VectorMnemonic, 0, 0)
+	fromString, err := GetOrdexusKeyPairFromMnemonicString(bip39VectorMnemonic, 0, 0)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPairFromMnemonicString() error = %v", err)
+		t.Fatalf("GetOrdexusKeyPairFromMnemonicString() error = %v", err)
 	}
 	if fromString.Address != keyInfo.Address {
-		t.Fatalf("GetSolanaKeyPairFromMnemonicString address = %s, want %s", fromString.Address, keyInfo.Address)
+		t.Fatalf("GetOrdexusKeyPairFromMnemonicString address = %s, want %s", fromString.Address, keyInfo.Address)
 	}
 
-	accountOne, err := GetSolanaKeyPair(words, 1, 0)
+	accountOne, err := GetOrdexusKeyPair(words, 1, 0)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPair(account 1) error = %v", err)
+		t.Fatalf("GetOrdexusKeyPair(account 1) error = %v", err)
 	}
-	addressOne, err := GetSolanaKeyPair(words, 0, 1)
+	addressOne, err := GetOrdexusKeyPair(words, 0, 1)
 	if err != nil {
-		t.Fatalf("GetSolanaKeyPair(address 1) error = %v", err)
+		t.Fatalf("GetOrdexusKeyPair(address 1) error = %v", err)
 	}
 	if keyInfo.Address == accountOne.Address {
 		t.Fatal("account 0 and account 1 addresses are equal")
@@ -243,14 +243,14 @@ func TestHDWalletInvalidInput(t *testing.T) {
 	if _, _, err := DerivePrivateKeyFromSeedAndPath(make([]byte, bip39SeedLength), "m/44'/501'/0'/0/0"); err == nil {
 		t.Fatal("DerivePrivateKeyFromSeedAndPath(non-hardened path) error = nil, want error")
 	}
-	if _, err := GetSolanaKeyPairFromSeed(make([]byte, bip39SeedLength), -1, 0); err == nil {
-		t.Fatal("GetSolanaKeyPairFromSeed(negative account) error = nil, want error")
+	if _, err := GetOrdexusKeyPairFromSeed(make([]byte, bip39SeedLength), -1, 0); err == nil {
+		t.Fatal("GetOrdexusKeyPairFromSeed(negative account) error = nil, want error")
 	}
-	if _, err := GetSolanaAddress([]byte{1, 2, 3}); err == nil {
-		t.Fatal("GetSolanaAddress(short key) error = nil, want error")
+	if _, err := GetOrdexusAddress([]byte{1, 2, 3}); err == nil {
+		t.Fatal("GetOrdexusAddress(short key) error = nil, want error")
 	}
-	if _, err := GetSolanaKeyPairFromMnemonicString("not a valid mnemonic", 0, 0); err == nil {
-		t.Fatal("GetSolanaKeyPairFromMnemonicString(invalid) error = nil, want error")
+	if _, err := GetOrdexusKeyPairFromMnemonicString("not a valid mnemonic", 0, 0); err == nil {
+		t.Fatal("GetOrdexusKeyPairFromMnemonicString(invalid) error = nil, want error")
 	}
 	if _, err := GenerateRootPrivateKey(bytes.Repeat([]byte{0}, bip39SeedLength)); err != nil {
 		t.Fatalf("GenerateRootPrivateKey() error = %v", err)

@@ -94,7 +94,7 @@ func BytesToUint64(value []byte) (uint64, error) {
 	return binary.BigEndian.Uint64(value), nil
 }
 
-// Uint16ToBytesLE 编码 uint16 + 使用小端序兼容 Solana 数据格式。
+// Uint16ToBytesLE 编码 uint16 + 使用小端序兼容 Ordexus 数据格式。
 func Uint16ToBytesLE(value uint16) []byte {
 	encoded := make([]byte, 2)
 	binary.LittleEndian.PutUint16(encoded, value)
@@ -109,7 +109,7 @@ func BytesToUint16LE(value []byte) (uint16, error) {
 	return binary.LittleEndian.Uint16(value), nil
 }
 
-// Uint32ToBytesLE 编码 uint32 + 使用小端序兼容 Solana 数据格式。
+// Uint32ToBytesLE 编码 uint32 + 使用小端序兼容 Ordexus 数据格式。
 func Uint32ToBytesLE(value uint32) []byte {
 	encoded := make([]byte, 4)
 	binary.LittleEndian.PutUint32(encoded, value)
@@ -124,7 +124,7 @@ func BytesToUint32LE(value []byte) (uint32, error) {
 	return binary.LittleEndian.Uint32(value), nil
 }
 
-// Uint64ToBytesLE 编码 uint64 + 使用小端序兼容 Solana 数据格式。
+// Uint64ToBytesLE 编码 uint64 + 使用小端序兼容 Ordexus 数据格式。
 func Uint64ToBytesLE(value uint64) []byte {
 	encoded := make([]byte, 8)
 	binary.LittleEndian.PutUint64(encoded, value)

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"solana_golang/database"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestLoadLocalConfig(t *testing.T) {

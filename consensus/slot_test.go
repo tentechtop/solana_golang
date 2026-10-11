@@ -5,61 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
-
-func TestSlotClockTickAndSkip(t *testing.T) {
-	startedAt := time.Unix(1710000000, 0)
-	clock, err := NewSlotClock(startedAt, 7, 400*time.Millisecond, 250*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewSlotClock() error = %v", err)
-	}
-
-	openTick := clock.Tick(startedAt.Add(850 * time.Millisecond))
-	if openTick.Slot != 9 {
-		t.Fatalf("open slot = %d, want 9", openTick.Slot)
-	}
-	if openTick.Elapsed != 50*time.Millisecond {
-		t.Fatalf("open elapsed = %s, want 50ms", openTick.Elapsed)
-	}
-	if openTick.ShouldSkip {
-		t.Fatal("open tick ShouldSkip = true, want false")
-	}
-
-	skipTick := clock.Tick(startedAt.Add(1060 * time.Millisecond))
-	if skipTick.Slot != 9 {
-		t.Fatalf("skip slot = %d, want 9", skipTick.Slot)
-	}
-	if skipTick.Elapsed != 260*time.Millisecond {
-		t.Fatalf("skip elapsed = %s, want 260ms", skipTick.Elapsed)
-	}
-	if !skipTick.ShouldSkip {
-		t.Fatal("skip tick ShouldSkip = false, want true")
-	}
-}
-
-func TestSlotClockTickBeforeStartIsNotStarted(t *testing.T) {
-	startedAt := time.Unix(1710000000, 0)
-	clock, err := NewSlotClock(startedAt, 1, time.Second, 700*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewSlotClock() error = %v", err)
-	}
-
-	beforeTick := clock.Tick(startedAt.Add(-time.Millisecond))
-	if beforeTick.Started {
-		t.Fatal("before start tick Started = true, want false")
-	}
-	if beforeTick.Slot != 1 {
-		t.Fatalf("before start slot = %d, want 1", beforeTick.Slot)
-	}
-
-	startTick := clock.Tick(startedAt)
-	if !startTick.Started {
-		t.Fatal("start tick Started = false, want true")
-	}
-}
 
 func TestVoteCollectorBuildsQuorumCertificate(t *testing.T) {
 	collector := newTestVoteCollector(t)
@@ -94,6 +42,60 @@ func TestVoteCollectorBuildsQuorumCertificate(t *testing.T) {
 	}
 }
 
+func TestVoteCollectorEmitsOnlyThresholdAndFullCertificates(t *testing.T) {
+	collector, err := NewVoteCollector(
+		map[string]uint64{"alice": 34, "bob": 33, "carol": 20, "dave": 13},
+		Quorum{Numerator: 2, Denominator: 3},
+	)
+	if err != nil {
+		t.Fatalf("NewVoteCollector() error = %v", err)
+	}
+	blockHash := testHash(7)
+	for _, voter := range []struct {
+		id    string
+		stake uint64
+		want  bool
+	}{
+		{id: "alice", stake: 34, want: false},
+		{id: "bob", stake: 33, want: true},
+		{id: "carol", stake: 20, want: false},
+		{id: "dave", stake: 13, want: true},
+	} {
+		vote := testVote(voter.id, voter.stake, blockHash)
+		certificate, formed, err := collector.AddVote(vote)
+		if err != nil {
+			t.Fatalf("AddVote(%s) error = %v", voter.id, err)
+		}
+		if formed != voter.want {
+			t.Fatalf("AddVote(%s) formed = %v, want %v", voter.id, formed, voter.want)
+		}
+		if voter.id == "dave" && certificate.ConfirmedStake != 100 {
+			t.Fatalf("full certificate stake = %d, want 100", certificate.ConfirmedStake)
+		}
+	}
+}
+
+func TestStrictQuorumRequiresMoreThanTwoThirds(t *testing.T) {
+	required, err := (Quorum{Numerator: 2, Denominator: 3, Strict: true}).RequiredStake(99)
+	if err != nil {
+		t.Fatalf("RequiredStake() error = %v", err)
+	}
+	if required != 67 {
+		t.Fatalf("required stake = %d, want 67", required)
+	}
+}
+
+func TestVoteCollectorRejectsQuorumsWithoutHonestIntersection(t *testing.T) {
+	_, err := NewVoteCollectorWithQuorums(
+		map[string]uint64{"alice": 34, "bob": 33, "carol": 33},
+		Quorum{Numerator: 2, Denominator: 3, Strict: true},
+		Quorum{Numerator: 1, Denominator: 3, Strict: true},
+	)
+	if !errors.Is(err, ErrInvalidQuorum) {
+		t.Fatalf("NewVoteCollectorWithQuorums(unsafe timeout) error = %v, want ErrInvalidQuorum", err)
+	}
+}
+
 func TestVoteCollectorBuildsSkipCertificate(t *testing.T) {
 	collector := newTestVoteCollector(t)
 
@@ -110,8 +112,8 @@ func TestVoteCollectorBuildsSkipCertificate(t *testing.T) {
 	if certificate.Type != VoteTypeSkip {
 		t.Fatalf("certificate type = %d, want skip", certificate.Type)
 	}
-	if !certificate.BlockHash.IsZero() {
-		t.Fatal("skip certificate block hash is not zero")
+	if certificate.BlockHash != testHash(9) || certificate.BlockHeight != 11 {
+		t.Fatalf("skip certificate parent = %s/%d, want bound parent", certificate.BlockHash.String(), certificate.BlockHeight)
 	}
 }
 
@@ -128,6 +130,43 @@ func TestVoteCollectorRejectsDuplicateAndConflict(t *testing.T) {
 	}
 	if _, _, err := collector.AddVote(testVote("alice", 34, nextBlockHash)); !errors.Is(err, ErrConflictingVote) {
 		t.Fatalf("AddVote(conflict) error = %v, want ErrConflictingVote", err)
+	}
+}
+
+func TestVoteCollectorRejectsConfirmAfterTimeoutInSameRound(t *testing.T) {
+	collector := newTestVoteCollector(t)
+	if _, _, err := collector.AddVote(testSkipVote("alice", 34)); err != nil {
+		t.Fatalf("AddVote(timeout) error = %v", err)
+	}
+	confirmVote := testVote("alice", 34, testHash(1))
+	if _, _, err := collector.AddVote(confirmVote); !errors.Is(err, ErrConflictingVote) {
+		t.Fatalf("AddVote(confirm after timeout) error = %v, want ErrConflictingVote", err)
+	}
+}
+
+func TestVoteCollectorAllowsPrepareThenTimeoutInSameRound(t *testing.T) {
+	collector := newTestVoteCollector(t)
+	prepareVote := testVote("alice", 34, testHash(1))
+	prepareVote.Type = VoteTypePrepare
+	if _, _, err := collector.AddVote(prepareVote); err != nil {
+		t.Fatalf("AddVote(prepare) error = %v", err)
+	}
+	if _, _, err := collector.AddVote(testSkipVote("alice", 34)); err != nil {
+		t.Fatalf("AddVote(timeout after prepare) error = %v", err)
+	}
+}
+
+func TestVoteCollectorRejectsConflictingPrepareVote(t *testing.T) {
+	collector := newTestVoteCollector(t)
+	firstVote := testVote("alice", 34, testHash(1))
+	firstVote.Type = VoteTypePrepare
+	secondVote := testVote("alice", 34, testHash(2))
+	secondVote.Type = VoteTypePrepare
+	if _, _, err := collector.AddVote(firstVote); err != nil {
+		t.Fatalf("AddVote(first prepare) error = %v", err)
+	}
+	if _, _, err := collector.AddVote(secondVote); !errors.Is(err, ErrConflictingVote) {
+		t.Fatalf("AddVote(conflicting prepare) error = %v, want ErrConflictingVote", err)
 	}
 }
 
@@ -181,12 +220,7 @@ func TestCertificateBorshRoundTrip(t *testing.T) {
 	}
 }
 
-func Example_localSlotSkipAndVoteConfirm() {
-	startedAt := time.Unix(1710000000, 0)
-	clock, _ := NewSlotClock(startedAt, 0, 400*time.Millisecond, 250*time.Millisecond)
-	tick := clock.Tick(startedAt.Add(260 * time.Millisecond))
-	fmt.Println(tick.Slot, tick.ShouldSkip)
-
+func ExampleVoteCollector() {
 	collector, _ := NewVoteCollector(map[string]uint64{
 		"alice": 34,
 		"bob":   33,
@@ -201,7 +235,6 @@ func Example_localSlotSkipAndVoteConfirm() {
 	fmt.Println(confirmed, certificate.ConfirmedStake)
 
 	// Output:
-	// 0 true
 	// false
 	// true 67
 }
@@ -236,6 +269,8 @@ func testSkipVote(voterID string, stake uint64) Vote {
 	return Vote{
 		Type:               VoteTypeSkip,
 		Slot:               10,
+		BlockHeight:        11,
+		BlockHash:          testHash(9),
 		VoterID:            voterID,
 		Stake:              stake,
 		CreatedAtUnixMilli: 1710000000000,

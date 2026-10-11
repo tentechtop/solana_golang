@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // TCPTransportConfig 保存 TCP 配置 + 允许测试和部署调整消息上限与日志。

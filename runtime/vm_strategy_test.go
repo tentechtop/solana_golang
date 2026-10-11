@@ -1,11 +1,57 @@
 package runtime_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
-	svm "solana_golang/vm"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
+
+func TestTransactionSimulatorPreservesVMLogsAndReturnData(t *testing.T) {
+	payerKey, payerPrivateKey := newSimulationSigner(t)
+	programKey := newTestPublicKey(149)
+	blockhash := newTestHash(150)
+	programData := mustVMProgramData(t, ovm.BuildProgramCode(
+		ovm.BuildSyscallOp(ovm.SyscallLog, []byte("contract-log")),
+		ovm.BuildSyscallOp(ovm.SyscallSetReturnData, []byte("contract-return")),
+	))
+	transaction := signedSimulationProgramTransaction(t, programKey, []AccountMeta{
+		{PublicKey: payerKey, IsSigner: true, IsWritable: true},
+		{PublicKey: programKey},
+	}, nil, nil, blockhash, map[PublicKey][]byte{payerKey: payerPrivateKey})
+
+	result, err := simulateWithVirtualMachine(t, TransactionSimulationInput{
+		Transaction: transaction,
+		Accounts: []AddressedAccount{
+			newSimulationAccount(t, payerKey, mustMinimumBalance(t, 0)+LamportsPerSignature+100, DefaultBuiltinProgramIDs.System, false),
+			newSimulationDataAccount(t, programKey, mustMinimumBalance(t, len(programData)), DefaultBuiltinProgramIDs.BPFLoader, true, programData),
+		},
+		BlockhashQueue: newSimulationBlockhashQueue(t, blockhash, 79),
+		CurrentSlot:    79,
+	})
+	if err != nil {
+		t.Fatalf("Simulate() error = %v", err)
+	}
+	if result.Status != TransactionStatusConfirmed {
+		t.Fatalf("Status = %d, want confirmed; error = %v", result.Status, result.Error)
+	}
+	if !containsString(result.LogMessages, "contract-log") {
+		t.Fatalf("LogMessages = %+v, want contract-log", result.LogMessages)
+	}
+	if result.ReturnData == nil || result.ReturnData.ProgramID != programKey || !reflect.DeepEqual(result.ReturnData.Data, []byte("contract-return")) {
+		t.Fatalf("ReturnData = %+v", result.ReturnData)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
 
 func TestTransactionSimulatorRejectsVirtualMachineProgramByDefault(t *testing.T) {
 	payerKey, payerPrivateKey := newSimulationSigner(t)
@@ -13,7 +59,7 @@ func TestTransactionSimulatorRejectsVirtualMachineProgramByDefault(t *testing.T)
 	programKey := newTestPublicKey(152)
 	blockhash := newTestHash(153)
 	instructionData := []byte("hello-vm")
-	programData := mustVMProgramData(t, svm.BuildProgramCode(svm.BuildWriteInstructionDataOp(0, 0)))
+	programData := mustVMProgramData(t, ovm.BuildProgramCode(ovm.BuildWriteInstructionDataOp(0, 0)))
 	payerLamports := mustMinimumBalance(t, 0) + LamportsPerSignature + 100
 	dataLamports := mustMinimumBalance(t, len(instructionData))
 	programLamports := mustMinimumBalance(t, len(programData))
@@ -52,7 +98,7 @@ func TestTransactionSimulatorRejectsVMReadonlyWrite(t *testing.T) {
 	dataKey := newTestPublicKey(154)
 	programKey := newTestPublicKey(155)
 	blockhash := newTestHash(156)
-	programData := mustVMProgramData(t, svm.BuildProgramCode(svm.BuildWriteInstructionDataOp(0, 0)))
+	programData := mustVMProgramData(t, ovm.BuildProgramCode(ovm.BuildWriteInstructionDataOp(0, 0)))
 	transaction := signedSimulationProgramTransaction(t, programKey, []AccountMeta{
 		{PublicKey: payerKey, IsSigner: true, IsWritable: true},
 		{PublicKey: dataKey, IsSigner: false, IsWritable: false},
@@ -88,7 +134,7 @@ func TestTransactionSimulatorRejectsVMFallbackNonExecutableProgram(t *testing.T)
 	dataKey := newTestPublicKey(157)
 	programKey := newTestPublicKey(158)
 	blockhash := newTestHash(159)
-	programData := mustVMProgramData(t, svm.BuildProgramCode(svm.BuildWriteInstructionDataOp(0, 0)))
+	programData := mustVMProgramData(t, ovm.BuildProgramCode(ovm.BuildWriteInstructionDataOp(0, 0)))
 	transaction := signedSimulationProgramTransaction(t, programKey, []AccountMeta{
 		{PublicKey: payerKey, IsSigner: true, IsWritable: true},
 		{PublicKey: dataKey, IsSigner: false, IsWritable: true},
@@ -127,7 +173,7 @@ func TestTransactionSimulatorRejectsVMFallbackWrongOwner(t *testing.T) {
 	dataKey := newTestPublicKey(160)
 	programKey := newTestPublicKey(161)
 	blockhash := newTestHash(162)
-	programData := mustVMProgramData(t, svm.BuildProgramCode(svm.BuildWriteInstructionDataOp(0, 0)))
+	programData := mustVMProgramData(t, ovm.BuildProgramCode(ovm.BuildWriteInstructionDataOp(0, 0)))
 	transaction := signedSimulationProgramTransaction(t, programKey, []AccountMeta{
 		{PublicKey: payerKey, IsSigner: true, IsWritable: true},
 		{PublicKey: dataKey, IsSigner: false, IsWritable: true},
@@ -164,7 +210,7 @@ func TestTransactionSimulatorRejectsVMFallbackWrongOwner(t *testing.T) {
 func mustVMProgramData(t *testing.T, code []byte) []byte {
 	t.Helper()
 
-	encoded, err := svm.EncodeBytecode(code)
+	encoded, err := ovm.EncodeBytecode(code)
 	if err != nil {
 		t.Fatalf("EncodeBytecode() error = %v", err)
 	}

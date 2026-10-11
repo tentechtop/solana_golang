@@ -7,7 +7,7 @@
 长期序列化分层如下：
 
 1. P2P / 节点通信：P2P frame + Borsh message body
-2. Solana 链上账户 / instruction data：Borsh
+2. Ordexus 链上账户 / instruction data：Borsh
 3. 外部 HTTP / 管理接口：JSON DTO
 4. 业务内部事实模型：Go domain struct
 5. 数据库存储：结构化字段优先，必要时保存 Borsh raw bytes
@@ -66,9 +66,9 @@ payload bytes
 7. 禁止引入 protobuf。
 
 
-四、Solana 链上数据规范
+四、Ordexus 链上数据规范
 
-Solana 链上账户数据和 instruction data 统一使用 Borsh。
+Ordexus 链上账户数据和 instruction data 统一使用 Borsh。
 
 Borsh 使用要求：
 

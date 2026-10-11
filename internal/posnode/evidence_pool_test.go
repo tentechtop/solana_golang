@@ -1,12 +1,76 @@
 package posnode
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
+
+func TestObserveSignedVoteQueuesCrossPhaseEvidence(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(node.epochSnapshot)
+	if !active || stakeValue == 0 {
+		t.Fatalf("local validator active=%v stake=%d, want active stake", active, stakeValue)
+	}
+	slot := node.epochSnapshot.StartSlot
+	timeoutVote := consensus.Vote{
+		Type:               consensus.VoteTypeSkip,
+		Slot:               slot,
+		BlockHeight:        node.ledger.Head().Height + 1,
+		BlockHash:          node.ledger.Head().BlockHash,
+		VoterID:            string(validatorID),
+		Stake:              stakeValue,
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	confirmVote := timeoutVote
+	confirmVote.Type = consensus.VoteTypeConfirm
+	confirmVote.BlockHash = testHashFromText(t, "cross-phase-confirm")
+	confirmVote.CreatedAtUnixMilli++
+	for _, vote := range []consensus.Vote{timeoutVote, confirmVote} {
+		envelope, err := node.newLocalVoteEnvelope(vote)
+		if err != nil {
+			t.Fatalf("newLocalVoteEnvelope(%d) error = %v", vote.Type, err)
+		}
+		node.observeSignedVoteForEvidence(context.Background(), envelope)
+	}
+	if len(node.pendingEvidence) != 1 {
+		t.Fatalf("pendingEvidence = %d, want 1 cross-phase double vote", len(node.pendingEvidence))
+	}
+}
+
+func TestObserveSignedVoteAllowsPrepareThenConfirm(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	validatorID := consensus.NewValidatorID(node.consensusKeyPair.PublicKey)
+	stakeValue, active := node.localValidatorEffectiveStakeFromSnapshot(node.epochSnapshot)
+	if !active || stakeValue == 0 {
+		t.Fatalf("local validator active=%v stake=%d, want active stake", active, stakeValue)
+	}
+	vote := consensus.Vote{
+		Type:               consensus.VoteTypePrepare,
+		Slot:               node.epochSnapshot.StartSlot,
+		BlockHeight:        node.ledger.Head().Height + 1,
+		BlockHash:          testHashFromText(t, "prepare-confirm-block"),
+		VoterID:            string(validatorID),
+		Stake:              stakeValue,
+		CreatedAtUnixMilli: time.Now().UnixMilli(),
+	}
+	for _, voteType := range []consensus.VoteType{consensus.VoteTypePrepare, consensus.VoteTypeConfirm} {
+		vote.Type = voteType
+		vote.CreatedAtUnixMilli++
+		envelope, err := node.newLocalVoteEnvelope(vote)
+		if err != nil {
+			t.Fatalf("newLocalVoteEnvelope(%d) error = %v", voteType, err)
+		}
+		node.observeSignedVoteForEvidence(context.Background(), envelope)
+	}
+	if len(node.pendingEvidence) != 0 {
+		t.Fatalf("pendingEvidence = %d, want 0 for legal phase transition", len(node.pendingEvidence))
+	}
+}
 
 func TestPendingEvidenceSnapshotSkipsFutureEvidence(t *testing.T) {
 	node := newConsensusStatusTestNode(t)
@@ -97,7 +161,7 @@ func signedDoubleVoteEvidenceForTest(
 
 func signedVoteForEvidenceTest(
 	t *testing.T,
-	keyPair structure.SolanaKeyPair,
+	keyPair structure.OrdexusKeyPair,
 	vote consensus.Vote,
 ) consensus.SignedVote {
 	t.Helper()

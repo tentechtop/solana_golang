@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (

@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
-	"solana_golang/rpc"
+	"github.com/tentechtop/ordexus-core/rpc"
 )
 
 func TestPrepareBootstrapJoinAppliesFrozenManifestForKnownValidator(t *testing.T) {
@@ -88,7 +87,7 @@ func TestPrepareBootstrapJoinAppliesFrozenManifestForKnownValidator(t *testing.T
 	}
 }
 
-func TestPrepareBootstrapJoinRejectsFrozenManifestForUnknownValidator(t *testing.T) {
+func TestPrepareBootstrapJoinAllowsNewValidatorAfterManifestFrozen(t *testing.T) {
 	coordinatorConfig := testBootstrapCoordinatorConfig(t, 1)
 	coordinator, err := newBootstrapCoordinator(coordinatorConfig, testBootstrapLogger())
 	if err != nil {
@@ -144,9 +143,22 @@ func TestPrepareBootstrapJoinRejectsFrozenManifestForUnknownValidator(t *testing
 		t.Fatalf("normalizeNodeConfig() error = %v", err)
 	}
 
-	_, err = prepareBootstrapJoinConfig(context.Background(), normalized, testBootstrapLogger())
-	if err == nil || !strings.Contains(err.Error(), "does not include local validator") {
-		t.Fatalf("prepareBootstrapJoinConfig() error = %v, want unknown validator rejection", err)
+	joined, err := prepareBootstrapJoinConfig(context.Background(), normalized, testBootstrapLogger())
+	if err != nil {
+		t.Fatalf("prepareBootstrapJoinConfig() error = %v", err)
+	}
+	if joined.ChainIdentityHash != manifest.ChainIdentityHash || joined.GenesisHash != manifest.GenesisHash {
+		t.Fatalf("joined chain identity = %s/%s, want %s/%s",
+			joined.ChainIdentityHash,
+			joined.GenesisHash,
+			manifest.ChainIdentityHash,
+			manifest.GenesisHash,
+		)
+	}
+	for _, validator := range joined.Genesis.InitialValidators {
+		if validator.PeerID == mustRawKeyPair("unknown-peer").peerID {
+			t.Fatal("new validator was added to frozen genesis instead of joining through on-chain registration")
+		}
 	}
 }
 

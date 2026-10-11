@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	systemprogram "solana_golang/programs/system"
-	runtimepkg "solana_golang/runtime"
+	systemprogram "github.com/tentechtop/ordexus-core/programs/system"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
 )
 
 func TestFixedExecutorWritesAuditLog(t *testing.T) {

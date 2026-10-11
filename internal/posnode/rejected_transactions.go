@@ -3,9 +3,9 @@ package posnode
 import (
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/rpc"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (

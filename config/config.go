@@ -10,8 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"solana_golang/database"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -29,8 +29,8 @@ const (
 	defaultP2PListenIP     = "0.0.0.0"
 	defaultP2PListenPort   = 5002
 	defaultP2PProtocol     = utils.ProtocolTCP
-	defaultP2PNetworkID    = "solana_golang:localnet:00000000000000000000000000000000"
-	defaultP2PSoftware     = "solana_golang/0.1.0"
+	defaultP2PNetworkID    = "ordexus-core:localnet:00000000000000000000000000000000"
+	defaultP2PSoftware     = "github.com/tentechtop/ordexus-core/0.1.0"
 )
 
 // AppConfig 保存启动配置 + 集中声明外部可调参数避免散落读取。
@@ -121,7 +121,7 @@ func Default() AppConfig {
 			Level:    defaultLogLevel,
 			Format:   defaultLogFormat,
 			Output:   defaultLogOutput,
-			FilePath: "./logs/solana_golang.log",
+			FilePath: "./logs/ordexus-core.log",
 		},
 		Database: DatabaseConfig{
 			Engine: string(defaultDatabaseEngine),

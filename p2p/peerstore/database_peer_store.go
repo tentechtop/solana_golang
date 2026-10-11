@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"solana_golang/database"
-	"solana_golang/p2p"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/p2p"
 )
 
 var databasePeerStorePrefix = []byte("peer_store/peer/")

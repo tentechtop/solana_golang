@@ -3,7 +3,7 @@ package consensus
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // DoubleProposalEvidence 描述同 slot 双出块证据 + 两个有效 leader 签名即可独立验证。
@@ -43,6 +43,24 @@ type SlashingEvidence struct {
 	Type           SlashingEvidenceType
 	DoubleProposal *DoubleProposalEvidence
 	DoubleVote     *SignedDoubleVoteEvidence
+}
+
+// Slot 返回作恶发生位置，历史验证者快照必须按该 slot 选择。
+func (evidence SlashingEvidence) Slot() (uint64, error) {
+	switch evidence.Type {
+	case SlashingEvidenceTypeDoubleProposal:
+		if evidence.DoubleProposal == nil {
+			return 0, fmt.Errorf("consensus: missing double proposal evidence")
+		}
+		return evidence.DoubleProposal.FirstProposal.Header.Slot, nil
+	case SlashingEvidenceTypeDoubleVote:
+		if evidence.DoubleVote == nil {
+			return 0, fmt.Errorf("consensus: missing double vote evidence")
+		}
+		return evidence.DoubleVote.FirstVote.Vote.Slot, nil
+	default:
+		return 0, fmt.Errorf("consensus: unsupported slashing evidence type %d", evidence.Type)
+	}
 }
 
 // Validate 校验双出块证据 + 必须同一 leader 同一 slot 不同区块。
@@ -95,7 +113,7 @@ func (vote SignedVote) Validate() error {
 	return nil
 }
 
-// Validate 校验双投票证据 + 同一验证者同一 slot 选择不同结果即冲突。
+// Validate 校验双投票证据 + Prepare 和决定阶段可各投一次，同阶段冲突才构成可罚没证据。
 func (evidence DoubleVoteEvidence) Validate() error {
 	if err := evidence.FirstVote.Validate(); err != nil {
 		return fmt.Errorf("consensus: first vote: %w", err)
@@ -108,6 +126,9 @@ func (evidence DoubleVoteEvidence) Validate() error {
 	}
 	if evidence.FirstVote.Slot != evidence.SecondVote.Slot {
 		return fmt.Errorf("consensus: votes are not in same slot")
+	}
+	if votePhaseForChoice(evidence.FirstVote.Type) != votePhaseForChoice(evidence.SecondVote.Type) {
+		return fmt.Errorf("consensus: votes are from different voting phases")
 	}
 	if evidence.FirstVote.Type == evidence.SecondVote.Type &&
 		evidence.FirstVote.BlockHeight == evidence.SecondVote.BlockHeight &&
@@ -133,6 +154,16 @@ func (evidence SignedDoubleVoteEvidence) Validate() error {
 
 // Validate 校验证据并返回被罚验证者 + 区块验证时据此定位 stake account。
 func (evidence SlashingEvidence) Validate(snapshot EpochSnapshot) (ValidatorState, uint64, error) {
+	if err := snapshot.Validate(); err != nil {
+		return ValidatorState{}, 0, fmt.Errorf("consensus: invalid slashing epoch snapshot: %w", err)
+	}
+	slot, err := evidence.Slot()
+	if err != nil {
+		return ValidatorState{}, 0, err
+	}
+	if slot < snapshot.StartSlot || slot > snapshot.EndSlot {
+		return ValidatorState{}, 0, fmt.Errorf("consensus: slashing evidence slot is outside epoch snapshot")
+	}
 	switch evidence.Type {
 	case SlashingEvidenceTypeDoubleProposal:
 		return evidence.validateDoubleProposal(snapshot)

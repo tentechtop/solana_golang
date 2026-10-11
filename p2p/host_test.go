@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestHostRequiresSecureSessionByDefault(t *testing.T) {
@@ -51,6 +51,39 @@ func TestHostRejectsWildcardAdvertisedAddress(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("NewHost(wildcard advertised) error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+func TestHostStaticBlockRejectsInboundAndOutboundPeer(t *testing.T) {
+	localPeerID := testPeerID(76)
+	blockedPeerID := testPeerID(77)
+	host, err := NewHost(HostConfig{
+		PeerID:         localPeerID,
+		AllowInsecure:  true,
+		BlockedPeerIDs: []string{blockedPeerID, blockedPeerID},
+	})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+
+	if err := host.checkPeerDialAllowed(blockedPeerID); !errors.Is(err, ErrPeerBlocked) {
+		t.Fatalf("checkPeerDialAllowed() error = %v, want ErrPeerBlocked", err)
+	}
+	if err := host.acceptInboundMessage(Message{FromPeerID: blockedPeerID}); !errors.Is(err, ErrPeerBlocked) {
+		t.Fatalf("acceptInboundMessage() error = %v, want ErrPeerBlocked", err)
+	}
+}
+
+func TestHostStaticBlockRejectsLocalPeer(t *testing.T) {
+	localPeerID := testPeerID(78)
+	_, err := NewHost(HostConfig{
+		PeerID:         localPeerID,
+		AllowInsecure:  true,
+		BlockedPeerIDs: []string{localPeerID},
+	})
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("NewHost(self block) error = %v, want ErrInvalidMessage", err)
 	}
 }
 

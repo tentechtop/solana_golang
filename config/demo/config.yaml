@@ -9,7 +9,7 @@ log:
   format: "json"
   add_source: false
   output: "console"
-  file_path: "./logs/demo/solana_golang.log"
+  file_path: "./logs/demo/ordexus-core.log"
 
 database:
   engine: "pebble"
@@ -24,8 +24,8 @@ p2p:
   listen_port: 5003
   default_protocol: "quic"
   max_peers: 64
-  network_id: "solana_golang:p2p-test:00000000000000000000000000000000"
-  software_version: "solana_golang/0.1.0"
+  network_id: "ordexus-core:p2p-test:00000000000000000000000000000000"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 1
   bootstrap_timeout_millis: 5000
   bootstrap:

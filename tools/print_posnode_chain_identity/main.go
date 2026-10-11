@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type output struct {

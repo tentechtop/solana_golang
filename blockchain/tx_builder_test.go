@@ -4,18 +4,18 @@ import (
 	"bytes"
 	"testing"
 
-	"solana_golang/structure"
-	svm "solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/structure"
+	ovm "github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestNewDeployContractTransactionCreatesSignedDeployment(t *testing.T) {
 	payer := testDeployKeyPair(t, 1)
 	program := testDeployKeyPair(t, 2)
-	code, err := svm.BuildRegisterProgramCode()
+	code, err := ovm.BuildRegisterProgramCode()
 	if err != nil {
 		t.Fatalf("BuildRegisterProgramCode() error = %v", err)
 	}
-	bytecode, err := svm.EncodeRegisterBytecode(code, nil)
+	bytecode, err := ovm.EncodeRegisterBytecode(code, nil)
 	if err != nil {
 		t.Fatalf("EncodeRegisterBytecode() error = %v", err)
 	}
@@ -88,9 +88,9 @@ func TestNewBootstrapFungibleAssetTransactionCreatesSignedAssetInitialization(t 
 	}
 }
 
-func testDeployKeyPair(t *testing.T, seedByte byte) structure.SolanaKeyPair {
+func testDeployKeyPair(t *testing.T, seedByte byte) structure.OrdexusKeyPair {
 	t.Helper()
-	seed := bytes.Repeat([]byte{seedByte}, structure.SolanaPrivateKeySeedSize)
+	seed := bytes.Repeat([]byte{seedByte}, structure.OrdexusPrivateKeySeedSize)
 	keyPair, err := structure.KeyPairFromSeed(seed)
 	if err != nil {
 		t.Fatalf("KeyPairFromSeed() error = %v", err)

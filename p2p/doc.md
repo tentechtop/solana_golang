@@ -1,4 +1,4 @@
-﻿# P2P 模块说明
+# P2P 模块说明
 
 ## 1. 当前目标
 
@@ -130,8 +130,10 @@ Go 标准库没有直接提供 QUIC 传输实现，因此 `quic_transport.go` �
 建议 ALPN：
 
 ```text
-solana-golang-p2p/1
+ordexus-p2p/1
 ```
+
+迁移期内默认传输层同时提供旧 ALPN `solana-golang-p2p/1`，以便滚动升级；新节点间优先协商 `ordexus-p2p/1`。
 
 ## 7. 握手协议建议
 

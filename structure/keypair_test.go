@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestSolanaKeyPairSecretKey64(t *testing.T) {
-	seed := bytes.Repeat([]byte{0x09}, SolanaPrivateKeySeedSize)
+func TestOrdexusKeyPairSecretKey64(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x09}, OrdexusPrivateKeySeedSize)
 	keyPair, err := KeyPairFromSeed(seed)
 	if err != nil {
 		t.Fatalf("KeyPairFromSeed() error = %v", err)
@@ -16,8 +16,8 @@ func TestSolanaKeyPairSecretKey64(t *testing.T) {
 	}
 
 	secretKey := keyPair.SecretKey64()
-	if len(secretKey) != SolanaSecretKeySize {
-		t.Fatalf("SecretKey64() length = %d, want %d", len(secretKey), SolanaSecretKeySize)
+	if len(secretKey) != OrdexusSecretKeySize {
+		t.Fatalf("SecretKey64() length = %d, want %d", len(secretKey), OrdexusSecretKeySize)
 	}
 	loaded, err := KeyPairFromSecretKey64(secretKey)
 	if err != nil {
@@ -38,7 +38,7 @@ func TestSolanaKeyPairSecretKey64(t *testing.T) {
 		t.Fatal("Verify(tampered) = true, want false")
 	}
 }
-func TestSolanaKeyPairInvalidInput(t *testing.T) {
+func TestOrdexusKeyPairInvalidInput(t *testing.T) {
 	if _, err := KeyPairFromSeed([]byte{1, 2, 3}); err == nil {
 		t.Fatal("KeyPairFromSeed(short) error = nil, want error")
 	}
@@ -46,12 +46,12 @@ func TestSolanaKeyPairInvalidInput(t *testing.T) {
 		t.Fatal("KeyPairFromSecretKey64(short) error = nil, want error")
 	}
 
-	seed := bytes.Repeat([]byte{0x09}, SolanaPrivateKeySeedSize)
+	seed := bytes.Repeat([]byte{0x09}, OrdexusPrivateKeySeedSize)
 	secretKey, err := ToSecretKey64(seed)
 	if err != nil {
 		t.Fatalf("ToSecretKey64() error = %v", err)
 	}
-	secretKey[SolanaPrivateKeySeedSize] ^= 0xff
+	secretKey[OrdexusPrivateKeySeedSize] ^= 0xff
 	if _, err := KeyPairFromSecretKey64(secretKey); err == nil {
 		t.Fatal("KeyPairFromSecretKey64(mismatched public key) error = nil, want error")
 	}

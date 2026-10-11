@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/vm"
 )
 
 func TestRunBuildsGovernedBytecodeWhenManifestExists(t *testing.T) {
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "contract.svmasm")
-	manifestPath := filepath.Join(tempDir, "contract.svm.json")
-	outputPath := filepath.Join(tempDir, "dist", "contract.svmbin")
+	sourcePath := filepath.Join(tempDir, "contract.ovmasm")
+	manifestPath := filepath.Join(tempDir, "contract.ovm.json")
+	outputPath := filepath.Join(tempDir, "dist", "contract.ovmbin")
 
 	writeTestFile(t, sourcePath, "syscall asset_execute\nexit\n")
 	writeTestFile(t, manifestPath, `{
@@ -24,7 +24,7 @@ func TestRunBuildsGovernedBytecodeWhenManifestExists(t *testing.T) {
 }
 `)
 
-	if err := run([]string{"svmasm", sourcePath, outputPath}); err != nil {
+	if err := run([]string{"ovmasm", sourcePath, outputPath}); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
 	bytecode, err := os.ReadFile(outputPath)
@@ -48,11 +48,11 @@ func TestRunBuildsGovernedBytecodeWhenManifestExists(t *testing.T) {
 
 func TestRunNoManifestBuildsPlainRegisterBytecode(t *testing.T) {
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "contract.svmasm")
-	outputPath := filepath.Join(tempDir, "contract.svmbin")
+	sourcePath := filepath.Join(tempDir, "contract.ovmasm")
+	outputPath := filepath.Join(tempDir, "contract.ovmbin")
 
 	writeTestFile(t, sourcePath, "syscall asset_execute\nexit\n")
-	if err := run([]string{"svmasm", "-no-manifest", sourcePath, outputPath}); err != nil {
+	if err := run([]string{"ovmasm", "-no-manifest", sourcePath, outputPath}); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
 	bytecode, err := os.ReadFile(outputPath)

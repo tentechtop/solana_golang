@@ -3,11 +3,11 @@ package rpcnode
 import (
 	"testing"
 
-	"solana_golang/internal/poswire"
-	"solana_golang/p2p"
-	"solana_golang/rpc"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/internal/poswire"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestNewStaticPeerMarksValidatorCapability(t *testing.T) {

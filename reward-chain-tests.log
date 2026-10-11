@@ -1,0 +1,25 @@
+ok  	solana_golang/programs/vm	1.157s
+ok  	solana_golang/rpc	1.434s
+17:49:53 INF compiling circuit
+17:49:53 INF parsed circuit inputs nbPublic=12 nbSecret=80
+17:49:53 INF building constraint builder nbConstraints=52748
+--- FAIL: TestRebuildEpochTreatsRuntimeCountersAsSameConsensusSnapshot (0.08s)
+    epoch_snapshot_store_test.go:115: rebuildEpoch() error = posnode: authenticated below-threshold epoch snapshot must contain exactly one elder
+17:49:55 DBG constraint system solver done nbConstraints=52748 took=100.2364
+17:49:55 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=177.7138
+17:49:55 DBG verifier done backend=groth16 curve=bn254 took=2
+17:49:55 DBG constraint system solver done nbConstraints=52748 took=94.2531
+17:49:56 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=173.7152
+17:49:56 DBG constraint system solver done nbConstraints=52748 took=65.4981
+17:49:56 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=155.3682
+17:49:56 DBG verifier done backend=groth16 curve=bn254 took=1.2264
+17:49:56 DBG constraint system solver done nbConstraints=52748 took=71.5401
+17:49:56 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=155.1548
+17:49:56 DBG constraint system solver done nbConstraints=52748 took=53.4482
+17:49:56 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=156.8328
+17:49:56 DBG verifier done backend=groth16 curve=bn254 took=1.005
+17:49:56 DBG verifier done backend=groth16 curve=bn254 took=1.5036
+time=2026-09-08T17:49:57.627+08:00 level=ERROR msg="validator wallet pairing activation failed" error="bootstrap manifest already frozen"
+FAIL
+FAIL	solana_golang/internal/posnode	5.708s
+FAIL

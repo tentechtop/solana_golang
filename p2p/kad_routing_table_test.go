@@ -3,7 +3,7 @@ package p2p
 import (
 	"testing"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestKADBucketIndexAndDistance(t *testing.T) {

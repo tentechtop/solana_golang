@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/database"
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestConsensusStatusExposesLayerWeightAndStakeBuckets(t *testing.T) {
@@ -42,6 +43,23 @@ func TestConsensusStatusExposesLayerWeightAndStakeBuckets(t *testing.T) {
 	}
 	if len(status.Consensus.Validators) != 3 {
 		t.Fatalf("validator count = %d, want 3", len(status.Consensus.Validators))
+	}
+}
+
+func TestPeerStatusSnapshotKeepsSyncFieldsWithoutOperationalValidatorScan(t *testing.T) {
+	node := newConsensusStatusTestNode(t)
+	status := node.peerStatusSnapshot()
+	if status.HeadHash == "" || status.FinalizedHash == "" {
+		t.Fatalf("peer status chain checkpoint is incomplete: %+v", status)
+	}
+	if !status.Consensus.Available || status.Consensus.ValidatorCount != 3 {
+		t.Fatalf("peer consensus summary = %+v, want available three-validator summary", status.Consensus)
+	}
+	if len(status.Consensus.Validators) != 0 {
+		t.Fatalf("peer status enumerated %d validators, want lightweight summary", len(status.Consensus.Validators))
+	}
+	if len(status.UpcomingLeaders) == 0 || len(status.TransactionFast.PreferredPeerIDs) == 0 {
+		t.Fatalf("peer status transaction routing is incomplete: %+v", status.TransactionFast)
 	}
 }
 
@@ -250,27 +268,30 @@ func newConsensusStatusTestNode(t *testing.T) *posNode {
 func newConsensusStatusTestNodeWithDatabase(t *testing.T, db database.Database) *posNode {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	validatorKeys := []structure.SolanaKeyPair{
+	validatorKeys := []structure.OrdexusKeyPair{
 		mustStructureKeyPair("consensus-status-validator-a"),
 		mustStructureKeyPair("consensus-status-validator-b"),
 		mustStructureKeyPair("consensus-status-validator-c"),
 	}
-	consensusKeys := []structure.SolanaKeyPair{
+	consensusKeys := []structure.OrdexusKeyPair{
 		mustStructureKeyPair("consensus-status-consensus-a"),
 		mustStructureKeyPair("consensus-status-consensus-b"),
 		mustStructureKeyPair("consensus-status-consensus-c"),
 	}
-	stakerKeys := []structure.SolanaKeyPair{
+	stakerKeys := []structure.OrdexusKeyPair{
 		mustStructureKeyPair("consensus-status-staker-a"),
 		mustStructureKeyPair("consensus-status-staker-b"),
 		mustStructureKeyPair("consensus-status-staker-c"),
 	}
 	genesisValidators := make([]blockchain.GenesisValidator, len(validatorKeys))
+	blsKeys := make([]consensus.BLSKeyPair, len(validatorKeys))
 	for index := range validatorKeys {
+		blsKeys[index] = consensusStatusBLSKeyPair(t, consensusKeys[index].PublicKey)
 		genesisValidators[index] = blockchain.GenesisValidator{
 			StakerAddress:      stakerKeys[index].PublicKey,
 			ValidatorAddress:   validatorKeys[index].PublicKey,
 			ConsensusPublicKey: consensusKeys[index].PublicKey,
+			BLSPublicKey:       append([]byte(nil), blsKeys[index].PublicKey...),
 			P2PPeerID:          mustRawKeyPair("consensus-status-peer-" + string(rune('a'+index))).peerID,
 			StakeLamports:      stake.MinimumStakeLamports,
 		}
@@ -311,11 +332,65 @@ func newConsensusStatusTestNodeWithDatabase(t *testing.T, db database.Database) 
 		db:               db,
 		ledger:           ledger,
 		consensusKeyPair: consensusKeys[0],
+		blsKeyPair:       blsKeys[0],
 		peerKeyPair:      rawKeyPair{peerID: genesisValidators[0].P2PPeerID},
 		epochSnapshot:    snapshot,
 		leaderSchedule:   schedule,
 		seenTransactions: make(map[string]struct{}),
 	}
+}
+
+func consensusStatusBLSKeyPair(t testing.TB, consensusPublicKey structure.PublicKey) consensus.BLSKeyPair {
+	t.Helper()
+	keyPair, err := consensus.BLSKeyPairFromSeed(utils.SHA256([]byte("consensus-status-bls-" + consensusPublicKey.String())))
+	if err != nil {
+		t.Fatalf("BLSKeyPairFromSeed() error = %v", err)
+	}
+	return keyPair
+}
+
+func collectConsensusStatusQC(
+	t testing.TB,
+	snapshot consensus.EpochSnapshot,
+	voteType consensus.VoteType,
+	slot uint64,
+	height uint64,
+	blockHash structure.Hash,
+) consensus.QuorumCertificate {
+	t.Helper()
+	collector, err := consensus.NewVoteCollectorWithQuorums(
+		snapshot.StakeMap(),
+		consensus.Quorum{Numerator: 2, Denominator: 3, Strict: true},
+		consensus.Quorum{Numerator: 2, Denominator: 3, Strict: true},
+	)
+	if err != nil {
+		t.Fatalf("NewVoteCollector() error = %v", err)
+	}
+	for index, validator := range snapshot.Validators {
+		vote := consensus.Vote{
+			Type:               voteType,
+			Slot:               slot,
+			BlockHeight:        height,
+			BlockHash:          blockHash,
+			VoterID:            string(validator.ValidatorID),
+			Stake:              validator.StakeLamports,
+			CreatedAtUnixMilli: int64(index + 1),
+		}
+		blsKeyPair := consensusStatusBLSKeyPair(t, validator.ConsensusPublicKey)
+		blsSignature, signErr := consensus.SignBLSVote(blsKeyPair.PrivateKey, vote)
+		if signErr != nil {
+			t.Fatalf("SignBLSVote() error = %v", signErr)
+		}
+		certificate, formed, addErr := collector.AddVoteWithBLS(vote, blsSignature, snapshot.ValidatorOrder())
+		if addErr != nil {
+			t.Fatalf("AddVoteWithBLS() error = %v", addErr)
+		}
+		if formed {
+			return certificate
+		}
+	}
+	t.Fatal("qc was not formed")
+	return consensus.QuorumCertificate{}
 }
 
 func addPendingStakeForValidator(t *testing.T, ledger *blockchain.Ledger, validatorAddress structure.PublicKey, lamports uint64) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/schema"
+	"github.com/tentechtop/ordexus-core/schema"
 )
 
 func TestWriterReaderGoldenBytes(t *testing.T) {

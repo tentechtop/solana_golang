@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // Context 保存一次 VM 调用上下文 + 将账户、计量、syscall 和运行态结果集中管理。

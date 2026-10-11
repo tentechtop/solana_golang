@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"solana_golang/consensus"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestTurbinePositionForSlotShowsNodeLayer(t *testing.T) {
@@ -163,6 +164,39 @@ func TestTransactionFastPathCanExcludeLocalPeer(t *testing.T) {
 	}
 }
 
+func TestTransactionReceiveForwardingUsesBoundedFanout(t *testing.T) {
+	snapshot, schedule, keysByValidator := newTurbineTestSnapshotForNode(t, 16)
+	localValidator := snapshot.Validators[0]
+	node := newTurbinePositionTestNode(keysByValidator[localValidator.ValidatorID], snapshot, schedule, 2)
+	node.peerKeyPair.peerID = localValidator.P2PPeerID
+	ledgerNode := newConsensusStatusTestNode(t)
+	node.ledger = ledgerNode.ledger
+	node.logger = ledgerNode.logger
+	host, err := p2p.NewHost(p2p.HostConfig{PeerID: localValidator.P2PPeerID, AllowInsecure: true, Logger: node.logger})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	defer host.Close()
+	for _, validator := range snapshot.Validators[1:] {
+		peer, err := p2p.NewPeer(validator.P2PPeerID, nil)
+		if err != nil {
+			t.Fatalf("NewPeer(%s) error = %v", validator.P2PPeerID, err)
+		}
+		if err := host.AddPeer(peer); err != nil {
+			t.Fatalf("AddPeer(%s) error = %v", validator.P2PPeerID, err)
+		}
+	}
+	node.host = host
+
+	targets := node.transactionForwardTargets(context.Background(), snapshot.Validators[1].P2PPeerID)
+	if len(targets) == 0 || len(targets) > transactionForwardFanout {
+		t.Fatalf("forward targets = %v, want 1..%d targets", targets, transactionForwardFanout)
+	}
+	assertPeerIDAbsent(t, targets, localValidator.P2PPeerID)
+	assertPeerIDAbsent(t, targets, snapshot.Validators[1].P2PPeerID)
+	assertUniquePeerIDs(t, targets)
+}
+
 func TestVoteRouteTargetsKeepLeaderDirectAndParentPath(t *testing.T) {
 	snapshot, schedule, keysByValidator := newTurbineTestSnapshotForNode(t, 10)
 	slot := snapshot.StartSlot
@@ -199,7 +233,39 @@ func TestVoteRouteTargetsKeepLeaderDirectAndParentPath(t *testing.T) {
 	assertUniquePeerIDs(t, targets)
 }
 
-func newTurbineNodesByValidator(keysByValidator map[consensus.ValidatorID]structure.SolanaKeyPair, snapshot consensus.EpochSnapshot, schedule consensus.LeaderSchedule, fanout int) map[consensus.ValidatorID]*posNode {
+func TestTimeoutVoteRouteTargetsFutureLeaderCollectors(t *testing.T) {
+	snapshot, schedule, keysByValidator := newTurbineTestSnapshotForNode(t, 16)
+	localValidator := snapshot.Validators[0]
+	node := newTurbinePositionTestNode(keysByValidator[localValidator.ValidatorID], snapshot, schedule, 2)
+	node.peerKeyPair.peerID = localValidator.P2PPeerID
+	slot := snapshot.StartSlot
+
+	targets := node.voteRouteTargets(context.Background(), consensus.Vote{
+		Type: consensus.VoteTypeSkip,
+		Slot: slot,
+	}, "", node.peerKeyPair.peerID)
+	expected := make([]string, 0, timeoutVoteCollectorRounds)
+	for offset := uint64(1); offset <= timeoutVoteCollectorRounds; offset++ {
+		leaderID, err := schedule.LeaderForSlot(slot + offset)
+		if err != nil {
+			t.Fatalf("LeaderForSlot(%d) error = %v", slot+offset, err)
+		}
+		leader, exists := snapshot.ValidatorByID(leaderID)
+		if !exists {
+			t.Fatalf("leader %s missing", leaderID)
+		}
+		expected = append(expected, leader.P2PPeerID)
+	}
+	expected = removePeerIDs(expected, localValidator.P2PPeerID)
+	if len(targets) >= len(snapshot.Validators)-1 {
+		t.Fatalf("timeout votes still use all-validator fanout: %d targets", len(targets))
+	}
+	assertPeerSetContains(t, targets, expected)
+	assertPeerIDAbsent(t, targets, localValidator.P2PPeerID)
+	assertUniquePeerIDs(t, targets)
+}
+
+func newTurbineNodesByValidator(keysByValidator map[consensus.ValidatorID]structure.OrdexusKeyPair, snapshot consensus.EpochSnapshot, schedule consensus.LeaderSchedule, fanout int) map[consensus.ValidatorID]*posNode {
 	nodes := make(map[consensus.ValidatorID]*posNode, len(keysByValidator))
 	for validatorID, keyPair := range keysByValidator {
 		nodes[validatorID] = newTurbinePositionTestNode(keyPair, snapshot, schedule, fanout)
@@ -370,19 +436,23 @@ func assertPeerSetContains(t *testing.T, actual []string, expected []string) {
 	}
 }
 
-func newTurbineTestSnapshotForNode(t testing.TB, count int) (consensus.EpochSnapshot, consensus.LeaderSchedule, map[consensus.ValidatorID]structure.SolanaKeyPair) {
+func newTurbineTestSnapshotForNode(t testing.TB, count int) (consensus.EpochSnapshot, consensus.LeaderSchedule, map[consensus.ValidatorID]structure.OrdexusKeyPair) {
 	t.Helper()
-	keysByValidator := make(map[consensus.ValidatorID]structure.SolanaKeyPair, count)
+	keysByValidator := make(map[consensus.ValidatorID]structure.OrdexusKeyPair, count)
 	validators := make([]consensus.ValidatorState, count)
 	for index := range validators {
 		accountKey := mustStructureKeyPair("cmd-turbine-account-" + string(rune('a'+index)))
 		consensusKey := mustStructureKeyPair("cmd-turbine-consensus-" + string(rune('a'+index)))
+		peerID, err := PeerIDFromSeed("cmd-turbine-peer-" + string(rune('a'+index)))
+		if err != nil {
+			t.Fatalf("PeerIDFromSeed() error = %v", err)
+		}
 		validatorID := consensus.NewValidatorID(consensusKey.PublicKey)
 		keysByValidator[validatorID] = consensusKey
 		validators[index] = consensus.ValidatorState{
 			AccountAddress:     accountKey.PublicKey,
 			ConsensusPublicKey: consensusKey.PublicKey,
-			P2PPeerID:          "peer-cmd-turbine-" + string(rune('a'+index)),
+			P2PPeerID:          peerID,
 			StakeLamports:      stake.MinimumStakeLamports,
 			Status:             consensus.ValidatorStatusActive,
 		}
@@ -402,7 +472,7 @@ func newTurbineTestSnapshotForNode(t testing.TB, count int) (consensus.EpochSnap
 	return snapshot, schedule, keysByValidator
 }
 
-func newTurbinePositionTestNode(keyPair structure.SolanaKeyPair, snapshot consensus.EpochSnapshot, schedule consensus.LeaderSchedule, fanout int) *posNode {
+func newTurbinePositionTestNode(keyPair structure.OrdexusKeyPair, snapshot consensus.EpochSnapshot, schedule consensus.LeaderSchedule, fanout int) *posNode {
 	return &posNode{
 		config: nodeConfig{
 			EpochSlots:    16,

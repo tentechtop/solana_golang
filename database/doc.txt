@@ -1,4 +1,4 @@
-Solana Golang Database 使用说明
+Ordexus Core Database 使用说明
 
 1. 简介
 

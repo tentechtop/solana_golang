@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"solana_golang/programs/stake"
-	"solana_golang/rpc"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestBootstrapCoordinatorFreezesManifestAtThreshold(t *testing.T) {
@@ -259,8 +259,8 @@ func TestApplyBootstrapManifestPreservesChainIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeNodeConfig() error = %v", err)
 	}
-	if err := validateBootstrapManifestForLocalNode(manifest, registration.PeerID); err != nil {
-		t.Fatalf("validateBootstrapManifestForLocalNode() error = %v", err)
+	if err := validateBootstrapManifest(manifest); err != nil {
+		t.Fatalf("validateBootstrapManifest() error = %v", err)
 	}
 	joined, err := applyBootstrapManifest(normalized, manifest)
 	if err != nil {

@@ -2,7 +2,7 @@
 
 版本：v0.1
 日期：2026-06-15
-目标：在现有账户模型、P2P、存储、固定指令执行器基础上，先不引入 VM，把 PoS 链最小真实业务闭环跑通；未来可平滑接入 VM、SVM 兼容执行器和更高性能网络层。
+目标：在现有账户模型、P2P、存储、固定指令执行器基础上，先不引入 VM，把 PoS 链最小真实业务闭环跑通；未来可平滑接入 VM、OVM 兼容执行器和更高性能网络层。
 
 一、核心目标
 
@@ -413,7 +413,7 @@ TxForwardPacket 字段：
 MVP 建议：
  - 先只把执行成功交易写入区块。
  - 失败交易返回 RPC 失败，不进入链。
- - 后续再引入 Solana 风格的失败交易 receipt 和费用扣除。
+ - 后续再引入 Ordexus 风格的失败交易 receipt 和费用扣除。
 
 九、验证者验块与投票流程
 
@@ -634,8 +634,8 @@ type ExecutionResult struct {
 
 ExecutionMode 建议值：
  - fixed_instruction_v1：当前固定指令。
- - gosvm_v1：未来自研 VM。
- - svm_compat_v1：未来兼容 SVM。
+ - goovm_v1：未来自研 VM。
+ - ovm_compat_v1：未来兼容 OVM。
 
 共识层只依赖 TransactionExecutor，不直接依赖具体业务代码。
 固定指令执行器属于 runtime，不属于 structure；structure 中不得新增带状态副作用的 Execute、Apply、Handle、Process 类方法。
@@ -956,7 +956,7 @@ P6：状态同步与重启恢复
 
 二十四、架构结论
 
-当前阶段不要追求完整 Solana 运行时，也不要让 KAD 承担交易快速路径。最稳妥的路线是：
+当前阶段不要追求完整 Ordexus 运行时，也不要让 KAD 承担交易快速路径。最稳妥的路线是：
 
 1. runtime 固定指令执行器先承载真实业务，structure 只保留纯结构。
 2. 共识层先实现确定性 PoS + QC + SkipQC。
@@ -964,4 +964,4 @@ P6：状态同步与重启恢复
 4. 证据和惩罚必须从第一版进入模型，否则后续补安全会很痛。
 5. VM 只作为执行器接口的未来实现，不阻塞 PoS 链闭环。
 
-这样可以最短路径跑通真实链，同时保留未来升级到 VM、聚合签名、高性能并行执行和更接近 Solana TPU/TVU 架构的空间。
+这样可以最短路径跑通真实链，同时保留未来升级到 VM、聚合签名、高性能并行执行和更接近 Ordexus TPU/TVU 架构的空间。

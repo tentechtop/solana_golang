@@ -3,9 +3,9 @@ package runtime_test
 import (
 	"testing"
 
-	tokenprogram "solana_golang/programs/token"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
+	tokenprogram "github.com/tentechtop/ordexus-core/programs/token"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestTokenProgramMintsAndTransfers(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"solana_golang/runtime"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestExecuteRejectsInsufficientComputeBudgetBeforeVerification(t *testing.T) {

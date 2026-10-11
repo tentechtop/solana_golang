@@ -1,0 +1,32 @@
+ok  	solana_golang/programs/bpfloader	(cached)
+ok  	solana_golang/programs/shielded	(cached)
+ok  	solana_golang/programs/stake	(cached)
+?   	solana_golang/programs/system	[no test files]
+?   	solana_golang/programs/token	[no test files]
+ok  	solana_golang/programs/vm	1.007s
+ok  	solana_golang/runtime	0.216s
+ok  	solana_golang/rpc	1.271s
+ok  	solana_golang/blockchain	2.152s
+06:38:54 INF compiling circuit
+06:38:54 INF parsed circuit inputs nbPublic=12 nbSecret=80
+06:38:54 INF building constraint builder nbConstraints=52748
+--- FAIL: TestRebuildEpochTreatsRuntimeCountersAsSameConsensusSnapshot (0.10s)
+    epoch_snapshot_store_test.go:115: rebuildEpoch() error = posnode: authenticated below-threshold epoch snapshot must contain exactly one elder
+06:38:56 DBG constraint system solver done nbConstraints=52748 took=46.7573
+06:38:56 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=139.6535
+06:38:56 DBG verifier done backend=groth16 curve=bn254 took=1.0472
+06:38:57 DBG constraint system solver done nbConstraints=52748 took=43.9426
+06:38:57 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=133.9801
+06:38:57 DBG constraint system solver done nbConstraints=52748 took=54.131
+06:38:57 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=133.098
+06:38:57 DBG verifier done backend=groth16 curve=bn254 took=0.5346
+06:38:57 DBG constraint system solver done nbConstraints=52748 took=43.2705
+06:38:57 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=127.2557
+06:38:57 DBG constraint system solver done nbConstraints=52748 took=50.2718
+06:38:57 DBG prover done acceleration=none backend=groth16 curve=bn254 nbConstraints=52748 took=122.9491
+06:38:57 DBG verifier done backend=groth16 curve=bn254 took=0.9997
+06:38:57 DBG verifier done backend=groth16 curve=bn254 took=2.0255
+time=2026-09-08T06:38:58.042+08:00 level=ERROR msg="validator wallet pairing activation failed" error="bootstrap manifest already frozen"
+FAIL
+FAIL	solana_golang/internal/posnode	4.682s
+FAIL

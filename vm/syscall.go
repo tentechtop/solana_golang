@@ -6,8 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"solana_golang/utils"
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/utils"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 type SyscallID uint32
@@ -81,18 +81,18 @@ func (registry SyscallRegistry) With(syscalls ...Syscall) (SyscallRegistry, erro
 // DefaultSyscallRegistry 返回默认 syscall 集合 + 覆盖日志、返回值、sysvar、PDA、CPI 和 ZK。
 func DefaultSyscallRegistry() SyscallRegistry {
 	registry, err := NewSyscallRegistry(
-		Syscall{ID: SyscallLog, Name: "sol_log", Cost: 50, Handler: syscallLog},
-		Syscall{ID: SyscallSHA256, Name: "sol_sha256", Cost: 90, Handler: syscallSHA256},
-		Syscall{ID: SyscallSetReturnData, Name: "sol_set_return_data", Cost: 50, Handler: syscallSetReturnData},
-		Syscall{ID: SyscallGetReturnData, Name: "sol_get_return_data", Cost: 25, Handler: syscallGetReturnData},
-		Syscall{ID: SyscallGetClock, Name: "sol_get_clock", Cost: 20, Handler: syscallGetClock},
-		Syscall{ID: SyscallGetRent, Name: "sol_get_rent", Cost: 20, Handler: syscallGetRent},
-		Syscall{ID: SyscallCreateProgramAddress, Name: "sol_create_program_address", Cost: 150, Handler: syscallCreateProgramAddress},
-		Syscall{ID: SyscallInvoke, Name: "sol_invoke", Cost: 500, Handler: syscallInvoke},
-		Syscall{ID: SyscallInvokeSigned, Name: "sol_invoke_signed", Cost: 700, Handler: syscallInvokeSigned},
+		Syscall{ID: SyscallLog, Name: "ovm_log", Cost: 50, Handler: syscallLog},
+		Syscall{ID: SyscallSHA256, Name: "ovm_sha256", Cost: 90, Handler: syscallSHA256},
+		Syscall{ID: SyscallSetReturnData, Name: "ovm_set_return_data", Cost: 50, Handler: syscallSetReturnData},
+		Syscall{ID: SyscallGetReturnData, Name: "ovm_get_return_data", Cost: 25, Handler: syscallGetReturnData},
+		Syscall{ID: SyscallGetClock, Name: "ovm_get_clock", Cost: 20, Handler: syscallGetClock},
+		Syscall{ID: SyscallGetRent, Name: "ovm_get_rent", Cost: 20, Handler: syscallGetRent},
+		Syscall{ID: SyscallCreateProgramAddress, Name: "ovm_create_program_address", Cost: 150, Handler: syscallCreateProgramAddress},
+		Syscall{ID: SyscallInvoke, Name: "ovm_invoke", Cost: 500, Handler: syscallInvoke},
+		Syscall{ID: SyscallInvokeSigned, Name: "ovm_invoke_signed", Cost: 700, Handler: syscallInvokeSigned},
 		Syscall{ID: SyscallVerifySchnorr, Name: "zk_verify_schnorr", Cost: 2_000, Handler: syscallVerifySchnorr},
-		Syscall{ID: SyscallGetAccountData, Name: "sol_get_account_data", Cost: 80, Handler: syscallGetAccountData},
-		Syscall{ID: SyscallSetAccountData, Name: "sol_set_account_data", Cost: 120, Handler: syscallSetAccountData},
+		Syscall{ID: SyscallGetAccountData, Name: "ovm_get_account_data", Cost: 80, Handler: syscallGetAccountData},
+		Syscall{ID: SyscallSetAccountData, Name: "ovm_set_account_data", Cost: 120, Handler: syscallSetAccountData},
 	)
 	if err != nil {
 		return SyscallRegistry{}

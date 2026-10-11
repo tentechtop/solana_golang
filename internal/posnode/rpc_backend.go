@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/p2p"
-	"solana_golang/programs/stake"
-	vmprogram "solana_golang/programs/vm"
-	"solana_golang/rpc"
-	runtimepkg "solana_golang/runtime"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/p2p"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
+	"github.com/tentechtop/ordexus-core/rpc"
+	runtimepkg "github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -142,6 +142,23 @@ func (node *posNode) GetShieldedPool(ctx context.Context) (rpc.ShieldedPoolResul
 	}, nil
 }
 
+// GetAccountInfo 返回公开账户的开发视图 + 隐私程序账户仅返回哈希和长度。
+func (node *posNode) GetAccountInfo(ctx context.Context, address string) (rpc.AccountInfoResult, error) {
+	_ = ctx
+	publicKey, err := decodePublicKey(address, "account info address")
+	if err != nil {
+		return rpc.AccountInfoResult{}, fmt.Errorf("posnode: decode account info address: %w", err)
+	}
+	account, found, err := node.ledger.Account(publicKey)
+	if err != nil {
+		return rpc.AccountInfoResult{}, err
+	}
+	if !found {
+		return rpc.AccountInfoResult{Address: publicKey.String(), Exists: false}, nil
+	}
+	return accountInfoResult(publicKey, account), nil
+}
+
 func (node *posNode) SendTransaction(ctx context.Context, encodedTransaction string) (string, error) {
 	transactionBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedTransaction))
 	if err != nil {
@@ -152,6 +169,28 @@ func (node *posNode) SendTransaction(ctx context.Context, encodedTransaction str
 		return "", fmt.Errorf("posnode: unmarshal transaction: %w", err)
 	}
 	return node.submitTransaction(ctx, transaction, "send_transaction")
+}
+
+// SimulateTransaction 在当前已确认状态上执行签名交易 + 返回日志、返回值和写集但不提交账本。
+func (node *posNode) SimulateTransaction(ctx context.Context, encodedTransaction string) (rpc.TransactionSimulationResult, error) {
+	transactionBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedTransaction))
+	if err != nil {
+		return rpc.TransactionSimulationResult{}, fmt.Errorf("posnode: decode simulated transaction: %w", err)
+	}
+	transaction, err := structure.UnmarshalTransactionBinary(transactionBytes)
+	if err != nil {
+		return rpc.TransactionSimulationResult{}, fmt.Errorf("posnode: unmarshal simulated transaction: %w", err)
+	}
+	head := node.ledger.Head()
+	state := node.ledger.State()
+	node.mutex.Lock()
+	blockhashQueue := node.blockhashQueue.Clone()
+	node.mutex.Unlock()
+	result, err := node.executePreflightTransaction(ctx, transaction, head, state, blockhashQueue, map[string]struct{}{})
+	if err != nil {
+		return rpc.TransactionSimulationResult{}, err
+	}
+	return transactionSimulationResult(result.Execution), nil
 }
 
 func (node *posNode) GetBlock(ctx context.Context, slot uint64) (rpc.BlockResult, error) {
@@ -218,11 +257,20 @@ func (node *posNode) blockResultFromProposal(proposal consensus.BlockProposal, b
 	result := rpc.BlockResult{
 		Slot:                 proposal.Header.Slot,
 		Height:               proposal.Header.Height,
+		EpochID:              proposal.Header.EpochID,
 		Blockhash:            blockHash.String(),
 		ParentSlot:           node.blockParentSlotForProposal(proposal),
 		BlockTimeUnixMilli:   proposal.Header.TimestampUnixMilli,
 		StateRoot:            proposal.Header.StateRoot.String(),
+		EpochSnapshotRoot:    proposal.Header.EpochSnapshotRoot.String(),
 		TxRoot:               proposal.Header.TxRoot.String(),
+		ReceiptRoot:          proposal.Header.ReceiptRoot.String(),
+		RewardQCRoot:         proposal.Header.RewardQCRoot.String(),
+		EvidenceRoot:         proposal.Header.EvidenceRoot.String(),
+		RewardRoot:           proposal.Header.RewardRoot.String(),
+		RewardQCCount:        len(proposal.RewardQCs),
+		EvidenceCount:        len(proposal.Evidence),
+		RewardCount:          len(proposal.Rewards),
 		LeaderAddress:        leader.address,
 		LeaderAddressSource:  leader.source,
 		LeaderCommissionBps:  leader.commissionBps,
@@ -967,6 +1015,11 @@ func (node *posNode) GetHealth(ctx context.Context) (rpc.HealthResult, error) {
 	if livenessGate.ProductionEnabled && !chainProgressing {
 		healthOK = false
 	}
+	if node.ledger.FinalitySuspended() {
+		healthOK = false
+		transactionSubmissionEnabled = false
+		transactionSubmissionReason = "finality_suspended"
+	}
 	return rpc.HealthResult{
 		OK:                                healthOK,
 		HeadHeight:                        head.Height,
@@ -1311,6 +1364,126 @@ func accountTypeName(owner structure.PublicKey) string {
 	}
 }
 
+func accountInfoResult(address structure.PublicKey, account structure.Account) rpc.AccountInfoResult {
+	result := rpc.AccountInfoResult{
+		Address:    address.String(),
+		Exists:     true,
+		Lamports:   strconv.FormatUint(account.Lamports, 10),
+		Owner:      account.Owner.String(),
+		Executable: account.Executable,
+		RentEpoch:  account.RentEpoch,
+		DataLength: len(account.Data),
+		DataHash:   utils.SHA256Hex(account.Data),
+	}
+	if account.Owner == structure.DefaultBuiltinProgramIDs.Shielded {
+		result.DataRedacted = true
+		return result
+	}
+	result.DataBase64 = base64.StdEncoding.EncodeToString(account.Data)
+	return result
+}
+
+func transactionSimulationResult(execution structure.TransactionExecutionResult) rpc.TransactionSimulationResult {
+	result := rpc.TransactionSimulationResult{
+		Status:               transactionSimulationStatus(execution.Status),
+		FeeLamports:          strconv.FormatUint(execution.FeeDetails.TotalFee, 10),
+		PreBalances:          uint64Strings(execution.PreBalances),
+		PostBalances:         uint64Strings(execution.PostBalances),
+		LogMessages:          append([]string(nil), execution.LogMessages...),
+		InnerInstructions:    transactionSimulationInnerInstructions(execution.InnerInstructions),
+		ComputeUnitsConsumed: execution.ComputeUnitsConsumed,
+		CostUnits:            execution.CostUnits,
+		WrittenAccounts:      make([]rpc.AccountInfoResult, 0, len(execution.WrittenAccounts)),
+	}
+	if result.PreBalances == nil {
+		result.PreBalances = []string{}
+	}
+	if result.PostBalances == nil {
+		result.PostBalances = []string{}
+	}
+	if result.LogMessages == nil {
+		result.LogMessages = []string{}
+	}
+	if result.InnerInstructions == nil {
+		result.InnerInstructions = []rpc.TransactionSimulationInnerInstructionResult{}
+	}
+	if execution.Error != nil {
+		result.Error = transactionSimulationErrorResult(execution.Error)
+	}
+	if execution.ReturnData != nil {
+		result.ReturnData = &rpc.TransactionSimulationReturnDataResult{
+			Program:    execution.ReturnData.ProgramID.String(),
+			DataBase64: base64.StdEncoding.EncodeToString(execution.ReturnData.Data),
+		}
+	}
+	for _, writtenAccount := range execution.WrittenAccounts {
+		result.WrittenAccounts = append(result.WrittenAccounts, accountInfoResult(writtenAccount.Address, writtenAccount.Account))
+	}
+	return result
+}
+
+func transactionSimulationInnerInstructions(values []structure.InnerInstruction) []rpc.TransactionSimulationInnerInstructionResult {
+	if values == nil {
+		return nil
+	}
+	result := make([]rpc.TransactionSimulationInnerInstructionResult, len(values))
+	for outerIndex, inner := range values {
+		result[outerIndex] = rpc.TransactionSimulationInnerInstructionResult{
+			Index:        inner.Index,
+			Instructions: make([]rpc.TransactionSimulationCompiledInstructionResult, len(inner.Instructions)),
+		}
+		for instructionIndex, instruction := range inner.Instructions {
+			result[outerIndex].Instructions[instructionIndex] = rpc.TransactionSimulationCompiledInstructionResult{
+				ProgramIDIndex: instruction.ProgramIDIndex,
+				AccountIndexes: append([]uint8(nil), instruction.AccountIndexes...),
+				DataBase64:     base64.StdEncoding.EncodeToString(instruction.Data),
+			}
+		}
+	}
+	return result
+}
+
+func transactionSimulationErrorResult(transactionError *structure.TransactionError) *rpc.TransactionSimulationErrorResult {
+	result := &rpc.TransactionSimulationErrorResult{
+		Code:    uint16(transactionError.Code),
+		Message: transactionError.Error(),
+	}
+	if transactionError.InstructionError == nil {
+		return result
+	}
+	instructionIndex := transactionError.InstructionError.InstructionIndex
+	instructionCode := uint16(transactionError.InstructionError.Code)
+	result.InstructionIndex = &instructionIndex
+	result.InstructionCode = &instructionCode
+	return result
+}
+
+func transactionSimulationStatus(status structure.TransactionStatus) string {
+	switch status {
+	case structure.TransactionStatusPending:
+		return "pending"
+	case structure.TransactionStatusConfirmed:
+		return "confirmed"
+	case structure.TransactionStatusFailed:
+		return "failed"
+	case structure.TransactionStatusExpired:
+		return "expired"
+	default:
+		return "unknown"
+	}
+}
+
+func uint64Strings(values []uint64) []string {
+	if values == nil {
+		return nil
+	}
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = strconv.FormatUint(value, 10)
+	}
+	return result
+}
+
 func accountTransactionHistoryResult(address structure.PublicKey, page blockchain.AddressHistoryPage, finalizedHeight uint64) rpc.AccountTransactionHistoryResult {
 	records := make([]rpc.AccountTransactionRecordResult, len(page.Records))
 	for index, record := range page.Records {
@@ -1541,14 +1714,14 @@ func decodePublicKey(address string, field string) (structure.PublicKey, error) 
 	return publicKey, nil
 }
 
-func keyPairFromSeed(seedText string) (structure.SolanaKeyPair, error) {
+func keyPairFromSeed(seedText string) (structure.OrdexusKeyPair, error) {
 	seedText = strings.TrimSpace(seedText)
 	if seedText == "" {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: seed is empty")
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: seed is empty")
 	}
 	keyPair, err := structure.KeyPairFromSeed(utils.SHA256([]byte(seedText)))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("posnode: build keypair: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("posnode: build keypair: %w", err)
 	}
 	return keyPair, nil
 }

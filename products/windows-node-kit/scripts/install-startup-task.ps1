@@ -1,5 +1,5 @@
-﻿param(
-  [string]$TaskName = "SolanaGolangPosNode",
+param(
+  [string]$TaskName = "OrdexusGolangPosNode",
   [string]$ConfigPath = "",
   [switch]$RunNow
 )
@@ -39,7 +39,7 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
 
 # 功能目的：注册开机自启任务；实现原因：Windows 原生没有直接安装服务的轻量入口。
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Description "SolanaGolang validator node" -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Description "OrdexusGolang validator node" -Force | Out-Null
 
 if ($RunNow) {
   Start-ScheduledTask -TaskName $TaskName

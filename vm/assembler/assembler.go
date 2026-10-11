@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"solana_golang/vm"
+	"github.com/tentechtop/ordexus-core/vm"
 )
 
 type sourceLine struct {
@@ -467,21 +467,33 @@ func resolveLabel(labels map[string]uint64, name string) (uint64, error) {
 
 func syscallIDByName(name string) (vm.SyscallID, error) {
 	switch strings.ToLower(name) {
-	case "log", "sol_log":
+	case "log", "ovm_log", "sol_log":
 		return vm.SyscallLog, nil
-	case "sha256", "sol_sha256":
+	case "sha256", "ovm_sha256", "sol_sha256":
 		return vm.SyscallSHA256, nil
-	case "set_return_data", "sol_set_return_data":
+	case "set_return_data", "ovm_set_return_data", "sol_set_return_data":
 		return vm.SyscallSetReturnData, nil
-	case "get_clock", "sol_get_clock":
+	case "get_return_data", "ovm_get_return_data", "sol_get_return_data":
+		return vm.SyscallGetReturnData, nil
+	case "get_clock", "ovm_get_clock", "sol_get_clock":
 		return vm.SyscallGetClock, nil
-	case "get_account_data", "sol_get_account_data":
+	case "get_rent", "ovm_get_rent", "sol_get_rent":
+		return vm.SyscallGetRent, nil
+	case "create_program_address", "ovm_create_program_address", "sol_create_program_address":
+		return vm.SyscallCreateProgramAddress, nil
+	case "invoke", "ovm_invoke", "sol_invoke":
+		return vm.SyscallInvoke, nil
+	case "invoke_signed", "ovm_invoke_signed", "sol_invoke_signed":
+		return vm.SyscallInvokeSigned, nil
+	case "verify_schnorr", "zk_verify_schnorr":
+		return vm.SyscallVerifySchnorr, nil
+	case "get_account_data", "ovm_get_account_data", "sol_get_account_data":
 		return vm.SyscallGetAccountData, nil
-	case "set_account_data", "sol_set_account_data":
+	case "set_account_data", "ovm_set_account_data", "sol_set_account_data":
 		return vm.SyscallSetAccountData, nil
-	case "stake_pool_execute", "sol_stake_pool_execute":
+	case "stake_pool_execute", "ovm_stake_pool_execute", "sol_stake_pool_execute":
 		return vm.SyscallStakePoolExecute, nil
-	case "asset_execute", "sol_asset_execute":
+	case "asset_execute", "ovm_asset_execute", "sol_asset_execute":
 		return vm.SyscallAssetExecute, nil
 	default:
 		return 0, fmt.Errorf("unknown syscall %s", name)

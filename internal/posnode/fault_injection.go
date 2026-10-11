@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const maxFaultInjectionProposalDelayMillis = int64(60_000)
@@ -38,9 +38,8 @@ func (node *posNode) injectDoubleVoteFault(ctx context.Context, originalVote con
 		return
 	}
 	conflictingVote := originalVote
-	conflictingVote.Type = consensus.VoteTypeSkip
-	conflictingVote.BlockHeight = 0
-	conflictingVote.BlockHash = structure.Hash{}
+	conflictingVote.BlockHeight = originalVote.BlockHeight
+	conflictingVote.BlockHash[0] ^= 1
 	conflictingVote.CreatedAtUnixMilli = time.Now().UnixMilli()
 	envelope, err := node.newLocalVoteEnvelope(conflictingVote)
 	if err != nil {

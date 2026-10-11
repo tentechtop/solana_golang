@@ -1,10 +1,12 @@
 package consensus
 
 import (
+	"sort"
 	"testing"
 
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestApplyBlockRewardsCreditsLeaderFee(t *testing.T) {
@@ -174,6 +176,44 @@ func TestApplyBlockRewardsJailsMissedVotesWithoutSlash(t *testing.T) {
 	}
 	if containsRewardType(rewards, RewardTypeSlash) || !containsRewardType(rewards, RewardTypeJail) {
 		t.Fatalf("rewards = %+v, want jail without slash", rewards)
+	}
+}
+
+func TestApplyBlockRewardsRejectsUnsignedRewardQC(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{90, 10}, []uint16{0, 0})
+	voterIndex := highestStakeValidatorIndex(snapshot)
+	qc := testRewardQC(snapshot, 1, 1, []int{voterIndex})
+	qc.SignatureScheme = ""
+	qc.AggregateSignature = nil
+	qc.VoterBitmap = nil
+
+	if _, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          3,
+		Height:        3,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[voterIndex],
+		RewardQCs:     []QuorumCertificate{qc},
+	}); err == nil {
+		t.Fatal("ApplyBlockRewards() error = nil, want unsigned reward qc rejection")
+	}
+}
+
+func TestApplyBlockRewardsRejectsTamperedRewardQCSignature(t *testing.T) {
+	state, snapshot, validators := newRewardTestState(t, []uint64{90, 10}, []uint16{0, 0})
+	voterIndex := highestStakeValidatorIndex(snapshot)
+	qc := testRewardQC(snapshot, 1, 1, []int{voterIndex})
+	qc.AggregateSignature[0] ^= 0xff
+
+	if _, _, err := ApplyBlockRewards(state, BlockRewardInput{
+		Slot:          3,
+		Height:        3,
+		EpochID:       0,
+		EpochSnapshot: snapshot,
+		Leader:        validators[voterIndex],
+		RewardQCs:     []QuorumCertificate{qc},
+	}); err == nil {
+		t.Fatal("ApplyBlockRewards() error = nil, want tampered reward qc rejection")
 	}
 }
 
@@ -390,6 +430,66 @@ func TestApplyBlockRewardsSlashesSignedDoubleVoteEvidence(t *testing.T) {
 	}
 }
 
+func TestApplyBlockRewardsVerifiesCrossEpochEvidenceWithHistoricalSnapshot(t *testing.T) {
+	state, historicalSnapshot, validators := newRewardTestState(t, []uint64{90, 10}, []uint16{0, 0})
+	slashedIndex := highestStakeValidatorIndex(historicalSnapshot)
+	leaderIndex := lowestStakeValidatorIndex(historicalSnapshot)
+	slashedValidator := validators[slashedIndex]
+	consensusKey := rewardConsensusKeyForValidator(t, slashedValidator, len(validators))
+	evidenceSlot := uint64(7)
+	evidence := SlashingEvidence{
+		Type: SlashingEvidenceTypeDoubleVote,
+		DoubleVote: &SignedDoubleVoteEvidence{
+			FirstVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        evidenceSlot,
+				BlockHash:          mustHashFromTestText("cross-epoch-double-vote-a"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000301,
+			}),
+			SecondVote: signedTestVote(t, consensusKey, Vote{
+				Type:               VoteTypeConfirm,
+				Slot:               evidenceSlot,
+				BlockHeight:        evidenceSlot,
+				BlockHash:          mustHashFromTestText("cross-epoch-double-vote-b"),
+				VoterID:            string(slashedValidator.ValidatorID),
+				Stake:              slashedValidator.StakeLamports,
+				CreatedAtUnixMilli: 1710000000302,
+			}),
+		},
+	}
+	currentSet, err := NewValidatorSet([]ValidatorState{validators[leaderIndex]})
+	if err != nil {
+		t.Fatalf("NewValidatorSet() error = %v", err)
+	}
+	currentSnapshot := mustEpochSnapshot(t, 1, 65, 64, mustHashFromText(t, "reward-current-snapshot"), currentSet)
+	input := BlockRewardInput{
+		Slot:           70,
+		Height:         70,
+		EpochID:        1,
+		EpochSnapshot:  currentSnapshot,
+		Leader:         validators[leaderIndex],
+		Evidence:       []SlashingEvidence{evidence},
+		ProofSnapshots: []EpochSnapshot{historicalSnapshot},
+	}
+
+	nextState, _, err := ApplyBlockRewards(state, input)
+	if err != nil {
+		t.Fatalf("ApplyBlockRewards() error = %v", err)
+	}
+	slashedState := mustStakeState(t, nextState, slashedValidator.AccountAddress)
+	if slashedState.LastSlashedSlot != evidenceSlot || slashedState.Status != stake.ValidatorStatusJailed {
+		t.Fatalf("slashed state = %+v, want historical evidence applied", slashedState)
+	}
+
+	input.ProofSnapshots = nil
+	if _, _, err := ApplyBlockRewards(state, input); err == nil {
+		t.Fatal("ApplyBlockRewards() error = nil, want missing historical snapshot rejection")
+	}
+}
+
 func TestApplyBlockRewardsSlashesStakeWhenAccountOnlyHasRentReserve(t *testing.T) {
 	state, snapshot, validators := newRewardTestState(t, []uint64{40, 60}, []uint16{0, 0})
 	slashedIndex := lowestStakeValidatorIndex(snapshot)
@@ -529,8 +629,10 @@ func TestApplyBlockRewardsFullSlashEjectsValidatorBelowMinimum(t *testing.T) {
 				CreatedAtUnixMilli: 1710000000101,
 			}),
 			SecondVote: signedTestVote(t, consensusKey, Vote{
-				Type:               VoteTypeSkip,
+				Type:               VoteTypeConfirm,
 				Slot:               evidenceSlot,
+				BlockHeight:        9,
+				BlockHash:          mustHashFromTestText("full-slash-b"),
 				VoterID:            string(validators[slashedIndex].ValidatorID),
 				Stake:              validators[slashedIndex].StakeLamports,
 				CreatedAtUnixMilli: 1710000000102,
@@ -570,12 +672,14 @@ func newRewardTestState(t *testing.T, stakeWeights []uint64, commissions []uint1
 		staker := mustKeyPair(t, "reward-staker-"+string(rune('a'+index)))
 		validator := mustKeyPair(t, "reward-validator-"+string(rune('a'+index)))
 		consensusKey := mustKeyPair(t, "reward-consensus-"+string(rune('a'+index)))
+		blsKeyPair := testBLSKeyPair(t, consensusKey.PublicKey)
 		stakeLamports := weight * stake.MinimumStakeLamports
 		accounts = append(accounts, newTestAccount(t, staker.PublicKey, 2_000_000_000, structure.DefaultBuiltinProgramIDs.System, false, nil))
-		accounts = append(accounts, newStakeAccount(t, validator.PublicKey, staker.PublicKey, consensusKey.PublicKey, stakeLamports, commissions[index]))
+		accounts = append(accounts, newStakeAccount(t, validator.PublicKey, staker.PublicKey, consensusKey.PublicKey, blsKeyPair.PublicKey, stakeLamports, commissions[index]))
 		validators[index] = ValidatorState{
 			AccountAddress:     validator.PublicKey,
 			ConsensusPublicKey: consensusKey.PublicKey,
+			BLSPublicKey:       append([]byte(nil), blsKeyPair.PublicKey...),
 			P2PPeerID:          "reward-peer",
 			StakeLamports:      stakeLamports,
 			Status:             ValidatorStatusActive,
@@ -595,12 +699,14 @@ func newStakeAccount(
 	address structure.PublicKey,
 	staker structure.PublicKey,
 	consensusKey structure.PublicKey,
+	blsPublicKey []byte,
 	lamports uint64,
 	commissionBps uint16,
 ) structure.AddressedAccount {
 	t.Helper()
 	state := stake.ValidatorState{
 		ConsensusPublicKey: consensusKey,
+		BLSPublicKey:       append([]byte(nil), blsPublicKey...),
 		StakerAccount:      staker,
 		P2PPeerID:          "reward-peer",
 		CommissionBps:      commissionBps,
@@ -618,22 +724,51 @@ func newStakeAccount(
 
 func testRewardQC(snapshot EpochSnapshot, slot uint64, height uint64, voterIndexes []int) QuorumCertificate {
 	voters := make([]string, len(voterIndexes))
+	signatures := make(map[string][]byte, len(voterIndexes))
 	var confirmedStake uint64
 	for index, voterIndex := range voterIndexes {
 		validator := snapshot.Validators[voterIndex]
 		voters[index] = string(validator.ValidatorID)
 		confirmedStake += validator.StakeLamports
+		vote := Vote{
+			Type:               VoteTypeConfirm,
+			Slot:               slot,
+			BlockHeight:        height,
+			BlockHash:          mustHashFromTestText("reward-block"),
+			VoterID:            string(validator.ValidatorID),
+			Stake:              validator.StakeLamports,
+			CreatedAtUnixMilli: 1710000000000,
+		}
+		keyPair, err := BLSKeyPairFromSeed(utils.SHA256([]byte("pos-test-bls-" + validator.ConsensusPublicKey.String())))
+		if err != nil {
+			panic(err)
+		}
+		signature, err := SignBLSVote(keyPair.PrivateKey, vote)
+		if err != nil {
+			panic(err)
+		}
+		signatures[string(validator.ValidatorID)] = signature
 	}
-	return QuorumCertificate{
+	sort.Strings(voters)
+	threshold, err := (Quorum{Numerator: 2, Denominator: 3, Strict: true}).RequiredStake(snapshot.TotalActiveStake)
+	if err != nil {
+		panic(err)
+	}
+	certificate := QuorumCertificate{
 		Type:               VoteTypeConfirm,
 		Slot:               slot,
 		BlockHeight:        height,
 		BlockHash:          mustHashFromTestText("reward-block"),
-		ThresholdStake:     (snapshot.TotalActiveStake*2 + 2) / 3,
+		ThresholdStake:     threshold,
 		ConfirmedStake:     confirmedStake,
 		Voters:             voters,
 		CreatedAtUnixMilli: 1710000000000,
 	}
+	aggregated, err := AttachBLSAggregate(certificate, snapshot.ValidatorOrder(), signatures)
+	if err != nil {
+		panic(err)
+	}
+	return aggregated
 }
 
 func mustHashFromTestText(text string) structure.Hash {
@@ -703,7 +838,7 @@ func replaceAccountLamports(
 	return ChainState{}
 }
 
-func signedTestVote(t *testing.T, keyPair structure.SolanaKeyPair, vote Vote) SignedVote {
+func signedTestVote(t *testing.T, keyPair structure.OrdexusKeyPair, vote Vote) SignedVote {
 	t.Helper()
 	voteBytes, err := vote.MarshalBinary()
 	if err != nil {
@@ -724,7 +859,7 @@ func rewardConsensusKeyForValidator(
 	t *testing.T,
 	validator ValidatorState,
 	validatorCount int,
-) structure.SolanaKeyPair {
+) structure.OrdexusKeyPair {
 	t.Helper()
 	for index := 0; index < validatorCount; index++ {
 		keyPair := mustKeyPair(t, "reward-consensus-"+string(rune('a'+index)))
@@ -733,7 +868,7 @@ func rewardConsensusKeyForValidator(
 		}
 	}
 	t.Fatalf("consensus key for validator %s not found", validator.ValidatorID)
-	return structure.SolanaKeyPair{}
+	return structure.OrdexusKeyPair{}
 }
 
 func containsRewardType(rewards []BlockReward, rewardType RewardType) bool {

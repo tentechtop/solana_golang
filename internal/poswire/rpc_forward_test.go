@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"solana_golang/rpc"
+	"github.com/tentechtop/ordexus-core/rpc"
 )
 
 func TestRPCForwardRequestRoundTrip(t *testing.T) {

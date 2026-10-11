@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 type epochContext struct {
@@ -28,6 +28,12 @@ func (node *posNode) ensureEpochForSlotLocked(slot uint64) error {
 		node.epochSnapshot.StartSlot == contextValue.StartSlot &&
 		slot <= node.epochSnapshot.EndSlot {
 		return nil
+	}
+	if err := node.persistEpochSnapshot(contextValue.Snapshot); err != nil {
+		return err
+	}
+	if err := node.reconcileConsensusModeForInstalledSnapshotLocked(contextValue.Snapshot); err != nil {
+		return err
 	}
 	node.epochSnapshot = contextValue.Snapshot
 	node.leaderSchedule = contextValue.Schedule
@@ -91,10 +97,34 @@ func (node *posNode) epochContextForSlotLocked(slot uint64) (epochContext, error
 	}
 	snapshot, exists := node.epochSnapshots[epochID]
 	if !exists || snapshot.StartSlot != startSlot || slot > snapshot.EndSlot {
+		persistedSnapshot, persisted, err := node.loadEpochSnapshot(
+			epochID,
+			startSlot,
+			node.config.EpochSlots,
+			node.epochSeed(epochID),
+		)
+		if err != nil {
+			return epochContext{}, err
+		}
+		if persisted {
+			snapshot = persistedSnapshot
+			exists = true
+			node.epochSnapshots[epochID] = snapshot
+			delete(node.leaderSchedules, epochID)
+		}
+	}
+	if !exists || snapshot.StartSlot != startSlot || slot > snapshot.EndSlot {
+		if node.runtimeContext != nil && epochID > node.epochSnapshot.EpochID {
+			return epochContext{}, fmt.Errorf("posnode: future epoch %d has no authenticated transition proof", epochID)
+		}
 		if node.ledger == nil {
 			return epochContext{}, fmt.Errorf("posnode: ledger unavailable for epoch context")
 		}
 		validatorSet, err := node.ledger.ValidatorSetFromFinalizedStateAtEpoch(epochID)
+		if err != nil {
+			return epochContext{}, err
+		}
+		validatorSet, err = node.effectiveValidatorSetLocked(validatorSet, epochID, node.epochSeed(epochID))
 		if err != nil {
 			return epochContext{}, err
 		}

@@ -17,4 +17,16 @@ const (
 	ProtocolPoSCommonAncestorV1 ProtocolID = 50
 	// ProtocolPoSRPCForwardV1 定义 RPC 转发协议 + 公网入口节点通过已连接验证者无状态转发钱包请求。
 	ProtocolPoSRPCForwardV1 ProtocolID = 51
+	// ProtocolPoSEmergencyRecoveryV1 传播安全委员会签署的临时长老证书。
+	ProtocolPoSEmergencyRecoveryV1 ProtocolID = 52
+	// ProtocolPoSMultiValidatorActivationV1 传播安全委员会签署的多验证者激活证书。
+	ProtocolPoSMultiValidatorActivationV1 ProtocolID = 53
+	// ProtocolPoSBlockQCV1 按区块哈希拉取认证 QC，落后节点需要同时恢复区块和法定证书才能推进链头。
+	ProtocolPoSBlockQCV1 ProtocolID = 54
+	// ProtocolPoSEpochTransitionV1 传播上一 epoch 验证者签署的下一 epoch 验证者集合证明。
+	ProtocolPoSEpochTransitionV1 ProtocolID = 55
+	// ProtocolPoSEpochProofV1 按 epoch 拉取连续的验证者集合变更证明和目标快照。
+	ProtocolPoSEpochProofV1 ProtocolID = 56
+	// ProtocolPoSEpochProofBatchV1 分页拉取连续 epoch 证明，减少长距离同步的网络往返。
+	ProtocolPoSEpochProofBatchV1 ProtocolID = 57
 )

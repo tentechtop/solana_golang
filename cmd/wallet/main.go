@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,16 +18,19 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/consensus"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/consensus"
+	vmprogram "github.com/tentechtop/ordexus-core/programs/vm"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
 	defaultRPCURL                 = "http://127.0.0.1:8899"
 	defaultHTTPTimeout            = 10 * time.Second
-	maxRPCBodyBytes               = 1 << 20
+	defaultConfirmationTimeout    = 60 * time.Second
+	confirmationPollInterval      = 250 * time.Millisecond
+	maxRPCBodyBytes               = 4 << 20
 	minimumStakeLamports          = 10_000_000
 	validatorPairingPayloadPrefix = "posvalpair:"
 	validatorPairingModeRegister  = "validator_registration"
@@ -59,14 +63,36 @@ type rpcError struct {
 type latestBlockhashResult struct {
 	Blockhash string `json:"blockhash"`
 	Slot      uint64 `json:"slot"`
+	Height    uint64 `json:"height"`
 }
 
 type balanceResult struct {
 	Value uint64 `json:"value"`
 }
 
+type bootstrapManifestStatusResult struct {
+	Ready bool `json:"ready"`
+}
+
 type transactionSubmitResult struct {
 	Signature string `json:"signature"`
+}
+
+type transactionDetailResult struct {
+	Found  bool   `json:"found"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 func (result *transactionSubmitResult) UnmarshalJSON(data []byte) error {
@@ -159,8 +185,18 @@ func run(args []string) error {
 		return runTransfer(args[1:])
 	case "deploy-contract":
 		return runDeployContract(args[1:])
+	case "upgrade-contract":
+		return runUpgradeContract(args[1:])
+	case "create-contract-account":
+		return runCreateContractAccount(args[1:])
+	case "contract-call":
+		return runContractCall(args[1:])
+	case "account-info":
+		return runAccountInfo(args[1:])
 	case "asset-bootstrap-fungible":
 		return runAssetBootstrapFungible(args[1:])
+	case "rwa-bootstrap":
+		return runRWABootstrap(args[1:])
 	case "validator-register":
 		return runValidatorRegister(args[1:])
 	case "validator-pair":
@@ -173,6 +209,18 @@ func run(args []string) error {
 		return runUndelegate(args[1:])
 	case "withdraw-delegation":
 		return runWithdrawDelegation(args[1:])
+	case "emergency-recovery-submit":
+		return runEmergencyRecoverySubmit(args[1:])
+	case "emergency-recovery-create":
+		return runEmergencyRecoveryCreate(args[1:])
+	case "emergency-recovery-sign":
+		return runEmergencyRecoverySign(args[1:])
+	case "multi-validator-activation-submit":
+		return runMultiValidatorActivationSubmit(args[1:])
+	case "multi-validator-activation-create":
+		return runMultiValidatorActivationCreate(args[1:])
+	case "multi-validator-activation-sign":
+		return runMultiValidatorActivationSign(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unsupported command %q", command)
@@ -285,7 +333,8 @@ func runDeployContract(args []string) error {
 	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
 	payerKeyPath := flags.String("payer-key", "", "payer ed25519 keystore path")
 	programKeyPath := flags.String("program-key", "", "program ed25519 keystore path")
-	bytecodePath := flags.String("bytecode", "", "compiled .svmbin bytecode path")
+	authorityKeyPath := flags.String("authority-key", "", "optional manifest upgrade authority keystore path")
+	bytecodePath := flags.String("bytecode", "", "compiled .ovmbin bytecode path")
 	depositLamports := flags.Uint64("deposit-lamports", 0, "extra deployment deposit lamports")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -306,24 +355,323 @@ func runDeployContract(args []string) error {
 	if err != nil {
 		return err
 	}
-	transaction, err := blockchain.NewDeployContractTransaction(payer, program, programData, *depositLamports, blockhash)
+	additionalSigners := make([]structure.OrdexusKeyPair, 0, 1)
+	if strings.TrimSpace(*authorityKeyPath) != "" {
+		authority, err := loadEd25519KeyPair(*authorityKeyPath)
+		if err != nil {
+			return fmt.Errorf("load deployment authority key: %w", err)
+		}
+		additionalSigners = append(additionalSigners, authority)
+	}
+	transactions, err := blockchain.NewDeployContractTransactionsWithSigners(payer, program, programData, *depositLamports, additionalSigners, blockhash)
 	if err != nil {
 		return fmt.Errorf("build deploy contract transaction: %w", err)
 	}
-	signature, err := submitTransaction(*rpcURL, transaction)
-	if err != nil {
-		return err
+	signatures := make([]string, len(transactions))
+	for index := range transactions {
+		transactions[index].SubmitTime = time.Now().UnixMilli()
+		signatures[index], err = submitTransaction(*rpcURL, transactions[index])
+		if err != nil {
+			return fmt.Errorf("submit deploy transaction %d/%d: %w", index+1, len(transactions), err)
+		}
+		if index < len(transactions)-1 {
+			if err := waitTransactionConfirmed(*rpcURL, signatures[index], defaultConfirmationTimeout); err != nil {
+				return fmt.Errorf("confirm deploy transaction %d/%d: %w", index+1, len(transactions), err)
+			}
+		}
 	}
-	result := map[string]string{
-		"signature": signature,
-		"program":   program.PublicKey.String(),
-		"bytecode":  filepath.Clean(strings.TrimSpace(*bytecodePath)),
+	result := map[string]any{
+		"signature":         signatures[len(signatures)-1],
+		"signatures":        signatures,
+		"transaction_count": len(signatures),
+		"program":           program.PublicKey.String(),
+		"bytecode":          filepath.Clean(strings.TrimSpace(*bytecodePath)),
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("encode deploy result: %w", err)
 	}
 	fmt.Println(string(encoded))
+	return nil
+}
+
+func runUpgradeContract(args []string) error {
+	flags := flag.NewFlagSet("upgrade-contract", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "payer ed25519 keystore path")
+	authorityKeyPath := flags.String("authority-key", "", "manifest upgrade authority keystore path")
+	programAddressText := flags.String("program", "", "deployed program address")
+	bytecodePath := flags.String("bytecode", "", "compiled .ovmbin bytecode path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load payer key: %w", err)
+	}
+	authority, err := loadEd25519KeyPair(*authorityKeyPath)
+	if err != nil {
+		return fmt.Errorf("load upgrade authority key: %w", err)
+	}
+	programAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(*programAddressText))
+	if err != nil {
+		return fmt.Errorf("decode program address: %w", err)
+	}
+	programData, err := readBytecodeFile(*bytecodePath)
+	if err != nil {
+		return err
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	transaction, err := blockchain.NewUpgradeContractTransaction(payer, authority, programAddress, programData, blockhash)
+	if err != nil {
+		return fmt.Errorf("build upgrade contract transaction: %w", err)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]string{
+		"signature": signature,
+		"program":   programAddress.String(),
+		"bytecode":  filepath.Clean(strings.TrimSpace(*bytecodePath)),
+	})
+}
+
+func runCreateContractAccount(args []string) error {
+	flags := flag.NewFlagSet("create-contract-account", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "payer ed25519 keystore path")
+	accountKeyPath := flags.String("account-key", "", "new contract account ed25519 keystore path")
+	programAddressText := flags.String("program", "", "owner contract program address")
+	space := flags.Uint64("space", 0, "account data size in bytes")
+	depositLamports := flags.Uint64("deposit-lamports", 0, "extra account deposit lamports")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load payer key: %w", err)
+	}
+	account, err := loadEd25519KeyPair(*accountKeyPath)
+	if err != nil {
+		return fmt.Errorf("load contract account key: %w", err)
+	}
+	programAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(*programAddressText))
+	if err != nil {
+		return fmt.Errorf("decode program address: %w", err)
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	transaction, err := blockchain.NewCreateContractAccountTransaction(
+		payer,
+		account,
+		programAddress,
+		*space,
+		*depositLamports,
+		blockhash,
+	)
+	if err != nil {
+		return fmt.Errorf("build contract account transaction: %w", err)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"signature": signature,
+		"account":   account.PublicKey.String(),
+		"program":   programAddress.String(),
+		"space":     *space,
+	})
+}
+
+func runContractCall(args []string) error {
+	flags := flag.NewFlagSet("contract-call", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "payer ed25519 keystore path")
+	programAddressText := flags.String("program", "", "deployed program address")
+	dataHex := flags.String("data-hex", "", "instruction data encoded as hex")
+	dataBase64 := flags.String("data-base64", "", "instruction data encoded as base64")
+	dataFile := flags.String("data-file", "", "instruction data file path")
+	simulate := flags.Bool("simulate", false, "simulate without submitting")
+	accountSpecs := stringListFlag{}
+	signerKeyPaths := stringListFlag{}
+	flags.Var(&accountSpecs, "account", "instruction account ADDRESS:r|w|s|sw; may be repeated")
+	flags.Var(&signerKeyPaths, "signer-key", "additional signer keystore path; may be repeated")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load payer key: %w", err)
+	}
+	programAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(*programAddressText))
+	if err != nil {
+		return fmt.Errorf("decode program address: %w", err)
+	}
+	accounts, err := parseContractAccounts(accountSpecs)
+	if err != nil {
+		return err
+	}
+	signers, err := loadContractSigners(signerKeyPaths)
+	if err != nil {
+		return err
+	}
+	instructionData, err := contractInstructionData(*dataHex, *dataBase64, *dataFile)
+	if err != nil {
+		return err
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	transaction, err := blockchain.NewInvokeContractTransaction(payer, programAddress, accounts, instructionData, signers, blockhash)
+	if err != nil {
+		return fmt.Errorf("build contract call transaction: %w", err)
+	}
+	if *simulate {
+		return simulateAndPrint(*rpcURL, transaction)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]string{"signature": signature, "program": programAddress.String()})
+}
+
+func runAccountInfo(args []string) error {
+	flags := flag.NewFlagSet("account-info", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	address := flags.String("address", "", "account address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*address) == "" {
+		return fmt.Errorf("account-info requires -address")
+	}
+	var result json.RawMessage
+	if err := rpcCall(*rpcURL, "getAccountInfo", []any{strings.TrimSpace(*address)}, &result); err != nil {
+		return err
+	}
+	return printRawJSON(result)
+}
+
+func parseContractAccounts(values []string) ([]structure.AccountMeta, error) {
+	accounts := make([]structure.AccountMeta, 0, len(values))
+	seen := make(map[structure.PublicKey]struct{}, len(values))
+	for index, value := range values {
+		parts := strings.Split(strings.TrimSpace(value), ":")
+		if len(parts) > 2 || strings.TrimSpace(parts[0]) == "" {
+			return nil, fmt.Errorf("contract account %d must use ADDRESS:r|w|s|sw", index)
+		}
+		address, err := structure.PublicKeyFromBase58(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, fmt.Errorf("decode contract account %d: %w", index, err)
+		}
+		if _, exists := seen[address]; exists {
+			return nil, fmt.Errorf("duplicate contract account %s", address.String())
+		}
+		seen[address] = struct{}{}
+		permission := "r"
+		if len(parts) == 2 {
+			permission = strings.ToLower(strings.TrimSpace(parts[1]))
+		}
+		account := structure.AccountMeta{PublicKey: address}
+		switch permission {
+		case "r":
+		case "w":
+			account.IsWritable = true
+		case "s":
+			account.IsSigner = true
+		case "sw", "ws":
+			account.IsSigner = true
+			account.IsWritable = true
+		default:
+			return nil, fmt.Errorf("contract account %d has invalid permission %q", index, permission)
+		}
+		accounts = append(accounts, account)
+	}
+	return accounts, nil
+}
+
+func loadContractSigners(paths []string) ([]structure.OrdexusKeyPair, error) {
+	signers := make([]structure.OrdexusKeyPair, 0, len(paths))
+	for index, path := range paths {
+		signer, err := loadEd25519KeyPair(path)
+		if err != nil {
+			return nil, fmt.Errorf("load contract signer %d: %w", index, err)
+		}
+		signers = append(signers, signer)
+	}
+	return signers, nil
+}
+
+func contractInstructionData(dataHex string, dataBase64 string, dataFile string) ([]byte, error) {
+	provided := 0
+	for _, value := range []string{dataHex, dataBase64, dataFile} {
+		if strings.TrimSpace(value) != "" {
+			provided++
+		}
+	}
+	if provided > 1 {
+		return nil, fmt.Errorf("use only one of -data-hex, -data-base64, or -data-file")
+	}
+	if strings.TrimSpace(dataHex) != "" {
+		data, err := hex.DecodeString(strings.TrimSpace(dataHex))
+		if err != nil {
+			return nil, fmt.Errorf("decode contract data hex: %w", err)
+		}
+		return data, nil
+	}
+	if strings.TrimSpace(dataBase64) != "" {
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(dataBase64))
+		if err != nil {
+			return nil, fmt.Errorf("decode contract data base64: %w", err)
+		}
+		return data, nil
+	}
+	if strings.TrimSpace(dataFile) != "" {
+		data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(dataFile)))
+		if err != nil {
+			return nil, fmt.Errorf("read contract data file: %w", err)
+		}
+		return data, nil
+	}
+	return nil, nil
+}
+
+func simulateAndPrint(rpcURL string, transaction structure.Transaction) error {
+	encoded, err := transaction.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("marshal simulated transaction: %w", err)
+	}
+	var result json.RawMessage
+	if err := rpcCall(rpcURL, "simulateTransaction", []any{base64.StdEncoding.EncodeToString(encoded)}, &result); err != nil {
+		return err
+	}
+	return printRawJSON(result)
+}
+
+func printJSON(value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode result: %w", err)
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func printRawJSON(value json.RawMessage) error {
+	var formatted bytes.Buffer
+	if err := json.Indent(&formatted, value, "", "  "); err != nil {
+		return fmt.Errorf("format rpc result: %w", err)
+	}
+	fmt.Println(formatted.String())
 	return nil
 }
 
@@ -391,6 +739,80 @@ func runAssetBootstrapFungible(args []string) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+func runRWABootstrap(args []string) error {
+	flags := flag.NewFlagSet("rwa-bootstrap", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "rpc url")
+	payerKeyPath := flags.String("payer-key", "", "issuer ed25519 keystore path")
+	programAddressText := flags.String("program", "", "deployed immutable RWA program address")
+	assetTypeText := flags.String("type", "share", "share or nft")
+	name := flags.String("name", "", "regulated asset display name")
+	symbol := flags.String("symbol", "", "regulated asset symbol")
+	maxSupply := flags.Uint64("max-supply", 0, "maximum whole shares; must be one for NFT")
+	initialSupply := flags.Uint64("initial-supply", 0, "initial whole shares issued to issuer")
+	documentHash := flags.String("document-hash", "", "lower-case SHA-256 of controlling legal documents")
+	identityHash := flags.String("identity-hash", "", "lower-case SHA-256 commitment for issuer identity record")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	assetType := uint8(vmprogram.RWAAssetShare)
+	switch strings.ToLower(strings.TrimSpace(*assetTypeText)) {
+	case "share":
+	case "nft":
+		assetType = vmprogram.RWAAssetNFT
+	default:
+		return fmt.Errorf("RWA type must be share or nft")
+	}
+	payer, err := loadEd25519KeyPair(*payerKeyPath)
+	if err != nil {
+		return fmt.Errorf("load RWA issuer key: %w", err)
+	}
+	programAddress, err := structure.PublicKeyFromBase58(strings.TrimSpace(*programAddressText))
+	if err != nil {
+		return fmt.Errorf("decode RWA program address: %w", err)
+	}
+	blockhash, err := latestBlockhash(*rpcURL)
+	if err != nil {
+		return err
+	}
+	params := blockchain.RWABootstrapParams{
+		Payer:           payer,
+		Program:         programAddress,
+		AssetType:       assetType,
+		Name:            strings.TrimSpace(*name),
+		Symbol:          strings.TrimSpace(*symbol),
+		MaxSupply:       *maxSupply,
+		InitialSupply:   *initialSupply,
+		DocumentHash:    strings.TrimSpace(*documentHash),
+		IdentityHash:    strings.TrimSpace(*identityHash),
+		RecentBlockhash: blockhash,
+	}
+	transaction, err := blockchain.NewBootstrapRWAAssetTransaction(params)
+	if err != nil {
+		return fmt.Errorf("build RWA bootstrap transaction: %w", err)
+	}
+	signature, err := submitTransaction(*rpcURL, transaction)
+	if err != nil {
+		return err
+	}
+	accounts, err := blockchain.DeriveRWABootstrapAccounts(programAddress, payer.PublicKey, params.Symbol)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"signature":      signature,
+		"program":        programAddress.String(),
+		"mint":           accounts.Mint.PublicKey.String(),
+		"issuer":         payer.PublicKey.String(),
+		"issuer_holding": accounts.Holding.PublicKey.String(),
+		"type":           strings.ToLower(strings.TrimSpace(*assetTypeText)),
+		"name":           params.Name,
+		"symbol":         params.Symbol,
+		"max_supply":     strconv.FormatUint(params.MaxSupply, 10),
+		"initial_supply": strconv.FormatUint(params.InitialSupply, 10),
+		"document_hash":  params.DocumentHash,
+	})
 }
 
 func runValidatorRegister(args []string) error {
@@ -491,24 +913,38 @@ func runValidatorPair(args []string) error {
 			bootstrapStakerSignature = signatureValue
 		}
 		signature = ""
-	} else if signature == "" {
-		blockhash, err := latestBlockhash(rpcURL)
-		if err != nil {
-			return err
+		bootstrapRPCURL := strings.TrimSpace(payload.BootstrapRPCURL)
+		if err := validateWalletRPCURL(bootstrapRPCURL); err != nil {
+			return fmt.Errorf("bootstrap rpc url: %w", err)
 		}
-		transaction, err := blockchain.NewRegisterValidatorTransactionWithBLS(
+		manifestStatus := bootstrapManifestStatusResult{}
+		if err := rpcCall(bootstrapRPCURL, "getBootstrapManifest", []any{}, &manifestStatus); err != nil {
+			return fmt.Errorf("get bootstrap manifest: %w", err)
+		}
+		if manifestStatus.Ready {
+			signature, err = submitPairedValidatorRegistration(
+				bootstrapRPCURL,
+				staker,
+				validatorAddress,
+				consensusAddress,
+				blsPublicKey,
+				payload.NodePeerID,
+				*lamports,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	} else if signature == "" {
+		signature, err = submitPairedValidatorRegistration(
+			rpcURL,
 			staker,
 			validatorAddress,
 			consensusAddress,
 			blsPublicKey,
-			strings.TrimSpace(payload.NodePeerID),
+			payload.NodePeerID,
 			*lamports,
-			blockhash,
 		)
-		if err != nil {
-			return fmt.Errorf("build paired validator register transaction: %w", err)
-		}
-		signature, err = submitTransaction(rpcURL, transaction)
 		if err != nil {
 			return err
 		}
@@ -534,6 +970,42 @@ func runValidatorPair(args []string) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+// submitPairedValidatorRegistration 提交配对验证者的链上注册交易 + 创世后加入和普通配对复用同一签名流程。
+func submitPairedValidatorRegistration(
+	rpcURL string,
+	staker structure.OrdexusKeyPair,
+	validatorAddress structure.PublicKey,
+	consensusAddress structure.PublicKey,
+	blsPublicKey []byte,
+	peerID string,
+	lamports uint64,
+) (string, error) {
+	blockhash, err := latestBlockhash(rpcURL)
+	if err != nil {
+		return "", err
+	}
+	transaction, err := blockchain.NewRegisterValidatorTransactionWithBLS(
+		staker,
+		validatorAddress,
+		consensusAddress,
+		blsPublicKey,
+		strings.TrimSpace(peerID),
+		lamports,
+		blockhash,
+	)
+	if err != nil {
+		return "", fmt.Errorf("build paired validator register transaction: %w", err)
+	}
+	signature, err := submitTransaction(rpcURL, transaction)
+	if err != nil {
+		return "", fmt.Errorf("submit paired validator register transaction: %w", err)
+	}
+	if strings.TrimSpace(signature) == "" {
+		return "", fmt.Errorf("paired validator register transaction returned empty signature")
+	}
+	return signature, nil
 }
 
 func runStake(args []string) error {
@@ -649,9 +1121,339 @@ func runWithdrawDelegation(args []string) error {
 	return submitAndPrint(*rpcURL, transaction)
 }
 
+func runEmergencyRecoverySubmit(args []string) error {
+	flags := flag.NewFlagSet("emergency-recovery-submit", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "validator management rpc url")
+	certificatePath := flags.String("certificate-file", "", "base64 or json emergency recovery certificate file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*certificatePath) == "" {
+		return fmt.Errorf("emergency-recovery-submit requires -certificate-file")
+	}
+	data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(*certificatePath)))
+	if err != nil {
+		return fmt.Errorf("read emergency recovery certificate: %w", err)
+	}
+	payload := strings.TrimSpace(string(data))
+	if !json.Valid(data) {
+		if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+			return fmt.Errorf("emergency recovery certificate must contain json or base64 json")
+		}
+	} else {
+		payload = base64.StdEncoding.EncodeToString(data)
+	}
+	var transactionID string
+	if err := rpcCall(*rpcURL, "submitEmergencyRecovery", []any{payload}, &transactionID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(transactionID) == "" {
+		return fmt.Errorf("emergency recovery returned empty transaction id")
+	}
+	fmt.Println(transactionID)
+	return nil
+}
+
+func runEmergencyRecoveryCreate(args []string) error {
+	flags := flag.NewFlagSet("emergency-recovery-create", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "validator management rpc url")
+	sequence := flags.Uint64("sequence", 0, "monotonically increasing recovery sequence")
+	expiresIn := flags.Duration("expires-in", 10*time.Minute, "certificate validity duration")
+	elderValidatorID := flags.String("elder-validator-id", "", "selected elder validator id")
+	excludedValidatorIDs := flags.String("exclude-validator-ids", "", "comma separated unavailable validator ids")
+	consensusKeyPath := flags.String("consensus-key", "", "safety committee validator consensus keystore path")
+	outPath := flags.String("out", "", "certificate output path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *sequence == 0 || *expiresIn <= 0 || strings.TrimSpace(*elderValidatorID) == "" || strings.TrimSpace(*outPath) == "" {
+		return fmt.Errorf("emergency-recovery-create requires positive -sequence/-expires-in, -elder-validator-id, and -out")
+	}
+	consensusKey, err := loadEd25519KeyPair(*consensusKeyPath)
+	if err != nil {
+		return err
+	}
+	var status struct {
+		ChainID   string `json:"chain_id"`
+		Consensus struct {
+			SafetyCheckpoint struct {
+				FinalizedHeight  uint64 `json:"finalized_height"`
+				FinalizedHash    string `json:"finalized_hash"`
+				EpochID          uint64 `json:"epoch_id"`
+				ValidatorSetRoot string `json:"validator_set_root"`
+			} `json:"safety_checkpoint"`
+		} `json:"consensus"`
+	}
+	if err := rpcCall(*rpcURL, "getNodeStatus", []any{}, &status); err != nil {
+		return err
+	}
+	certificate := consensus.EmergencyRecoveryCertificate{
+		Version:                consensus.EmergencyRecoveryCertificateVersion,
+		ChainID:                strings.TrimSpace(status.ChainID),
+		Sequence:               *sequence,
+		FinalizedHeight:        status.Consensus.SafetyCheckpoint.FinalizedHeight,
+		FinalizedHash:          status.Consensus.SafetyCheckpoint.FinalizedHash,
+		SafetyEpochID:          status.Consensus.SafetyCheckpoint.EpochID,
+		SafetyValidatorSetRoot: status.Consensus.SafetyCheckpoint.ValidatorSetRoot,
+		ElderValidatorID:       strings.TrimSpace(*elderValidatorID),
+		ExcludedValidatorIDs:   splitCommaSeparated(*excludedValidatorIDs),
+		ExpiresAtUnixMilli:     time.Now().Add(*expiresIn).UnixMilli(),
+	}
+	if err := signEmergencyRecoveryCertificate(&certificate, consensusKey); err != nil {
+		return err
+	}
+	return writeEmergencyRecoveryCertificate(*outPath, certificate)
+}
+
+func runEmergencyRecoverySign(args []string) error {
+	flags := flag.NewFlagSet("emergency-recovery-sign", flag.ContinueOnError)
+	certificatePath := flags.String("certificate-file", "", "input certificate json file")
+	consensusKeyPath := flags.String("consensus-key", "", "safety committee validator consensus keystore path")
+	outPath := flags.String("out", "", "signed certificate output path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*certificatePath) == "" || strings.TrimSpace(*outPath) == "" {
+		return fmt.Errorf("emergency-recovery-sign requires -certificate-file and -out")
+	}
+	data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(*certificatePath)))
+	if err != nil {
+		return fmt.Errorf("read emergency recovery certificate: %w", err)
+	}
+	certificate := consensus.EmergencyRecoveryCertificate{}
+	if err := json.Unmarshal(data, &certificate); err != nil {
+		return fmt.Errorf("parse emergency recovery certificate: %w", err)
+	}
+	consensusKey, err := loadEd25519KeyPair(*consensusKeyPath)
+	if err != nil {
+		return err
+	}
+	if err := signEmergencyRecoveryCertificate(&certificate, consensusKey); err != nil {
+		return err
+	}
+	return writeEmergencyRecoveryCertificate(*outPath, certificate)
+}
+
+func signEmergencyRecoveryCertificate(certificate *consensus.EmergencyRecoveryCertificate, signer structure.OrdexusKeyPair) error {
+	if certificate == nil || len(signer.PrivateKey) == 0 || signer.PublicKey.IsZero() {
+		return fmt.Errorf("emergency recovery certificate or validator signer is empty")
+	}
+	validatorID := string(consensus.NewValidatorID(signer.PublicKey))
+	for _, item := range certificate.Signatures {
+		if strings.TrimSpace(item.ValidatorID) == validatorID {
+			return fmt.Errorf("validator already signed emergency recovery certificate")
+		}
+	}
+	signBytes, err := certificate.SignBytes()
+	if err != nil {
+		return err
+	}
+	signature, err := structure.SignMessage(signer.PrivateKey, signBytes)
+	if err != nil {
+		return fmt.Errorf("sign emergency recovery certificate: %w", err)
+	}
+	certificate.Signatures = append(certificate.Signatures, consensus.EmergencyRecoverySignature{
+		ValidatorID: validatorID,
+		PublicKey:   signer.PublicKey.String(),
+		Signature:   signature.String(),
+	})
+	return nil
+}
+
+func splitCommaSeparated(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func writeEmergencyRecoveryCertificate(path string, certificate consensus.EmergencyRecoveryCertificate) error {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return fmt.Errorf("emergency recovery certificate output path is empty")
+	}
+	data, err := json.MarshalIndent(certificate, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode emergency recovery certificate: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return fmt.Errorf("create emergency recovery certificate directory: %w", err)
+	}
+	if err := os.WriteFile(cleanPath, data, 0o600); err != nil {
+		return fmt.Errorf("write emergency recovery certificate: %w", err)
+	}
+	return nil
+}
+
+func runMultiValidatorActivationSubmit(args []string) error {
+	flags := flag.NewFlagSet("multi-validator-activation-submit", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "validator management rpc url")
+	certificatePath := flags.String("certificate-file", "", "base64 or json activation certificate file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*certificatePath) == "" {
+		return fmt.Errorf("multi-validator-activation-submit requires -certificate-file")
+	}
+	data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(*certificatePath)))
+	if err != nil {
+		return fmt.Errorf("read multi-validator activation certificate: %w", err)
+	}
+	payload := strings.TrimSpace(string(data))
+	if !json.Valid(data) {
+		if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+			return fmt.Errorf("multi-validator activation certificate must contain json or base64 json")
+		}
+	} else {
+		payload = base64.StdEncoding.EncodeToString(data)
+	}
+	var checkpointHash string
+	if err := rpcCall(*rpcURL, "submitMultiValidatorActivation", []any{payload}, &checkpointHash); err != nil {
+		return err
+	}
+	if strings.TrimSpace(checkpointHash) == "" {
+		return fmt.Errorf("multi-validator activation returned empty checkpoint hash")
+	}
+	fmt.Println(checkpointHash)
+	return nil
+}
+
+func runMultiValidatorActivationCreate(args []string) error {
+	flags := flag.NewFlagSet("multi-validator-activation-create", flag.ContinueOnError)
+	rpcURL := flags.String("rpc", defaultRPCURL, "validator management rpc url")
+	sequence := flags.Uint64("sequence", 0, "monotonically increasing recovery sequence")
+	expiresIn := flags.Duration("expires-in", 10*time.Minute, "certificate validity duration")
+	consensusKeyPath := flags.String("consensus-key", "", "safety committee validator consensus keystore path")
+	outPath := flags.String("out", "", "certificate output path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *sequence == 0 || *expiresIn <= 0 || strings.TrimSpace(*outPath) == "" {
+		return fmt.Errorf("multi-validator-activation-create requires positive -sequence/-expires-in and -out")
+	}
+	signer, err := loadEd25519KeyPair(*consensusKeyPath)
+	if err != nil {
+		return err
+	}
+	var status struct {
+		ChainID    string `json:"chain_id"`
+		HeadHeight uint64 `json:"head_height"`
+		HeadHash   string `json:"head_hash"`
+		Consensus  struct {
+			CandidateEpochID          uint64 `json:"candidate_epoch_id"`
+			CandidateValidatorSetRoot string `json:"candidate_validator_set_root"`
+			SafetyCheckpoint          struct {
+				FinalizedHeight  uint64 `json:"finalized_height"`
+				FinalizedHash    string `json:"finalized_hash"`
+				EpochID          uint64 `json:"epoch_id"`
+				ValidatorSetRoot string `json:"validator_set_root"`
+			} `json:"safety_checkpoint"`
+		} `json:"consensus"`
+	}
+	if err := rpcCall(*rpcURL, "getNodeStatus", []any{}, &status); err != nil {
+		return err
+	}
+	certificate := consensus.MultiValidatorActivationCertificate{
+		Version:                consensus.MultiValidatorActivationCertificateVersion,
+		ChainID:                strings.TrimSpace(status.ChainID),
+		Sequence:               *sequence,
+		SafetyFinalizedHeight:  status.Consensus.SafetyCheckpoint.FinalizedHeight,
+		SafetyFinalizedHash:    status.Consensus.SafetyCheckpoint.FinalizedHash,
+		SafetyEpochID:          status.Consensus.SafetyCheckpoint.EpochID,
+		SafetyValidatorSetRoot: status.Consensus.SafetyCheckpoint.ValidatorSetRoot,
+		TargetHeight:           status.HeadHeight,
+		TargetHash:             status.HeadHash,
+		TargetEpochID:          status.Consensus.CandidateEpochID,
+		TargetValidatorSetRoot: status.Consensus.CandidateValidatorSetRoot,
+		ExpiresAtUnixMilli:     time.Now().Add(*expiresIn).UnixMilli(),
+	}
+	if err := signMultiValidatorActivationCertificate(&certificate, signer); err != nil {
+		return err
+	}
+	return writeMultiValidatorActivationCertificate(*outPath, certificate)
+}
+
+func runMultiValidatorActivationSign(args []string) error {
+	flags := flag.NewFlagSet("multi-validator-activation-sign", flag.ContinueOnError)
+	certificatePath := flags.String("certificate-file", "", "input activation certificate json file")
+	consensusKeyPath := flags.String("consensus-key", "", "safety committee validator consensus keystore path")
+	outPath := flags.String("out", "", "signed certificate output path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*certificatePath) == "" || strings.TrimSpace(*outPath) == "" {
+		return fmt.Errorf("multi-validator-activation-sign requires -certificate-file and -out")
+	}
+	data, err := os.ReadFile(filepath.Clean(strings.TrimSpace(*certificatePath)))
+	if err != nil {
+		return fmt.Errorf("read multi-validator activation certificate: %w", err)
+	}
+	var certificate consensus.MultiValidatorActivationCertificate
+	if err := json.Unmarshal(data, &certificate); err != nil {
+		return fmt.Errorf("parse multi-validator activation certificate: %w", err)
+	}
+	signer, err := loadEd25519KeyPair(*consensusKeyPath)
+	if err != nil {
+		return err
+	}
+	if err := signMultiValidatorActivationCertificate(&certificate, signer); err != nil {
+		return err
+	}
+	return writeMultiValidatorActivationCertificate(*outPath, certificate)
+}
+
+func signMultiValidatorActivationCertificate(certificate *consensus.MultiValidatorActivationCertificate, signer structure.OrdexusKeyPair) error {
+	if certificate == nil || len(signer.PrivateKey) == 0 || signer.PublicKey.IsZero() {
+		return fmt.Errorf("multi-validator activation certificate or validator signer is empty")
+	}
+	validatorID := string(consensus.NewValidatorID(signer.PublicKey))
+	for _, item := range certificate.Signatures {
+		if strings.TrimSpace(item.ValidatorID) == validatorID {
+			return fmt.Errorf("validator already signed multi-validator activation certificate")
+		}
+	}
+	signBytes, err := certificate.SignBytes()
+	if err != nil {
+		return err
+	}
+	signature, err := structure.SignMessage(signer.PrivateKey, signBytes)
+	if err != nil {
+		return fmt.Errorf("sign multi-validator activation certificate: %w", err)
+	}
+	certificate.Signatures = append(certificate.Signatures, consensus.EmergencyRecoverySignature{
+		ValidatorID: validatorID,
+		PublicKey:   signer.PublicKey.String(),
+		Signature:   signature.String(),
+	})
+	return nil
+}
+
+func writeMultiValidatorActivationCertificate(path string, certificate consensus.MultiValidatorActivationCertificate) error {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "." || cleanPath == "" {
+		return fmt.Errorf("multi-validator activation certificate output path is empty")
+	}
+	data, err := json.MarshalIndent(certificate, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode multi-validator activation certificate: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return fmt.Errorf("create multi-validator activation certificate directory: %w", err)
+	}
+	if err := os.WriteFile(cleanPath, data, 0o600); err != nil {
+		return fmt.Errorf("write multi-validator activation certificate: %w", err)
+	}
+	return nil
+}
+
 // writeEd25519Keystore 写入 Ed25519 密钥 + 节点和钱包复用同一种 keystore 格式。
 func writeEd25519Keystore(path string) error {
-	seed, err := randomBytes(structure.SolanaPrivateKeySeedSize)
+	seed, err := randomBytes(structure.OrdexusPrivateKeySeedSize)
 	if err != nil {
 		return err
 	}
@@ -733,10 +1535,10 @@ func printValidatorKeySummary(outDir string) error {
 	return nil
 }
 
-func loadEd25519KeyPair(path string) (structure.SolanaKeyPair, error) {
+func loadEd25519KeyPair(path string) (structure.OrdexusKeyPair, error) {
 	keyFile, err := readKeystore(path)
 	if err != nil {
-		return structure.SolanaKeyPair{}, err
+		return structure.OrdexusKeyPair{}, err
 	}
 	if strings.TrimSpace(keyFile.PrivateKeyBase64) != "" {
 		return keyPairFromBase64Seed(keyFile.PrivateKeyBase64)
@@ -744,7 +1546,7 @@ func loadEd25519KeyPair(path string) (structure.SolanaKeyPair, error) {
 	if strings.TrimSpace(keyFile.SecretKeyBase64) != "" {
 		return keyPairFromBase64Secret(keyFile.SecretKeyBase64)
 	}
-	return structure.SolanaKeyPair{}, fmt.Errorf("ed25519 keystore has no private key material")
+	return structure.OrdexusKeyPair{}, fmt.Errorf("ed25519 keystore has no private key material")
 }
 
 func loadBLSPublicKey(path string) ([]byte, error) {
@@ -854,7 +1656,7 @@ type bootstrapPairingRegistration struct {
 	RegisteredAtUnixMilli int64
 }
 
-func signBootstrapPairingAuthorization(payload validatorPairingPayload, staker structure.SolanaKeyPair, lamports uint64) (string, error) {
+func signBootstrapPairingAuthorization(payload validatorPairingPayload, staker structure.OrdexusKeyPair, lamports uint64) (string, error) {
 	blsPublicKey, err := utils.Base58Decode(strings.TrimSpace(payload.BLSPublicKey))
 	if err != nil {
 		return "", fmt.Errorf("decode bootstrap bls public key: %w", err)
@@ -936,18 +1738,18 @@ func readKeystore(path string) (keystoreFile, error) {
 	return keyFile, nil
 }
 
-func keyPairFromBase64Seed(encodedSeed string) (structure.SolanaKeyPair, error) {
+func keyPairFromBase64Seed(encodedSeed string) (structure.OrdexusKeyPair, error) {
 	seed, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedSeed))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("decode private key seed: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("decode private key seed: %w", err)
 	}
 	return structure.KeyPairFromSeed(seed)
 }
 
-func keyPairFromBase64Secret(encodedSecret string) (structure.SolanaKeyPair, error) {
+func keyPairFromBase64Secret(encodedSecret string) (structure.OrdexusKeyPair, error) {
 	secretKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encodedSecret))
 	if err != nil {
-		return structure.SolanaKeyPair{}, fmt.Errorf("decode secret key: %w", err)
+		return structure.OrdexusKeyPair{}, fmt.Errorf("decode secret key: %w", err)
 	}
 	return structure.KeyPairFromSecretKey64(secretKey)
 }
@@ -975,7 +1777,7 @@ func readBytecodeFile(path string) ([]byte, error) {
 	if len(data) < 10 {
 		return nil, fmt.Errorf("bytecode is too short")
 	}
-	if string(data[:4]) != "SVM1" {
+	if header := string(data[:4]); header != "OVM1" && header != "SVM1" {
 		return nil, fmt.Errorf("bytecode magic is invalid")
 	}
 	return data, nil
@@ -1013,6 +1815,31 @@ func submitTransaction(rpcURL string, transaction structure.Transaction) (string
 		return "", err
 	}
 	return result.Signature, nil
+}
+
+func waitTransactionConfirmed(rpcURL string, signature string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		var detail transactionDetailResult
+		if err := rpcCall(rpcURL, "getTransaction", []any{signature}, &detail); err != nil {
+			return err
+		}
+		if detail.Found {
+			switch strings.ToLower(strings.TrimSpace(detail.Status)) {
+			case "confirmed":
+				return nil
+			case "failed", "expired":
+				if strings.TrimSpace(detail.Error) != "" {
+					return fmt.Errorf("transaction %s: %s", detail.Status, detail.Error)
+				}
+				return fmt.Errorf("transaction %s", detail.Status)
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("confirmation timeout after %s", timeout)
+		}
+		time.Sleep(confirmationPollInterval)
+	}
 }
 
 func rpcCall(rpcURL string, method string, params []any, result any) error {
@@ -1065,8 +1892,13 @@ func printUsage() {
 		"  wallet address -key keys/staker.json",
 		"  wallet balance -rpc http://127.0.0.1:8899 -address ADDRESS",
 		"  wallet transfer -rpc http://127.0.0.1:8899 -key keys/staker.json -to ADDRESS -lamports 1000",
-		"  wallet deploy-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program-key keys/program.json -bytecode dist/pop.svmbin -deposit-lamports 0",
+		"  wallet deploy-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program-key keys/program.json [-authority-key keys/authority.json] -bytecode dist/pop.ovmbin -deposit-lamports 0",
+		"  wallet upgrade-contract -rpc http://127.0.0.1:8899 -payer-key keys/user.json -authority-key keys/authority.json -program PROGRAM -bytecode dist/pop.ovmbin",
+		"  wallet create-contract-account -rpc http://127.0.0.1:8899 -payer-key keys/user.json -account-key keys/state.json -program PROGRAM -space 64 -deposit-lamports 0",
+		"  wallet contract-call -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program PROGRAM -account ADDRESS:w -data-hex 0102 [-simulate]",
+		"  wallet account-info -rpc http://127.0.0.1:8899 -address ADDRESS",
 		"  wallet asset-bootstrap-fungible -rpc http://127.0.0.1:8899 -payer-key keys/user.json -program PROGRAM -name POP -symbol POP -decimals 6 -initial-supply 1000000000000000",
+		"  wallet rwa-bootstrap -rpc http://127.0.0.1:8899 -payer-key keys/issuer.json -program PROGRAM -type share|nft -name NAME -symbol SYMBOL -max-supply 1000 -initial-supply 100 -document-hash SHA256 -identity-hash SHA256",
 		"  wallet validator-register -rpc http://127.0.0.1:8899 -staker-key keys/staker.json -validator-address ADDRESS -consensus-address ADDRESS -bls-public-key KEY -peer-id PEER -lamports 10000000",
 		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -lamports 10000000",
 		"  wallet validator-pair -payload PAYLOAD -staker-key keys/staker.json -signature SIGNATURE",
@@ -1074,6 +1906,12 @@ func printUsage() {
 		"  wallet delegate -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -lamports 10000000",
 		"  wallet undelegate -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -lamports 10000000 -unlock-epoch 10",
 		"  wallet withdraw-delegation -rpc http://127.0.0.1:8899 -key keys/user.json -validator-address ADDRESS -current-epoch 10",
+		"  wallet emergency-recovery-create -rpc http://127.0.0.1:8899 -sequence 1 -elder-validator-id ID -exclude-validator-ids ID1,ID2 -consensus-key keys/consensus-1.json -out recovery.json",
+		"  wallet emergency-recovery-sign -certificate-file recovery.json -consensus-key keys/consensus-2.json -out recovery-signed.json",
+		"  wallet emergency-recovery-submit -rpc http://127.0.0.1:8899 -certificate-file recovery-signed.json",
+		"  wallet multi-validator-activation-create -rpc http://127.0.0.1:8899 -sequence 2 -consensus-key keys/consensus-1.json -out activation.json",
+		"  wallet multi-validator-activation-sign -certificate-file activation.json -consensus-key keys/consensus-2.json -out activation-signed.json",
+		"  wallet multi-validator-activation-submit -rpc http://127.0.0.1:8899 -certificate-file activation-signed.json",
 		"",
 		"minimum stake lamports: " + strconv.FormatUint(minimumStakeLamports, 10),
 	}

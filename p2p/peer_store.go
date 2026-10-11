@@ -6,8 +6,8 @@ import (
 	"sort"
 	"sync"
 
-	"solana_golang/codec/borsh"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/codec/borsh"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (

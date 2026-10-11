@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"testing"
 
-	shieldedprogram "solana_golang/programs/shielded"
-	"solana_golang/runtime"
-	walletshielded "solana_golang/shielded"
-	"solana_golang/structure"
+	shieldedprogram "github.com/tentechtop/ordexus-core/programs/shielded"
+	"github.com/tentechtop/ordexus-core/runtime"
+	walletshielded "github.com/tentechtop/ordexus-core/shielded"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 // TestShieldedTransferModesEndToEnd 连续执行 t→z、z→z、z→t，确保钱包证明与链上状态转换使用同一协议。
@@ -302,7 +302,7 @@ func assertFailedShieldedTransferDidNotChangePool(
 	}
 }
 
-func initialShieldedAccounts(t *testing.T, poolState structure.ShieldedPoolState, source structure.SolanaKeyPair) []structure.AddressedAccount {
+func initialShieldedAccounts(t *testing.T, poolState structure.ShieldedPoolState, source structure.OrdexusKeyPair) []structure.AddressedAccount {
 	t.Helper()
 	poolData, err := poolState.MarshalBinary()
 	if err != nil {
@@ -406,9 +406,9 @@ func deriveShieldedKeySet(t *testing.T, seedByte byte, diversifierByte byte) (wa
 	return spendingKey, viewKey, address
 }
 
-func transparentKeyPair(t *testing.T, seedByte byte) structure.SolanaKeyPair {
+func transparentKeyPair(t *testing.T, seedByte byte) structure.OrdexusKeyPair {
 	t.Helper()
-	keyPair, err := structure.KeyPairFromSeed(bytes.Repeat([]byte{seedByte}, structure.SolanaPrivateKeySeedSize))
+	keyPair, err := structure.KeyPairFromSeed(bytes.Repeat([]byte{seedByte}, structure.OrdexusPrivateKeySeedSize))
 	if err != nil {
 		t.Fatalf("KeyPairFromSeed() error = %v", err)
 	}

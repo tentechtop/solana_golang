@@ -13,21 +13,21 @@ import (
 )
 
 const (
-	remoteRoot    = "/opt/solana_golang"
+	remoteRoot    = "/opt/ordexus-core"
 	remoteBinary  = remoteRoot + "/bin/posnode"
 	defaultConfig = "cmd/posnode/configs/bootstrap-public.json"
 )
 
 func buildServiceText(remoteConfig string) string {
 	return fmt.Sprintf(`[Unit]
-Description=solana_golang posnode
+Description=ordexus-core posnode
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/solana_golang
-ExecStart=/opt/solana_golang/bin/posnode -config %s
+WorkingDirectory=/opt/ordexus-core
+ExecStart=/opt/ordexus-core/bin/posnode -config %s
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -71,7 +71,7 @@ func main() {
 			exitError("reset remote data: %v", err)
 		}
 	}
-	if err := run(client, "install -d -m 0755 /opt/solana_golang/bin /opt/solana_golang/config /opt/solana_golang/data"); err != nil {
+	if err := run(client, "install -d -m 0755 /opt/ordexus-core/bin /opt/ordexus-core/config /opt/ordexus-core/data"); err != nil {
 		exitError("create remote directories: %v", err)
 	}
 	if err := uploadFile(client, localPath("dist", "posnode-linux-amd64"), remoteBinary, "0755"); err != nil {

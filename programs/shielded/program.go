@@ -8,10 +8,10 @@ import (
 
 	"github.com/consensys/gnark/backend/groth16"
 
-	"solana_golang/runtime"
-	walletshielded "solana_golang/shielded"
-	"solana_golang/structure"
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/runtime"
+	walletshielded "github.com/tentechtop/ordexus-core/shielded"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 // Program 验证统一屏蔽 bundle + 维护全局承诺树和独立 nullifier 标记账户。
@@ -221,7 +221,7 @@ func (program Program) VerifyTransactionAuthorization(transaction structure.Tran
 	if err := transaction.Validate(); err != nil {
 		return err
 	}
-	message, err := transaction.SolanaMessage()
+	message, err := transaction.OrdexusMessage()
 	if err != nil {
 		return err
 	}

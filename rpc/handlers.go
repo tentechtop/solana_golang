@@ -10,8 +10,10 @@ import (
 const (
 	MethodGetBalance                 = "getBalance"
 	MethodGetAccountType             = "getAccountType"
+	MethodGetAccountInfo             = "getAccountInfo"
 	MethodGetLatestBlockhash         = "getLatestBlockhash"
 	MethodSendTransaction            = "sendTransaction"
+	MethodSimulateTransaction        = "simulateTransaction"
 	MethodGetBlock                   = "getBlock"
 	MethodGetTransaction             = "getTransaction"
 	MethodGetAddressTransactions     = "getAddressTransactions"
@@ -163,11 +165,20 @@ type AccountTypeResult struct {
 type BlockResult struct {
 	Slot                 uint64  `json:"slot"`
 	Height               uint64  `json:"height,omitempty"`
+	EpochID              uint64  `json:"epoch_id,omitempty"`
 	Blockhash            string  `json:"blockhash,omitempty"`
 	ParentSlot           uint64  `json:"parentSlot,omitempty"`
 	BlockTimeUnixMilli   int64   `json:"block_time_unix_milli,omitempty"`
 	StateRoot            string  `json:"state_root,omitempty"`
+	EpochSnapshotRoot    string  `json:"epoch_snapshot_root,omitempty"`
 	TxRoot               string  `json:"tx_root,omitempty"`
+	ReceiptRoot          string  `json:"receipt_root,omitempty"`
+	RewardQCRoot         string  `json:"reward_qc_root,omitempty"`
+	EvidenceRoot         string  `json:"evidence_root,omitempty"`
+	RewardRoot           string  `json:"reward_root,omitempty"`
+	RewardQCCount        int     `json:"reward_qc_count"`
+	EvidenceCount        int     `json:"evidence_count"`
+	RewardCount          int     `json:"reward_count"`
 	LeaderAddress        string  `json:"leader_address,omitempty"`
 	LeaderAddressSource  string  `json:"leader_address_source,omitempty"`
 	LeaderCommissionBps  *uint16 `json:"leader_commission_bps,omitempty"`
@@ -509,7 +520,19 @@ type BootstrapContractDeploymentPolicyResult struct {
 	AllowUpgradeableContracts    bool     `json:"allow_upgradeable_contracts"`
 }
 
+// NetworkParameters carries replay and recovery configuration without changing
+// the existing chain identity or block encoding. Older clients ignore it.
+type BootstrapNetworkParametersResult struct {
+	Version                    int      `json:"version"`
+	MultiValidatorThreshold    int      `json:"multi_validator_threshold"`
+	StakeRewardExactRatioEpoch uint64   `json:"stake_reward_exact_ratio_epoch"`
+	RecoveryEnabled            bool     `json:"recovery_enabled"`
+	GovernancePublicKeys       []string `json:"governance_public_keys,omitempty"`
+	GovernanceThreshold        int      `json:"governance_threshold,omitempty"`
+}
+
 type BootstrapManifestResult struct {
+	NetworkParameters             *BootstrapNetworkParametersResult       `json:"network_parameters,omitempty"`
 	Ready                         bool                                    `json:"ready"`
 	ValidatorCount                int                                     `json:"validator_count"`
 	MinValidators                 int                                     `json:"min_validators"`
@@ -591,10 +614,16 @@ type ValidatorPairingCompleteResult struct {
 }
 
 func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
+	registerStablecoinHandlers(router, backend)
+	registerRWAHandlers(router, backend)
+	registerRewardHandlers(router, backend)
+	registerMarketHandlers(router, backend)
 	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
 	_ = router.Register(MethodGetAccountType, getAccountTypeHandler(backend))
+	_ = router.Register(MethodGetAccountInfo, getAccountInfoHandler(backend))
 	_ = router.Register(MethodGetLatestBlockhash, getLatestBlockhashHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
+	_ = router.Register(MethodSimulateTransaction, simulateTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
@@ -607,8 +636,6 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 	_ = router.Register(MethodRegisterValidatorIdentity, signedTransactionRequiredHandler(MethodRegisterValidatorIdentity))
 	_ = router.Register(MethodStake, signedTransactionRequiredHandler(MethodStake))
 	_ = router.Register(MethodUnstake, signedTransactionRequiredHandler(MethodUnstake))
-	_ = router.Register(MethodSlashValidator, slashValidatorHandler(backend))
-	_ = router.Register(MethodJailValidator, jailValidatorHandler(backend))
 	_ = router.Register(MethodGetLocalValidatorIdentity, getLocalValidatorIdentityHandler(backend))
 	_ = router.Register(MethodGetValidatorSet, getValidatorSetHandler(backend))
 	_ = router.Register(MethodGetNodeStatus, getNodeStatusHandler(backend))
@@ -622,10 +649,16 @@ func RegisterDefaultHandlers(router *Router, backend LedgerBackend) {
 
 // RegisterPublicHandlers 注册公网 RPC 方法 + 防止管理和私钥代签接口暴露给 APP。
 func RegisterPublicHandlers(router *Router, backend LedgerBackend) {
+	registerStablecoinHandlers(router, backend)
+	registerRWAHandlers(router, backend)
+	registerRewardHandlers(router, backend)
+	registerMarketHandlers(router, backend)
 	_ = router.Register(MethodGetBalance, getBalanceHandler(backend))
 	_ = router.Register(MethodGetAccountType, getAccountTypeHandler(backend))
+	_ = router.Register(MethodGetAccountInfo, getAccountInfoHandler(backend))
 	_ = router.Register(MethodGetLatestBlockhash, getLatestBlockhashHandler(backend))
 	_ = router.Register(MethodSendTransaction, sendTransactionHandler(backend))
+	_ = router.Register(MethodSimulateTransaction, simulateTransactionHandler(backend))
 	_ = router.Register(MethodGetBlock, getBlockHandler(backend))
 	_ = router.Register(MethodGetTransaction, getTransactionHandler(backend))
 	_ = router.Register(MethodGetAddressTransactions, getAddressTransactionsHandler(backend))
@@ -659,13 +692,26 @@ func publicForwardMethods() []string {
 	return []string{
 		MethodGetBalance,
 		MethodGetAccountType,
+		MethodGetAccountInfo,
 		MethodGetLatestBlockhash,
 		MethodSendTransaction,
+		MethodSimulateTransaction,
 		MethodGetBlock,
 		MethodGetTransaction,
 		MethodGetAddressTransactions,
 		MethodGetContractPrograms,
 		MethodGetAssetState,
+		MethodGetStablecoinCapabilities,
+		MethodGetStablecoins,
+		MethodGetStablecoinState,
+		MethodGetStablecoinOrders,
+		MethodGetRWACapabilities,
+		MethodGetRewardCapabilities,
+		MethodGetRewardState,
+		MethodGetRWAAssets,
+		MethodGetRWAState,
+		MethodGetRWAProposal,
+		MethodGetRWADividend,
 		MethodGetShieldedPool,
 		MethodGetValidatorSet,
 	}

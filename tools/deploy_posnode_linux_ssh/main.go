@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	remoteRoot          = "/opt/solana_golang"
+	remoteRoot          = "/opt/ordexus-core"
 	remoteBinary        = remoteRoot + "/bin/posnode"
 	defaultConfig       = "cmd/posnode/configs/bootstrap-public.json"
 	defaultRemoteConfig = remoteRoot + "/config/bootstrap-public.json"
@@ -110,7 +110,7 @@ func main() {
 			exitError("reset remote data: %v", err)
 		}
 	}
-	if err := run(client, "install -d -m 0755 /opt/solana_golang/bin /opt/solana_golang/config /opt/solana_golang/data /opt/solana_golang/logs"); err != nil {
+	if err := run(client, "install -d -m 0755 /opt/ordexus-core/bin /opt/ordexus-core/config /opt/ordexus-core/data /opt/ordexus-core/logs"); err != nil {
 		exitError("create remote directories: %v", err)
 	}
 	if err := uploadFile(client, localPath("dist", "posnode-linux-amd64"), remoteBinary, "0755"); err != nil {
@@ -147,20 +147,20 @@ func buildServiceText(remoteConfigPath string, serviceName string) string {
 		logName = "posnode"
 	}
 	return fmt.Sprintf(`[Unit]
-Description=solana_golang %s
+Description=ordexus-core %s
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/solana_golang
-ExecStart=/opt/solana_golang/bin/posnode -config %s
+WorkingDirectory=/opt/ordexus-core
+ExecStart=/opt/ordexus-core/bin/posnode -config %s
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
 Environment=SG_LOG_FORMAT=json
-StandardOutput=append:/opt/solana_golang/logs/%s.out.log
-StandardError=append:/opt/solana_golang/logs/%s.err.log
+StandardOutput=append:/opt/ordexus-core/logs/%s.out.log
+StandardError=append:/opt/ordexus-core/logs/%s.err.log
 
 [Install]
 WantedBy=multi-user.target
@@ -193,9 +193,9 @@ func inspectRemote(client *ssh.Client) error {
 		"echo '== systemd services =='; systemctl list-units --type=service --all --no-pager | grep -E 'posnode|rpcnode|public-rpc' || true",
 		"echo '== processes =='; ps -eo pid,comm,args | grep -E 'posnode|rpcnode' | grep -v grep || true",
 		"echo '== listening ports =='; ss -ltnp | grep -E ':(8899|8901|8910|8911|8912|8913|5101|5102|5103|5104|5105|5106|5107)\\b' || true",
-		"echo '== config roles =='; for file in /opt/solana_golang/config/*.json; do [ -f \"$file\" ] || continue; echo \"--- $file\"; grep -E '\"chain_id\"|\"chain_identity_hash\"|\"genesis_hash\"|\"node_mode\"|\"node_name\"|\"data_path\"|\"listen_port\"|\"advertised_ip\"|\"advertised_port\"|\"rpc_enabled\"|\"rpc_listen_ip\"|\"rpc_port\"|\"node_role\"|\"validator_enabled\"|\"consensus_enabled\"|\"staker_address\"|\"bootstrap_join\"|\"rpc_url\"|\"registered_at_unix_milli\"|\"staker_signature\"|\"peer_key_path\"|\"validator_key_path\"|\"consensus_key_path\"|\"bls_key_path\"' \"$file\" || true; done",
+		"echo '== config roles =='; for file in /opt/ordexus-core/config/*.json; do [ -f \"$file\" ] || continue; echo \"--- $file\"; grep -E '\"chain_id\"|\"chain_identity_hash\"|\"genesis_hash\"|\"node_mode\"|\"node_name\"|\"data_path\"|\"listen_port\"|\"advertised_ip\"|\"advertised_port\"|\"rpc_enabled\"|\"rpc_listen_ip\"|\"rpc_port\"|\"node_role\"|\"validator_enabled\"|\"consensus_enabled\"|\"staker_address\"|\"bootstrap_join\"|\"rpc_url\"|\"registered_at_unix_milli\"|\"staker_signature\"|\"peer_key_path\"|\"validator_key_path\"|\"consensus_key_path\"|\"bls_key_path\"' \"$file\" || true; done",
 		"echo '== recent validator logs =='; journalctl -u posnode-public-validator.service -n 80 --no-pager || true",
-		"echo '== validator stdout tail =='; tail -n 80 /opt/solana_golang/logs/posnode-public-validator.out.log 2>/dev/null || true; echo '== validator stderr tail =='; tail -n 80 /opt/solana_golang/logs/posnode-public-validator.err.log 2>/dev/null || true",
+		"echo '== validator stdout tail =='; tail -n 80 /opt/ordexus-core/logs/posnode-public-validator.out.log 2>/dev/null || true; echo '== validator stderr tail =='; tail -n 80 /opt/ordexus-core/logs/posnode-public-validator.err.log 2>/dev/null || true",
 	}
 	for _, command := range commands {
 		if err := run(client, command); err != nil {
@@ -213,7 +213,7 @@ func uploadBinaryAndRestart(client *ssh.Client, serviceNames []string) error {
 	if len(serviceNames) == 0 {
 		return fmt.Errorf("restart services is empty")
 	}
-	if err := run(client, "install -d -m 0755 /opt/solana_golang/bin /opt/solana_golang/logs"); err != nil {
+	if err := run(client, "install -d -m 0755 /opt/ordexus-core/bin /opt/ordexus-core/logs"); err != nil {
 		return fmt.Errorf("create remote directories: %w", err)
 	}
 	if err := uploadFile(client, localPath("dist", "posnode-linux-amd64"), remoteBinary, "0755"); err != nil {

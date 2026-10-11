@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestParsePreferredProtocolsUsesFallback(t *testing.T) {

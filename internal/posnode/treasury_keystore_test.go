@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 func TestLoadTreasuryKeyPairFromSeedKeystore(t *testing.T) {

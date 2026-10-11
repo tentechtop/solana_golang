@@ -3,7 +3,8 @@ package stake
 import (
 	"testing"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/runtime"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestSlashAndJailInstructionsRoundTrip(t *testing.T) {
@@ -43,6 +44,25 @@ func TestSlashAndJailInstructionsRoundTrip(t *testing.T) {
 func TestSlashInstructionRejectsZeroAmount(t *testing.T) {
 	if _, err := NewSlashValidatorInstruction(0); err == nil {
 		t.Fatal("NewSlashValidatorInstruction(0) error = nil, want error")
+	}
+}
+
+func TestPunishmentInstructionsCannotExecuteAsTransactions(t *testing.T) {
+	testCases := []Instruction{
+		{Type: InstructionSlashValidator, Amount: 1},
+		{Type: InstructionJailValidator, UnlockEpoch: 1},
+	}
+	for _, instruction := range testCases {
+		data, err := instruction.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary(%d) error = %v", instruction.Type, err)
+		}
+		err = NewProgram(structure.DefaultBuiltinProgramIDs.Stake).Execute(runtime.InstructionContext{
+			Instruction: structure.CompiledInstruction{Data: data},
+		})
+		if err == nil {
+			t.Fatalf("Execute(%d) error = nil, want consensus-managed rejection", instruction.Type)
+		}
 	}
 }
 

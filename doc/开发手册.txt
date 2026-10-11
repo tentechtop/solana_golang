@@ -1,4 +1,4 @@
-Solana Golang 开发手册
+Ordexus Core 开发手册
 
 版本：v2
 核心决策：本项目不再使用 protobuf。系统二进制序列化统一使用 Borsh 或基于 Borsh 的固定字段布局；外部接口使用 JSON DTO；内部事实模型使用 Go domain struct。

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type keyInfo struct {

@@ -13,17 +13,17 @@ import (
 func TestStructureProductionImportsStayLowLevel(t *testing.T) {
 	structureDirectory := filepath.Join("..", "structure")
 	allowedImports := map[string]struct{}{
-		"solana_golang/codec/borsh": {},
-		"solana_golang/utils":       {},
+		"github.com/tentechtop/ordexus-core/codec/borsh": {},
+		"github.com/tentechtop/ordexus-core/utils":       {},
 	}
 	forbiddenPrefixes := []string{
-		"solana_golang/runtime",
-		"solana_golang/programs",
-		"solana_golang/consensus",
-		"solana_golang/p2p",
-		"solana_golang/database",
-		"solana_golang/rpc",
-		"solana_golang/cmd",
+		"github.com/tentechtop/ordexus-core/runtime",
+		"github.com/tentechtop/ordexus-core/programs",
+		"github.com/tentechtop/ordexus-core/consensus",
+		"github.com/tentechtop/ordexus-core/p2p",
+		"github.com/tentechtop/ordexus-core/database",
+		"github.com/tentechtop/ordexus-core/rpc",
+		"github.com/tentechtop/ordexus-core/cmd",
 	}
 
 	err := filepath.WalkDir(structureDirectory, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -43,10 +43,10 @@ func TestStructureProductionImportsStayLowLevel(t *testing.T) {
 func TestRuntimeDoesNotImportConcretePrograms(t *testing.T) {
 	runtimeDirectory := filepath.Join("..", "runtime")
 	forbiddenPrefixes := []string{
-		"solana_golang/programs",
-		"solana_golang/consensus",
-		"solana_golang/p2p",
-		"solana_golang/cmd",
+		"github.com/tentechtop/ordexus-core/programs",
+		"github.com/tentechtop/ordexus-core/consensus",
+		"github.com/tentechtop/ordexus-core/p2p",
+		"github.com/tentechtop/ordexus-core/cmd",
 	}
 	assertDirectoryDoesNotImport(t, runtimeDirectory, forbiddenPrefixes)
 }
@@ -54,9 +54,9 @@ func TestRuntimeDoesNotImportConcretePrograms(t *testing.T) {
 func TestProgramsDoNotImportConsensusOrNetwork(t *testing.T) {
 	programsDirectory := filepath.Join("..", "programs")
 	forbiddenPrefixes := []string{
-		"solana_golang/consensus",
-		"solana_golang/p2p",
-		"solana_golang/cmd",
+		"github.com/tentechtop/ordexus-core/consensus",
+		"github.com/tentechtop/ordexus-core/p2p",
+		"github.com/tentechtop/ordexus-core/cmd",
 	}
 	assertDirectoryDoesNotImport(t, programsDirectory, forbiddenPrefixes)
 }
@@ -80,7 +80,7 @@ func assertStructureFileImports(
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(importPath, "solana_golang/") {
+		if !strings.HasPrefix(importPath, "github.com/tentechtop/ordexus-core/") {
 			continue
 		}
 		for _, forbiddenPrefix := range forbiddenPrefixes {

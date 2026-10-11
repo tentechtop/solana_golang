@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"solana_golang/structure"
-	"solana_golang/zk"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/zk"
 )
 
 // PoolAccountDataCapacity 是当前树深度和锚点窗口下池状态的最大规范编码长度。

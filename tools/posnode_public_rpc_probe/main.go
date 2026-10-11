@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"solana_golang/blockchain"
-	"solana_golang/programs/stake"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/blockchain"
+	"github.com/tentechtop/ordexus-core/programs/stake"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 type manifest struct {
@@ -191,7 +191,7 @@ func buildProbeTransaction(ctx context.Context, rpcURL string, operation string,
 	return transaction, accounts, signature, nil
 }
 
-func buildOperationTransaction(operation string, plan manifest, source structure.SolanaKeyPair, destinationSeed string, validatorIndex int, lamports uint64, blockhash structure.Hash) (structure.Transaction, probeAccounts, error) {
+func buildOperationTransaction(operation string, plan manifest, source structure.OrdexusKeyPair, destinationSeed string, validatorIndex int, lamports uint64, blockhash structure.Hash) (structure.Transaction, probeAccounts, error) {
 	switch operation {
 	case "transfer":
 		destination, err := keyPairFromSeed(destinationSeed)
@@ -369,7 +369,7 @@ func (rpcError *rpcError) detail() string {
 	return fmt.Sprintf("%s data=%s", rpcError.Message, string(rpcError.Data))
 }
 
-func keyPairFromSeed(seed string) (structure.SolanaKeyPair, error) {
+func keyPairFromSeed(seed string) (structure.OrdexusKeyPair, error) {
 	return structure.KeyPairFromSeed(utils.SHA256([]byte(strings.TrimSpace(seed))))
 }
 

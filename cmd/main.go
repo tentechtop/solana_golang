@@ -15,15 +15,15 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
-	appconfig "solana_golang/config"
-	"solana_golang/database"
-	"solana_golang/internal/bootstrapnode"
-	"solana_golang/internal/posnode"
-	"solana_golang/internal/rpcnode"
-	"solana_golang/p2p"
-	p2ppeerstore "solana_golang/p2p/peerstore"
-	"solana_golang/rpc"
-	"solana_golang/utils"
+	appconfig "github.com/tentechtop/ordexus-core/config"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/internal/bootstrapnode"
+	"github.com/tentechtop/ordexus-core/internal/posnode"
+	"github.com/tentechtop/ordexus-core/internal/rpcnode"
+	"github.com/tentechtop/ordexus-core/p2p"
+	p2ppeerstore "github.com/tentechtop/ordexus-core/p2p/peerstore"
+	"github.com/tentechtop/ordexus-core/rpc"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -56,7 +56,7 @@ func run() error {
 	switch nodeMode {
 	case "default":
 	case "runtime":
-	case "posnode", "pos", "validator":
+	case "fullnode", "full_node", "full", "posnode", "pos", "validator":
 		return posnode.Run(configPath)
 	case "rpcnode", "rpc", "public_rpc", "rpc_gateway":
 		return rpcnode.Run(configPath)

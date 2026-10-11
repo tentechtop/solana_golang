@@ -1,8 +1,8 @@
-# Solana BPF 风格字节码 VM MVP 计划
+# Ordexus BPF 风格字节码 VM MVP 计划
 
 ## 目标边界
 
-MVP 的目标是实现一个可执行自定义字节码的智能合约虚拟机，风格参考 Solana BPF/eBPF，但不兼容 EVM，也不要求完整兼容 Solana SBF。
+MVP 的目标是实现一个可执行自定义字节码的智能合约虚拟机，风格参考 Ordexus BPF/eBPF，但不兼容 EVM，也不要求完整兼容 Ordexus SBF。
 
 MVP 必须满足：
 
@@ -42,13 +42,13 @@ MVP 暂不实现：
 第一阶段不要直接编译 Go/Rust，也不要引入 LLVM。MVP 使用自研汇编器生成字节码：
 
 ```text
-合约源码 .svmasm
+合约源码 .ovmasm
     |
     v
-cmd/svmasm 汇编器
+cmd/ovmasm 汇编器
     |
     v
-VM 字节码 .svmbin
+VM 字节码 .ovmbin
     |
     v
 程序账户 Data
@@ -81,7 +81,7 @@ Rust/C -> LLVM IR -> 自定义后端或 eBPF 子集 -> VM 字节码
 建议使用固定头部和固定宽度指令，降低解析复杂度。
 
 ```text
-Magic      4 字节，固定为 SVM1
+Magic      4 字节，固定为 OVM1
 Version    2 字节
 Flags      2 字节
 CodeSize   4 字节
@@ -237,7 +237,7 @@ SetAccountData
 新增命令：
 
 ```text
-cmd/svmasm
+cmd/ovmasm
 ```
 
 输入示例：
@@ -253,12 +253,12 @@ exit
 输出：
 
 ```text
-contract.svmbin
+contract.ovmbin
 ```
 
 汇编器职责：
 
-- 解析 `.svmasm` 文本。
+- 解析 `.ovmasm` 文本。
 - 校验寄存器名称。
 - 校验立即数范围。
 - 解析 label。
@@ -334,16 +334,16 @@ contract.svmbin
 
 ### 第五阶段：汇编器
 
-- 新增 `cmd/svmasm`。
+- 新增 `cmd/ovmasm`。
 - 支持基础指令。
 - 支持 label。
-- 支持输出 `.svmbin`。
+- 支持输出 `.ovmbin`。
 - 为汇编器增加单元测试。
 
 验收标准：
 
-- `.svmasm` 可编译为 `.svmbin`。
-- `.svmbin` 可被 VM 加载执行。
+- `.ovmasm` 可编译为 `.ovmbin`。
+- `.ovmbin` 可被 VM 加载执行。
 - 非法寄存器、非法立即数、重复 label 均失败。
 
 ### 第六阶段：集成测试
@@ -374,7 +374,7 @@ vm/
   interpreter_test.go
   verifier_test.go
 
-cmd/svmasm/
+cmd/ovmasm/
   main.go
 
 vm/assembler/

@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 const (
@@ -123,6 +123,9 @@ func normalizeValidatorState(validator ValidatorState) (ValidatorState, error) {
 	}
 	if validator.ValidatorID == "" {
 		validator.ValidatorID = NewValidatorID(validator.ConsensusPublicKey)
+	}
+	if validator.ValidatorID != NewValidatorID(validator.ConsensusPublicKey) {
+		return ValidatorState{}, fmt.Errorf("%w: validator id does not match consensus public key", ErrInvalidVote)
 	}
 	if strings.TrimSpace(string(validator.ValidatorID)) == "" || len(validator.ValidatorID) > maxConsensusTextLength {
 		return ValidatorState{}, fmt.Errorf("%w: invalid validator id", ErrInvalidVote)

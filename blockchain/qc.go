@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"solana_golang/consensus"
-	"solana_golang/structure"
-	"solana_golang/utils"
+	"github.com/tentechtop/ordexus-core/consensus"
+	"github.com/tentechtop/ordexus-core/structure"
+	"github.com/tentechtop/ordexus-core/utils"
 )
 
 // HashQC 计算 QC 哈希 + 链头保存最高确认凭证引用。

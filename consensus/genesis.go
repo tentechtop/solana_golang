@@ -3,7 +3,7 @@ package consensus
 import (
 	"fmt"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 const (
@@ -14,8 +14,8 @@ const (
 )
 
 // HardcodedGenesisTreasuryKeyPair 拒绝返回私钥 + 共识层不允许内置可签名密钥材料。
-func HardcodedGenesisTreasuryKeyPair() (structure.SolanaKeyPair, error) {
-	return structure.SolanaKeyPair{}, fmt.Errorf("consensus: genesis treasury private key is not embedded; configure local keystore")
+func HardcodedGenesisTreasuryKeyPair() (structure.OrdexusKeyPair, error) {
+	return structure.OrdexusKeyPair{}, fmt.Errorf("consensus: genesis treasury private key is not embedded; configure local keystore")
 }
 
 // HardcodedGenesisTreasuryPublicKey 返回固定创世资金地址 + 配置和 RPC 可直接展示该账户。

@@ -5,7 +5,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/database"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestRecordCommittedBlockhashKeepsRecentWindowFresh(t *testing.T) {
@@ -30,5 +31,28 @@ func TestRecordCommittedBlockhashKeepsRecentWindowFresh(t *testing.T) {
 	}
 	if node.blockhashQueue.IsRecent(oldHash, 4) {
 		t.Fatal("old blockhash stayed recent after trim")
+	}
+}
+
+func TestRestoreRecentBlockhashQueueLoadsPersistedMainChainHistory(t *testing.T) {
+	db, err := database.NewDatabase(database.DatabaseConfig{Path: t.TempDir(), Engine: database.EnginePebble, WAL: true})
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	defer db.Close()
+	node := newConsensusStatusTestNodeWithDatabase(t, db)
+	firstHead := node.ledger.Head()
+	commitConsensusStatusState(t, node.ledger, node.ledger.State())
+	secondHead := node.ledger.Head()
+
+	queue, err := restoreRecentBlockhashQueue(node.ledger)
+	if err != nil {
+		t.Fatalf("restoreRecentBlockhashQueue() error = %v", err)
+	}
+	if !queue.IsRecent(firstHead.BlockHash, secondHead.Slot) {
+		t.Fatal("persisted previous blockhash was not restored")
+	}
+	if !queue.IsRecent(secondHead.BlockHash, secondHead.Slot) {
+		t.Fatal("persisted head blockhash was not restored")
 	}
 }

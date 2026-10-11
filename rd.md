@@ -1,4 +1,4 @@
-# Solana Golang 总体设计文档
+# Ordexus Core 总体设计文档
 
 版本：v3  
 状态：架构基线  
@@ -290,8 +290,8 @@ p2p:
   listen_port: 5002
   default_protocol: "tcp"
   max_peers: 64
-  network_id: "solana_golang:localnet:00000000000000000000000000000000"
-  software_version: "solana_golang/0.1.0"
+  network_id: "ordexus-core:localnet:00000000000000000000000000000000"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 8
   bootstrap_timeout_millis: 5000
 ```
@@ -662,7 +662,7 @@ log:
   level: "info"
   format: "json"
   output: "console"
-  file_path: "./logs/solana_golang.log"
+  file_path: "./logs/ordexus-core.log"
 
 database:
   engine: "pebble"
@@ -675,8 +675,8 @@ p2p:
   listen_port: 5002
   default_protocol: "tcp"
   max_peers: 64
-  network_id: "solana_golang:localnet:00000000000000000000000000000000"
-  software_version: "solana_golang/0.1.0"
+  network_id: "ordexus-core:localnet:00000000000000000000000000000000"
+  software_version: "github.com/tentechtop/ordexus-core/0.1.0"
   min_outbound_peers: 8
   bootstrap_timeout_millis: 5000
 ```

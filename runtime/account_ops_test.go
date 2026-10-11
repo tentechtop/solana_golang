@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"solana_golang/structure"
+	"github.com/tentechtop/ordexus-core/structure"
 )
 
 func TestTransferLamportsCreatesDestinationAccount(t *testing.T) {
